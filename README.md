@@ -13,7 +13,7 @@ The **Terminus Application Chart (TAC)** describes essential information about a
 - [Extensions field to Helm in Terminus](https://docs.jointerminus.com/developer/develope/extension.html)
 
 
-## Submiting Your Application
+## Submitting Your Application
 ### Brief Process
 
 1. Test your application on Terminus,  create the TAC according to guideline.
