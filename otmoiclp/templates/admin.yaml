@@ -1,0 +1,272 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: otmoic-admin-base-data
+  namespace: {{ .Release.Namespace }}
+data:
+  init_data.js: |-
+    var init_data = {
+      data: [
+        {
+          collectionName: "chainList",
+          data: [
+            {
+              chainId: 9006,
+              chainName: "BSC",
+              name: "bsc smart chain",
+              tokenName: "BNB",
+              tokenUsd: 300,
+              chainType: "evm",
+              image: "otmoic/otmoic-chainclient-evm:latest",
+              serviceName: "chain-client-evm-bsc-server-9006",
+              envList: [
+                {
+                  STATUS_KEY: "chain-client-status-report-bsc",
+                },
+              ],
+            },
+            {
+              chainId: 9000,
+              chainName: "AVAX",
+              name: "avax chain",
+              tokenName: "AVAX",
+              tokenUsd: 300,
+              chainType: "evm",
+              image: "otmoic/otmoic-chainclient-evm:latest",
+              serviceName: "chain-client-evm-avax-server-9000",
+              envList: [
+                {
+                  STATUS_KEY: "chain-client-status-report-avax",
+                },
+              ],
+            },
+            {
+              chainId: 60,
+              chainName: "eth",
+              name: "eth chain",
+              tokenName: "ETH",
+              tokenUsd: 300,
+              chainType: "evm",
+              image: "otmoic/otmoic-chainclient-evm:latest",
+              serviceName: "chain-client-evm-eth-server-60",
+              envList: [
+                {
+                  STATUS_KEY: "chain-client-status-report-eth",
+                },
+              ],
+            },
+            {
+              chainId: 966,
+              chainName: "polygon",
+              name: "polygon chain",
+              tokenName: "MATIC",
+              tokenUsd: 300,
+              chainType: "evm",
+              image: "otmoic/otmoic-chainclient-evm:latest",
+              serviceName: "chain-client-evm-polygon-server-966",
+              envList: [
+                {
+                  STATUS_KEY: "chain-client-status-report-polygon",
+                },
+              ],
+            }
+          ],
+          filter: [
+            {
+              name: "chainId",
+              type: "int",
+            },
+            {
+              name: "chainName",
+              type: "string",
+            },
+          ],
+          set: [
+            {
+              name: "name",
+              type: "string",
+            },
+            {
+              name: "tokenName",
+              type: "string",
+            },
+            {
+              name: "tokenUsd",
+              type: "int",
+            },
+            {
+              name: "chainType",
+              type: "string",
+            },
+            {
+              name: "image",
+              type: "string",
+            },
+            {
+              name: "serviceName",
+              type: "string",
+            },
+            {
+              name: "envList",
+              type: "array",
+            },
+          ],
+        },
+        {
+          collectionName: "monitor_list",
+          data: [
+            {
+              cron: "0,5,10,15,20,25,30,35,40,45,50,55 * * * *",
+              name: "block-timestamp-monit",
+              script_path: "./m_s_block_timestamp.js",
+              task_type: "system",
+              deploy_message: "",
+            },
+          ],
+          filter: [
+            {
+              name: "name",
+              type: "string",
+            },
+          ],
+          set: [
+            {
+              name: "cron",
+              type: "string",
+            },
+            {
+              name: "script_path",
+              type: "string",
+            },
+            {
+              name: "task_type",
+              type: "string",
+            },
+          ],
+        },
+      ],
+    };
+    var json_init_data = JSON.stringify(init_data);
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: lpnode-sa
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lpnode-sa-rolebinding
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: lpnode-sa
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# Source: lpnode-admin/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: lpnode-admin-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: lpnode-admin
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: lpnode-admin-api
+      port: 18006
+      targetPort: 18006
+---
+# Source: lpnode-admin/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lpnode-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: lpnode-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lpnode-admin
+  template:
+    metadata:
+      labels:
+        app: lpnode-admin
+    spec:
+      serviceAccountName: lpnode-sa
+      volumes:
+        - name: base-data-config
+          configMap:
+            name: otmoic-admin-base-data
+            items:
+              - key: init_data.js
+                path: init_data.js
+            defaultMode: 420
+      containers:
+      - name: lpnode-admin
+        image: otmoic/otmoic-lpnode-admin:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 1m
+            memory: 8Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        ports:
+          - containerPort: 18006
+        volumeMounts:
+          - name: base-data-config
+            readOnly: true
+            mountPath: /init_data
+        env:
+          - name: DEPLOY_ENV
+            value: 'dev' # prod/dev
+          - name: RELAY_ACCESS_URL
+            value: 'https://5b4522f4.saidevgp01.relay-1-testnet.otmoic.cloud'
+          - name: REDIS_PASS
+            value: {{ .Values.redis.password }}
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                apiVersion: v1
+                fieldPath: metadata.namespace
+          - name: MONGODB_USER
+            value: {{ .Values.mongodb.username }}
+          - name: MONGODB_DBNAME_LP_STORE
+            value: {{ .Values.mongodb.databases.lp_store }}
+          - name: MONGODB_DBNAME_BUSINESS_HISTORY
+            value: {{ .Values.mongodb.databases.businessHistory }}
+          - name: MONGODB_PASS
+            value: {{ .Values.mongodb.password }}
+          - name: REDIS_HOST
+            value: {{ .Values.redis.host }}
+          - name: MONGODB_HOST
+            value: {{ .Values.mongodb.host }}
+          - name: REDIS_PORT
+            value: "{{ .Values.redis.port }}"
+          - name: MONGODB_PORT
+            value: "{{ .Values.mongodb.port }}"
+          - name: OS_API_KEY
+            value: {{ .Values.os.appKey }}
+          - name: OS_API_SECRET
+            value: {{ .Values.os.appSecret }}
+          - name: OS_SYSTEM_SERVER
+            value: system-server.user-system-{{ .Values.bfl.username }}
+          - name: AMM_APP_DISPLAY_IMAGE
+            value: otmoic/otmoic-lpnode-amm:latest
+          - name: MARKET_APP_DISPLAY_IMAGE
+            value: otmoic/otmoic-lpnode-exchange-adapter:latest
+          - name: LP_NAME
+            value: {{ .Values.user.zone }}
+          - name: USERSPACE_DATA_PATH
+            value: {{ .Values.userspace.userData }}

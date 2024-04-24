@@ -1,0 +1,145 @@
+# Source: obridge-relay-fep-websocket/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-fep-ws-server-1
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: relay-fep-websocket-1
+  type: LoadBalancer
+  ports:
+    - protocol: TCP
+      name: relay-fep-websocket-api
+      port: 3000
+      targetPort: 3000
+    - protocol: TCP
+      name: relay-fep-websocket-api-redirect
+      port: 3001
+      targetPort: 3001
+
+---
+# Source: obridge-relay-fep-websocket/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-fep-websocket-1
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: relay-fep-websocket-1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: relay-fep-websocket-1
+  template:
+    metadata:
+      labels:
+        app: relay-fep-websocket-1
+    spec:
+      containers:
+      - name: relay-fep-websocket-1
+        image: otmoic/otmoic-relay-fep-websocket:latest
+        ports:
+          - containerPort: 3000
+          - containerPort: 3001
+        resources:
+          requests:
+            cpu: 1m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+        env:
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-redis
+                key: redis-password
+          - name: REDIS_HOST
+            value: "obridge-relay-db-redis-master"
+          - name: REDIS_DB
+            value: "5"
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP         
+          - name: SERVER_NAME
+            value: relay-fep-ws-server-1
+          - name: CORS_ORIGIN
+            value: "http://localhost:9099,https://obridge-web-app.edge-dev.xyz/,https://mainnet-obridge-web-app.edge-dev.xyz/"
+          - name: URL_COOKIE_MATH
+            value: "http://relay-utils-service:9000/utils/wscookie"
+          - name: COOKIE_DOMAIN
+            value: "" 
+          - name: COOKIE_PATH
+            value: ""
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: relay-utils
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: relay-utils
+  annotations:
+    deployment.kubernetes.io/revision: '5'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: relay-utils
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: relay-utils
+    spec:
+      containers:
+        - name: relay-utils
+          image: 'kldtks/edge:obridge-relay-utils-4c0ec1e3'
+          resources:
+            requests:
+              cpu: 1m
+              memory: 1Mi
+            limits:
+              cpu: 50m
+              memory: 16Mi
+          ports:
+            - containerPort: 9000
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: obridge-relay-db-redis
+                  key: redis-password
+            - name: REDIS_HOST
+              value: "obridge-relay-db-redis-master"
+            - name: REDIS_DB
+              value: '5'
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: relay-utils-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: relay-utils-api
+      protocol: TCP
+      port: 9000
+      targetPort: 9000
+  selector:
+    app: relay-utils
+  type: ClusterIP
+
+

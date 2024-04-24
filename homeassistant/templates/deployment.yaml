@@ -1,0 +1,162 @@
+
+
+apiVersion: v1
+data:
+  nginx.conf: |
+    stream {
+      server {
+          listen  8001;  
+          proxy_pass 127.0.0.1:8123;
+      }
+    }
+
+    events {
+      # Your event-related configurations go here
+    }
+
+    http {
+      # Your HTTP server configurations go here
+    }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: {{ .Release.Name }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  configuration.yaml: |-
+    # Loads default set of integrations. Do not remove.
+    default_config:
+    # Load frontend themes from the themes folder
+    frontend:
+      themes: !include_dir_merge_named themes
+    # Text to speech
+    tts:
+      - platform: google_translate
+    http:
+      use_x_forwarded_for: true
+      use_x_frame_options: false
+      trusted_proxies:
+        - "127.0.0.1"
+      ip_ban_enabled: true
+      login_attempts_threshold: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: homeassistant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homeassistant
+  template:
+    metadata:
+      labels:
+        app: homeassistant
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: 'busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - >
+              cp /config/configuration.yaml
+              /homeassistant-config/configuration.yaml
+          resources: {}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: homeassistant-config
+              mountPath: /homeassistant-config
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+      containers:
+      - name: homeassistant
+        image: ghcr.io/home-assistant/home-assistant:stable
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        ports:
+        - containerPort: 8123
+        volumeMounts:
+        - mountPath: /config
+          name: homeassistant-config
+        - mountPath: /etc/localtime
+          name: homeassistant-localtime
+      - name: nginx
+        image: nginx:latest
+        volumeMounts:
+        - name: nginx-config 
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        ports:
+        - containerPort: 8001
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 256Mi
+      volumes:
+      - name: homeassistant-config
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/homeassistant
+      - name: homeassistant-localtime
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/homeassistant/localtime
+      - name: config
+        configMap:
+          name: {{ .Release.Name }}-config
+          items:
+            - key: configuration.yaml
+              path: configuration.yaml
+          defaultMode: 420
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+          defaultMode: 438
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8123
+      targetPort: 8123
+      name: ha-service
+    - protocol: TCP
+      port: 8001
+      targetPort: 8001  
+      name: ha-proxy
+
+

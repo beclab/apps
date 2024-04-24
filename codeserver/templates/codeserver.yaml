@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-secret
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  password: {{ randAlphaNum 16 | b64enc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: dev
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  selector:
+    app: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      volumes:
+        - name: code
+          hostPath:
+            type: Directory
+            path: {{ .Values.userspace.userData }}/Code
+      initContainers:
+        - name: init-chmod-data
+          image: 'busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /home/coder
+          resources: {}
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+          securityContext:
+            runAsUser: 0
+        - name: download-plugin
+          image: 'kldtks/edge:codeserver-plugin'
+          command:
+            - sh
+            - '-c'
+            - >
+              cp bt-sai.edge-app-builder-latest.vsix
+              /home/coder/bt-sai.edge-app-builder-latest.vsix 
+          resources: {}
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+      containers:
+        - name: code-server
+          image: codercom/code-server
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - name: cs-port
+              containerPort: 8080
+              protocol: TCP
+            - name: ext-port
+              containerPort: 8000
+              protocol: TCP
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+          env:
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name:  {{ .Release.Name }}-secret
+                  key: password
+            - name: OS_API_KEY
+              value: {{ .Values.os.appKey }}
+            - name: OS_API_SECRET
+              value: {{ .Values.os.appSecret }}
+            - name: OS_SYSTEM_SERVER
+              value: system-server.user-system-{{ .Values.bfl.username }}
+            - name: NAME_SPACE
+              value: {{ .Release.Namespace }}

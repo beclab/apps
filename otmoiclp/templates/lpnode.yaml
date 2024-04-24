@@ -1,0 +1,72 @@
+{{- $traefikDomainENV := split  ","  .Values.domain.traefik -}}
+{{- $webDomain := index $traefikDomainENV "_0" -}}
+# Source: lpnode/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: lpnode-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: otmoiclp
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: lpnode-api
+      port: 9202
+      targetPort: 9202
+---
+# Source: lpnode/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otmoiclp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: otmoiclp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoiclp
+  template:
+    metadata:
+      labels:
+        app: otmoiclp
+    spec:
+      containers:
+      - name: otmoiclp
+        image: otmoic/otmoic-lpnode:latest
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 20m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        ports:
+          - containerPort: 9202
+        env:
+          - name: MONGODB_USER
+            value: {{ .Values.mongodb.username }}
+          - name: MONGODB_DBNAME_LP_STORE
+            value: {{ .Values.mongodb.databases.lp_store }}
+          - name: MONGODB_DBNAME_BUSINESS_HISTORY
+            value: {{ .Values.mongodb.databases.businessHistory }}
+          - name: REDIS_PASSWORD
+            value: {{ .Values.redis.password }}
+          - name: MONGODB_ROOT_PASSWORD
+            value: {{ .Values.mongodb.password }}
+          - name: REDIS_HOST
+            value: {{ .Values.redis.host }}
+          - name: MONGODB_HOST
+            value: {{ .Values.mongodb.host }}
+          - name: REDIS_PORT
+            value: "{{ .Values.redis.port }}"
+          - name: MONGODB_PORT
+            value: "{{ .Values.mongodb.port }}"
+          - name: LPNODE_URI
+            value: "https://{{ $webDomain }}/lpnode"
+          - name: RELAY_URI
+            value: "https://5b4522f4.saidevgp01.relay-1-testnet.otmoic.cloud/relay"

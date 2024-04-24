@@ -1,0 +1,61 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: nzbget
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nzbget
+  template:
+    metadata:
+      labels:
+        app: nzbget
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: TZ
+          value: Europe/London
+        name: nzbget
+        image: lscr.io/linuxserver/nzbget:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 64Mi
+        ports:
+        - containerPort: 6789
+        volumeMounts:
+        - mountPath: /config
+          name: nzbget-config
+      volumes:
+      - name: nzbget-config
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/nzbget 
+        
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 6789
+      targetPort: 6789

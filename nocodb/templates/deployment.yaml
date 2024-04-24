@@ -1,0 +1,85 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: nocodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nocodb
+  template:
+    metadata:
+      labels:
+        app: nocodb
+    spec:
+      containers:
+      - name: postgres
+        image: postgres
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: POSTGRES_DB
+            value: nocode
+          - name: POSTGRES_PASSWORD
+            value: postgres
+          - name: POSTGRES_USER
+            value: postgres  
+        resources:
+          requests:
+            cpu: 250m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+      - name: nocodb
+        image: nocodb/nocodb:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        ports:
+        - containerPort: 8080
+        env:
+          - name: NC_DB
+            value: pg://localhost:5432?u=postgres&p=postgres&d=nocode
+
+        volumeMounts:
+        - name: postgredb
+          mountPath: /var/lib/postgresql/data
+        - name: nc-data
+          mountPath: /usr/app/data
+  
+      volumes:
+      - name: postgredb
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nocodb/postgredb
+      - name: nc-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nocodb/nc-data
+    
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: nocodbtcp
+      protocol: TCP
+      port: 80
+      targetPort: 8080
+      

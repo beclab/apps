@@ -1,0 +1,100 @@
+
+{{- $wordpressproxyDomainENV := split  ","  .Values.domain.wordpressproxy -}}
+{{- $wordpressproxyDomain := index $wordpressproxyDomainENV "_0" -}}
+
+{{- $wordpressDomainENV := split  ","  .Values.domain.wordpress -}}
+{{- $wordpressDomain := index $wordpressDomainENV "_0" -}}
+
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: wordpress-proxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100M
+  storageClassName: local
+  volumeMode: Filesystem
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: wordpress-proxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: h8001
+      protocol: TCP
+      port: 8001
+      targetPort: 8001
+  selector:
+    app: {{ .Release.Name }}-proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-proxy
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-proxy
+    spec:
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: wordpress-proxy
+      containers:
+        - name: {{ .Release.Name }}-proxy
+          image: kldtks/edge:wordpress-proxy-7643db22
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          ports:
+            - name: ext-port
+              containerPort: 8001
+              protocol: TCP
+          env:
+            - name: SERVER_PROXY_URL
+              value: 'https://{{$wordpressDomain}}'
+            - name: SERVER_PROXY_DOMAIN
+              value: '{{$wordpressDomain}}'
+            - name: THIS_DOMAIN
+              value: '{{$wordpressproxyDomain}}'
+            - name: PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name:  wordpress
+                  key: wordpress-password
+          volumeMounts:
+            - name: db
+              mountPath: /src/db
+        - name: browserless
+          image: 'browserless/chrome:1.61-puppeteer-21.4.1'
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          resources: {}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1024Mi

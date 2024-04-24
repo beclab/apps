@@ -1,0 +1,92 @@
+# Copyright 2022 bytetrade
+# 
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+# 
+#     http://www.apache.org/licenses/LICENSE-2.0
+# 
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: filebrowser
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: filebrowser
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: filebrowser
+  template:
+    metadata:
+      labels:
+        app: filebrowser
+    spec:
+      containers:
+      - name: filebrowser
+        image: filebrowser/filebrowser:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        volumeMounts:
+        - name: fb-data
+          mountPath: /appdata
+        - name: userspace-dir
+          mountPath: /data
+        ports:
+        - containerPort: 80
+        env:
+        - name: FB_DATABASE
+          value: /appdata/database/filebrowser.db
+        - name: FB_CONFIG
+          value: /appdata/config/settings.json
+        - name: FB_ROOT
+          value: /data
+        - name: OS_APP_SECRET
+          value: '{{ .Values.os.appSecret }}'
+        - name: OS_APP_KEY
+          value: {{ .Values.os.appKey }}
+        - name: OS_SYSTEM_SERVER
+          value: system-server.user-system-{{ .Values.bfl.username }}
+        command:
+        - /filebrowser
+        - --noauth
+      volumes:
+      - name: userspace-dir
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData}}
+      - name: fb-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/filebrowser
+   
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: filebrowser-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: filebrowser
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: fb
+      port: 80
+      targetPort: 80

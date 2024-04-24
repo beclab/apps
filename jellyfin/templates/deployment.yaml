@@ -1,0 +1,95 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: jellyfin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jellyfin
+  template:
+    metadata:
+      labels:
+        app: jellyfin
+    spec:
+      volumes:
+        - name: home
+          hostPath:
+            type: Directory
+            path: {{ .Values.userspace.userData }}
+      initContainers:
+        - name: init-chmod-data
+          image: 'busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /home
+          resources: {}
+          volumeMounts:
+            - name: home
+              mountPath: /home
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: jellyfin
+          image: jellyfin/jellyfin
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          ports:
+          - containerPort: 8096
+          volumeMounts:
+          - name: home
+            mountPath: /home
+          env:
+          - name: PGID
+            value: "1000" 
+          - name: PUID
+            value: "1000" 
+          - name: UMASK
+            value: "002" 
+          - name: TZ
+            value: Etc/UTC
+          
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8096
+      targetPort: 8096
+      
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: {{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_api
+  deployment: {{ .Release.Name }}
+  description: {{ .Release.Name }} legacy api
+  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8096
+  group: api.jellyfin
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v1
+status:
+  state: active

@@ -1,0 +1,104 @@
+
+{{- $gitlabDomainENV := split  ","  .Values.domain.gitlab -}}
+{{- $gitlabDomain := index $gitlabDomainENV "_0" -}}
+
+---
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: sp-dev
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100M
+  storageClassName: local
+  volumeMode: Filesystem
+
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: serverproxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: h8000
+      protocol: TCP
+      port: 8000
+      targetPort: 8000
+    - name: h4000
+      protocol: TCP
+      port: 4000
+      targetPort: 4000
+  selector:
+    app: {{ .Release.Name }}-sp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitlabfusion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-sp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-sp
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-sp
+    spec:
+      volumes:
+        - name: db
+          persistentVolumeClaim:
+            claimName: sp-dev
+      containers:
+        - name: {{ .Release.Name }}-sp
+          image: kldtks/edge:gitlab-server-proxy-001
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          ports:
+            - name: ext-port
+              containerPort: 8000
+              protocol: TCP
+            - name: ext-port2
+              containerPort: 8004
+              protocol: TCP
+          env:
+            - name: SERVER_PROXY_URL
+              value: 'https://{{ $gitlabDomain }}'
+            - name: SERVER_PROXY_DOMAIN
+              value: {{ $gitlabDomain }}
+            - name: SERVER_THIS_DOMAIN
+              value: serverproxy
+            - name: ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-gitlab-initial-root-password
+                  key: password
+          volumeMounts:
+            - name: db
+              mountPath: /src/db
+        - name: browserless
+          image: 'browserless/chrome:1.61-puppeteer-21.4.1'
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          resources: {}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

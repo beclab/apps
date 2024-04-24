@@ -1,0 +1,63 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: radarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: radarr
+  template:
+    metadata:
+      labels:
+        app: radarr
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: UMASK
+          value: "002" 
+        - name: TZ
+          value: Etc/UTC
+        name: radarr
+        image: hotio/radarr:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        ports:
+        - containerPort: 7878
+        volumeMounts:
+        - mountPath: /config
+          name: radarr-config
+      volumes:
+      - name: radarr-config
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/radarr 
+        
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 7878
+      targetPort: 7878

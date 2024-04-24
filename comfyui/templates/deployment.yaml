@@ -1,0 +1,112 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: script
+  namespace: {{ .Release.Namespace }}
+data:
+  download.txt: |
+    # download
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  name: comfyui
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: comfyui
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: comfyui
+    spec:
+      containers:
+      
+        - env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+
+          securityContext:
+            runAsUser: 0
+     
+          image: "yanwk/comfyui-boot:latest"
+          name: comfyui
+          ports:
+
+            - containerPort: 8188
+                    
+          resources: 
+            requests:
+              cpu: 250m
+              memory: 2048Mi
+            limits:
+              cpu: 2000m
+              memory: 10240Mi
+
+          volumeMounts:
+                    
+            # - mountPath: /home/runner/ComfyUI/models
+            #   name: appdata
+            - mountPath: /appdata
+              name: appdata
+                      
+            - mountPath: /home/runner
+              name: userdata
+
+            - name: volume-script
+              readOnly: true
+              mountPath: /home/scripts/download.txt
+              subPath: download.txt
+
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+
+      volumes:
+                    
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/comfyui
+                      
+        - name: userdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}/comfyui
+
+        - name: volume-script
+          configMap:
+            name: script
+            defaultMode: 420
+                      
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  name: comfyui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+
+    - name: "8188"
+      port: 8188
+      targetPort: 8188
+                    
+  selector:
+    io.kompose.service: comfyui
+status:
+  loadBalancer: {}
+                  

@@ -1,0 +1,67 @@
+{{- $traefikDomainENV := split  ","  .Values.domain.traefik -}}
+{{- $webDomain := index $traefikDomainENV "_0" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: amm-graphql-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: amm-graphql
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: amm-graphql-service
+      port: 14000
+      targetPort: 4000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: amm-graphql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: amm-graphql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: amm-graphql
+  template:
+    metadata:
+      labels:
+        app: amm-graphql
+    spec:
+      containers:
+        - name: amm-graphql
+          image: otmoic/otmoic-lpnode-graphql:latest
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          ports:
+            - containerPort: 4000
+          env:
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_DBNAME_HISTORY
+              value: {{ .Values.mongodb.databases.businessHistory }}
+            - name: WEB_DOMAIN
+              value: {{ $webDomain }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace

@@ -1,0 +1,286 @@
+apiVersion: v1
+data:
+  config.toml: |
+    n8nUrl = ""
+    restartInterval = 43200000 # 1000 * 60 * 60 * 12
+
+    [point]
+    port = 1235
+    arbiterUrl = "http://arbiter-service:1236"
+    relayAdminUrl = "http://relay-adminpanel-service:9101"
+    refreshInterval = 43200000 # 1000 * 60 * 60 * 12
+
+    [arbiter]
+    didSupportUrl = "https://did-support.ursa-services.bttcdn.com/graphql"
+    port = 1236
+
+    [agent]
+    port = 1237
+    rpc = "https://sepolia.optimism.io"
+    priv = "0xab1144211deab0fca23ce83b87b66368fddda770783a61bbdb738ee46e9eef38"
+    contractAddr = "0xe69257d83b2c50b2d7496348d053d76c744753e4"
+
+    [connector]
+    port = 1234
+    callbackUrl = "http://connector-service:1234"
+
+    [chainIdConvert]
+    9006 = "97"
+    966 = "80001"
+    60 = "11155111"
+    9000 = "43113"
+
+
+    [[chainClients]]
+    url = "http://obridge-chain-client-evm-bsc-server-9006:9100"
+    initBlockHeight = 38936935
+    chainId = "9006" # bsc
+    nativeChainId = "97" # bsc testnet
+    registerPath = "/support/register"
+    historyPath = "/support/history"
+
+    [[chainClients]]
+    url = "http://obridge-chain-client-evm-eth-server-60:9100"
+    initBlockHeight = 5579765
+    chainId = "60" # eth
+    nativeChainId = "11155111" # bsc testnet
+    registerPath = "/support/register"
+    historyPath = "/support/history"
+
+    [[chainClients]]
+    url = "http://obridge-chain-client-evm-avax-server-9000:9100"
+    initBlockHeight = 31330505
+    chainId = "9000" # avax
+    nativeChainId = "43113" # bsc testnet
+    registerPath = "/support/register"
+    historyPath = "/support/history"
+
+    [[chainClients]]
+    url = "http://obridge-chain-client-evm-polygon-server-966:9100"
+    initBlockHeight = 47592195
+    chainId = "966" # polygon
+    nativeChainId = "80001" # bsc testnet
+    registerPath = "/support/register"
+    historyPath = "/support/history"
+
+kind: ConfigMap
+metadata:
+  name: reputation-config
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: connector-deployment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: reputation-connector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reputation-connector
+  template:
+    metadata:
+      labels:
+        app: reputation-connector
+    spec:
+      containers:
+        - name: connector
+          image: otmoic/reputation-service:latest
+          env:
+          - name: DBUSER
+            value: "postgres"
+          - name: DBHOST
+            value: "obridge-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: DBPORT
+            value: "5432"
+          - name: DBPASS
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          ports:
+            - containerPort: 1234
+          volumeMounts:
+          - name: reputation-config
+            mountPath: /src/config.toml
+            subPath: config.toml
+          command: ['npm', 'run', 'start-connector']
+          resources: 
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          imagePullPolicy: Always
+      restartPolicy: Always
+      volumes:
+        - name: reputation-config
+          configMap:
+            name: reputation-config
+            defaultMode: 438
+            items:
+            - key: config.toml
+              path: config.toml
+          
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: connector-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: reputation-connector
+  ports:
+    - protocol: TCP
+      port: 1234
+      targetPort: 1234
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbiter-deployment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: reputation-arbiter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reputation-arbiter
+  template:
+    metadata:
+      labels:
+        app: reputation-arbiter
+    spec:
+      containers:
+        - name: arbiter
+          image: otmoic/reputation-service:latest
+          env:
+          - name: DBUSER
+            value: "postgres"
+          - name: DBHOST
+            value: "obridge-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: DBPORT
+            value: "5432"
+          - name: DBPASS
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          ports:
+            - containerPort: 1236
+          volumeMounts:
+          - name: reputation-config
+            mountPath: /src/config.toml
+            subPath: config.toml
+          command: ['npm', 'run', 'start-arbiter']
+          resources: 
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          imagePullPolicy: Always
+      restartPolicy: Always
+      volumes:
+        - name: reputation-config
+          configMap:
+            name: reputation-config
+            defaultMode: 438
+            items:
+            - key: config.toml
+              path: config.toml
+          
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arbiter-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: reputation-arbiter
+  ports:
+    - protocol: TCP
+      port: 1236
+      targetPort: 1236
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: points-deployment
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: reputation-points
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reputation-points
+  template:
+    metadata:
+      labels:
+        app: reputation-points
+    spec:
+      containers:
+        - name: points
+          image: otmoic/reputation-service:latest
+          env:
+          - name: DBUSER
+            value: "postgres"
+          - name: DBHOST
+            value: "obridge-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: DBPORT
+            value: "5432"
+          - name: DBPASS
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          ports:
+            - containerPort: 1235
+          volumeMounts:
+          - name: reputation-config
+            mountPath: /src/config.toml
+            subPath: config.toml
+          command: ['npm', 'run', 'start-points']
+          resources: 
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          imagePullPolicy: Always
+      restartPolicy: Always
+      volumes:
+        - name: reputation-config
+          configMap:
+            name: reputation-config
+            defaultMode: 438
+            items:
+            - key: config.toml
+              path: config.toml
+          
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: points-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: reputation-points
+  ports:
+    - protocol: TCP
+      port: 1235
+      targetPort: 1235
+---
+
+  

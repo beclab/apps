@@ -1,0 +1,76 @@
+# Source: obridge-relay-adminpanel/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-adminpanel-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: relay-adminpanel
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: relay-admin-panel-api
+      port: 9101
+      targetPort: 9101
+---
+# Source: obridge-relay-adminpanel/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-adminpanel
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: relay-adminpanel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: relay-adminpanel
+  template:
+    metadata:
+      labels:
+        app: relay-adminpanel
+    spec:
+      volumes:
+      - name: document
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/otmoicrelay
+      containers:
+      - name: relay-adminpanel
+        image: otmoic/otmoic-relay-admin:latest
+        ports:
+          - containerPort: 9101
+        resources:
+          requests:
+            cpu: 1m
+            memory: 1Mi
+          limits:
+            cpu: 50m
+            memory: 16Mi
+        env:
+          - name: POSTGRES_USERNAME
+            value: "postgres"
+          - name: POSTGRES_HOST
+            value: "obridge-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: POSTGRES_PORT
+            value: "5432"
+          - name: POSTGRES_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          - name: REDIS_PWD
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-redis
+                key: redis-password
+          - name: REDIS_PORT
+            value: "6379"
+          - name: REDIS_HOST
+            value: obridge-relay-db-redis-master
+        volumeMounts:
+        - name: document
+          mountPath: /admin-panel/app
+

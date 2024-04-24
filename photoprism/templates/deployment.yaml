@@ -1,0 +1,75 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: photoprism
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: photoprism
+  template:
+    metadata:
+      labels:
+        app: photoprism
+    spec:
+      containers:     
+      - name: photoprism
+        image: kldtks/edge:photoprism
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        ports:
+        - containerPort: 2342
+        env:
+        - name: HOME
+          value: /photoprism
+        - name: PHOTOPRISM_DEBUG
+          value: "true"
+        - name: PHOTOPRISM_READONLY
+          value: "false"  
+        - name: PHOTOPRISM_HTTP_HOST
+          value: 0.0.0.0
+        - name: PHOTOPRISM_HTTP_PORT
+          value: "2342"
+        - name: PHOTOPRISM_ADMIN_PASSWORD
+          value: "123456"
+        volumeMounts:
+        - mountPath: /photoprism/originals
+          name: originals
+        - mountPath: /photoprism/storage
+          name: storage
+       
+      volumes:
+      - name: originals
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.userData }}/Pictures
+      - name: storage
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/photoprism/storage
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 2342
+      targetPort: 2342
+      

@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: user-embedding-r4entertainment
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: '0 */1 * * *'
+  startingDeadlineSeconds: 0
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  suspend: false
+  ttlStrategy:
+    secondsAfterSuccess: 3600
+    secondsAfterCompletion: 3600
+    secondsAfterFailure: 3600
+  workflowSpec:
+    entrypoint: userEmbeddingFlow
+    volumes:
+      - name: huggingface
+        hostPath:
+          type: DirectoryOrCreate
+          path: >-
+            {{ .Values.userspace.appData }}/rss/model/huggingface
+    templates:
+      - name: userEmbeddingFlow
+        steps:
+          - - name: user-embedding
+              template: user-embedding-template
+      - name: user-embedding-template
+        container:
+          image: 'beclab/r4userembedding'
+          imagePullPolicy: Always
+          env:
+            - name: KNOWLEDGE_BASE_API_URL
+              value: {{ .Values.apiUrl }}
+            - name: TERMINUS_RECOMMEND_SOURCE_NAME
+              value: r4entertainment
+          volumeMounts:
+            - mountPath: /root/.cache/huggingface
+              name: huggingface
