@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: onlyoffice
+  name: onlyoffice
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: onlyoffice
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: onlyoffice
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: DB_TYPE
+          value: "postgres"
+        - name: DB_PORT
+          value: "{{ .Values.postgres.port }}"
+        - name: DB_NAME
+          value: "{{ .Values.postgres.databases.onlyoffice }}"
+        - name: DB_USER
+          value: "{{ .Values.postgres.username }}"
+        - name: DB_HOST
+          value: "{{ .Values.postgres.host }}"
+        - name: DB_PWD
+          value: "{{ .Values.postgres.password }}"
+        - name: REDIS_SERVER_PORT
+          value: "{{ .Values.redis.port }}"
+        - name: REDIS_SERVER_HOST
+          value: "{{ .Values.redis.host }}"
+        - name: REDIS_SERVER_PASS
+          value: "{{ .Values.redis.password }}"
+        - name: WOPI_ENABLED
+          value: "true"
+        - name: JWT_ENABLED
+          value: "true"
+        - name: JWT_SECRET
+          value: "randomgeneratedstring"
+        image: onlyoffice/documentserver
+        name: onlyoffice
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4000Mi
+          requests:
+            cpu: 1
+            memory: 500Mi
+        volumeMounts:
+        - mountPath: /var/log/onlyoffice
+          name: logs
+        - mountPath: /var/www/onlyoffice/Data
+          name: data
+        - mountPath: /var/lib/onlyoffice
+          name: lib
+        - mountPath: /userdata
+          name: userdata
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/onlyoffice/logs'
+          type: DirectoryOrCreate
+        name: logs
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/onlyoffice/data'
+          type: DirectoryOrCreate
+        name: data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/onlyoffice/lib'
+          type: DirectoryOrCreate
+        name: lib
+      - hostPath:
+          path: '{{ .Values.userspace.userData }}'
+          type: DirectoryOrCreate
+        name: userdata
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: onlyoffice
+  name: onlyoffice
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "80"
+    port: 80
+    targetPort: 80
+  selector:
+    io.kompose.service: onlyoffice
+status:
+  loadBalancer: {}

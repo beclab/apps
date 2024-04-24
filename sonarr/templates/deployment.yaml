@@ -1,0 +1,61 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sonarr
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sonarr
+  template:
+    metadata:
+      labels:
+        app: sonarr
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: TZ
+          value: Europe/London
+        name: sonarr
+        image: lscr.io/linuxserver/sonarr:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 64Mi
+        ports:
+        - containerPort: 8989
+        volumeMounts:
+        - mountPath: /config
+          name: sonarr-config
+      volumes:
+      - name: sonarr-config
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/sonarr 
+        
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8989
+      targetPort: 8989

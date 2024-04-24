@@ -1,0 +1,93 @@
+{{- $bytebaseDomainENV := split  ","  .Values.domain.bytebase -}}
+{{- $bytebaseDomain := index $bytebaseDomainENV "_0" -}}
+---
+# Source: bytebase/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: bytebase-entrypoint
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bytebase
+    app.kubernetes.io/version: 2.11.1
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: LoadBalancer
+  selector:
+    app: bytebase
+  ports:
+  - protocol: TCP
+    port: 8080
+    targetPort: 8080
+---
+# Source: bytebase/templates/statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: bytebase
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bytebase
+    app.kubernetes.io/version: 2.11.1
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app: bytebase
+  serviceName: "bytebase"
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: bytebase
+    spec:
+      containers:
+        - name: bytebase
+          image: kldtks/edge:bytebase-2-11-1
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1024Mi
+          env:
+          # If user specifies the external pg connection string directly, we should use that.
+          - name: PG_URL
+            value: postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.bytebase }}
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              exec bytebase \
+              --data \
+              "/var/opt/bytebase" \
+              --port \
+              "8080" \
+              --external-url \
+              "https://{{ $bytebaseDomain }}" \
+          ports:
+            - containerPort: 8080
+              name: web
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 300
+            periodSeconds: 300
+            timeoutSeconds: 60
+          volumeMounts:
+            - mountPath: /var/opt/bytebase
+              # Either user disable persistence or enable persistence but not specify an existing PVC, use "bytebase-volume" as the volume name. It means
+              # that we will request to create a PVC with the specified storage class with name "bytebase-volume".
+              name: bytebase-volume
+            - mountPath: /mnt/bytebase-shared-volume
+              name: bytebase-shared-volume
+      volumes:
+        # Mount the shared volume.
+        - name: bytebase-volume
+          emptyDir: {}
+        - name: bytebase-shared-volume
+          emptyDir: {}

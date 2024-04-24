@@ -1,0 +1,84 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: transmission
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transmission
+  template:
+    metadata:
+      labels:
+        app: transmission
+    spec:
+      containers:
+      - name: transmission
+        env:
+        - name: PGID
+          value: "1000"  
+        - name: PUID
+          value: "1000" 
+        - name: TZ
+          value: Asia/Shanghai
+        image: lscr.io/linuxserver/transmission:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 64Mi
+        ports:
+        - containerPort: 9091
+          protocol: TCP
+        - containerPort: 51413
+          protocol: TCP
+        - containerPort: 51413
+          protocol: UDP
+        volumeMounts:
+        - mountPath: /config
+          name: transmission-data
+          subPath: config
+        - mountPath: /downloads
+          name: transmission-data
+          subPath: downloads
+        - mountPath: /watch
+          name: transmission-data  
+          subPath: watch
+        
+      volumes:
+      - name: transmission-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/transmission
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: webui-port
+      port: 9091            
+      targetPort: 9091       
+      protocol: TCP
+    - name: torrent-port
+      port: 51413
+      targetPort: 51413
+      protocol: TCP
+    - name: torrent-udp-port
+      port: 51413
+      protocol: UDP
+      targetPort: 51413
+      

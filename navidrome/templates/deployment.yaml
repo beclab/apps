@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: navidrome
+  name: navidrome
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: navidrome
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: navidrome
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        image: deluan/navidrome:latest
+        name: navidrome
+        ports:
+        - containerPort: 4533
+        resources:
+          limits:
+            cpu: "1"
+            memory: 4Gi
+          requests:
+            cpu: 50m
+            memory: 4Gi
+        volumeMounts:
+        - mountPath: /music
+          name: music
+        - mountPath: /data
+          name: data
+        - mountPath: /userdata
+          name: userdata
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/navidrome/music'
+          type: DirectoryOrCreate
+        name: music
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/navidrome/data'
+          type: DirectoryOrCreate
+        name: data
+      - hostPath:
+          path: '{{ .Values.userspace.userData }}'
+          type: DirectoryOrCreate
+        name: userdata
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: navidrome
+  name: navidrome
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "4533"
+    port: 4533
+    targetPort: 4533
+  selector:
+    io.kompose.service: navidrome
+status:
+  loadBalancer: {}

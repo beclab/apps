@@ -1,0 +1,138 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.26.1 (HEAD)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: chinesesubfinder
+  name: chinesesubfinder
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: chinesesubfinder
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.26.1 (HEAD)
+      creationTimestamp: null
+      labels:
+        io.kompose.service: chinesesubfinder
+    spec:
+      containers:
+        - env:
+            - name: PERMS
+              value: "true"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Asia/Shanghai
+            - name: UMASK
+              value: "022"
+          image: allanpk716/chinesesubfinder:latest
+          name: chinesesubfinder
+          resources:
+            requests:
+              cpu: 100m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 64Mi
+          ports:
+            - containerPort: 19035
+            - containerPort: 19037
+          volumeMounts:
+            - mountPath: /config
+              name: config
+            - mountPath: /media
+              name: downloads
+            - mountPath: /root/.cache/rod/browser
+              name: cache
+      hostname: chinesesubfinder
+      restartPolicy: Always
+      volumes:
+        - name: config
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}/chinesesubfinder/config
+        - name: cache
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}/chinesesubfinder/cache
+        - name: downloads
+          hostPath:
+            type: Directory
+            path: {{ .Values.userspace.userData }}/Downloads
+status: {}
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.26.1 (HEAD)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: chinesesubfinder
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: "19035"
+      port: 19035
+      targetPort: 19035
+    - name: "19037"
+      port: 19037
+      targetPort: 19037
+  selector:
+    io.kompose.service: chinesesubfinder
+status:
+  loadBalancer: {}
+
+---
+
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: {{ .Release.Name }}-svc-api
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_api
+  deployment: chinesesubfinder
+  description: chinesesubfinder api
+  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:19037
+  group: api.chinesesubfinderapi
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v1
+status:
+  state: active
+
+---
+
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: {{ .Release.Name }}-svc-web
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_api
+  deployment: chinesesubfinder
+  description: chinesesubfinder api
+  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:19035
+  group: api.chinesesubfinderweb
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v1
+status:
+  state: active

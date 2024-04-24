@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: amm-market-price-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: amm-market-price
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: amm-market-price-service
+      port: 18080
+      targetPort: 18080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: amm-market-price
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: amm-market-price
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: amm-market-price
+  template:
+    metadata:
+      labels:
+        app: amm-market-price
+    spec:
+      containers:
+        - name: amm-market-price
+          image: otmoic/otmoic-lpnode-exchange-adapter:latest
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
+          ports:
+            - containerPort: 18080
+          env:
+            - name: STATUS_KEY
+              value: amm-market-status-report-price
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: SERVICE_PORT
+              value: "18080"
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASS
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace

@@ -1,0 +1,113 @@
+{{- $ghostDomainENV := split  ","  .Values.domain.ghost -}}
+{{- $ghostDomain := index $ghostDomainENV "_0" -}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: ghost
+  name: ghost
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: ghost
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: ghost
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: database__client
+          value: "mysql"
+        - name: database__connection__host
+          value: "127.0.0.1"
+        - name: database__connection__user
+          value: "root"
+        - name: database__connection__password
+          value: "example"
+        - name: database__connection__database
+          value: "ghost"
+        - name: url
+          value: 'https://{{$ghostDomain}}'
+        image: ghost:5-alpine
+        name: ghost
+        ports:
+        - name: proxy-ghost
+          containerPort: 2368
+        resources:
+          limits:
+            cpu: "2"
+            memory: 3Gi
+          requests:
+            cpu: "1"
+            memory: 3Gi
+        volumeMounts:
+        - mountPath: /var/lib/ghost/content
+          name: ghost
+        - mountPath: /userdata
+          name: userdata
+      - name: ghost-mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "example"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 4Gi
+          requests:
+            cpu: "1"
+            memory: 2Gi
+        ports:
+        - name: ghost-mysql
+          containerPort: 3306
+        volumeMounts:
+        - mountPath: /var/lib/ghost/content
+          name: db
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/ghost/ghost'
+          type: DirectoryOrCreate
+        name: ghost
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/ghost/db'
+          type: DirectoryOrCreate
+        name: db
+      - hostPath:
+          path: '{{ .Values.userspace.userData }}'
+          type: DirectoryOrCreate
+        name: userdata
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: ghost
+  name: ghost
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "2368"
+    port: 2368
+    targetPort: 2368
+  selector:
+    io.kompose.service: ghost
+status:
+  loadBalancer: {}

@@ -1,0 +1,115 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: nostream
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nostream
+  template:
+    metadata:
+      labels:
+        app: nostream
+    spec:
+      containers:
+      - name: postgres
+        image: postgres
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        env:
+        - name: POSTGRES_DB
+          value: "nostr_ts_relay"
+        - name: POSTGRES_USER
+          value: "postgres"  
+        - name: POSTGRES_PASSWORD
+          value: "postgres"  
+        volumeMounts:
+        - name: pgdata
+          mountPath: /var/lib/postgresql/data-old
+      - name: redis
+        image: redis:7.0.5-alpine3.16
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data  
+      - name: nostream
+        image: docker.io/mmchong/nostream:latest
+        resources:
+          requests:
+            cpu: 1.5
+            memory: 256Mi
+          limits:
+            cpu: 2.5
+            memory: 512Mi
+        env:
+        - name: RELAY_PORT
+          value: "8008"
+        - name: DB_USER
+          value: "postgres"  
+        - name: DB_PASSWORD
+          value: "postgres"  
+        - name: DB_NAME
+          value: "nostr_ts_relay" 
+        - name: DB_HOST
+          value: localhost
+        - name: DB_PORT
+          value: "5432"
+        - name: REDIS_HOST
+          value: localhost
+        - name: REDIS_PORT
+          value: "6379"  
+        - name: REDIS_USER
+          value: default
+        - name: REDIS_PASSWORD
+          value: 
+        lifecycle:
+          postStart:
+            exec:  
+              command: 
+              - sh
+              - -c
+              - |
+                cd code && \
+                npx knex migrate:latest      
+        ports:
+        - containerPort: 8008
+      volumes:
+      - name: pgdata
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nostream/pgdata
+      - name: redis-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nostream/redisdata  
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8008
+      targetPort: 8008

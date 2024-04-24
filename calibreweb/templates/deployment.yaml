@@ -1,0 +1,66 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: calibreweb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: calibreweb
+  template:
+    metadata:
+      labels:
+        app: calibreweb
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: TZ
+          value: Europe/London
+        name: calibreweb
+        image: kldtks/edge:calibre-web
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        ports:
+        - containerPort: 8083
+        volumeMounts:
+        - mountPath: /config
+          name: calibre-config
+        - mountPath: /books
+          name: calibre-data
+      volumes:
+      - name: calibre-config
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.userData }}/Calibre/config 
+      - name: calibre-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.userData }}/Calibre/books         
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8083
+      targetPort: 8083

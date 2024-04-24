@@ -1,0 +1,65 @@
+# Source: obridge-relay/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoicrelay-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: relay
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: relay-api
+      port: 9102
+      targetPort: 9102
+---
+# Source: obridge-relay/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otmoicrelay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: relay
+  template:
+    metadata:
+      labels:
+        app: relay
+    spec:
+      containers:
+      - name: relay
+        image: otmoic/otmoic-relay:latest
+        ports:
+          - containerPort: 9102
+        resources:
+          requests:
+            cpu: 1m
+            memory: 256Mi
+          limits:
+            cpu: 200m
+            memory: 512Mi
+        env:
+          - name: POSTGRESQL_HOST
+            value: "obridge-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: POSTGRESQL_PORT
+            value: "5432"
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: obridge-relay-db-redis
+                key: redis-password
+          - name: REDIS_HOST
+            value: 'obridge-relay-db-redis-master'
+          - name: REDIS_PORT
+            value: '6379'

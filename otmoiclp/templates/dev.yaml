@@ -1,0 +1,119 @@
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: lpnode-dev-sa
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lpnode-dev-sa-rolebinding
+  namespace: {{ .Release.Namespace }}
+subjects:
+- kind: ServiceAccount
+  name: lpnode-dev-sa
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dev
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dev
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: dev
+  template:
+    metadata:
+      labels:
+        app: dev
+    spec:
+      serviceAccountName: lpnode-dev-sa
+      volumes:
+        - name: code
+          hostPath:
+            type: Directory
+            path: {{ .Values.userspace.userData }}/Code
+      initContainers:
+        - name: init-chmod-data
+          image: 'busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /home/coder
+          resources: {}
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: code-server
+          image: codercom/code-server
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 1024Mi
+          env:
+            - name: MONGODB_USER
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_DBNAME_BUSINESS_HISTORY
+              value: {{ .Values.mongodb.databases.businessHistory }}
+            - name: PASSWORD
+              value: '123456'
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.namespace
+            - name: RELAY-URL
+              value: 'https://otmoicrelay.saidev.snowinning.com'
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: MONGODB_ROOT_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: OS_API_KEY
+              value: {{ .Values.os.appKey }}
+            - name: OS_API_SECRET
+              value: {{ .Values.os.appSecret }}
+            - name: OS_SYSTEM_SERVER
+              value: system-server.user-system-{{ .Values.bfl.username }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dev-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: dev
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080

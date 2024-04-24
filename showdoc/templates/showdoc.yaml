@@ -1,0 +1,72 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: showdoc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: showdoc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: showdoc
+  template:
+    metadata:
+      labels:
+        app: showdoc
+    spec:
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}/showdoc
+      containers:
+        - name: container-96l42k
+          image: kldtks/edge:showdoc-v3.2.5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 64Mi
+            limits:
+              cpu: 1000m
+              memory: 128Mi
+          ports:
+            - name: http-0
+              containerPort: 80
+              protocol: TCP
+            - name: http-1
+              containerPort: 443
+              protocol: TCP
+            - name: http-2
+              containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+          securityContext:
+            runAsUser: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - {{ .Values.schedule.nodeName }}
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: showdoc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: showdoc
+spec:
+  ports:
+    - name: http-web
+      protocol: TCP
+      port: 80
+      targetPort: 80
+  selector:
+    app: showdoc

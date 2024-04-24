@@ -1,0 +1,121 @@
+{{- $affineDomainENV := split  ","  .Values.domain.affine -}}
+{{- $affineDomain := index $affineDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: affine
+  name: affine
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: affine
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: affine
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: NODE_OPTIONS
+          value: "--import=./scripts/register.js"
+        - name: AFFINE_CONFIG_PATH
+          value: "/root/.affine/config"
+        - name: REDIS_SERVER_HOST
+          value: "localhost"
+        - name: DATABASE_URL
+          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
+        - name: NODE_ENV
+          value: production
+        - name: AFFINE_ADMIN_EMAIL
+          value: "affine@acme.sh"
+        - name: AFFINE_ADMIN_PASSWORD
+          value: "affine"
+        - name: AFFINE_SERVER_HOST
+          value: '{{$affineDomain}}'
+        - name: AFFINE_SERVER_HTTPS
+          value: 'false'
+        image: ghcr.io/toeverything/affine-graphql:stable
+        command: ['sh', '-c', 'node ./scripts/self-host-predeploy && node ./dist/index.js']
+        name: affine
+        ports:
+        - name: proxy-affine
+          containerPort: 3010
+        resources:
+          limits:
+            cpu: "2"
+            memory: 3Gi
+          requests:
+            cpu: "1"
+            memory: 3Gi
+        volumeMounts:
+        - mountPath: /root/.affine/config
+          name: config
+        - mountPath: /root/.affine/storage
+          name: blob
+        - mountPath: /userdata
+          name: userdata
+      - name: affine-redis
+        image: redis
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: "1"
+            memory: 2Gi
+        volumeMounts:
+        - mountPath: /data
+          name: redis
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/affine/config'
+          type: DirectoryOrCreate
+        name: config
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/affine/blob'
+          type: DirectoryOrCreate
+        name: blob
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/affine/redis'
+          type: DirectoryOrCreate
+        name: redis
+      - hostPath:
+          path: '{{ .Values.userspace.userData }}'
+          type: DirectoryOrCreate
+        name: userdata
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: affine
+  name: affine
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3010"
+    port: 3010
+    targetPort: 3010
+  selector:
+    io.kompose.service: affine
+status:
+  loadBalancer: {}

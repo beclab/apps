@@ -1,0 +1,320 @@
+
+# Source: traefik/templates/rbac/serviceaccount.yaml
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: traefik
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+---
+# Source: traefik/templates/pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: traefik
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+spec:
+  accessModes:
+    - "ReadWriteOnce"
+  resources:
+    requests:
+      storage: "5G"
+---
+# Source: traefik/templates/rbac/clusterrole.yaml
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: traefik-{{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+rules:
+  - apiGroups:
+      - extensions
+      - networking.k8s.io
+    resources:
+      - ingressclasses
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+      - networking.k8s.io
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+  - apiGroups:
+      - traefik.containo.us
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+      - serverstransports
+    verbs:
+      - get
+      - list
+      - watch
+---
+# Source: traefik/templates/rbac/clusterrolebinding.yaml
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: traefik-{{ .Release.Namespace }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: traefik-{{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: traefik
+    namespace: {{ .Release.Namespace }}
+---
+# Source: traefik/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+  annotations:
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+  ports:
+  - port: 9000
+    name: "traefik"
+    targetPort: traefik
+    protocol: TCP
+  - port: 80
+    name: "web"
+    targetPort: web
+    protocol: TCP
+  - port: 443
+    name: "websecure"
+    targetPort: websecure
+    protocol: TCP
+---
+# Source: traefik/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: traefik
+    app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+  annotations:
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: traefik
+      app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+  strategy: 
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  minReadySeconds: 0
+  template: 
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "9100"
+      labels:
+        app.kubernetes.io/name: traefik
+        app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+    spec:
+      serviceAccountName: traefik
+      terminationGracePeriodSeconds: 60
+      hostNetwork: false
+      containers:
+      - image: traefik:v2.9.7
+        imagePullPolicy: IfNotPresent
+        name: traefik
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        readinessProbe:
+          httpGet:
+            path: /ping
+            port: 8080
+            scheme: HTTP
+          failureThreshold: 1
+          initialDelaySeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        livenessProbe:
+          httpGet:
+            path: /ping
+            port: 8080
+            scheme: HTTP
+          failureThreshold: 3
+          initialDelaySeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 2
+        lifecycle:
+        ports:
+        - name: "metrics"
+          containerPort: 9100
+          protocol: "TCP"
+        - name: "traefik"
+          containerPort: 8080
+          protocol: "TCP"
+        - name: "web"
+          containerPort: 80
+          protocol: "TCP"
+        - name: "websecure"
+          containerPort: 443
+          protocol: "TCP"
+        securityContext:
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 0
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+          - name: data
+            mountPath: /data
+          - name: tmp
+            mountPath: /tmp
+        args:
+          - "--global.checknewversion"
+          - "--global.sendanonymoususage"
+          - "--entrypoints.metrics.address=:9100/tcp"
+          - "--entrypoints.traefik.address=:8080/tcp"
+          - "--entrypoints.web.address=:80/tcp"
+          - "--entrypoints.websecure.address=:443/tcp"
+          - "--api.dashboard=true"
+          - "--ping=true"
+          - "--metrics.prometheus=true"
+          - "--metrics.prometheus.entrypoint=metrics"
+          - "--providers.kubernetescrd"
+          - "--providers.kubernetesingress=true"
+          - "--providers.kubernetescrd.namespaces={{ .Release.Namespace }}"
+          - "--providers.kubernetesingress.namespaces={{ .Release.Namespace }}"
+          - "--entrypoints.websecure.http.tls=true"
+          - "--entrypoints.websecure.http.tls.domains[0].main=snowinning.com"
+          - "--entrypoints.websecure.http.tls.domains[0].sans=*.snowinning.com"
+          - "--log.level=DEBUG"
+          - "--accesslog=true"
+          - "--accesslog.fields.defaultmode=keep"
+          - "--accesslog.fields.headers.defaultmode=drop"
+          - "--serversTransport.insecureSkipVerify=true"
+          - "--api.insecure=true"
+          - "--api.dashboard=true"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: traefik
+        - name: tmp
+          emptyDir: {}
+      securityContext:
+        fsGroup: 65532
+---
+# Source: traefik/templates/ingressclass.yaml
+# apiVersion: networking.k8s.io/v1
+# kind: IngressClass
+# metadata:
+#   annotations:
+#     ingressclass.kubernetes.io/is-default-class: "false"
+#   labels:
+#     app.kubernetes.io/name: traefik
+#     app.kubernetes.io/instance: traefik-{{ .Release.Namespace }}
+#   name: traefik-{{ .Release.Namespace }}
+#   namespace: {{ .Release.Namespace }}
+# spec:
+#   controller: traefik.io/ingress-controller
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: Middleware
+metadata:
+  name: openllm-stripprefix
+  namespace: {{ .Release.Namespace }}
+  # annotations:
+  #     app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
+spec:
+  stripPrefix:
+    prefixes:
+      - /api
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: ingress-openllm-ui
+  namespace: {{ .Release.Namespace }}
+  # annotations:
+  #     app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
+spec:
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    - match: "HostRegexp(`{subdomain:[a-z~1-9]+}.{{ .Values.user.zone }}`)"
+      kind: Rule
+      services:
+        - name: openllm
+          port: 80
+---
+apiVersion: traefik.containo.us/v1alpha1
+kind: IngressRoute
+metadata:
+  name: ingress-openllm
+  namespace: {{ .Release.Namespace }}
+  # annotations:
+  #     app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
+spec:
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    - match: "HostRegexp(`{subdomain:[a-z~1-9]+}.{{ .Values.user.zone }}`) && PathPrefix(`/api/`)"
+      kind: Rule
+      middlewares:
+        - name: openllm-stripprefix
+      services:
+        - name: openllm
+          port: 3000

@@ -1,0 +1,92 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: nextcloud
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nextcloud
+  template:
+    metadata:
+      labels:
+        app: nextcloud
+    spec:
+      containers:
+      - name: mariadb
+        image: mariadb:10.5
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "123456"
+        - name: MYSQL_PASSWORD
+          value: "nextcloud"  
+        - name: MYSQL_DATABASE
+          value: "nextcloud"
+        - name: MYSQL_USER
+          value: "nextcloud"
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysqldb
+          mountPath: /var/lib/mysql
+      - env:
+        - name: MYSQL_PASSWORD
+          value: "123456" 
+        - name: MYSQL_DATABASE
+          value: "nextcloud"
+        - name: MYSQL_USER
+          value: "root"
+        - name: MYSQL_HOST
+          value: 127.0.0.1               
+        name: nextcloud
+        image: nextcloud
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nextcloud-vol
+          mountPath: /var/www/html
+          
+      volumes:
+      - name: mysqldb
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nextcloud/db
+      - name: nextcloud-vol
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/nextcloud 
+        
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

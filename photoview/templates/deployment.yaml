@@ -1,0 +1,105 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: photoview
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: photoview
+  template:
+    metadata:
+      labels:
+        app: photoview
+    spec:
+      containers:
+      - name: mysql
+        image: mariadb:10.5
+        resources:
+          requests:
+            cpu: 70m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "123456"
+        - name: MYSQL_DATABASE
+          value: "photoview"  
+        ports:
+        - containerPort: 3306
+          name: mysql
+        volumeMounts:
+        - name: mysqldb
+          mountPath: /var/lib/mysql
+      - name: photoview
+        image: viktorstrate/photoview:2  
+        resources:
+          requests:
+            cpu: 150m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        ports:
+        - containerPort: 80
+        env:
+        - name: PHOTOVIEW_DATABASE_DRIVER
+          value: mysql
+        - name: PHOTOVIEW_LISTEN_IP
+          value: 0.0.0.0
+        - name: PHOTOVIEW_LISTEN_PORT
+          value: "80"
+        - name: PHOTOVIEW_MEDIA_CACHE
+          value: /app/cache
+        - name: PHOTOVIEW_MYSQL_URL
+          value: root:123456@tcp(localhost:3306)/photoview
+        volumeMounts:
+        - name: cache
+          mountPath: /app/cache
+        - name: photos
+          mountPath: /photos
+          readOnly: true
+        - name: user-data
+          mountPath: /data
+       
+      volumes:
+      - name: cache
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/photoview
+      - name: photos
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/photoview/photos
+      - name: mysqldb
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/photoview/db
+      - name: user-data
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: phtoviewtcp
+      protocol: TCP
+      port: 80
+      targetPort: 80
+      
