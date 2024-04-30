@@ -1,6 +1,6 @@
 # Terminus Apps
 
-The is the official application repository of Terminus Market，
+This is the official application repository of Terminus Market，
 
 Terminus distributes applications in a permissionless manner using the Market Protocol, thereby maximizing the freedom of developers. Meanwhile, Terminus provides a default indexing service that is based on this repository, enhancing the flexibility and scalability of application distribution. Learn more about the [Market Protocol](https://docs.jointerminus.com/overview/protocol/market.html).
 
@@ -28,7 +28,7 @@ The **Terminus Application Chart (TAC)** describes essential information about a
 Developing applications on Terminus doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Terminus development concepts [here](https://docs.jointerminus.com/developer/develop/).
 
 Before submitting an application, please ensure that it has been thoroughly tested on your Terminus OS.
-- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.jointerminus.com/developer/develope/tutorial/devbox.html)
+- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.jointerminus.com/developer/develop/tutorial/devbox.html)
 - Use the [custom installation](https://docs.jointerminus.com/how-to/terminus/market/#custom-application) in the Market app for user testing.
 
 #### 2. Submit an application
