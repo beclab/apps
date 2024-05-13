@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mastodon
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: apache
+    helm.sh/chart: apache-9.2.9
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: apache
+      app.kubernetes.io/instance: mastodon
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: apache
+        helm.sh/chart: apache-9.2.9
+        app.kubernetes.io/instance: mastodon
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      
+      # yamllint disable rule:indentation
+      hostAliases:
+        - hostnames:
+          - status.localhost
+          ip: 127.0.0.1
+      # yamllint enable rule:indentation
+      priorityClassName: ""
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: apache
+                    app.kubernetes.io/instance: mastodon
+                topologyKey: kubernetes.io/hostname
+              weight: 1
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: apache
+          image: docker.io/bitnami/apache:2.4.54-debian-11-r63
+          imagePullPolicy: "IfNotPresent"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: APACHE_HTTP_PORT_NUMBER
+              value: "8080"
+            - name: APACHE_HTTPS_PORT_NUMBER
+              value: "8443"
+          envFrom:
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: https
+              containerPort: 8443
+          livenessProbe:
+            httpGet:
+              path: /api/v1/streaming/health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 20
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/v1/streaming/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          volumeMounts:
+            - name: vhosts
+              mountPath: /vhosts
+      volumes:
+        - name: vhosts
+          configMap:
+            name: mastodon-apache-mastodon-vhost
