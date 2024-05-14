@@ -21,7 +21,28 @@ metadata:
   name: nginx-config
   namespace: {{ .Release.Namespace }}
 ---
+apiVersion: v1
+data:
+  init.sh: |
+    #!/bin/bash
 
+    appDataDir="/appData"
+    configDir="/config/qBittorrent"
+
+    if [ "$(ls -A $appDataDir)" ]; then
+      echo "$appDataDir not empty"
+    else
+      echo "$appDataDir is empty"
+      cp -r $configDir/. $appDataDir
+      echo "copy succeed"
+    fi
+
+
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
+---
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -44,6 +65,10 @@ spec:
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/qbittorrent
         - name: nginx-config
           configMap:
             name: nginx-config
@@ -51,6 +76,13 @@ spec:
             items:
             - key: nginx.conf
               path: nginx.conf
+        - name: init-config
+          configMap:
+            name: init-config
+            defaultMode: 438
+            items:
+            - key: init.sh
+              path: init.sh
       initContainers:
         - name: init-chmod-data
           image: 'busybox:latest'
@@ -65,6 +97,22 @@ spec:
               mountPath: /home
           securityContext:
             runAsUser: 0
+        - name: init-qbittorrent-config
+          image: 'aboveos/qbittorrent:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chmod +x /init.sh & bash /init.sh
+          resources: {}
+          volumeMounts:
+            - name: appdata
+              mountPath: /appData
+            - name: init-config 
+              mountPath: /init.sh
+              subPath: init.sh
+          securityContext:
+            runAsUser: 0            
       containers:
         - name: nginx
           image: nginx:latest
@@ -89,7 +137,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 500m
-              memory: 128Mi
+              memory: 512Mi
           ports:
             - name: http
               containerPort: 8080
@@ -106,6 +154,8 @@ spec:
           volumeMounts:
             - name: home
               mountPath: /home
+            - name: appdata
+              mountPath: /config/qBittorrent
           livenessProbe:
             tcpSocket:
               port: 8080
