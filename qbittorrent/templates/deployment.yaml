@@ -1,3 +1,27 @@
+apiVersion: v1
+data:
+  nginx.conf: |
+    stream {
+      server {
+          listen  8001;  
+          proxy_pass 127.0.0.1:8080;
+      }
+    }
+
+    events {
+      # Your event-related configurations go here
+    }
+
+    http {
+      # Your HTTP server configurations go here
+    }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+---
+
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -20,6 +44,13 @@ spec:
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
       initContainers:
         - name: init-chmod-data
           image: 'busybox:latest'
@@ -35,8 +66,23 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
+        - name: nginx
+          image: nginx:latest
+          volumeMounts:
+          - name: nginx-config 
+            mountPath: /etc/nginx/nginx.conf
+            subPath: nginx.conf
+          ports:
+          - containerPort: 8001
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
         - name: qbittorrent
-          image: 'kldtks/edge:qbittorrent-v0.1'
+          image: 'aboveos/qbittorrent:latest'
           resources:
             requests:
               cpu: 100m
@@ -107,7 +153,7 @@ spec:
   dataType: legacy_api
   deployment: qbittorrent
   description: qbittorrent legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8080
+  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8001
   group: api.qbittorrent
   kind: provider
   namespace: {{ .Release.Namespace }}
