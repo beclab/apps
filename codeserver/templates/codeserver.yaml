@@ -1,4 +1,15 @@
 apiVersion: v1
+data:
+  config.yaml: |
+    bind-addr: 127.0.0.1:8080
+    auth: none
+
+kind: ConfigMap
+metadata:
+  name: codeserver-config
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
 kind: Secret
 metadata:
   name: {{ .Release.Name }}-secret
@@ -55,7 +66,29 @@ spec:
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}/Code
+        - name: codeserver-config
+          configMap:
+            name: codeserver-config
+            defaultMode: 438
+            items:
+            - key: config.yaml
+              path: config.yaml
       initContainers:
+
+        - name: init-config
+          image: 'busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - >
+              mkdir -p /home/coder/.config/.code-server/ && cp /config.yaml /home/coder/.config/code-server/config.yaml
+          resources: {}
+          volumeMounts:
+            - name: code
+              mountPath: /home/coder
+            - name: codeserver-config
+              mountPath: /config.yaml
+              subPath: config.yaml
         - name: init-chmod-data
           image: 'busybox:latest'
           command:
@@ -69,28 +102,16 @@ spec:
               mountPath: /home/coder
           securityContext:
             runAsUser: 0
-        - name: download-plugin
-          image: 'kldtks/edge:codeserver-plugin'
-          command:
-            - sh
-            - '-c'
-            - >
-              cp bt-sai.edge-app-builder-latest.vsix
-              /home/coder/bt-sai.edge-app-builder-latest.vsix 
-          resources: {}
-          volumeMounts:
-            - name: code
-              mountPath: /home/coder
       containers:
         - name: code-server
           image: codercom/code-server
           resources:
             requests:
-              cpu: 100m
+              cpu: 200m
               memory: 256Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: 1000m
+              memory: 4000Mi
           ports:
             - name: cs-port
               containerPort: 8080

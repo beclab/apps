@@ -1,0 +1,381 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mastodon-web
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: mastodon
+    helm.sh/chart: mastodon-0.1.2
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: mastodon
+    app.kubernetes.io/component: web
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mastodon
+      app.kubernetes.io/instance: mastodon
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mastodon
+        helm.sh/chart: mastodon-0.1.2
+        app.kubernetes.io/instance: mastodon
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/component: web
+    spec:
+      serviceAccountName: mastodon
+      
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: mastodon
+                    app.kubernetes.io/instance: mastodon
+                    app.kubernetes.io/component: web
+                topologyKey: kubernetes.io/hostname
+              weight: 1
+      securityContext:
+        fsGroup: 1001
+        fsGroupChangePolicy: Always
+        supplementalGroups: []
+        sysctls: []
+      initContainers:
+        - name: prepare-tmp-dir
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - /bin/bash
+          args:
+            - -ec
+            - |
+              #!/bin/bash
+              # HACK: Mastodon does not allow having a /tmp directory world-writable, so we need to create a /tmp dir
+              # with more restricted permissions
+              mkdir /tmp/tmp-dir
+          resources:
+            limits:
+              cpu: 750m
+              ephemeral-storage: 1024Mi
+              memory: 768Mi
+            requests:
+              cpu: 500m
+              ephemeral-storage: 50Mi
+              memory: 512Mi
+          volumeMounts:
+            - name: empty-dir
+              mountPath: /tmp
+        # We need to wait for the PostgreSQL database to be ready in order to start with Mastodon.
+        # As it is a ReplicaSet, we need that all nodes are configured in order to start with
+        # the application or race conditions can occur
+        - name: wait-for-db
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - bash
+            - -ec
+            - |
+              #!/bin/bash
+        
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+        
+              . /opt/bitnami/scripts/liblog.sh
+              . /opt/bitnami/scripts/libvalidations.sh
+              . /opt/bitnami/scripts/libmastodon.sh
+              . /opt/bitnami/scripts/mastodon-env.sh
+        
+              mastodon_wait_for_postgresql_connection "postgresql://${MASTODON_DATABASE_USER}:${MASTODON_DATABASE_PASSWORD:-}@${MASTODON_DATABASE_HOST}:${MASTODON_DATABASE_PORT_NUMBER}/${MASTODON_DATABASE_NAME}"
+              info "Database is ready"
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: MASTODON_DATABASE_HOST
+              value: "mastodon-postgresql"
+            - name: MASTODON_DATABASE_PORT_NUMBER
+              value: "5432"
+            - name: MASTODON_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-postgresql
+                  key: password
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-postgresql
+                  key: "password"
+            - name: MASTODON_DATABASE_USER
+              value: bn_mastodon
+            - name: MASTODON_DATABASE_NAME
+              value: bitnami_mastodon
+        
+        # We need to wait for the Redis(TM) to be ready in order to start with Mastodon.
+        # As it is a ReplicaSet, we need that all nodes are configured in order to start with
+        # the application or race conditions can occur
+        - name: wait-for-redis
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - bash
+            - -ec
+            - |
+              #!/bin/bash
+        
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+        
+              . /opt/bitnami/scripts/liblog.sh
+              . /opt/bitnami/scripts/libvalidations.sh
+              . /opt/bitnami/scripts/libmastodon.sh
+              . /opt/bitnami/scripts/mastodon-env.sh
+        
+              mastodon_wait_for_redis_connection "redis://${MASTODON_REDIS_PASSWORD:-}@${MASTODON_REDIS_HOST}:${MASTODON_REDIS_PORT_NUMBER}"
+              info "Redis(TM) is ready"
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: MASTODON_REDIS_HOST
+              value: "mastodon-redis-master"
+            - name: MASTODON_REDIS_PORT_NUMBER
+              value: "6379"
+            - name: MASTODON_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-redis
+                  key: redis-password
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-redis
+                  key: "redis-password"
+        - name: wait-for-elasticsearch
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - bash
+            - -ec
+            - |
+              #!/bin/bash
+        
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+        
+              . /opt/bitnami/scripts/liblog.sh
+              . /opt/bitnami/scripts/libvalidations.sh
+              . /opt/bitnami/scripts/libmastodon.sh
+              . /opt/bitnami/scripts/mastodon-env.sh
+        
+              mastodon_wait_for_elasticsearch_connection "http://${MASTODON_ELASTICSEARCH_HOST}:${MASTODON_ELASTICSEARCH_PORT_NUMBER}"
+              info "Mastodon web is ready"
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: MASTODON_ELASTICSEARCH_HOST
+              value: "mastodon-elasticsearch"
+            - name: MASTODON_ELASTICSEARCH_PORT_NUMBER
+              value: "9200"
+          volumeMounts:
+            - name: empty-dir
+              mountPath: /tmp
+              subPath: tmp-dir
+        - name: wait-for-s3
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - bash
+            - -ec
+            - |
+              #!/bin/bash
+        
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+        
+              . /opt/bitnami/scripts/liblog.sh
+              . /opt/bitnami/scripts/libvalidations.sh
+              . /opt/bitnami/scripts/libmastodon.sh
+              . /opt/bitnami/scripts/mastodon-env.sh
+        
+              mastodon_wait_for_s3_connection "$MASTODON_S3_HOSTNAME" "$MASTODON_S3_PORT_NUMBER"
+              info "S3 is ready"
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: MASTODON_S3_HOSTNAME
+              value: "mastodon-minio"
+            - name: MASTODON_S3_PORT_NUMBER
+              value: "80"
+          volumeMounts:
+            - name: empty-dir
+              mountPath: /tmp
+              subPath: tmp-dir
+      containers:
+        - name: mastodon
+          image: docker.io/bitnami/mastodon:4.2.8-debian-12-r6
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsGroup: 1001
+            runAsNonRoot: true
+            runAsUser: 1001
+            seLinuxOptions: null
+            seccompProfile:
+              type: RuntimeDefault
+          command:
+            - /opt/bitnami/scripts/mastodon/run.sh
+          env:
+            - name: BITNAMI_DEBUG
+              value: "false"
+            - name: MASTODON_MODE
+              value: "web"
+            - name: MASTODON_WEB_PORT_NUMBER
+              value: "3000"
+            - name: MASTODON_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-postgresql
+                  key: "password"
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-postgresql
+                  key: "password"
+            - name: MASTODON_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-redis
+                  key: "redis-password"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-redis
+                  key: "redis-password"
+            - name: MASTODON_AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-minio
+                  key: "root-user"
+            - name: MASTODON_AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-minio
+                  key: "root-password"
+          envFrom:
+            - configMapRef:
+                name: mastodon-default
+            - secretRef:
+                name: mastodon-default
+          ports:
+            - name: http
+              containerPort: 3000
+          livenessProbe:
+            failureThreshold: 6
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+            httpGet:
+              path: /health
+              port: http
+          readinessProbe:
+            failureThreshold: 6
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+            httpGet:
+              path: /health
+              port: http
+          volumeMounts:
+            - name: empty-dir
+              mountPath: /tmp
+              subPath: tmp-dir
+      volumes:
+          - name: empty-dir
+            emptyDir: {}
