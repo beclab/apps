@@ -1,3 +1,92 @@
+{{- $ipfsDomainENV := split  ","  .Values.domain.rpc -}}
+{{- $webDomain := index $ipfsDomainENV "_0" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -ex
+    ipfs config --json API.HTTPHeaders.Access-Control-Allow-Origin '["https://{{ $webDomain }}", "http://localhost:3000", "http://127.0.0.1:5001", "https://webui.ipfs.io"]'
+    ipfs config --json API.HTTPHeaders.Access-Control-Allow-Methods '["PUT", "POST"]'
+  
+  init-cmd.sh: |
+    #!/bin/sh
+
+    /sbin/tini -s -- /usr/local/bin/start_ipfs daemon --migrate=true --agent-version-suffix=docker > output.log 2>&1 &
+
+    while true; do
+        if grep -q "Daemon is ready" output.log ; then
+            pkill -P $$ tail
+            exit 0
+        else
+            tail -n 1 output.log
+        fi
+        sleep 1
+    done
+
+  init-config-cmd.sh: |
+    #!/bin/bash
+
+    # Define the path to the config file
+    CONFIG_FILE="/data/ipfs/config"
+
+    # Define the JSON content to check and add if not present
+    JSON_CONTENT='
+    
+    "API": {
+      "HTTPHeaders": {
+        "Access-Control-Allow-Methods": [
+          "PUT",
+          "POST"
+        ],
+        "Access-Control-Allow-Origin": [
+          "https://{{ $webDomain }}",
+          "http://localhost:3000",
+          "http://127.0.0.1:5001",
+          "https://webui.ipfs.io"
+        ]
+      }
+    }
+    
+    '
+
+    # Function to check if the JSON content is present in the config file
+    check_json_content() {
+      grep -q '"API": {\s*"HTTPHeaders": {\s*"Access-Control-Allow-Methods": \[\s*"PUT",\s*"POST"\s*\],\s*"Access-Control-Allow-Origin": \[\s*"https://{{ $webDomain }}",\s*"http://localhost:3000",\s*"http://127.0.0.1:5001",\s*"https://webui.ipfs.io"\s*\]\s*}\s*}' $CONFIG_FILE
+    }
+
+    # Check if the config file exists
+    if [ -f $CONFIG_FILE ]; then
+      # Check if the JSON content is present in the config file
+      if ! check_json_content; then
+          # Append the JSON content to the config file
+          sed -i 's/"HTTPHeaders": {}/"HTTPHeaders": {\
+              "Access-Control-Allow-Methods": [\
+                  "PUT",\
+                  "POST"\
+              ],\
+              "Access-Control-Allow-Origin": [\
+                  "https:\/\/{{ $webDomain }}",\
+                  "http:\/\/localhost:3000",\
+                  "http:\/\/127.0.0.1:5001",\
+                  "https:\/\/webui.ipfs.io"\
+              ]\
+          }/g' $CONFIG_FILE
+          # Restart the pod or any relevant action needed
+          # Restart command (replace with actual command)
+          echo "Init config succeed"
+      else
+          echo "JSON content already exists in the config file"
+      fi
+    else
+      echo "Config file does not exist"
+    fi
+
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -18,6 +107,15 @@ data:
             }
             
             location / {
+                
+                add_header Access-Control-Allow-Origin 'https://{{ $webDomain }}';
+                add_header Access-Control-Allow-Origin 'http://localhost:3000';
+                add_header Access-Control-Allow-Origin 'http://127.0.0.1:5001';
+                add_header Access-Control-Allow-Origin 'https://webui.ipfs.io';
+
+                # Allow Methods
+                add_header Access-Control-Allow-Methods 'PUT, POST';
+
                 proxy_pass  http://127.0.0.1:5001;
             }
         }        
@@ -49,11 +147,11 @@ spec:
         - name: data
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appdata }}/ipfs/data
+            path: {{ .Values.userspace.appData }}/ipfs/data
         - name: export
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appdata }}/ipfs/export
+            path: {{ .Values.userspace.appData }}/ipfs/export
         - name: nginx-config
           configMap:
             name: nginx-config
@@ -61,6 +159,80 @@ spec:
             items:
             - key: nginx.conf
               path: nginx.conf
+        - name: init-config
+          configMap:
+            name: init-config
+            defaultMode: 438
+            items:
+            - key: init.sh
+              path: init.sh
+        - name: init-cmd
+          configMap:
+            name: init-config
+            defaultMode: 438
+            items:
+            - key: init-cmd.sh
+              path: init-cmd.sh
+        - name: init-config-cmd
+          configMap:
+            name: init-config
+            defaultMode: 438
+            items:
+            - key: init-config-cmd.sh
+              path: init-config-cmd.sh
+
+        
+      initContainers:
+      - name: init-ipfs
+        image: ipfs/kubo:latest
+        resources:
+          requests:
+            cpu: 50m
+            memory: 150Mi
+          limits:
+            cpu: 1000m
+            memory: 2048Mi
+        ports:
+          - name: gateway
+            containerPort: 8080
+            protocol: TCP
+          - name: rpc
+            containerPort: 5001
+            protocol: TCP
+          - name: p2p-tcp
+            containerPort: 4001
+            protocol: TCP
+          - name: p2p-udp
+            containerPort: 4001
+            protocol: UDP
+        volumeMounts:
+          - name: data
+            mountPath: /data/ipfs
+          - name: export
+            mountPath: /export
+          - name: init-cmd
+            mountPath: /data/cmd
+        command: 
+            - sh
+            - '-c'
+            - >-
+              cp /data/cmd/init-cmd.sh /tmp/init-cmd.sh; chmod +x
+              /tmp/init-cmd.sh; sh /tmp/init-cmd.sh
+      - name: init-config
+        image: 'busybox:latest'
+        volumeMounts:
+          - name: data
+            mountPath: /data/ipfs
+          - name: export
+            mountPath: /export
+          - name: init-config-cmd
+            mountPath: /data/cmd
+        command: 
+            - sh
+            - '-c'
+            - >-
+              cp /data/cmd/init-config-cmd.sh /tmp/init-config-cmd.sh;
+              chmod +x /tmp/init-config-cmd.sh; sh /tmp/init-config-cmd.sh
       containers:
       - name: ipfs
         image: ipfs/kubo:latest
@@ -89,6 +261,8 @@ spec:
             mountPath: /data/ipfs
           - name: export
             mountPath: /export
+          - name: init-config
+            mountPath: /container-init.d
       - name: nginx
         image: nginx:latest
         volumeMounts:
