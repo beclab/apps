@@ -1,0 +1,47 @@
+{{- $mastodonDomainENV := split  ","  .Values.domain.mastodonapache -}}
+{{- $webDomain := index $mastodonDomainENV "_0" -}}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mastodon-apache-mastodon-vhost
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: mastodon
+    helm.sh/chart: mastodon-0.1.2
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: mastodon
+data:
+  mastodon-vhost.conf: |-
+    <VirtualHost VirtualHost 127.0.0.1:8080 _default_:8080>
+      ServerName {{ $webDomain }}
+      ServerAlias *
+      ProxyPreserveHost On
+      <Location "/">
+        RequestHeader add X-Forwarded-Proto https
+        ProxyPass http://mastodon-web:80/
+        ProxyPassReverse {{ $webDomain }}
+        Order allow,deny
+        Allow from all
+      </Location>
+      <Location "/api/v1/streaming">
+        # Streaming uses normal API calls and websockets. We used this configuration
+        # based on https://stackoverflow.com/questions/27526281/websockets-and-apache-proxy-how-to-configure-mod-proxy-wstunnel
+        RewriteEngine On
+        RewriteCond %{HTTP:Upgrade} =websocket [NC]
+        RewriteRule /api/(.*)           ws://mastodon-streaming:80/api/$1 [P,L]
+        RewriteCond %{HTTP:Upgrade} !=websocket [NC]
+        RewriteRule /api/(.*)           http://mastodon-streaming:80/api/$1 [P,L]
+        ProxyPassReverse {{ $webDomain }}
+        Order allow,deny
+        Allow from all
+      </Location>
+      <Location "/s3storage">
+        ProxyPass http://mastodon-minio:80/s3storage/
+        ProxyPassReverse {{ $webDomain }}
+        Order allow,deny
+        Allow from all
+      </Location>
+    </VirtualHost>
