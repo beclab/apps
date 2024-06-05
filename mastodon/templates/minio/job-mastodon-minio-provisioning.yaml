@@ -1,0 +1,129 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mastodon-minio-provisioning
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: minio
+    helm.sh/chart: minio-11.10.24
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/component: minio-provisioning
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: minio-11.10.24
+        app.kubernetes.io/component: minio-provisioning
+    spec:
+      
+      restartPolicy: OnFailure
+      terminationGracePeriodSeconds: 0
+      securityContext:
+        fsGroup: 1001
+      serviceAccountName: mastodon-minio
+      initContainers:
+        - name: wait-for-available-minio
+          image: docker.io/bitnami/minio:2022.12.12-debian-11-r0
+          imagePullPolicy: "IfNotPresent"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+          command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e;
+              echo "Waiting for Minio";
+              wait-for-port \
+                --host=mastodon-minio \
+                --state=inuse \
+                --timeout=120 \
+                80;
+              echo "Minio is available";
+          resources:
+            limits: {}
+            requests: {}
+      containers:
+        - name: minio
+          image: docker.io/bitnami/minio:2022.12.12-debian-11-r0
+          imagePullPolicy: "IfNotPresent"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1001
+          command:
+            - /bin/bash
+            - -c
+            - >-
+              set -e;
+              echo "Start Minio provisioning";
+
+              function addPolicy() {
+                local tmp=$(mc admin $1 info provisioning $2 | sed -n -e 's/^Policy.*: \(.*\)$/\1/p');
+                IFS=',' read -r -a CURRENT_POLICIES <<< "$tmp";
+                if [[ ! "${CURRENT_POLICIES[*]}" =~ "$3" ]]; then
+                  mc admin policy update provisioning $3 $1=$2;
+                fi;
+              };
+
+              function addUsersFromFile() {
+                local username=$(grep -oP '^username=\K.+' $1);
+                local password=$(grep -oP '^password=\K.+' $1);
+                local disabled=$(grep -oP '^disabled=\K.+' $1);
+                local policies_list=$(grep -oP '^policies=\K.+' $1);
+                local set_policies=$(grep -oP '^setPolicies=\K.+' $1);
+
+                mc admin user add provisioning "${username}" "${password}";
+
+                if [ "${set_policies}" == "true" ]; then
+                  mc admin policy set provisioning "${policies_list}" user="${username}";
+                else
+                  IFS=',' read -r -a POLICIES <<< "${policies_list}";
+                  for policy in "${POLICIES[@]}"; do
+                    addPolicy user "${username}" "${policy}";
+                  done
+                fi;
+
+                local user_status="enable";
+                if [[ "${disabled}" != "" && "${disabled,,}" == "true" ]]; then
+                  user_status="disable";
+                fi;
+
+                mc admin user "${user_status}" provisioning "${username}";
+              };
+              mc alias set provisioning $MINIO_SCHEME://mastodon-minio:80 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD;
+
+              mc admin service restart provisioning;
+              
+              mc anonymous set download provisioning/s3storage;
+
+              echo "End Minio provisioning";
+          env:
+            - name: MINIO_SCHEME
+              value: "http"
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-minio
+                  key: root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-minio
+                  key: root-password
+          envFrom:
+          resources:
+            limits: {}
+            requests: {}
+          volumeMounts:
+            - name: minio-provisioning
+              mountPath: /etc/ilm
+      volumes:
+        - name: minio-provisioning
+          configMap:
+            name: mastodon-minio-provisioning

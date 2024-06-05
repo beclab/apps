@@ -1,6 +1,6 @@
-# Terminus Market
+# Terminus Apps
 
-This is the official repository for the Terminus Application Chart Indexer.
+This is the official application repository of Terminus Market，
 
 Terminus distributes applications in a permissionless manner using the Market Protocol, thereby maximizing the freedom of developers. Meanwhile, Terminus provides a default indexing service that is based on this repository, enhancing the flexibility and scalability of application distribution. Learn more about the [Market Protocol](https://docs.jointerminus.com/overview/protocol/market.html).
 
@@ -8,9 +8,9 @@ Terminus distributes applications in a permissionless manner using the Market Pr
 ## Terminus Application Chart
 
 The **Terminus Application Chart (TAC)** describes essential information about applications to the **Terminus OS** and **Terminus Market**. It is an extension of the Helm Chart package. Before you submit your application to **Terminus Market**, here is some information you need to know about TAC:
-- [The structure of the Terminus Application Chart](https://docs.jointerminus.com/developer/develope/chart.html)
-- [Configuration guide and field descriptions of TerminusManifest.yaml](https://docs.jointerminus.com/developer/develope/manifest.html)
-- [Extensions field to Helm in Terminus](https://docs.jointerminus.com/developer/develope/extension.html)
+- [The structure of the Terminus Application Chart](https://docs.jointerminus.com/developer/develop/package/chart.html)
+- [Configuration guide and field descriptions of TerminusManifest.yaml](https://docs.jointerminus.com/developer/develop/package/manifest.html)
+- [Extensions field to Helm in Terminus](https://docs.jointerminus.com/developer/develop/package/extension.html)
 
 
 ## Submitting Your Application
@@ -25,11 +25,11 @@ The **Terminus Application Chart (TAC)** describes essential information about a
 ### Detail Process
 
 #### 1. Develop and test your application
-Developing applications on Terminus doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Terminus development concepts [here](https://docs.jointerminus.com/developer/develope/).
+Developing applications on Terminus doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Terminus development concepts [here](https://docs.jointerminus.com/developer/develop/).
 
 Before submitting an application, please ensure that it has been thoroughly tested on your Terminus OS.
-- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.jointerminus.com/developer/develope/tutorial/devbox.html)
-- Use the [custom installation](https://docs.jointerminus.com/how-to/terminus/market/custom.html) in the Market app for user testing.
+- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.jointerminus.com/developer/develop/tutorial/devbox.html)
+- Use the [custom installation](https://docs.jointerminus.com/how-to/terminus/market/#custom-application) in the Market app for user testing.
 
 #### 2. Submit an application
 The submission of the application needs to be completed through a Pull Request. Here's how:
@@ -42,7 +42,7 @@ The submission of the application needs to be completed through a Pull Request. 
         - UPDATE: Update an already successfully merged application
         - REMOVE: Remove an already successfully merged application
         - SUSPEND: Suspend an already successfully merged application from distribution through the application store
-    - `FolderName` is your Terminus Application Chart name. It must adhere to the naming requirements in [TAC specification](https://docs.jointerminus.com/developer/develope/chart.html).
+    - `FolderName` is your Terminus Application Chart name. It must adhere to the naming requirements in [TAC specification](https://docs.jointerminus.com/developer/develop/package/chart.html).
     - `version` refers to your TAC's Chart Version, which needs to be consistent with the `version` field in `Chart.yaml` and metadata section of `TerminusManifest.yaml`
 - To prevent your PR from being incorrectly parsed or closed, please adhere to the following rules:
     - Your PR title must contain only one PR Type, FolderName, and version.
