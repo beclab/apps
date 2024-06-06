@@ -1,3 +1,23 @@
+apiVersion: v1
+data:
+  init.sh: |
+    #!/bin/bash
+
+    source_dir="/config"
+    dest_dir="/new-config"
+
+    if [ -z "$(ls -A $dest_dir)" ]; then
+      echo "$dest_dir is empty. Copying files from $source_dir..."
+      cp -r $source_dir/. $dest_dir
+      echo "Files copied successfully."
+    else
+      echo "$dest_dir is not empty. No action taken."
+    fi
+
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -16,6 +36,38 @@ spec:
       labels:
         app: radarr
     spec:
+      initContainers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: UMASK
+          value: "002" 
+        - name: TZ
+          value: Etc/UTC
+        name: radarr-init-data
+        image: hotio/radarr:latest
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        ports:
+        - containerPort: 7878
+        volumeMounts:
+        - mountPath: /new-config
+          name: radarr-config
+        - name: init-config 
+          mountPath: /init.sh
+          subPath: init.sh
+        command:
+          - sh
+          - '-c'
+          - |
+            chmod +x /init.sh & bash /init.sh
       containers:
       - env:
         - name: PGID
@@ -34,19 +86,32 @@ spec:
             memory: 64Mi
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 256Mi
         ports:
         - containerPort: 7878
         volumeMounts:
         - mountPath: /config
           name: radarr-config
+        - name: home
+          mountPath: /home
+
       volumes:
       - name: radarr-config
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appData }}/radarr 
-        
-
+      - name: home
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}
+      - name: init-config
+        configMap:
+          name: init-config
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
+            
 ---
 apiVersion: v1
 kind: Service
