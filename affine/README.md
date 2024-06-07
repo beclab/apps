@@ -10,5 +10,4 @@ Switch to the Cloud sync Workspace
 
 In cloud workspace, you should be able to synchronize your docs between your local client and Terminus.
 
-> **Note**<br>
-> At present, team collaboration in the cloud workspace is not yet supported on Self-hosted AFFiNE.
+**Note**: At present, team collaboration in the cloud workspace is not yet supported on Self-hosted AFFiNE.
