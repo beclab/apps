@@ -1,0 +1,54 @@
+{{- $penpotDomainENV := split  ","  .Values.domain.penpot -}}
+{{- $penpotDomain := index $penpotDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: penpot-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: penpot-exporter
+  template:
+    metadata:
+      labels:
+        app: penpot-exporter
+    spec:
+      containers:
+        - name: penpot-exporter
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - all
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1001
+          image: penpotapp/exporter:latest
+          resources:
+            requests:
+              cpu: 10m
+              memory: 100Mi
+            limits:
+              cpu: 200m
+              memory: 500Mi
+          ports:
+            - name: http
+              containerPort: 6061
+              protocol: TCP
+          env:
+            - name: PENPOT_PUBLIC_URI
+              value: "https://{{$penpotDomain}}"
+            - name: PENPOT_REDIS_URI
+#              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+              value: "redis://penpot-redis:6379/0"
+      volumes:
+        - name: data-assets
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/penpot/data/assets
