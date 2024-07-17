@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: immich
+  name: immich
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: immich
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: immich
+    spec:
+      containers:
+      - args:
+        - sed -i "s/RedisConnection.minimumVersion = '5.0.0';/RedisConnection.minimumVersion = '4.0.0';/" ./node_modules/bullmq/dist/cjs/classes/redis-connection.js; sed -i 's/0.2.x/0.3.x/' ./dist/constants.js; exec ./start.sh
+        command:
+        - /bin/sh
+        - -c
+        env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: REDIS_HOSTNAME
+          value: {{ .Values.redis.host }}
+        - name: REDIS_PASSWORD
+          value: {{ .Values.redis.password }}
+        - name: DB_HOSTNAME
+          value: {{ .Values.postgres.host }}
+        - name: DB_USERNAME
+          value: {{ .Values.postgres.username }}
+        - name: DB_PASSWORD
+          value: {{ .Values.postgres.password }}
+        - name: DB_DATABASE_NAME
+          value: {{ .Values.postgres.databases.immich }}
+        - name: IMMICH_PORT
+          value: "3001"
+        image: ghcr.io/immich-app/immich-server:v1.108.0
+        imagePullPolicy: IfNotPresent
+        name: immich
+        ports:
+        - containerPort: 3001
+          name: http
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /api/server-info/ping
+            port: http
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/server-info/ping
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 1
+          successThreshold: 1
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: 500m
+            memory: 1000Mi
+          requests:
+            cpu: 200m
+            memory: 300Mi
+        volumeMounts:
+        - name: appcache
+          mountPath: /usr/src/app/upload          
+        - name: home  
+          mountPath: /home
+      restartPolicy: Always
+      volumes:
+      - name: appcache
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/data/upload'
+          type: DirectoryOrCreate        
+      - name: home
+        hostPath:
+          path: '{{ .Values.userspace.userData }}'
+          type: DirectoryOrCreate  
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: immich
+  name: immich
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 3001
+  selector:
+    io.kompose.service: immich
+status:
+  loadBalancer: {}
