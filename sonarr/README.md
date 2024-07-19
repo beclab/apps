@@ -3,7 +3,7 @@
 2. Retrieve the API Endpoint of the Download Client
     - Open Control Hub and navigate to CRDs page
     - In 'sys.bytetrade.io' section, locate 'ProviderRegistry' and find the provider information for the Download Client
-        - The name is typically in the format legacy-appName.
+        - The name is typically in the format legacy-appname.
     - Click on 'Edit YAML', and in the popup window, copy the endpoint URI
         - The URI usually follows the format appname-svc.appname-username:port
 3. Add the Download Client in Sonarr
