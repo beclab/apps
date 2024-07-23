@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.toml: |
+    [GENERAL]
+    PORT = 3001 # Port to run the server on
+    SIMILARITY_MEASURE = "cosine" # "cosine" or "dot"
+
+    [API_KEYS]
+    # OPENAI = "" # OpenAI API key - sk-1234567890abcdef1234567890abcdef
+    # GROQ = "" # Groq API key - gsk_1234567890abcdef1234567890abcdef
+
+    [API_ENDPOINTS]
+    SEARXNG = "http://searxng.searxng-{{ .Values.bfl.username }}:8080" # SearxNG API URL
+    OLLAMA = "http://ollama.ollama-{{ .Values.bfl.username }}:11434" # Ollama API URL - http://host.docker.internal:11434
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perplexica-backend
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: perplexica-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: perplexica-backend
+  template:
+    metadata:
+      labels:
+        io.kompose.service: perplexica-backend
+    spec:
+      initContainers:
+      - name: getconfigfile
+        image: "kldtks/perplexica-backend:v1.7.1"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "if [ ! -f '/home/perplexica/config.toml' ]; then cp '/home/perplexica-config/config.toml' '/home/perplexica/config.toml'; fi"]
+        volumeMounts:
+        - mountPath: /home/perplexica
+          name: appconfig
+        - mountPath: /home/perplexica-config/config.toml
+          name: config
+          subPath: config.toml
+      containers:
+      - name: perplexica-backend
+        image: kldtks/perplexica-backend:v1.7.1
+        command: ["sh", "-c", "yarn build; yarn start"]
+        env:
+        - name: SEARXNG_API_URL
+          value: "http://searxng.searxng-{{ .Values.bfl.username }}:8080"
+        - name: OLLAMA_API_URL
+          value: "http://ollama.ollama-{{ .Values.bfl.username }}:11434"
+        ports:
+        - containerPort: 3001
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2048Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        volumeMounts:
+        - mountPath: /home/perplexica/data
+          name: appcache
+        - mountPath: /home/perplexica/config.toml
+          name: appconfig
+          subPath: config.toml        
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica/data'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica/config'
+          type: DirectoryOrCreate
+        name: appconfig
+      - name: config
+        configMap:
+          name: api-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: perplexica-backend
+  name: perplexica-backend
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3001"
+    port: 3001
+    targetPort: 3001
+  selector:
+    io.kompose.service: perplexica-backend
+status:
+  loadBalancer: {}
