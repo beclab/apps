@@ -1,0 +1,219 @@
+{{- $farcasterhubbleDomainENV := split  ","  .Values.domain.farcasterhubble -}}
+{{- $farcasterhubbleDomain := index $farcasterhubbleDomainENV "_0" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-ini
+  namespace: {{ .Release.Namespace }}
+data:
+  grafana.ini: |
+    [auth.anonymous]
+    enabled = true
+    org_name = Main Org.
+    org_role = Viewer
+    hide_version = true
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: farcasterhubble
+  name: farcasterhubble
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: farcasterhubble
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: farcasterhubble
+    spec:
+      initContainers:
+        - name: init-account
+          image: farcasterxyz/hubble:latest
+          command: ["/bin/sh", "-c"]
+          args: ["if [ ! -f /home/node/app/apps/hubble/.hub/default_id.protobuf ];then yarn identity create; fi"]
+          env:
+          - name: HUBBLE_ARGS
+            value: >- 
+              start
+              --ip 0.0.0.0
+              --gossip-port 2282
+              --rpc-port 2283
+              --eth-mainnet-rpc-url https://eth.merkle.io
+              --l2-rpc-url https://optimism.drpc.org
+              --network 1
+              --rpc-subscribe-per-ip-limit 4
+              -b /dns/nemes.farcaster.xyz/tcp/2282
+              --statsd-metrics-server 127.0.0.1:8125
+              --hub-operator-fid 0
+              --opt-out-diagnostics false
+          volumeMounts:
+          - mountPath: /home/node/app/apps/hubble/.hub
+            name: hub
+          - mountPath: /home/node/app/apps/hubble/.rocks
+            name: rocks
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 50m
+              memory: 10Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: CATCHUP_SYNC_WITH_SNAPSHOT
+          value: "true"
+        - name: NODE_OPTIONS
+          value: "--no-warnings --max-old-space-size=8192"
+        - name: HUBBLE_ARGS
+          value: >- 
+            start
+            --ip 0.0.0.0
+            --gossip-port 2282
+            --rpc-port 2283
+            --eth-mainnet-rpc-url https://eth.merkle.io
+            --l2-rpc-url https://optimism.drpc.org
+            --network 1
+            --rpc-subscribe-per-ip-limit 4
+            -b /dns/nemes.farcaster.xyz/tcp/2282
+            --statsd-metrics-server 127.0.0.1:8125
+            --hub-operator-fid 0
+            --opt-out-diagnostics false
+            --announce-server-name {{ $farcasterhubbleDomain }}
+        image: farcasterxyz/hubble:latest
+        command: ["/bin/sh", "-c"]
+        args: ["npx pm2-runtime start pm2.config.cjs"]
+        name: farcasterhubble
+        ports:
+        - name: httapi-port
+          containerPort: 2281
+          protocol: TCP
+        - name: gossip-port
+          containerPort: 2282
+          protocol: TCP
+        - name: rpc-port
+          containerPort: 2283
+          protocol: TCP
+        resources:
+          limits:
+            cpu: "1"
+            memory: 8096Mi
+          requests:
+            cpu: 50m
+            memory: 8096Mi
+        volumeMounts:
+        - mountPath: /home/node/app/apps/hubble/.hub
+          name: hub
+        - mountPath: /home/node/app/apps/hubble/.rocks
+          name: rocks
+        securityContext:
+            runAsUser: 0
+      - name: statsd
+        image: graphiteapp/graphite-statsd:1.1.10-5
+        ports:
+          - name: statsd-admin
+            containerPort: 8126
+            protocol: TCP
+          - name: statsd-publish
+            containerPort: 8125
+            protocol: UDP
+          - name: statsd
+            containerPort: 80
+            protocol: TCP
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 256Mi
+      - name: grafana
+        image: grafana/grafana:10.0.3
+        volumeMounts:
+        - name: grafana-ini 
+          mountPath: /etc/grafana/grafana.ini
+          subPath: grafana.ini
+        - mountPath: /var/lib/grafana/data
+          name: grafana-data
+        ports:
+        - name: grafana-rpc
+          containerPort: 3000
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 256Mi
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/farcasterhubble/hub'
+          type: DirectoryOrCreate
+        name: hub
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/farcasterhubble/rocks'
+          type: DirectoryOrCreate
+        name: rocks
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/farcasterhubble/grafana/data'
+          type: DirectoryOrCreate
+        name: grafana-data
+      - name: grafana-ini 
+        configMap:
+          name: grafana-ini 
+          defaultMode: 438
+          items:
+          - key: grafana.ini
+            path: grafana.ini
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: farcasterhubble
+  name: farcasterhubble
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: httapi-port
+    protocol: TCP
+    port: 2281
+    targetPort: 2281
+  - name: gossip-port
+    protocol: TCP
+    port: 2282
+    targetPort: 2282
+  - name: rpc-port
+    protocol: TCP
+    port: 2283
+    targetPort: 2283
+  - name: grafana-rpc
+    protocol: TCP
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: farcasterhubble
+status:
+  loadBalancer: {}
