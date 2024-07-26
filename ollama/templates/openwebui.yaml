@@ -1,0 +1,75 @@
+{{- $ollamaDomainENV := split  ","  .Values.domain.ollama -}}
+{{- $ollamaDomain := index $ollamaDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: openwebui
+  name: openwebui
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: openwebui
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: openwebui
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        image: ghcr.io/open-webui/open-webui:main
+        name: openwebui
+        ports:
+        - containerPort: 8080
+        env:
+        - name: OLLAMA_BASE_URL
+          value: "https://{{ $ollamaDomain}}"
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /app/backend/data
+          name: appcache
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ollamaui'
+          type: DirectoryOrCreate
+        name: appcache
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: openwebui
+  name: openwebui
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8080"
+    port: 8080
+    targetPort: 8080
+  selector:
+    io.kompose.service: openwebui
+status:
+  loadBalancer: {}
