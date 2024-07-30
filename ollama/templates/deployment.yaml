@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: ollama
+  name: ollama
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: ollama
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: ollama
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        image: ollama/ollama:0.2.5
+        name: ollama
+        ports:
+        - containerPort: 11434
+        resources:
+          limits:
+            cpu: "4"
+            memory: 16000Mi
+          requests:
+            cpu: 50m
+            memory: 4000Mi
+        volumeMounts:
+        - mountPath: "/root/.ollama"
+          name: data
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ollama'
+          type: DirectoryOrCreate
+        name: data
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: ollama
+  name: ollama
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "11434"
+    port: 11434
+    targetPort: 11434
+  selector:
+    io.kompose.service: ollama
+status:
+  loadBalancer: {}
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_ollama
+  deployment: ollama
+  description: ollama legacy api
+  endpoint: ollama.{{ .Release.Namespace }}:11434
+  group: api.ollama
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /  
+status:
+  state: active
