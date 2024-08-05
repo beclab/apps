@@ -1,0 +1,95 @@
+{{- $gaianetaiDomainENV := split  ","  .Values.domain.gaianetai -}}
+{{- $gaianetaiDomain := index $gaianetaiDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: gaianetai
+  name: gaianetai
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: gaianetai
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: gaianetai
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        image: gaianet/phi-3-mini-instruct-4k_paris:cuda11
+        name: gaianetai
+        ports:
+        - containerPort: 8080
+        env:
+        - name: gaianetai_BASE_URL
+          value: "https://{{ $gaianetaiDomain }}"
+        resources:
+          limits:
+            cpu: "2"
+            memory: 6000Mi
+          requests:
+            cpu: 50m
+            memory: 1500Mi
+        volumeMounts:
+        - mountPath: /root/gaianet/qdrant/storage
+          name: appcache
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/gaianetai'
+          type: DirectoryOrCreate
+        name: appcache
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: gaianetai
+  name: gaianetai
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8080"
+    port: 8080
+    targetPort: 8080
+  selector:
+    io.kompose.service: gaianetai
+status:
+  loadBalancer: {}
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_gaianetai
+  deployment: gaianetai
+  description: gaianetai legacy api
+  endpoint: gaianetai.{{ .Release.Namespace }}:8080
+  group: api.gaianetai
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /  
+status:
+  state: active
