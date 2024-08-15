@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: whisper
+  name: whisper
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: whisper
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: whisper
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        image: fedirz/faster-whisper-server:0.3-cuda
+        name: whisper
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            cpu: "2"
+            memory: 12000Mi
+          requests:
+            cpu: 50m
+            memory: 4000Mi
+        volumeMounts:
+        - mountPath: "/root/.cache/huggingface"
+          name: data
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/whisper'
+          type: DirectoryOrCreate
+        name: data
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: whisper
+  name: whisper
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8000"
+    port: 8000
+    targetPort: 8000
+  selector:
+    io.kompose.service: whisper
+status:
+  loadBalancer: {}
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_whisper
+  deployment: whisper
+  description: whisper legacy api
+  endpoint: whisper.{{ .Release.Namespace }}:8000
+  group: api.whisper
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /  
+status:
+  state: active
