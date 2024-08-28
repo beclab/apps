@@ -16,6 +16,20 @@ spec:
       labels:
         app: sdwebui
     spec:
+      initContainers:
+        - name: initcache
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - 'if [ ! -d /data/config ]; then cp -r /cache/.* /data/; fi'
+          resources: {}
+          volumeMounts:
+            - name: cacheforstartup
+              mountPath: /cache
+            - name: sdmodel
+              mountPath: /data
+          imagePullPolicy: IfNotPresent
       containers:
       - name: sdwebui
         image: docker.io/aboveos/goolashe-automatic1111-sd-webui:latest
@@ -24,7 +38,7 @@ spec:
             cpu: 500m
             memory: 3Gi
           limits:
-            cpu: 1000m
+            cpu: 4000m
             memory: 24Gi
             nvidia.com/gpu: 1
         ports:
@@ -45,6 +59,9 @@ spec:
           mountPath: /data/embeddings
         - name: modellibhypernetworks
           mountPath: /data/models/hypernetworks
+        - name: extensions
+          mountPath: /data/config/auto/extensions
+        imagePullPolicy: IfNotPresent
       volumes:
       - name: sddata
         hostPath:
@@ -70,6 +87,14 @@ spec:
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appData}}/modellib/hypernetworks
+      - name: cacheforstartup
+        hostPath:
+          path: {{ .Values.userspace.appData}}/sd/sdcachestartup
+          type: DirectoryOrCreate
+      - name: extensions
+        hostPath:
+          path: {{ .Values.userspace.appData}}/sd/extensions
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
