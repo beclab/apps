@@ -28,31 +28,15 @@ spec:
         io.kompose.service: comfyui
     spec:
       initContainers:
-        - name: init-chmod-data
-          image: 'docker.io/aboveos/busybox:latest'
-          command:
-            - sh
-            - '-c'
-            - |
-              chown -R 1000:1000 /home/runner
-          resources: {}
-          volumeMounts:
-            - name: appdata
-              mountPath: /home/runner
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
         - name: initcomfyuilocal
-          image: 'docker.io/aboveos/yanwk-comfyui-boot:latest'
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
           command:
             - sh
             - '-c'
             - |-
               if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
                   if [ -n "$(ls -A /cache)" ]; then
-                      cp -a /cache/. /home/runner/
+                      echo "start copy"; cp -a /cache/. /home/runner/
                   fi
               fi
           resources: {}
@@ -64,8 +48,32 @@ spec:
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: initcomfyuisitepackages
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
+          command:
+            - sh
+            - '-c'
+            - |-
+              if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
+                  if [ -n "$(ls -A /cache)" ]; then
+                      echo "start copy"; cp -a /cache/. /home/runner/
+                  fi
+              fi
+          resources: {}
+          volumeMounts:
+            - name: sitepackages
+              mountPath: /home/runner
+            - name: sitepackagesforstartup
+              mountPath: /cache
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
         - name: initcomfyui
-          image: 'docker.io/aboveos/yanwk-comfyui-boot:latest'
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
           command:
             - sh
             - '-c'
@@ -83,6 +91,25 @@ spec:
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - >
+              chown -R 1000:1000 /home/runner; chown -R 1000:1000
+              /usr/local/lib64/python3.11;
+          resources: {}
+          volumeMounts:
+            - name: appdata
+              mountPath: /home/runner
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
       
         - env:
@@ -96,7 +123,7 @@ spec:
           securityContext:
             runAsUser: 0
      
-          image: "docker.io/aboveos/yanwk-comfyui-boot:latest"
+          image: "docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5"
           name: comfyui
           ports:
 
@@ -108,12 +135,14 @@ spec:
               memory: 2Gi
             limits:
               cpu: 4
-              memory: 10Gi
+              memory: 30Gi
 
           volumeMounts:
                       
             - mountPath: /home/runner
               name: appdata
+            - name: sitepackages
+              mountPath: /usr/local/lib64/python3.11/site-packages
             - name: modellibckp
               mountPath: /home/runner/ComfyUI/models/checkpoints
             - name: modelliblora
@@ -124,6 +153,8 @@ spec:
               mountPath: /home/runner/ComfyUI/models/hypernetworks
             - name: modellibembeddings
               mountPath: /home/runner/ComfyUI/models/embeddings
+            - name: modellibclip
+              mountPath: /home/runner/ComfyUI/models/clip
             - name: customnodes
               mountPath: /home/runner/ComfyUI/custom_nodes
             - name: volume-script
@@ -138,35 +169,47 @@ spec:
         - name: appdata
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/comfyui
+            path: {{ .Values.userspace.appData }}/comfyui/appdata
+        - name: sitepackages
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/comfyui/site-packages            
         - name: modellibckp
           hostPath:
             type: DirectoryOrCreate
-            path: /ai/model/checkpoint
+            path: {{ .Values.sharedlib }}/ai/model/checkpoint
         - name: modelliblora
           hostPath:
             type: DirectoryOrCreate
-            path: /ai/model/lora
+            path: {{ .Values.sharedlib }}/ai/model/lora
         - name: modellibvae
           hostPath:
             type: DirectoryOrCreate
-            path: /ai/model/vae
+            path: {{ .Values.sharedlib }}/ai/model/vae
         - name: modellibembeddings
           hostPath:
             type: DirectoryOrCreate
-            path: /ai/model/embeddings
+            path: {{ .Values.sharedlib }}/ai/model/embeddings
         - name: modellibhypernetworks
           hostPath:
             type: DirectoryOrCreate
-            path: /ai/model/hypernetworks
+            path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+        - name: modellibclip
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/clip
         - name: customnodes
           hostPath:
-            path: /ai/comfyui/custom_nodes
+            path: {{ .Values.sharedlib }}/ai/comfyui/custom_nodes
             type: DirectoryOrCreate
         - name: cacheforstartup
           hostPath:
-            path: /ai/comfyui/cacheforstartup
+            path: {{ .Values.sharedlib }}/ai/comfyui/cacheforstartup
             type: DirectoryOrCreate
+        - name: sitepackagesforstartup
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/comfyui/site-packages
+            type: DirectoryOrCreate        
         - name: volume-script
           configMap:
             name: script
