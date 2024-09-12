@@ -105,13 +105,14 @@ spec:
           volumeMounts:
             - name: appdata
               mountPath: /home/runner
+            - name: sitepackages
+              mountPath: /usr/local/lib64/python3.11/site-packages
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
       containers:
-      
         - env:
             - name: PGID
               value: "0"
@@ -119,10 +120,8 @@ spec:
               value: "0"
             - name: TZ
               value: Etc/UTC
-
           securityContext:
             runAsUser: 0
-     
           image: "docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5"
           name: comfyui
           command:
@@ -132,9 +131,24 @@ spec:
               pip3 install "numpy<2.0.0"; pip3 install "gguf>=0.9.1"; bash
               /home/scripts/entrypoint.sh
           ports:
-
             - containerPort: 8188
-                    
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8188
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 8188
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30    
           resources: 
             requests:
               cpu: 250m
@@ -179,10 +193,8 @@ spec:
               readOnly: true
               mountPath: /home/scripts/download.txt
               subPath: download.txt
-
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
-
       volumes:
         - name: appdata
           hostPath:
