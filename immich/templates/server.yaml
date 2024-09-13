@@ -20,6 +20,18 @@ spec:
         io.kompose.service: immich
     spec:
       containers:
+      - name: immich-redis
+        image: aboveos/redis:latest
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /data
+          name: redis
       - args:
         - sed -i "s/RedisConnection.minimumVersion = '5.0.0';/RedisConnection.minimumVersion = '4.0.0';/" ./node_modules/bullmq/dist/cjs/classes/redis-connection.js; sed -i 's/0.2.x/0.3.x/' ./dist/constants.js; exec ./start.sh
         command:
@@ -32,10 +44,12 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
+        # - name: REDIS_HOSTNAME
+        #   value: {{ .Values.redis.host }}
+        # - name: REDIS_PASSWORD
+        #   value: {{ .Values.redis.password }}
         - name: REDIS_HOSTNAME
-          value: {{ .Values.redis.host }}
-        - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
+          value: "localhost"
         - name: DB_HOSTNAME
           value: {{ .Values.postgres.host }}
         - name: DB_USERNAME
@@ -73,8 +87,8 @@ spec:
           failureThreshold: 3
         resources:
           limits:
-            cpu: 500m
-            memory: 1000Mi
+            cpu: 2000m
+            memory: 2000Mi
           requests:
             cpu: 200m
             memory: 300Mi
@@ -88,7 +102,11 @@ spec:
       - name: appcache
         hostPath:
           path: '{{ .Values.userspace.appData }}/immich/data/upload'
-          type: DirectoryOrCreate        
+          type: DirectoryOrCreate  
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/redis'
+          type: DirectoryOrCreate
+        name: redis      
       - name: home
         hostPath:
           path: '{{ .Values.userspace.userData }}'
