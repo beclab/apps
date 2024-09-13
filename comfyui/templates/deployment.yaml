@@ -27,8 +27,92 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: comfyui
     spec:
+      initContainers:
+        - name: initcomfyuilocal
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
+          command:
+            - sh
+            - '-c'
+            - |-
+              if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
+                  if [ -n "$(ls -A /cache)" ]; then
+                      echo "start copy"; cp -a /cache/. /home/runner/
+                  fi
+              fi
+          resources: {}
+          volumeMounts:
+            - name: appdata
+              mountPath: /home/runner
+            - name: cacheforstartup
+              mountPath: /cache
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: initcomfyuisitepackages
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
+          command:
+            - sh
+            - '-c'
+            - |-
+              if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
+                  if [ -n "$(ls -A /cache)" ]; then
+                      echo "start copy"; cp -a /cache/. /home/runner/
+                  fi
+              fi
+          resources: {}
+          volumeMounts:
+            - name: sitepackages
+              mountPath: /home/runner
+            - name: sitepackagesforstartup
+              mountPath: /cache
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: initcomfyui
+          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
+          command:
+            - sh
+            - '-c'
+            - >-
+              if [ ! -d /home/runner ]; then chmod u+x
+              /home/scripts/download.sh; /home/scripts/download.sh; fi
+          resources: {}
+          volumeMounts:
+            - name: appdata
+              mountPath: /home/runner
+            - name: volume-script
+              readOnly: true
+              mountPath: /home/scripts/download.txt
+              subPath: download.txt
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - >
+              chown -R 1000:1000 /home/runner; chown -R 1000:1000
+              /usr/local/lib64/python3.11;
+          resources: {}
+          volumeMounts:
+            - name: appdata
+              mountPath: /home/runner
+            - name: sitepackages
+              mountPath: /usr/local/lib64/python3.11/site-packages
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
-      
         - env:
             - name: PGID
               value: "0"
@@ -36,54 +120,150 @@ spec:
               value: "0"
             - name: TZ
               value: Etc/UTC
-
           securityContext:
             runAsUser: 0
-     
-          image: "docker.io/aboveos/yanwk-comfyui-boot:latest"
+          image: "docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5"
           name: comfyui
+          command:
+            - sh
+            - '-c'
+            - >
+              pip3 install "numpy<2.0.0"; pip3 install "gguf>=0.9.1"; bash
+              /home/scripts/entrypoint.sh
           ports:
-
             - containerPort: 8188
-                    
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8188
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 8188
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30    
           resources: 
             requests:
               cpu: 250m
-              memory: 2048Mi
+              memory: 2Gi
             limits:
-              cpu: 2000m
-              memory: 10240Mi
+              cpu: 4
+              memory: 30Gi
 
           volumeMounts:
-                    
-            # - mountPath: /home/runner/ComfyUI/models
-            #   name: appdata
-            - mountPath: /appdata
-              name: appdata
                       
             - mountPath: /home/runner
-              name: userdata
-
+              name: appdata
+            - name: sitepackages
+              mountPath: /usr/local/lib64/python3.11/site-packages
+            - name: modellibckp
+              mountPath: /home/runner/ComfyUI/models/checkpoints
+            - name: modelliblora
+              mountPath: /home/runner/ComfyUI/models/loras
+            - name: modellibvae
+              mountPath: /home/runner/ComfyUI/models/vae
+            - name: modellibhypernetworks
+              mountPath: /home/runner/ComfyUI/models/hypernetworks
+            - name: modellibembeddings
+              mountPath: /home/runner/ComfyUI/models/embeddings
+            - name: modellibclip
+              mountPath: /home/runner/ComfyUI/models/clip
+            - name: modellibclipvision
+              mountPath: /home/runner/ComfyUI/models/clip_vision
+            - name: modellibcontrolnet
+              mountPath: /home/runner/ComfyUI/models/controlnet
+            - name: modellibinpaint
+              mountPath: /home/runner/ComfyUI/models/inpaint
+            - name: modellibupscale
+              mountPath: /home/runner/ComfyUI/models/upscale_models
+            - name: modellibipadapter
+              mountPath: /home/runner/ComfyUI/models/ipadapter
+            - name: modellibunet
+              mountPath: /home/runner/ComfyUI/models/unet
+            - name: customnodes
+              mountPath: /home/runner/ComfyUI/custom_nodes
             - name: volume-script
               readOnly: true
               mountPath: /home/scripts/download.txt
               subPath: download.txt
-
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
-
       volumes:
-                    
         - name: appdata
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/comfyui
-                      
-        - name: userdata
+            path: {{ .Values.userspace.appCache }}/comfyui/appdata
+        - name: sitepackages
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.userData }}/comfyui
-
+            path: {{ .Values.userspace.appCache }}/comfyui/site-packages            
+        - name: modellibckp
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/main
+        - name: modelliblora
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/lora
+        - name: modellibvae
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/vae
+        - name: modellibembeddings
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/embeddings
+        - name: modellibhypernetworks
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+        - name: modellibclip
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/clip
+        - name: modellibclipvision
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/clip_vision
+            type: DirectoryOrCreate
+        - name: modellibcontrolnet
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/controlnet
+            type: DirectoryOrCreate
+        - name: modellibinpaint
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/inpaint
+            type: DirectoryOrCreate
+        - name: modellibupscale
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/upscale_models
+            type: DirectoryOrCreate
+        - name: modellibipadapter
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/ipadapter
+            type: DirectoryOrCreate
+        - name: modellibunet
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/unet
+            type: DirectoryOrCreate
+        - name: customnodes
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/comfyui/custom_nodes
+            type: DirectoryOrCreate
+        - name: cacheforstartup
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/comfyui/cacheforstartup
+            type: DirectoryOrCreate
+        - name: sitepackagesforstartup
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/comfyui/site-packages
+            type: DirectoryOrCreate        
         - name: volume-script
           configMap:
             name: script
