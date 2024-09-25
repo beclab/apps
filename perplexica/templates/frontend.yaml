@@ -1,0 +1,90 @@
+{{- $pbeDomainENV := split  ","  .Values.domain.pbe -}}
+{{- $pbeDomain := index $pbeDomainENV "_0" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: perplexica-config
+  namespace: {{ .Release.Namespace }}
+data:
+  .env.local: |
+    NEXT_PUBLIC_WS_URL=wss://{{ $pbeDomain }}
+    NEXT_PUBLIC_API_URL=https://{{ $pbeDomain }}/api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perplexica
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: perplexica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: perplexica
+  template:
+    metadata:
+      labels:
+        io.kompose.service: perplexica
+    spec:
+      containers:
+      - name: perplexica-frontend
+        image: kldtks/perplexica-app-api-switch:v1.8.1-fix-fetch
+        command: ['sh', '-c', 'yarn build; yarn start']
+        env:
+        - name: NEXT_PUBLIC_API_URL_API_1
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_2
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_3
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_4
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_5
+          value: "http://perplexica-backend:3001/api"
+        - name: NEXT_PUBLIC_API_URL_API_6
+          value: "http://perplexica-backend:3001/api"
+        - name: NEXT_PUBLIC_API_URL_API_7
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_8
+          value: "https://{{ $pbeDomain }}/api"
+        - name: NEXT_PUBLIC_API_URL_API_9
+          value: "http://perplexica-backend:3001/api"     
+        - name: NEXT_PUBLIC_WS_URL
+          value: "wss://{{ $pbeDomain }}/ws"
+        resources:
+          limits:
+            cpu: 2
+            memory: 2048Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        ports:
+        - containerPort: 3000
+        volumeMounts:
+        - mountPath: /home/perplexica/.env.local
+          name: config
+          subPath: .env.local
+      volumes:
+      - name: config
+        configMap:
+          name: perplexica-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: perplexica
+  name: perplexica
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: perplexica
+status:
+  loadBalancer: {}
