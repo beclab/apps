@@ -16,30 +16,146 @@ spec:
       labels:
         app: sdwebui
     spec:
+      initContainers:
+        - name: initcache
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - 'if [ ! -d /data/config ]; then if [ "$(ls -A /cache)" ]; then cp -r /cache/.* /data/; fi fi'
+          resources: {}
+          volumeMounts:
+            - name: cacheforstartup
+              mountPath: /cache
+            - name: sddata
+              mountPath: /data
+          imagePullPolicy: IfNotPresent
       containers:
       - name: sdwebui
-        image: docker.io/aboveos/goolashe-automatic1111-sd-webui:latest
+        image: docker.io/aboveos/kldtks-sdwebui-preinstalled:v1.9.4-beta5-cuda-11-8
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 7860
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 7860
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
         resources:
           requests:
             cpu: 500m
             memory: 3Gi
           limits:
-            cpu: 1000m
+            cpu: 4000m
             memory: 24Gi
             nvidia.com/gpu: 1
         ports:
         - containerPort: 7860
         env:
         - name: CLI_ARGS
-          value: "--allow-code --medvram --xformers --enable-insecure-extension-access --api"
+          value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue"
         volumeMounts:
         - mountPath: /data
-          name: sdmodel
+          name: sddata
+        - name: modellibckp
+          mountPath: /data/models/Stable-diffusion
+        - name: modelliblora
+          mountPath: /data/models/Lora
+        - name: modellibvae
+          mountPath: /data/models/VAE
+        - name: modellicontrolnet
+          mountPath: /data/models/ControlNet
+            
+        - name: modellibclip
+          mountPath: /data/models/CLIP
+        - name: modellibclipvision
+          mountPath: /data/models/clip_vision
+        - name: modellibinpaint
+          mountPath: /data/models/Inpaint
+        - name: modellibupscale
+          mountPath: /data/models/ESRGAN
+        - name: modellibipadapter
+          mountPath: /data/models/ipadapter
+        - name: modellibunet
+          mountPath: /data/models/unet
+
+        - name: modellibembeddings
+          mountPath: /data/embeddings
+        - name: modellibhypernetworks
+          mountPath: /data/models/hypernetworks
+        - name: extensions
+          mountPath: /data/config/auto/extensions
+        imagePullPolicy: IfNotPresent
       volumes:
-      - name: sdmodel
+      - name: sddata
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData}}/sdwebui
+          path: {{ .Values.userspace.appCache}}/sdwebui
+      - name: modellibckp
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/main
+      - name: modelliblora
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/lora
+      - name: modellibvae
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/vae
+      - name: modellibclip
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/clip
+          type: DirectoryOrCreate
+      - name: modellibclipvision
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/clip_vision
+          type: DirectoryOrCreate
+      - name: modellicontrolnet
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/controlnet
+          type: DirectoryOrCreate
+      - name: modellibinpaint
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/inpaint
+          type: DirectoryOrCreate
+      - name: modellibupscale
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/upscale_models
+          type: DirectoryOrCreate
+      - name: modellibipadapter
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/ipadapter
+          type: DirectoryOrCreate
+      - name: modellibunet
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/unet
+          type: DirectoryOrCreate
+      - name: modellibembeddings
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/embeddings
+      - name: modellibhypernetworks
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+      - name: cacheforstartup
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/sd/cacheforstartup
+          type: DirectoryOrCreate
+      - name: extensions
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/sd/extensions
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
