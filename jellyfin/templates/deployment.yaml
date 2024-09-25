@@ -1,3 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-scripts
+  namespace: {{ .Release.Namespace }}
+data:
+  copy-config.sh: |
+    #!/bin/bash
+
+    new_dir="/config-new"
+    source_dir="/config"
+
+    if [ -z "$(ls -A $new_dir)" ]; then
+        echo "Directory $new_dir is empty. Copying contents from $source_dir..."
+        cp -r $source_dir/* $new_dir
+        echo "Contents copied successfully."
+    else
+        echo "Directory $new_dir is not empty, no action needed."
+    fi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,9 +40,24 @@ spec:
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/jellyfin/config'
+            type: DirectoryOrCreate
+          name: config
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/jellyfin/cache'
+            type: DirectoryOrCreate
+          name: cache
+        - name: config-scripts
+          configMap:
+            name: config-scripts
+            defaultMode: 438
+            items:
+            - key: copy-config.sh
+              path: copy-config.sh
       initContainers:
         - name: init-chmod-data
-          image: 'busybox:latest'
+          image: 'docker.io/aboveos/busybox:latest'
           command:
             - sh
             - '-c'
@@ -35,21 +69,37 @@ spec:
               mountPath: /home
           securityContext:
             runAsUser: 0
+        - name: init-config
+          image: docker.io/aboveos/jellyfin-jellyfin:latest
+          resources: {}
+          command: ["/bin/bash", "-c", "chmod +x /scripts/copy-config.sh & bash /scripts/copy-config.sh"]
+          volumeMounts:
+          - name: config
+            mountPath: /config-new
+          - name: config-scripts
+            mountPath: /scripts/copy-config.sh
+            subPath: copy-config.sh
+          securityContext:
+            runAsUser: 0
       containers:
         - name: jellyfin
-          image: jellyfin/jellyfin
+          image: docker.io/aboveos/jellyfin-jellyfin:latest
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
-              cpu: 1000m
-              memory: 512Mi
+              cpu: 4000m
+              memory: 4Gi
           ports:
           - containerPort: 8096
           volumeMounts:
           - name: home
             mountPath: /home
+          - name: config
+            mountPath: /config
+          - name: cache
+            mountPath: /cache
           env:
           - name: PGID
             value: "1000" 
