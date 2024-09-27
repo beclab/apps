@@ -1,3 +1,22 @@
+apiVersion: v1
+data:
+  config.json: |
+    {
+      oauth: {
+        autoLaunch: false,
+        autoRegister: true,
+        clientId: '{{ .Values.oidc.client.id }}',
+        clientSecret: '{{ .Values.oidc.client.secret }}',
+        enabled: true,
+        issuerUrl: '{{ .Values.oidc.issuer }}',
+        scope: 'openid email profile',
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: {{ .Release.Namespace }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +39,18 @@ spec:
         io.kompose.service: immich
     spec:
       containers:
+      - name: immich-redis
+        image: aboveos/redis:latest
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /data
+          name: redis
       - args:
         - sed -i "s/RedisConnection.minimumVersion = '5.0.0';/RedisConnection.minimumVersion = '4.0.0';/" ./node_modules/bullmq/dist/cjs/classes/redis-connection.js; sed -i 's/0.2.x/0.3.x/' ./dist/constants.js; exec ./start.sh
         command:
@@ -32,10 +63,12 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
+        # - name: REDIS_HOSTNAME
+        #   value: {{ .Values.redis.host }}
+        # - name: REDIS_PASSWORD
+        #   value: {{ .Values.redis.password }}
         - name: REDIS_HOSTNAME
-          value: {{ .Values.redis.host }}
-        - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
+          value: "localhost"
         - name: DB_HOSTNAME
           value: {{ .Values.postgres.host }}
         - name: DB_USERNAME
@@ -46,7 +79,19 @@ spec:
           value: {{ .Values.postgres.databases.immich }}
         - name: IMMICH_PORT
           value: "3001"
-        image: ghcr.io/immich-app/immich-server:v1.108.0
+        - name: OAUTH_ENABLED
+          value: "true"
+        - name: OAUTH_CLIENT_ID
+          value: "{{ .Values.oidc.client.id }}"
+        - name: OAUTH_CLIENT_SECRET
+          value: "{{ .Values.oidc.client.secret }}"
+        - name: OAUTH_ISSUER_URL
+          value: "{{ .Values.oidc.issuer }}"
+        - name: OAUTH_SCOPE
+          value: "openid,profile,email"
+        - name: IMMICH_CONFIG_FILE
+          value: "/config.json"
+        image: docker.io/aboveos/immich-app-immich-server:v1.108.0
         imagePullPolicy: IfNotPresent
         name: immich
         ports:
@@ -73,8 +118,8 @@ spec:
           failureThreshold: 3
         resources:
           limits:
-            cpu: 500m
-            memory: 1000Mi
+            cpu: 2000m
+            memory: 2000Mi
           requests:
             cpu: 200m
             memory: 300Mi
@@ -83,16 +128,30 @@ spec:
           mountPath: /usr/src/app/upload          
         - name: home  
           mountPath: /home
+        - name: config
+          mountPath: /config.json
+          subPath: config.json
       restartPolicy: Always
       volumes:
       - name: appcache
         hostPath:
           path: '{{ .Values.userspace.appData }}/immich/data/upload'
-          type: DirectoryOrCreate        
+          type: DirectoryOrCreate  
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/redis'
+          type: DirectoryOrCreate
+        name: redis      
       - name: home
         hostPath:
           path: '{{ .Values.userspace.userData }}'
           type: DirectoryOrCreate  
+      - name: config
+        configMap:
+          name: config
+          defaultMode: 438
+          items:
+          - key: config.json
+            path: config.json
 status: {}
 
 ---
