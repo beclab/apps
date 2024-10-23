@@ -1,12 +1,4 @@
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: script
-  namespace: {{ .Release.Namespace }}
-data:
-  download.txt: |
-    # download
----
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -112,6 +104,26 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+        - name: init-flux-simple
+          image: 'docker.io/aboveos/busybox:latest'
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          resources: {}
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - '-c'
+            - >
+              cp /wf/flux-q8-12g-simple.json /ai/资料/comfyui-workflow/FLUX/flux-q8-12g-simple.json
+          volumeMounts:
+            - name: volume-script
+              readOnly: true
+              mountPath: /wf/flux-q8-12g-simple.json
+              subPath: flux-q8-12g-simple.json
+            - name: dirai
+              mountPath: /ai
       containers:
         - env:
             - name: PGID
@@ -128,27 +140,42 @@ spec:
             - sh
             - '-c'
             - >
+              pip3 config set global.index-url https://pypi.org/simple; 
+              pip3 config set global.extra-index-url "https://pypi.tuna.tsinghua.edu.cn/simple/ http://mirrors.aliyun.com/pypi/simple/";
               pip3 install "numpy<2.0.0"; pip3 install "gguf>=0.9.1"; bash
               /home/scripts/entrypoint.sh
           ports:
             - containerPort: 8188
           livenessProbe:
             httpGet:
-              path: /
+              path: /api/settings
               port: 8188
               scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
-            successThreshold: 1
-            failureThreshold: 10
-          startupProbe:
-            tcpSocket:
-              port: 8188
-            timeoutSeconds: 5
+            initialDelaySeconds: 600
             periodSeconds: 10
+            timeoutSeconds: 2
             successThreshold: 1
-            failureThreshold: 30    
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8188
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "pgrep pt_main_thread > /dev/null 2>&1 || exit 1"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
           resources: 
             requests:
               cpu: 250m
@@ -270,6 +297,10 @@ spec:
           hostPath:
             path: {{ .Values.sharedlib }}/ai/comfyui/site-packages
             type: DirectoryOrCreate        
+        - name: dirai
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai
+            type: DirectoryOrCreate  
         - name: volume-script
           configMap:
             name: script
