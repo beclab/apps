@@ -9,7 +9,7 @@ Olares distributes applications in a permissionless manner using the Market Prot
 
 The **Olares Application Chart (OAC)** describes essential information about applications to the **Olares OS** and **Olares Market**. It is an extension of the Helm Chart package. Before you submit your application to **Olares Market**, here is some information you need to know about OAC:
 - [The structure of the Olares Application Chart](https://docs.jointerminus.com/developer/develop/package/chart.html)
-- [Configuration guide and field descriptions of TerminusManifest.yaml](https://docs.jointerminus.com/developer/develop/package/manifest.html)
+- [Configuration guide and field descriptions of OlaresManifest.yaml](https://docs.jointerminus.com/developer/develop/package/manifest.html)
 - [Extensions field to Helm in Olares](https://docs.jointerminus.com/developer/develop/package/extension.html)
 
 
