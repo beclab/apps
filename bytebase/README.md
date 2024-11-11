@@ -1,6 +1,6 @@
 ### Adding a PostgreSQL Database
 After opening **Bytebase**, click **'Add Instance'**, and select **PostgreSQL**.
-- The Instance Name could be `Terminus` or others.
+- The Instance Name could be `Olares` or others.
 - Choose either `PROD` or `TEST` for the Environment.
 - `HOST`, `USERNAME`, `PASSWORD` information can be found in [Control Hub's Middleware section](https://docs.jointerminus.com/how-to/terminus/controlhub/middleware.html#postgres).
 
@@ -10,7 +10,7 @@ Once saved and connected, you can view the data in **PostgreSQL**.
 
 ### Adding a MongoDB Database
 After opening **Bytebase**, click **'Add Instance'**, and select **MongoDB**.
-- The Instance Name could be `Terminus` or others.
+- The Instance Name could be `Olares` or others.
     :::info NOTE
     Do not use duplicate instance names.
     :::
