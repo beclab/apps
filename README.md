@@ -8,9 +8,9 @@ Olares distributes applications in a permissionless manner using the Market Prot
 ## Olares Application Chart
 
 The **Olares Application Chart (OAC)** describes essential information about applications to the **Olares OS** and **Olares Market**. It is an extension of the Helm Chart package. Before you submit your application to **Olares Market**, here is some information you need to know about OAC:
-- [The structure of the Olares Application Chart](https://docs.jointerminus.com/developer/develop/package/chart.html)
-- [Configuration guide and field descriptions of OlaresManifest.yaml](https://docs.jointerminus.com/developer/develop/package/manifest.html)
-- [Extensions field to Helm in Olares](https://docs.jointerminus.com/developer/develop/package/extension.html)
+- [The structure of the Olares Application Chart](https://docs.olares.xyz/developer/develop/package/chart.html)
+- [Configuration guide and field descriptions of OlaresManifest.yaml](https://docs.olares.xyz/developer/develop/package/manifest.html)
+- [Extensions field to Helm in Olares](https://docs.olares.xyz/developer/develop/package/extension.html)
 
 
 ## Submitting Your Application
@@ -25,11 +25,11 @@ The **Olares Application Chart (OAC)** describes essential information about app
 ### Detail Process
 
 #### 1. Develop and test your application
-Developing applications on Olares doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Olares development concepts [here](https://docs.jointerminus.com/developer/develop/).
+Developing applications on Olares doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Olares development concepts [here](https://docs.olares.xyz/developer/develop/).
 
 Before submitting an application, please ensure that it has been thoroughly tested on your Olares OS.
-- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.jointerminus.com/developer/develop/tutorial/devbox.html)
-- Use the [custom installation](https://docs.jointerminus.com/how-to/terminus/market/#custom-application) in the Market app for user testing.
+- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.olares.xyz/developer/develop/tutorial/devbox.html)
+- Use the [custom installation](https://docs.olares.xyz/manual/tasks/install-uninstall-update.html#install-custom-applications) in the Market app for user testing.
 
 #### 2. Submit an application
 The submission of the application needs to be completed through a Pull Request. Here's how:
@@ -42,7 +42,7 @@ The submission of the application needs to be completed through a Pull Request. 
         - UPDATE: Update an already successfully merged application
         - REMOVE: Remove an already successfully merged application
         - SUSPEND: Suspend an already successfully merged application from distribution through the application store
-    - `FolderName` is your Olares Application Chart name. It must adhere to the naming requirements in [OAC specification](https://docs.jointerminus.com/developer/develop/package/chart.html).
+    - `FolderName` is your Olares Application Chart name. It must adhere to the naming requirements in [OAC specification](hhttps://docs.olares.xyz/developer/develop/package/chart.html).
     - `version` refers to your OAC's Chart Version, which needs to be consistent with the `version` field in `Chart.yaml` and metadata section of `OlaresManifest.yaml`
 - To prevent your PR from being incorrectly parsed or closed, please adhere to the following rules:
     - Your PR title must contain only one PR Type, FolderName, and version.
