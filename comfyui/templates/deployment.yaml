@@ -19,111 +19,6 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: comfyui
     spec:
-      initContainers:
-        - name: initcomfyuilocal
-          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
-          command:
-            - sh
-            - '-c'
-            - |-
-              if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
-                  if [ -n "$(ls -A /cache)" ]; then
-                      echo "start copy"; cp -a /cache/. /home/runner/
-                  fi
-              fi
-          resources: {}
-          volumeMounts:
-            - name: appdata
-              mountPath: /home/runner
-            - name: cacheforstartup
-              mountPath: /cache
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-        - name: initcomfyuisitepackages
-          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
-          command:
-            - sh
-            - '-c'
-            - |-
-              if [ ! -d "/home/runner" ] || [ -z "$(ls -A /home/runner)" ]; then
-                  if [ -n "$(ls -A /cache)" ]; then
-                      echo "start copy"; cp -a /cache/. /home/runner/
-                  fi
-              fi
-          resources: {}
-          volumeMounts:
-            - name: sitepackages
-              mountPath: /home/runner
-            - name: sitepackagesforstartup
-              mountPath: /cache
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-        - name: initcomfyui
-          image: 'docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5'
-          command:
-            - sh
-            - '-c'
-            - >-
-              if [ ! -d /home/runner ]; then chmod u+x
-              /home/scripts/download.sh; /home/scripts/download.sh; fi
-          resources: {}
-          volumeMounts:
-            - name: appdata
-              mountPath: /home/runner
-            - name: volume-script
-              readOnly: true
-              mountPath: /home/scripts/download.txt
-              subPath: download.txt
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-        - name: init-chmod-data
-          image: 'docker.io/aboveos/busybox:latest'
-          command:
-            - sh
-            - '-c'
-            - >
-              chown -R 1000:1000 /home/runner; chown -R 1000:1000
-              /usr/local/lib64/python3.11;
-          resources: {}
-          volumeMounts:
-            - name: appdata
-              mountPath: /home/runner
-            - name: sitepackages
-              mountPath: /usr/local/lib64/python3.11/site-packages
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
-        - name: init-flux-simple
-          image: 'docker.io/aboveos/busybox:latest'
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          resources: {}
-          securityContext:
-            runAsUser: 0
-          command:
-            - sh
-            - '-c'
-            - >
-              cp /wf/flux-q8-12g-simple.json /ai/资料/comfyui-workflow/FLUX/flux-q8-12g-simple.json
-          volumeMounts:
-            - name: volume-script
-              readOnly: true
-              mountPath: /wf/flux-q8-12g-simple.json
-              subPath: flux-q8-12g-simple.json
-            - name: dirai
-              mountPath: /ai
       containers:
         - env:
             - name: PGID
@@ -132,20 +27,21 @@ spec:
               value: "0"
             - name: TZ
               value: Etc/UTC
+            - name: CLI_ARGS
+              value: ' --front-end-version Comfy-Org/ComfyUI_frontend@latest'
           securityContext:
             runAsUser: 0
-          image: "docker.io/aboveos/kldtks-comfyui-preinstalled:v0.1.2.30-Beta5"
+          image: "docker.io/aboveos/kldtks-comfyui-newui:build6"
           name: comfyui
-          command:
-            - sh
-            - '-c'
-            - >
-              pip3 config set global.index-url https://pypi.org/simple; 
-              pip3 config set global.extra-index-url "https://pypi.tuna.tsinghua.edu.cn/simple/ http://mirrors.aliyun.com/pypi/simple/";
-              pip3 install "numpy<2.0.0"; pip3 install "gguf>=0.9.1"; bash
-              /home/scripts/entrypoint.sh
           ports:
             - containerPort: 8188
+          resources: 
+            requests:
+              cpu: 250m
+              memory: 2Gi
+            limits:
+              cpu: 4
+              memory: 30Gi
           livenessProbe:
             httpGet:
               path: /api/settings
@@ -170,58 +66,43 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - "pgrep pt_main_thread > /dev/null 2>&1 || exit 1"
+                - "pgrep python3 > /dev/null 2>&1 || exit 1"
             initialDelaySeconds: 5
-            periodSeconds: 10
+            periodSeconds: 15
             timeoutSeconds: 2
             successThreshold: 1
-            failureThreshold: 3
-          resources: 
-            requests:
-              cpu: 250m
-              memory: 2Gi
-            limits:
-              cpu: 4
-              memory: 30Gi
-
+            failureThreshold: 40
           volumeMounts:
-                      
-            - mountPath: /home/runner
-              name: appdata
-            - name: sitepackages
-              mountPath: /usr/local/lib64/python3.11/site-packages
+            - name: appdata
+              mountPath: /root
             - name: modellibckp
-              mountPath: /home/runner/ComfyUI/models/checkpoints
+              mountPath: /root/ComfyUI/models/checkpoints
             - name: modelliblora
-              mountPath: /home/runner/ComfyUI/models/loras
+              mountPath: /root/ComfyUI/models/loras
             - name: modellibvae
-              mountPath: /home/runner/ComfyUI/models/vae
+              mountPath: /root/ComfyUI/models/vae
             - name: modellibhypernetworks
-              mountPath: /home/runner/ComfyUI/models/hypernetworks
+              mountPath: /root/ComfyUI/models/hypernetworks
             - name: modellibembeddings
-              mountPath: /home/runner/ComfyUI/models/embeddings
+              mountPath: /root/ComfyUI/models/embeddings
             - name: modellibclip
-              mountPath: /home/runner/ComfyUI/models/clip
+              mountPath: /root/ComfyUI/models/clip
             - name: modellibclipvision
-              mountPath: /home/runner/ComfyUI/models/clip_vision
+              mountPath: /root/ComfyUI/models/clip_vision
             - name: modellibcontrolnet
-              mountPath: /home/runner/ComfyUI/models/controlnet
+              mountPath: /root/ComfyUI/models/controlnet
             - name: modellibinpaint
-              mountPath: /home/runner/ComfyUI/models/inpaint
+              mountPath: /root/ComfyUI/models/inpaint
             - name: modellibupscale
-              mountPath: /home/runner/ComfyUI/models/upscale_models
+              mountPath: /root/ComfyUI/models/upscale_models
             - name: modellibipadapter
-              mountPath: /home/runner/ComfyUI/models/ipadapter
+              mountPath: /root/ComfyUI/models/ipadapter
             - name: modellibunet
-              mountPath: /home/runner/ComfyUI/models/unet
-            - name: customnodes
-              mountPath: /home/runner/ComfyUI/custom_nodes
+              mountPath: /root/ComfyUI/models/unet
+            - name: modellibfacerestore
+              mountPath: /root/ComfyUI/models/facerestore_models
             - name: output
-              mountPath: /home/runner/ComfyUI/output
-            - name: volume-script
-              readOnly: true
-              mountPath: /home/scripts/download.txt
-              subPath: download.txt
+              mountPath: /root/ComfyUI/output
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
       volumes:
@@ -232,11 +113,7 @@ spec:
         - name: appdata
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/comfyui/appdata
-        - name: sitepackages
-          hostPath:
-            type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/comfyui/site-packages            
+            path: {{ .Values.sharedlib }}/ai/comfyui
         - name: modellibckp
           hostPath:
             type: DirectoryOrCreate
@@ -285,22 +162,11 @@ spec:
           hostPath:
             path: {{ .Values.sharedlib }}/ai/model/unet
             type: DirectoryOrCreate
-        - name: customnodes
+        - name: modellibfacerestore
           hostPath:
-            path: {{ .Values.sharedlib }}/ai/comfyui/custom_nodes
+            path: {{ .Values.sharedlib }}/ai/model/facerestore_models
             type: DirectoryOrCreate
-        - name: cacheforstartup
-          hostPath:
-            path: {{ .Values.sharedlib }}/ai/comfyui/cacheforstartup
-            type: DirectoryOrCreate
-        - name: sitepackagesforstartup
-          hostPath:
-            path: {{ .Values.sharedlib }}/ai/comfyui/site-packages
-            type: DirectoryOrCreate        
-        - name: dirai
-          hostPath:
-            path: {{ .Values.sharedlib }}/ai
-            type: DirectoryOrCreate  
+            
         - name: volume-script
           configMap:
             name: script
