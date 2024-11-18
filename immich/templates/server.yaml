@@ -1,3 +1,22 @@
+apiVersion: v1
+data:
+  config.json: |
+    {
+      oauth: {
+        autoLaunch: false,
+        autoRegister: true,
+        clientId: '{{ .Values.oidc.client.id }}',
+        clientSecret: '{{ .Values.oidc.client.secret }}',
+        enabled: true,
+        issuerUrl: '{{ .Values.oidc.issuer }}',
+        scope: 'openid email profile',
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: {{ .Release.Namespace }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,6 +79,18 @@ spec:
           value: {{ .Values.postgres.databases.immich }}
         - name: IMMICH_PORT
           value: "3001"
+        - name: OAUTH_ENABLED
+          value: "true"
+        - name: OAUTH_CLIENT_ID
+          value: "{{ .Values.oidc.client.id }}"
+        - name: OAUTH_CLIENT_SECRET
+          value: "{{ .Values.oidc.client.secret }}"
+        - name: OAUTH_ISSUER_URL
+          value: "{{ .Values.oidc.issuer }}"
+        - name: OAUTH_SCOPE
+          value: "openid,profile,email"
+        - name: IMMICH_CONFIG_FILE
+          value: "/config.json"
         image: docker.io/aboveos/immich-app-immich-server:v1.108.0
         imagePullPolicy: IfNotPresent
         name: immich
@@ -97,6 +128,9 @@ spec:
           mountPath: /usr/src/app/upload          
         - name: home  
           mountPath: /home
+        - name: config
+          mountPath: /config.json
+          subPath: config.json
       restartPolicy: Always
       volumes:
       - name: appcache
@@ -111,6 +145,13 @@ spec:
         hostPath:
           path: '{{ .Values.userspace.userData }}'
           type: DirectoryOrCreate  
+      - name: config
+        configMap:
+          name: config
+          defaultMode: 438
+          items:
+          - key: config.json
+            path: config.json
 status: {}
 
 ---
