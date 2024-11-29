@@ -38,6 +38,23 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: immich
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name: app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - name: immich-redis
         image: aboveos/redis:latest
@@ -51,6 +68,7 @@ spec:
         volumeMounts:
         - mountPath: /data
           name: redis
+        imagePullPolicy: IfNotPresent
       - args:
         - sed -i "s/RedisConnection.minimumVersion = '5.0.0';/RedisConnection.minimumVersion = '4.0.0';/" ./node_modules/bullmq/dist/cjs/classes/redis-connection.js; sed -i 's/0.2.x/0.3.x/' ./dist/constants.js; exec ./start.sh
         command:
@@ -140,7 +158,15 @@ spec:
       - hostPath:
           path: '{{ .Values.userspace.appData }}/immich/redis'
           type: DirectoryOrCreate
-        name: redis      
+        name: redis
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/machine-learning'
+          type: DirectoryOrCreate
+        name: learningcache      
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich'
+          type: DirectoryOrCreate
+        name: app-data-root   
       - name: home
         hostPath:
           path: '{{ .Values.userspace.userData }}'
