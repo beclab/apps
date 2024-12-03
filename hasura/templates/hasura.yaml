@@ -1,0 +1,171 @@
+# https://stackoverflow.com/questions/54173581/combining-multiple-k8s-secrets-into-an-env-variable
+# Source: hasura/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hasura
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: hasura-2.10.0
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+    app.kubernetes.io/version: "v2.16.0-ce"
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: hasura/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hasura
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: hasura-2.10.0
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+    app.kubernetes.io/version: "v2.16.0-ce"
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+stringData:
+  HASURA_GRAPHQL_ADMIN_SECRET: "qwer1234"
+---
+# Source: hasura/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hasura
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: hasura-2.10.0
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+    app.kubernetes.io/version: "v2.16.0-ce"
+    app.kubernetes.io/managed-by: Helm
+data:
+  HASURA_GRAPHQL_SERVER_HOST: "*"
+  HASURA_GRAPHQL_SERVER_PORT: "8080"
+  HASURA_GRAPHQL_ENABLE_REMOTE_SCHEMA_PERMISSIONS: "true"
+  HASURA_GRAPHQL_DEV_MODE: "false"
+  HASURA_GRAPHQL_ENABLE_CONSOLE: "true"
+  HASURA_GRAPHQL_ENABLED_APIS: "graphql,metadata"
+  HASURA_GRAPHQL_ENABLE_TELEMETRY: "true"
+  HASURA_GRAPHQL_LOG_LEVEL: "info"
+  HASURA_GRAPHQL_ENABLED_LOG_TYPES: "http-log, webhook-log, websocket-log, query-log"
+  HASURA_GRAPHQL_EVENTS_HTTP_POOL_SIZE: "100"
+  HASURA_GRAPHQL_EVENTS_FETCH_BATCH_SIZE: "100"
+  HASURA_GRAPHQL_PG_STRIPES: "1"
+  HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES: "false"
+  HASURA_GRAPHQL_LIVE_QUERIES_MULTIPLEXED_REFETCH_INTERVAL: "1000"
+  HASURA_GRAPHQL_LIVE_QUERIES_MULTIPLEXED_BATCH_SIZE: "100"
+  HASURA_GRAPHQL_ENABLE_ALLOWLIST: "false"
+  HASURA_GRAPHQL_INFER_FUNCTION_PERMISSIONS: "true"
+  HASURA_GRAPHQL_SCHEMA_SYNC_POLL_INTERVAL: "1000"
+  HASURA_GRAPHQL_GRACEFUL_SHUTDOWN_TIMEOUT: "60"
+  HASURA_GRAPHQL_ENABLE_MAINTENANCE_MODE: "false"
+  HASURA_GRAPHQL_CONNECTION_COMPRESSION: "false"
+  HASURA_GRAPHQL_WEBSOCKET_KEEPALIVE: "5"
+  HASURA_GRAPHQL_WEBSOCKET_CONNECTION_INIT_TIMEOUT: "3"
+  HASURA_GRAPHQL_WS_READ_COOKIE: "false"
+  HASURA_GRAPHQL_METADATA_DATABASE_EXTENSIONS_SCHEMA: "public"
+  HASURA_GRAPHQL_DEFAULT_NAMING_CONVENTION: "hasura-default"
+  HASURA_GRAPHQL_ENABLE_LOG_COMPRESSION: "false"
+  HASURA_GRAPHQL_ENABLE_METADATA_QUERY_LOGGING: "false"
+  HASURA_GRAPHQL_DISABLE_CORS: 'true'
+---
+# Source: hasura/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: hasura
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: hasura-2.10.0
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+    app.kubernetes.io/version: "v2.16.0-ce"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+---
+# Source: hasura/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hasura
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: hasura-2.10.0
+    app.kubernetes.io/name: hasura
+    app.kubernetes.io/instance: hasura
+    app.kubernetes.io/version: "v2.16.0-ce"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hasura
+      app.kubernetes.io/instance: hasura
+  template:
+    metadata:
+      annotations:
+        checksum/configmap: 482a0d4b3aff0ad798596c4e3d9f4cc6241850aefaff6a4e15a67625e7c8eeea
+        checksum/secret: 41ff5801704dc7a109ae4404854a03050ebc16cdbf6ab4f5f705869abf1685be
+      labels:
+        app.kubernetes.io/name: hasura
+        app.kubernetes.io/instance: hasura
+    spec:
+      serviceAccountName: hasura
+      securityContext:
+        {}
+      containers:
+        - name: hasura
+          securityContext:
+            {}
+          image: "hasura/graphql-engine:v2.16.0-ce"
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: hasura
+            - secretRef:
+                name: hasura
+          env:
+            - name: POSTGRESQL_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: POSTGRESQL_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: POSTGRESQL_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: HASURA_GRAPHQL_DATABASE_URL
+              value: "postgres://{{ .Values.postgres.username }}:$(POSTGRESQL_PASSWORD)@$(POSTGRESQL_HOST):$(POSTGRESQL_PORT)/{{ .Values.postgres.databases.hasura }}"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 128Mi
+            limits:
+              cpu: 2000m
+              memory: 1Gi
