@@ -14,7 +14,8 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: gaianetai
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -22,6 +23,23 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: gaianetai
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -32,6 +50,20 @@ spec:
           value: Etc/UTC
         image: docker.io/aboveos/gaianet-phi-3-mini-instruct-4k_paris:cuda11
         name: gaianetai
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /config_pub.json
+            port: 8080
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
         ports:
         - containerPort: 8080
         env:

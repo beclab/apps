@@ -6,8 +6,8 @@
 3. Sync indexers with *arr app
     - navigate to "Settings > Apps" in Prowlarr, and click the card with big "+" button under "Applications", then select the *arr app accrodingly.
     - Fill in the endpoint url for Prowlarr and *arr Server
-        - The format is usually "http://{appname}-svc.{appname}-{your_terminus_name}:{service_port}" 
-        - For example, the Prowlarr Server url is "http://prowlarr-svc.prowlarr-{your_terminus_name}:9696"
+        - The format is usually "http://{appname}-svc.{appname}-{your_olares_name}:{service_port}" 
+        - For example, the Prowlarr Server url is "http://prowlarr-svc.prowlarr-{your_olares_name}:9696"
         - To find the exact endpoint url of an app, you can open ControlHub and navigate to "CRDs > sys.bytetrade.io > ProviderRegistry". Locate the record named "legacy-{appname}", then click on "Edit Yaml". The endpoint url is in the "spec > endpoint" field.
     - Copy the API key of the *arr app, which can be found in the "Settings > General"
     - Leave the rest as it is. Test if everything is working correctly with the button at the bottom before saving it.
