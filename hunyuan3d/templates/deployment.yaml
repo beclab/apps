@@ -1,0 +1,77 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: hunyuan3d
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hunyuan3d
+  template:
+    metadata:
+      labels:
+        app: hunyuan3d
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-cache-root
+          resources: {}
+          volumeMounts:
+            - name:  hydata
+              mountPath: /app-cache-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+      - name: hunyuan3d
+        image: docker.io/aboveos/maccam912-hunyuan3d:latest
+        command:
+          - python3
+          - app.py
+          - '--use_lite'
+        resources:
+          requests:
+            cpu: 500m
+            memory: 3Gi
+          limits:
+            cpu: 4000m
+            memory: 30Gi
+        ports:
+        - containerPort: 8080
+        env:
+        volumeMounts:
+        - mountPath: /data
+          name: hydata
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: hydata
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/hunyuan3d
+  strategy:
+    type: Recreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
