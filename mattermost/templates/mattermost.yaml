@@ -1,0 +1,140 @@
+{{- $mattermostDomainENV := split  ","  .Values.domain.mattermost -}}
+{{- $mattermostDomain := index $mattermostDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: mattermost
+  name: mattermost
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  strategy: 
+    rollingUpdate: null
+    type: RollingUpdate
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      io.kompose.service: mattermost
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        checksum/config: b3a6119a370af9701afd437a53727798bba6e368b5324c341de66528c28f53f4
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: mattermost
+    spec:
+      initContainers:
+      - name: getconfigfile
+        image: "docker.io/aboveos/mattermost-mattermost-team-edition:9.9.1"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "if [ ! -f '/mattermost/config-new/config.json' ]; then cp '/mattermost/config/config.json' '/mattermost/config-new/config.json'; fi"]
+        volumeMounts:
+        - mountPath: /mattermost/config-new
+          name: mattermost-config
+      - name: resetconfig
+        image: "aboveos/utils-jq"
+        imagePullPolicy: IfNotPresent
+        command:
+          - "sh"
+          - "-c"
+          - |
+            mv /mattermost/config-new/config.json /mattermost/config-new/config-old.json;
+            jq '.SqlSettings.DataSource = "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.mattermost }}?sslmode=disable&connect_timeout=10"' /mattermost/config-new/config-old.json > /mattermost/config-new/config-new1.json;
+            jq '.ServiceSettings.SiteURL = "https://{{ $mattermostDomain }}"' /mattermost/config-new/config-new1.json > /mattermost/config-new/config-new2.json;
+            jq '.TeamSettings.SiteName = "Mattermost in Olares"' /mattermost/config-new/config-new2.json > /mattermost/config-new/config-new3.json;
+            jq '.SqlSettings.DriverName = "postgres"' /mattermost/config-new/config-new3.json > /mattermost/config-new/config.json;
+        volumeMounts:
+        - mountPath: /mattermost/config-new
+          name: mattermost-config
+      containers:
+      - name: mattermost
+        image: "docker.io/aboveos/mattermost-mattermost-team-edition:9.9.1"
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        envFrom:
+        - secretRef:
+            name: mattermost-team-edition-config
+        ports:
+        - name: http
+          containerPort: 8065
+          protocol: TCP
+        startupProbe:
+          failureThreshold: 30
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          httpGet:
+            path: /healthz
+            port: http
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 1
+          periodSeconds: 10
+          timeoutSeconds: 5
+          httpGet:
+            path: /api/v4/system/ping
+            port: http
+        readinessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+          httpGet:
+            path: /api/v4/system/ping
+            port: http
+        volumeMounts:
+        - mountPath: /mattermost/config
+          name: mattermost-config
+        - mountPath: /mattermost/data
+          name: mattermost-data
+        - mountPath: /mattermost/client/plugins
+          name: mattermost-plugins
+        resources:
+          requests:
+            cpu: 50m
+            memory: 200Mi
+          limits:
+            cpu: 1000m
+            memory: 2000Mi
+      securityContext:
+        runAsUser: 0
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/mattermost/config'
+          type: DirectoryOrCreate
+        name: mattermost-config
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/mattermost/data'
+          type: DirectoryOrCreate
+        name: mattermost-data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/mattermost/plugins'
+          type: DirectoryOrCreate
+        name: mattermost-plugins
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mattermost
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: mattermost
+spec:
+  selector:
+    io.kompose.service: mattermost
+  type: ClusterIP
+  ports:
+  - port: 8065
+    targetPort: http
+    protocol: TCP
+    name: mattermost

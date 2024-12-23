@@ -19,6 +19,25 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: navidrome
     spec:
+      initContainers:
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-data-root; chown -R 1000:1000 /userdata
+          resources: {}
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+            - name: userdata
+              mountPath: /userdata
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -27,7 +46,7 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        image: deluan/navidrome:latest
+        image: docker.io/aboveos/deluan-navidrome:latest
         name: navidrome
         ports:
         - containerPort: 4533
@@ -40,23 +59,21 @@ spec:
             memory: 50Mi
         volumeMounts:
         - mountPath: /music
-          name: music
+          name: userdata
         - mountPath: /data
           name: data
-        - mountPath: /userdata
-          name: userdata
       restartPolicy: Always
       volumes:
       - hostPath:
-          path: '{{ .Values.userspace.appData }}/navidrome/music'
+          path: '{{ .Values.userspace.appData }}/navidrome'
           type: DirectoryOrCreate
-        name: music
+        name: app-data-root
       - hostPath:
           path: '{{ .Values.userspace.appData }}/navidrome/data'
           type: DirectoryOrCreate
         name: data
       - hostPath:
-          path: '{{ .Values.userspace.userData }}'
+          path: '{{ .Values.userspace.userData }}/Music'
           type: DirectoryOrCreate
         name: userdata
 status: {}
