@@ -40,13 +40,31 @@ spec:
         securityContext:
           runAsUser: 0
       - name: installcomfyui
-        image: 'docker.io/aboveos/kldtks-comfyui-newui:build6'
+        image: 'docker.io/aboveos/kldtks-comfyui:v0.3.9-t2'
         command:
           - sh
           - '-c'
           - >-
             if [ ! -d /root/ComfyUI ]; then chmod u+x
             /runner-scripts/download.sh; /runner-scripts/download.sh; fi
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: upversion
+        image: 'docker.io/aboveos/kldtks-comfyui:v0.3.9-t2'
+        command:
+          - sh
+          - '-c'
+          - >-
+              chmod +x /runner-scripts/up-version-cp.sh; sh
+              /runner-scripts/up-version-cp.sh; rsync -av --update 
+              /runner-scripts/ /root/runner-scripts/;
         resources: {}
         volumeMounts:
           - name: appdata
@@ -91,6 +109,8 @@ spec:
             mountPath: /root/ComfyUI/models/ipadapter
           - name: modellibunet
             mountPath: /root/ComfyUI/models/unet
+          - name: modellibstyle
+            mountPath: /root/ComfyUI/models/style_models
           - name: modellibfacerestore
             mountPath: /root/ComfyUI/models/facerestore_models
           - name: output
@@ -112,7 +132,7 @@ spec:
               value: '--normalvram --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@latest'
           securityContext:
             runAsUser: 1000
-          image: "docker.io/aboveos/kldtks-comfyui-newui:build6"
+          image: "docker.io/aboveos/kldtks-comfyui:v0.3.9-t2"
           name: comfyui
           ports:
             - containerPort: 8188
@@ -180,6 +200,8 @@ spec:
               mountPath: /root/ComfyUI/models/ipadapter
             - name: modellibunet
               mountPath: /root/ComfyUI/models/unet
+            - name: modellibstyle
+              mountPath: /root/ComfyUI/models/style_models
             - name: modellibfacerestore
               mountPath: /root/ComfyUI/models/facerestore_models
             - name: output
@@ -249,6 +271,10 @@ spec:
         - name: modellibunet
           hostPath:
             path: {{ .Values.sharedlib }}/ai/model/unet
+            type: DirectoryOrCreate
+        - name: modellibstyle
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/style_models
             type: DirectoryOrCreate
         - name: modellibfacerestore
           hostPath:
