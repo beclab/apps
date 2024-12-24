@@ -3,6 +3,11 @@
 
 {{- $clientproxyDomainENV := split  ","  .Values.domain.clientproxy -}}
 {{- $clientproxyDomain := index $clientproxyDomainENV "_0" -}}
+
+{{- $serverproxyHost := printf "%s" (index .Values.svcs "serverproxy_host") -}}
+{{- $serverproxyHostL := (split "." $serverproxyHost) -}}
+{{- $serverproxyHostF := index $serverproxyHostL "_0" -}}
+
 ---
 apiVersion: v1
 kind: Secret
@@ -126,6 +131,7 @@ data:
                       prefix: /
                     route:
                       cluster: original_dst
+                      timeout: 180s
               stat_prefix: desktop_http
               upgrade_configs:
               - upgrade_type: websocket
@@ -199,7 +205,7 @@ spec:
             defaultMode: 420
       initContainers:
         - name: terminus-sidecar-init
-          image: 'openservicemesh/init:v1.2.3'
+          image: 'docker.io/aboveos/openservicemesh-init:v1.2.3'
           command:
             - /bin/sh
           args:
@@ -239,7 +245,7 @@ spec:
             runAsNonRoot: false
       containers:
         - name: gitlabfusion-cp
-          image: 'kldtks/edge:gitlab-client-proxy-001'
+          image: 'beclab/gitlab-client-proxy:cf6f4973'
           ports:
             - name: ext-port
               containerPort: 8000
@@ -251,19 +257,21 @@ spec:
             - name: SERVER_PROXY_URL
               value: 'http://{{ index .Values.svcs "serverproxy_host" }}:8000'
             - name: SERVER_PROXY_DOMAIN
-              value: {{index .Values.svcs "serverproxy_host" }}
+              value: '{{index .Values.svcs "serverproxy_host" }}'
+            - name: SERVER_PROXY_DOMAIN_NO_NAMESPACE
+              value: '{{ $serverproxyHostF }}'
             - name: SERVER_THIS_DOMAIN
-              value: {{ $clientproxyDomain }}
+              value: '{{ $clientproxyDomain }}'
             - name: SERVER_SSO_URL
               value: 'http://clientproxy:8000/'
             - name: SERVER_SSO_DOMAIN
-              value: {{ $cpDomain }}
+              value: '{{ $cpDomain }}'
             - name: SERVER_ACCOUNT_MANAGER_URL
               value: 'http://{{index .Values.svcs "serverproxy_host" }}:4000'
             - name: SERVER_SRC_DOMAIN
-              value: {{index .Values.svcs "gitlab-nginx-ingress-controller_host" }}
+              value: '{{index .Values.svcs "gitlab-nginx-ingress-controller_host" }}'
             - name: ACCOUNT_NAME
-              value: {{ .Values.bfl.username }}
+              value: '{{ .Values.bfl.username }}'
             - name: ACCOUNT_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -274,10 +282,10 @@ spec:
               cpu: 100m
               memory: 150Mi
             limits:
-              cpu: 500m
+              cpu: 1000m
               memory: 512Mi
         - name: terminus-envoy-sidecar
-          image: 'envoyproxy/envoy-distroless:v1.25.1'
+          image: 'docker.io/aboveos/envoyproxy-envoy-distroless:v1.25.1'
           command:
             - envoy
           args:

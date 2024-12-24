@@ -1,3 +1,90 @@
+{{- $onlyofficeDomainENV := split  ","  .Values.domain.onlyoffice -}}
+{{- $onlyofficeDomain := index $onlyofficeDomainENV "_0" -}}
+
+
+{{- $of_office_secret := (lookup "v1" "Secret" .Release.Namespace "office-secret") -}}
+{{- $coauthoring_secret := "" -}}
+{{ if $of_office_secret -}}
+{{- $coauthoring_secret = (index $of_office_secret "data" "coauthoring-secret") -}}
+{{ else -}}
+{{- $coauthoring_secret = randAlphaNum 8 | b64enc}}
+{{- end -}}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: office-secret
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: minio
+    helm.sh/chart: minio-11.10.24
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+data:
+  coauthoring-secret: "{{ $coauthoring_secret }}"
+---
+apiVersion: v1
+data:
+
+  local.json: |
+    {
+      "services": {
+        "CoAuthoring": {
+          "sql": {
+            "type": "postgres",
+            "dbHost": "{{ .Values.postgres.host }}",
+            "dbPort": "{{ .Values.postgres.port }}",
+            "dbName": "{{ .Values.postgres.databases.onlyoffice }}",
+            "dbUser": "{{ .Values.postgres.username }}",
+            "dbPass": "{{ .Values.postgres.password }}"
+          },
+          "token": {
+            "enable": {
+              "request": {
+                "inbox": true,
+                "outbox": true
+              },
+              "browser": true
+            },
+            "inbox": {
+              "header": "Authorization",
+              "inBody": false
+            },
+            "outbox": {
+              "header": "Authorization",
+              "inBody": false
+            }
+          },
+          "secret": {
+            "inbox": {
+              "string": "{{ $coauthoring_secret }}"
+            },
+            "outbox": {
+              "string": "{{ $coauthoring_secret }}"
+            },
+            "session": {
+              "string": "{{ $coauthoring_secret }}"
+            }
+          }
+        }
+      },
+      "rabbitmq": {
+        "url": "amqp://guest:guest@localhost"
+      },
+      "storage": {
+        "fs": {
+          "secretString": "lWjXgZbCCu5HC8gjBmJb"
+        }
+      }
+    }
+
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: {{ .Release.Namespace }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,6 +106,18 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: onlyoffice
     spec:
+      initContainers:
+      - image: docker.io/aboveos/onlyoffice-documentserver:latest
+        name: 'init-config'
+        command:
+          - 'sh'
+          - '-c'
+          - >
+            cp local.json /etc/onlyoffice/documentserver/local.json
+        volumeMounts:
+          - name: config
+            mountPath: /local.json
+            subPath: local.json
       containers:
       - env:
         - name: PGID
@@ -50,18 +149,18 @@ spec:
         - name: JWT_ENABLED
           value: "true"
         - name: JWT_SECRET
-          value: "randomgeneratedstring"
-        image: onlyoffice/documentserver
+          value: "{{ $coauthoring_secret }}"
+        image: docker.io/aboveos/onlyoffice-documentserver:latest
         name: onlyoffice
         ports:
         - containerPort: 80
         resources:
           limits:
-            cpu: "2"
-            memory: 4000Mi
+            cpu: 2.5
+            memory: 8Gi
           requests:
             cpu: 1
-            memory: 500Mi
+            memory: 1.5Gi
         volumeMounts:
         - mountPath: /var/log/onlyoffice
           name: logs
@@ -69,8 +168,6 @@ spec:
           name: data
         - mountPath: /var/lib/onlyoffice
           name: lib
-        - mountPath: /userdata
-          name: userdata
       restartPolicy: Always
       volumes:
       - hostPath:
@@ -85,10 +182,13 @@ spec:
           path: '{{ .Values.userspace.appData }}/onlyoffice/lib'
           type: DirectoryOrCreate
         name: lib
-      - hostPath:
-          path: '{{ .Values.userspace.userData }}'
-          type: DirectoryOrCreate
-        name: userdata
+      - name: config
+        configMap:
+          name: config
+          defaultMode: 438
+          items:
+          - key: local.json
+            path: local.json
 status: {}
 
 ---
@@ -107,5 +207,63 @@ spec:
     targetPort: 80
   selector:
     io.kompose.service: onlyoffice
+status:
+  loadBalancer: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: jwtgeter
+  name: jwtgeter
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: jwtgeter
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: jwtgeter
+    spec:
+      containers:
+      - name: jwt-geter
+        image: kldtks/jwt-geter:v9
+        ports:
+          - containerPort: 3030
+        env:
+          - name: JWT_SECRET
+            value: "{{ $coauthoring_secret }}"
+        resources:
+          limits:
+            cpu: 0.1
+            memory: 0.1Gi
+          requests:
+            cpu: 0.1
+            memory: 0.1Gi
+      restartPolicy: Always
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: jwtgeter
+  name: jwtgeter
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3030"
+    port: 3030
+    targetPort: 3030
+  selector:
+    io.kompose.service: jwtgeter
 status:
   loadBalancer: {}

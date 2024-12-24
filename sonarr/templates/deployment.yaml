@@ -1,3 +1,23 @@
+apiVersion: v1
+data:
+  init.sh: |
+    #!/bin/bash
+
+    source_dir="/config"
+    dest_dir="/new-config"
+
+    if [ -z "$(ls -A $dest_dir)" ]; then
+      echo "$dest_dir is empty. Copying files from $source_dir..."
+      cp -r $source_dir/. $dest_dir
+      echo "Files copied successfully."
+    else
+      echo "$dest_dir is not empty. No action taken."
+    fi
+
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -16,6 +36,36 @@ spec:
       labels:
         app: sonarr
     spec:
+      initContainers:
+      - env:
+        - name: PGID
+          value: "1000" 
+        - name: PUID
+          value: "1000" 
+        - name: TZ
+          value: Europe/London
+        name: sonarr-init-data
+        image: docker.io/aboveos/linuxserver-sonarr:latest
+        command:
+          - sh
+          - '-c'
+          - |
+            chmod +x /init.sh & bash /init.sh
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 1000m
+            memory: 256Mi
+        ports:
+        - containerPort: 8989
+        volumeMounts:
+        - mountPath: /new-config
+          name: sonarr-config
+        - name: init-config 
+          mountPath: /init.sh
+          subPath: init.sh
       containers:
       - env:
         - name: PGID
@@ -25,25 +75,37 @@ spec:
         - name: TZ
           value: Europe/London
         name: sonarr
-        image: lscr.io/linuxserver/sonarr:latest
+        image: docker.io/aboveos/linuxserver-sonarr:latest
         resources:
           requests:
             cpu: 100m
             memory: 32Mi
           limits:
-            cpu: 500m
-            memory: 64Mi
+            cpu: 1000m
+            memory: 256Mi
         ports:
         - containerPort: 8989
         volumeMounts:
         - mountPath: /config
           name: sonarr-config
+        - name: home
+          mountPath: /home          
       volumes:
       - name: sonarr-config
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appData }}/sonarr 
-        
+      - name: home
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}
+      - name: init-config
+        configMap:
+          name: init-config
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
 
 ---
 apiVersion: v1
@@ -59,3 +121,24 @@ spec:
     - protocol: TCP
       port: 8989
       targetPort: 8989
+
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_sonarr
+  deployment: sonarr
+  description: sonarr legacy api
+  endpoint: sonarr-svc.{{ .Release.Namespace }}:8989
+  group: api.sonarr
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /
+status:
+  state: active

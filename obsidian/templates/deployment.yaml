@@ -1,4 +1,50 @@
+apiVersion: v1
+data:
+  nginx.conf: |
+    
+    http {
+        server {
+            listen 8001;
+        
+            location = / {
+                rewrite ^ /_utils;
+            }
 
+            location / {
+                proxy_pass http://127.0.0.1:5984;
+            }
+        }
+    }
+
+    events {
+      # Your event-related configurations go here
+    }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+data:
+  init.sh: |
+    #!/bin/bash
+
+    new_etc_dir="/new-etc"
+    couchdb_etc_dir="/opt/couchdb/etc"
+
+    if [ -d "$new_etc_dir" ] && [ -z "$(ls -A $new_etc_dir)" ]; then
+      cp -r $couchdb_etc_dir/. $new_etc_dir
+      echo "Files and directories from $couchdb_etc_dir copied to $new_etc_dir"
+    else
+      echo "$new_etc_dir is not an empty directory or does not exist"
+    fi
+
+
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
 data:
@@ -51,9 +97,57 @@ spec:
       labels:
         app: obsidian
     spec:
+      initContainers:
+      - name: init-config
+        image: 'docker.io/aboveos/couchdb:3.1.2'
+        command:
+          - sh
+          - '-c'
+          - |
+            chmod +x /init.sh & bash /init.sh
+        volumeMounts:
+        - mountPath: /opt/couchdb/etc/local.ini
+          name: obsidian-config
+          subPath: local.ini  
+        - mountPath: /new-etc
+          name: server-etc
+        - name: init-config 
+          mountPath: /init.sh
+          subPath: init.sh
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name:  app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
+      - name: nginx
+        image: docker.io/aboveos/nginx:latest
+        volumeMounts:
+        - name: nginx-config 
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        ports:
+        - containerPort: 8001
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
       - name: server
-        image: couchdb:3.1.2
+        image: docker.io/aboveos/couchdb:3.1.2
         resources:
           requests:
             cpu: 100m
@@ -66,9 +160,8 @@ spec:
         volumeMounts:
         - mountPath: /opt/couchdb/data
           name: server-data
-        - mountPath: /opt/couchdb/etc/local.ini
-          name: obsidian-config
-          subPath: local.ini  
+        - mountPath: /opt/couchdb/etc
+          name: server-etc
         command:
         - tini
         - --
@@ -83,7 +176,15 @@ spec:
       - name: server-data
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/obsidian 
+          path: {{ .Values.userspace.appData }}/obsidian/data
+      - name: server-etc
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/obsidian/etc   
+      - name: app-data-root
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/obsidian   
       - name: obsidian-config
         configMap:
           defaultMode: 420
@@ -91,7 +192,20 @@ spec:
           items:
           - key: local.ini
             path: local.ini        
-
+      - name: init-config
+        configMap:
+          name: init-config
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+          defaultMode: 438
+          items:
+          - key: nginx.conf
+            path: nginx.conf
 ---
 apiVersion: v1
 kind: Service
@@ -104,5 +218,5 @@ spec:
     app: {{ .Release.Name }}
   ports:
     - protocol: TCP
-      port: 5984
-      targetPort: 5984
+      port: 8001
+      targetPort: 8001

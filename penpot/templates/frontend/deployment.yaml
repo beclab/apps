@@ -1,0 +1,61 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: penpot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: penpot
+  template:
+    metadata:
+      labels:
+        app: penpot
+    spec:
+      containers:
+        - name: penpot
+          image: docker.io/aboveos/penpotapp-frontend:latest
+          resources:
+            requests:
+              cpu: 10m
+              memory: 50Mi
+            limits:
+              cpu: 200m
+              memory: 200Mi
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - >
+                  response=$(curl -s -o /dev/null -w "%{http_code}" http://127.1/api/rpc/command/get-profile);
+                  if [ $response -lt 500 ]; then
+                    exit 0;
+                  else
+                    exit 1;
+                  fi
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - mountPath: /opt/data/assets
+              name: data-assets
+          env:
+            - name: PENPOT_FLAGS
+#              value: "disable-registration disable-login-with-password disable-email-verification disable-smtp disable-prepl-server disable-secure-session-cookies"
+              value: "enable-registration enable-login-with-password disable-email-verification disable-smtp enable-prepl-server enable-secure-session-cookies"
+#              value: "enable-registration enable-login-with-password"
+            - name: PENPOT_EXPORTER_URI
+              value: "http://penpot-exporter:6061"
+            - name: PENPOT_BACKEND_URI
+              value: "http://penpot-backend:6060"
+      volumes:
+        - name: data-assets
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/penpot/data/assets

@@ -16,26 +16,26 @@ spec:
       labels:
         app: nocodb
     spec:
-      containers:
-      - name: postgres
-        image: postgres
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name: app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
-        env:
-          - name: POSTGRES_DB
-            value: nocode
-          - name: POSTGRES_PASSWORD
-            value: postgres
-          - name: POSTGRES_USER
-            value: postgres  
-        resources:
-          requests:
-            cpu: 250m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 256Mi
+        securityContext:
+          runAsUser: 0
+      containers:
       - name: nocodb
-        image: nocodb/nocodb:latest
+        image: docker.io/aboveos/nocodb-nocodb:latest
         imagePullPolicy: IfNotPresent
         resources:
           requests:
@@ -48,23 +48,19 @@ spec:
         - containerPort: 8080
         env:
           - name: NC_DB
-            value: pg://localhost:5432?u=postgres&p=postgres&d=nocode
-
+            value: "pg://{{ .Values.postgres.host }}:{{ .Values.postgres.port }}?u={{ .Values.postgres.username }}&p={{ .Values.postgres.password }}&d={{ .Values.postgres.databases.nocodb }}"
         volumeMounts:
-        - name: postgredb
-          mountPath: /var/lib/postgresql/data
         - name: nc-data
           mountPath: /usr/app/data
-  
       volumes:
-      - name: postgredb
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData}}/nocodb/postgredb
       - name: nc-data
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appData}}/nocodb/nc-data
+      - name: app-data-root
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData}}/nocodb
     
 
 ---
