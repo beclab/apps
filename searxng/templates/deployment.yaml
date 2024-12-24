@@ -178,7 +178,7 @@ data:
     #
     outgoing:
       # default timeout in seconds, can be override by engine
-      request_timeout: 3.0
+      request_timeout: 5.0
       # the maximum timeout in seconds
       # max_request_timeout: 10.0
       # suffix of searx_useragent, could contain information like an email address
@@ -428,12 +428,10 @@ data:
       - name: bilibili
         engine: bilibili
         shortcut: bil
-        disabled: true
 
       - name: bing
         engine: bing
         shortcut: bi
-        disabled: true
 
       - name: bing images
         engine: bing_images
@@ -1001,7 +999,6 @@ data:
         engine: imdb
         shortcut: imdb
         timeout: 6.0
-        disabled: true
 
       - name: imgur
         engine: imgur
@@ -2015,7 +2012,6 @@ data:
         engine: wolframalpha_noapi
         timeout: 6.0
         categories: general
-        disabled: true
 
       - name: dictzone
         engine: dictzone
@@ -2473,10 +2469,27 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        image: docker.io/searxng/searxng:latest
+        image: docker.io/aboveos/searxng-searxng:latest
         name: searxng
         ports:
         - containerPort: 8080
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
         env:
         - name: SEARXNG_BASE_URL
           value: "https://{{ $searxngDomain }}"
@@ -2496,10 +2509,6 @@ spec:
           subPath: settings.yml
       restartPolicy: Always
       volumes:
-      - hostPath:
-          path: '{{ .Values.userspace.appCache }}/searxng'
-          type: DirectoryOrCreate
-        name: appcache
       - name: config
         configMap:
           name: searxng-config
