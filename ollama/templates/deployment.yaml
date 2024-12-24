@@ -11,7 +11,8 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: ollama
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -19,6 +20,23 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: ollama
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name:  data
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -27,17 +45,36 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        image: ollama/ollama:0.2.5
+        - name: GGML_CUDA_DISABLE_GRAPHS
+          value: "1"
+        image: docker.io/aboveos/ollama-ollama:0.5.2
         name: ollama
         ports:
         - containerPort: 11434
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 11434
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 11434
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
         resources:
           limits:
             cpu: "4"
-            memory: 16000Mi
+            memory: 16Gi
           requests:
             cpu: 50m
-            memory: 4000Mi
+            memory: 4Gi
         volumeMounts:
         - mountPath: "/root/.ollama"
           name: data
