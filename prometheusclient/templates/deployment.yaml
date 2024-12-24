@@ -1,0 +1,176 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: prometheus-frontend
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: prometheus-frontend
+    spec:
+      containers:
+        - env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          image: nginx:stable-alpine
+          name: prometheus-frontend
+          command:
+            - /bin/sh
+            - -c
+            - |
+              rm /etc/nginx/conf.d/default.conf
+              nginx -g 'daemon off;'
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: prometheus-frontend-nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: prometheus-frontend-nginx-config
+              mountPath: /etc/nginx/conf.d/prometheus.conf
+              subPath: prometheus.conf
+      restartPolicy: Always
+      volumes:
+        - name: prometheus-frontend-nginx-config
+          configMap:
+            name: prometheus-frontend-nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+              - key: prometheus.conf
+                path: prometheus.conf
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: "9090"
+      port: 9090
+      targetPort: 9090
+  selector:
+    app: prometheus-frontend
+
+
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_prometheus
+  deployment: prometheus
+  description: prometheus legacy api
+  endpoint: prometheus-k8s.kubesphere-monitoring-system:9090
+  group: api.prometheus
+  kind: provider
+  namespace: kubesphere-monitoring-system
+  version: v2
+  opApis:
+    - name: All
+      uri: /
+status:
+  state: active
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: prometheus-frontend-nginx-config
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kubesphere.io/creator: bytetrade.io
+data:
+  nginx.conf: |-
+    user nginx;
+    worker_processes 2;
+    worker_rlimit_nofile 65535;
+    worker_shutdown_timeout 240s;
+
+    error_log   /var/log/nginx/error.log notice;
+    pid         /var/run/nginx.pid;
+
+    events {
+        multi_accept        on;
+        worker_connections 16384;
+        use epoll;
+    }
+
+    http {
+        aio                 threads;
+        aio_write           on;
+        tcp_nopush          on;
+        tcp_nodelay         on;
+        log_subrequest      on;
+        reset_timedout_connection on;
+        keepalive_timeout  75s;
+        keepalive_requests 100;
+        client_body_temp_path           /tmp/client-body;
+        fastcgi_temp_path               /tmp/fastcgi-temp;
+        proxy_temp_path                 /tmp/proxy-temp;
+        client_max_body_size            1g;
+        client_header_buffer_size       1k;
+        client_header_timeout           60s;
+        large_client_header_buffers     4 8k;
+        client_body_buffer_size         8k;
+        client_body_timeout             60s;
+        types_hash_max_size             2048;
+        server_names_hash_max_size      4096;
+        server_names_hash_bucket_size   1024;
+        map_hash_bucket_size            64;
+        proxy_headers_hash_max_size     512;
+        proxy_headers_hash_bucket_size  64;
+        variables_hash_bucket_size      256;
+        variables_hash_max_size         2048;
+        underscores_in_headers          off;
+        ignore_invalid_headers          on;
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+        proxy_ssl_session_reuse on;
+
+        sendfile        on;
+        resolver_timeout        30s;
+        send_timeout            60s;
+
+        include /etc/nginx/conf.d/*.conf;
+    }
+  prometheus.conf: |
+    server {
+      listen 9090;
+      location / {
+        proxy_pass http://prometheus-k8s.kubesphere-monitoring-system:9090;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host "prometheus-k8s.kubesphere-monitoring-system:9090";
+      }
+    }
