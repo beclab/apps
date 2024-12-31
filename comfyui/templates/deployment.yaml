@@ -19,19 +19,120 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: comfyui
     spec:
+      initContainers:
+      - name: cleanup-folders
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - >
+            cp /volume-script/cleanup_folders.sh /tmp/cleanup_folders.sh;
+            chmod +x /tmp/cleanup_folders.sh; sh /tmp/cleanup_folders.sh
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: volume-script
+            mountPath: /volume-script
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: Always
+        securityContext:
+          runAsUser: 0
+      - name: installcomfyui
+        image: 'docker.io/aboveos/kldtks-comfyui:v0.3.9-t2'
+        command:
+          - sh
+          - '-c'
+          - >-
+            if [ ! -d /root/ComfyUI ]; then chmod u+x
+            /runner-scripts/download.sh; /runner-scripts/download.sh; fi
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: upversion
+        image: 'docker.io/aboveos/kldtks-comfyui:v0.3.9-t2'
+        command:
+          - sh
+          - '-c'
+          - >-
+              chmod +x /runner-scripts/up-version-cp.sh; sh
+              /runner-scripts/up-version-cp.sh; rsync -av --update 
+              /runner-scripts/ /root/runner-scripts/;
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /root
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: modellibckp
+            mountPath: /root/ComfyUI/models/checkpoints
+          - name: modelliblora
+            mountPath: /root/ComfyUI/models/loras
+          - name: modellibvae
+            mountPath: /root/ComfyUI/models/vae
+          - name: modellibhypernetworks
+            mountPath: /root/ComfyUI/models/hypernetworks
+          - name: modellibembeddings
+            mountPath: /root/ComfyUI/models/embeddings
+          - name: modellibclip
+            mountPath: /root/ComfyUI/models/clip
+          - name: modellibclipvision
+            mountPath: /root/ComfyUI/models/clip_vision
+          - name: modellibcontrolnet
+            mountPath: /root/ComfyUI/models/controlnet
+          - name: modellibinpaint
+            mountPath: /root/ComfyUI/models/inpaint
+          - name: modellibupscale
+            mountPath: /root/ComfyUI/models/upscale_models
+          - name: modellibipadapter
+            mountPath: /root/ComfyUI/models/ipadapter
+          - name: modellibunet
+            mountPath: /root/ComfyUI/models/unet
+          - name: modellibstyle
+            mountPath: /root/ComfyUI/models/style_models
+          - name: modellibfacerestore
+            mountPath: /root/ComfyUI/models/facerestore_models
+          - name: output
+            mountPath: /root/ComfyUI/output
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: Always
+        securityContext:
+          runAsUser: 0
       containers:
         - env:
             - name: PGID
-              value: "0"
+              value: "1000"
             - name: PUID
-              value: "0"
+              value: "1000"
             - name: TZ
               value: Etc/UTC
             - name: CLI_ARGS
-              value: ' --front-end-version Comfy-Org/ComfyUI_frontend@latest'
+              value: '--normalvram --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@latest'
           securityContext:
-            runAsUser: 0
-          image: "docker.io/aboveos/kldtks-comfyui-newui:build6"
+            runAsUser: 1000
+          image: "docker.io/aboveos/kldtks-comfyui:v0.3.9-t2"
           name: comfyui
           ports:
             - containerPort: 8188
@@ -99,6 +200,8 @@ spec:
               mountPath: /root/ComfyUI/models/ipadapter
             - name: modellibunet
               mountPath: /root/ComfyUI/models/unet
+            - name: modellibstyle
+              mountPath: /root/ComfyUI/models/style_models
             - name: modellibfacerestore
               mountPath: /root/ComfyUI/models/facerestore_models
             - name: output
@@ -106,6 +209,13 @@ spec:
           imagePullPolicy: IfNotPresent
       restartPolicy: Always
       volumes:
+        - name: script
+          configMap:
+            name: script
+            defaultMode: 438
+            items:
+            - key: cleanup_folders.sh
+              path: cleanup_folders.sh
         - name: output
           hostPath:
             type: DirectoryOrCreate
@@ -161,6 +271,10 @@ spec:
         - name: modellibunet
           hostPath:
             path: {{ .Values.sharedlib }}/ai/model/unet
+            type: DirectoryOrCreate
+        - name: modellibstyle
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/style_models
             type: DirectoryOrCreate
         - name: modellibfacerestore
           hostPath:
