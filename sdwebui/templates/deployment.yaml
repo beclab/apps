@@ -30,23 +30,53 @@ spec:
             - name: sddata
               mountPath: /data
           imagePullPolicy: IfNotPresent
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-cache-root
+          resources: {}
+          volumeMounts:
+            - name:  sddata
+              mountPath: /app-cache-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
       - name: sdwebui
-        image: docker.io/aboveos/kldtks-sdwebui-preinstalled:v1.9.4-beta5-cuda-11-8
+        image: docker.io/aboveos/kldtks-sdwebui-base:v1.10.1-cn-beta12
         livenessProbe:
+          httpGet:
+            path: /info
+            port: 7860
+            scheme: HTTP
+          initialDelaySeconds: 600
+          timeoutSeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
           httpGet:
             path: /
             port: 7860
             scheme: HTTP
-          initialDelaySeconds: 30
-          timeoutSeconds: 60
-          periodSeconds: 60
+          initialDelaySeconds: 10
+          timeoutSeconds: 10
+          periodSeconds: 20
           successThreshold: 1
-          failureThreshold: 10
+          failureThreshold: 15
         startupProbe:
-          tcpSocket:
-            port: 7860
-          timeoutSeconds: 5
+          exec:
+            command:
+              - /bin/sh
+              - '-c'
+              - pgrep pt_main_thread > /dev/null 2>&1 || exit 1
+          initialDelaySeconds: 5
+          timeoutSeconds: 2
           periodSeconds: 10
           successThreshold: 1
           failureThreshold: 30
@@ -62,7 +92,7 @@ spec:
         - containerPort: 7860
         env:
         - name: CLI_ARGS
-          value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue"
+          value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers"
         volumeMounts:
         - mountPath: /data
           name: sddata
@@ -94,6 +124,8 @@ spec:
           mountPath: /data/models/hypernetworks
         - name: extensions
           mountPath: /data/config/auto/extensions
+        - name: output
+          mountPath: /output
         imagePullPolicy: IfNotPresent
       volumes:
       - name: sddata
@@ -156,6 +188,12 @@ spec:
         hostPath:
           path: {{ .Values.sharedlib }}/ai/sd/extensions
           type: DirectoryOrCreate
+      - name: output
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/output/sdwebui
+          type: DirectoryOrCreate  
+  strategy:
+    type: Recreate
 ---
 apiVersion: v1
 kind: Service

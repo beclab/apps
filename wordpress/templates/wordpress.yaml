@@ -103,25 +103,6 @@ data:
     socket=/opt/bitnami/mariadb/tmp/mysql.sock
     pid-file=/opt/bitnami/mariadb/tmp/mysqld.pid
 ---
-# Source: wordpress/templates/pvc.yaml
-kind: PersistentVolumeClaim
-apiVersion: v1
-metadata:
-  name: wordpress
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/instance: wordpress
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: wordpress
-    app.kubernetes.io/version: 6.4.2
-    helm.sh/chart: wordpress-19.1.0
-spec:
-  accessModes:
-    - "ReadWriteOnce"
-  resources:
-    requests:
-      storage: "10Gi"
----
 # Source: wordpress/charts/mariadb/templates/primary/svc.yaml
 apiVersion: v1
 kind: Service
@@ -228,13 +209,39 @@ spec:
                 topologyKey: kubernetes.io/hostname
               weight: 1
         nodeAffinity:
-          
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: node-role.kubernetes.io/master
+                      operator: Exists
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
         fsGroupChangePolicy: Always
         supplementalGroups: []
         sysctls: []
       serviceAccountName: wordpress
+
+      initContainers:
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-data-root
+          resources: {}
+          volumeMounts:
+            - name:  wordpress-data
+              mountPath: /app-data-root
+            - name: wordpress-data
+              mountPath: /bitnami/wordpress
+              subPath: wordpress
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
       containers:
         - name: wordpress
           image: docker.io/aboveos/bitnami-wordpress:6.4.2-debian-11-r14
@@ -247,11 +254,15 @@ spec:
             privileged: false
             readOnlyRootFilesystem: false
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
             seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
           env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
             - name: BITNAMI_DEBUG
               value: "false"
             - name: ALLOW_EMPTY_PASSWORD
@@ -345,8 +356,9 @@ spec:
               subPath: wordpress
       volumes:
         - name: wordpress-data
-          persistentVolumeClaim:
-            claimName: wordpress
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache}}/wordpress
 ---
 # Source: wordpress/charts/mariadb/templates/primary/statefulset.yaml
 apiVersion: apps/v1
@@ -402,7 +414,7 @@ spec:
         nodeAffinity:
           
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
       containers:
         - name: mariadb
           image: docker.io/aboveos/bitnami-mariadb:11.2.2-debian-11-r1
@@ -414,7 +426,7 @@ spec:
               - ALL
             privileged: false
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
             seccompProfile:
               type: RuntimeDefault
           env:

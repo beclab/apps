@@ -4,14 +4,14 @@ Password: password
 Please change username and password as soon as possible.
 
 #### Sync Setup Guide
-1. Install Obsidian LiveSync on Terminus and Obsidian Client on you computer or cellphone.
+1. Install Obsidian LiveSync on Olares and Obsidian Client on you computer or cellphone.
 
 2. Install and Enable Sync Plugin on Primary Device
     * Open Obsidian Client, in Vault-> Settings-> Community Plugins-> Turn on Community Plugins-> Browse, install "Self-hosted LiveSync".
     * Enable this plugin at Settings-> Community Plugins
 
 3. Setup Remote Database.
-    * Login to Obsidian LiveSync with default credentials, and get the app url (e.g. https://8591294e.YOUR_TERMINUS_NAME.snowinning.com) and configure information.
+    * Login to Obsidian LiveSync with default credentials, and get the app url (e.g. https://8591294e.YOUR_OLARES_NAME.olares.com) and configure information.
     * Set the configurations at Self-hosted LiveSync-> Remote Database configuration.
     * The database name must consist of lowercase alphabetic characters.
 
