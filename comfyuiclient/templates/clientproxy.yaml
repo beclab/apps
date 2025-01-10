@@ -21,6 +21,7 @@ data:
 
         location / {
             proxy_pass http://comfyui.comfyui-{{ .Values.admin }}:8188;
+            add_header X-Frame-Options "";
         }
       }
 
@@ -81,16 +82,19 @@ spec:
             periodSeconds: 60
             successThreshold: 1
             failureThreshold: 10
-          # readinessProbe:
-          #   httpGet:
-          #     path: /
-          #     host: sdwebui.sdwebui-{{ .Values.admin }}
-          #     port: 8188
-          #     scheme: HTTP
-          #   initialDelaySeconds: 10
-          #   periodSeconds: 5
-          #   successThreshold: 1
-          #   failureThreshold: 10
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                http_code=$(curl -s -o /dev/null -w "%{http_code}" http://comfyui.comfyui-{{ .Values.admin }}:8188)
+                [ $http_code -ge 200 ] && [ $http_code -lt 300 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
           resources:
             limits:
               cpu: 100m
