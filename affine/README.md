@@ -8,6 +8,6 @@ To ensure data security, sign in to your self-hosted AFFiNE Cloud account by fol
 Switch to the Cloud sync Workspace
    ![Sync](https://app.affine.pro/api/workspaces/055f9c4b-497a-43ec-a1c9-29d5baf184b9/blobs/BhLmxdhVsMGrV211k6DA9mwyZSO3z8HTnLx_fVoBIEw=)
 
-In cloud workspace, you should be able to synchronize your docs between your local client and Terminus.
+In cloud workspace, you should be able to synchronize your docs between your local client and Olares.
 
 **Note**: At present, team collaboration in the cloud workspace is not yet supported on Self-hosted AFFiNE.
