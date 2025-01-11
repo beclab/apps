@@ -84,6 +84,21 @@ data:
         proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
+    
+      location /chat {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
+    
+      location /completion {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
+    
+      location /workflow {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
 
       location /console/api/login {
         # Check if user has logged in~
@@ -115,7 +130,7 @@ data:
 
       location /api {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
         proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
@@ -287,7 +302,7 @@ data:
         keepalive_timeout  65;
 
         #gzip  on;
-        client_max_body_size 15M;
+        client_max_body_size 200M;
 
         include /etc/nginx/conf.d/*.conf;
     }
@@ -480,7 +495,7 @@ spec:
       # terminationGracePeriodSeconds: 0
       containers:
         - name: api
-          image: beclab/dify-api:v0.0.6
+          image: beclab/dify-api:v0.0.7
           imagePullPolicy: IfNotPresent
           ports:
             - name: api-port
@@ -535,6 +550,8 @@ spec:
             # When enabled, migrations will be executed prior to application startup and the application will start after the migrations have completed.
             - name: MIGRATION_ENABLED
               value: 'true'
+            - name: NUMEXPR_MAX_THREADS
+              value: '4'
             # The configurations of postgres database connection.
             # It is consistent with the configuration in the 'db' service below.
             - name: DB_USERNAME
@@ -547,12 +564,28 @@ spec:
               value: '5432'
             - name: DB_DATABASE
               value: user_space_{{ .Values.bfl.username }}_difyfusion
+            - name: DB_OPTIONS
+              value: "-c connect_timeout=10000"
             - name: SQLALCHEMY_POOL_SIZE
-              value: '30'
+              value: '20'
+            - name: SQLALCHEMY_MAX_OVERFLOW
+              value: '5'
             - name: SQLALCHEMY_POOL_RECYCLE
-              value: '3600'
+              value: '14400'
             - name: SQLALCHEMY_ECHO
               value: 'false'
+            - name: SQLALCHEMY_POOL_PRE_PING
+              value: 'true'
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: '20'
+            - name: POSTGRES_SHARED_BUFFERS
+              value: '128MB'
+            - name: POSTGRES_WORK_MEM
+              value: '4MB'
+            - name: POSTGRES_MAINTENANCE_WORK_MEM
+              value: '64MB'
+            - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+              value: '4096MB'
             # The configurations of redis connection.
             # It is consistent with the configuration in the 'redis' service below.
             - name: REDIS_HOST
@@ -660,6 +693,16 @@ spec:
               value: ''
             - name: RESEND_API_URL
               value: https://api.resend.com
+            - name: UPLOAD_FILE_SIZE_LIMIT
+              value: '30'
+            - name: UPLOAD_FILE_BATCH_LIMIT
+              value: '10'
+            - name: UPLOAD_IMAGE_FILE_SIZE_LIMIT
+              value: '20'
+            - name: UPLOAD_VIDEO_FILE_SIZE_LIMIT
+              value: '200'
+            - name: UPLOAD_AUDIO_FILE_SIZE_LIMIT
+              value: '100'
             # The DSN for Sentry error reporting. If not set, Sentry error reporting will be disabled.
             - name: SENTRY_DSN
               value: ''
@@ -700,14 +743,14 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 1Gi
           volumeMounts:
             # Mount the storage directory to the container, for storing user files.
             - name: api-vol
               mountPath: /app/api/storage
 
         - name: worker
-          image: beclab/dify-api:v0.0.6
+          image: beclab/dify-api:v0.0.7
           imagePullPolicy: IfNotPresent
           env:
             # Startup mode, 'worker' starts the Celery worker for processing the queue.
@@ -724,6 +767,8 @@ spec:
             # same as the API service
             - name: SECRET_KEY
               value: sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U
+            - name: NUMEXPR_MAX_THREADS
+              value: '4'
             # The configurations of postgres database connection.
             # It is consistent with the configuration in the 'db' service below.
             - name: DB_USERNAME
@@ -736,12 +781,28 @@ spec:
               value: '5432'
             - name: DB_DATABASE
               value: user_space_{{ .Values.bfl.username }}_difyfusion
+            - name: DB_OPTIONS
+              value: "-c connect_timeout=10000"
             - name: SQLALCHEMY_POOL_SIZE
-              value: '30'
+              value: '4'
+            - name: SQLALCHEMY_MAX_OVERFLOW
+              value: '1'
             - name: SQLALCHEMY_POOL_RECYCLE
-              value: '3600'
+              value: '14400'
             - name: SQLALCHEMY_ECHO
               value: 'false'
+            - name: SQLALCHEMY_POOL_PRE_PING
+              value: 'true'
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: '4'
+            - name: POSTGRES_SHARED_BUFFERS
+              value: '128MB'
+            - name: POSTGRES_WORK_MEM
+              value: '4MB'
+            - name: POSTGRES_MAINTENANCE_WORK_MEM
+              value: '64MB'
+            - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+              value: '4096MB'
             # The configurations of redis cache connection.
             - name: REDIS_HOST
               value: localhost
@@ -837,6 +898,16 @@ spec:
               value: difyai123456
             - name: RELYT_DATABASE
               value: postgres
+            - name: UPLOAD_FILE_SIZE_LIMIT
+              value: '30'
+            - name: UPLOAD_FILE_BATCH_LIMIT
+              value: '10'
+            - name: UPLOAD_IMAGE_FILE_SIZE_LIMIT
+              value: '20'
+            - name: UPLOAD_VIDEO_FILE_SIZE_LIMIT
+              value: '200'
+            - name: UPLOAD_AUDIO_FILE_SIZE_LIMIT
+              value: '100'
             - name: HTTP_PROXY
               value: http://127.0.0.1:3128
             - name: HTTPS_PROXY
@@ -847,14 +918,14 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 1Gi
           volumeMounts:
             # Mount the storage directory to the container, for storing user files.
             - name: worker-vol
               mountPath: /app/api/storage
 
         - name: web
-          image: beclab/dify-web:v0.0.6
+          image: beclab/dify-web:v0.0.7
           imagePullPolicy: IfNotPresent
           ports:
             - name: web-port
@@ -889,7 +960,7 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 200Mi
         - name: weaviate
           image: docker.io/aboveos/semitechnologies-weaviate:1.19.0
           imagePullPolicy: IfNotPresent
@@ -954,7 +1025,7 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 50Mi
 
         - name: redis
           image: docker.io/aboveos/redis:6.2.13-alpine3.18
@@ -979,7 +1050,7 @@ spec:
         - name: dify-sandbox
           image: 'langgenius/dify-sandbox:0.2.10'
           ports:
-            - containerPort: 8195  # 或你需要的端口
+            - containerPort: 8194  # 或你需要的端口
           env:
             - name: API_KEY
               value: dify-sandbox
@@ -994,14 +1065,14 @@ spec:
             - name: HTTPS_PROXY
               value: http://127.0.0.1:3128
             - name: SANDBOX_PORT
-              value: '8195'
+              value: '8194'
           resources:
             limits:
               cpu: 1000m
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 500Mi
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -1014,12 +1085,12 @@ spec:
           image: ubuntu/squid:latest
 #          restartPolicy: Always  # 在 K8S 中，restartPolicy 通常在 Pod 级别设置，这里仅示意为 Always
           resources:
-            requests:
-              memory: "256Mi"  # 设置内存请求，例如 256 MiB
-              cpu: "500m"     # 设置 CPU 请求，例如 500 milliCPUs
             limits:
-              memory: "512Mi"  # 设置内存限制，例如 512 MiB
-              cpu: "1"        # 设置 CPU 限制，例如 1 CPU
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 50m
+              memory: 100Mi
           ports:
             - containerPort: 3128  # 或你需要的端口
           volumeMounts:
@@ -1046,7 +1117,17 @@ spec:
             - name: SANDBOX_HOST
               value: '127.0.0.1'
             - name: SANDBOX_PORT
-              value: '8195'
+              value: '8194'
+            - name: SSRF_DEFAULT_MAX_RETRIES
+              value: '3'
+            - name: SSRF_DEFAULT_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_CONNECT_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_READ_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_WRITE_TIME_OUT
+              value: '5'
 #          networks:
 #            - name: ssrf_proxy_network  # 在 K8S 中，网络通常在 Pod 级别通过 network policies 或在部署时指定
 #            - name: default  # 默认网络通常自动应用，如果已在 Pod 级别指定可省略
