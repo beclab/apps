@@ -6,7 +6,7 @@ This algorithm is part of the broader R4 family, which is inspired by Obi-Wan's 
 
 #### KEY FEATURES
 **Security and Privacy First** <br> 
-This workflow requires an internet connection only for installation and upgrades. It operates in offline sandbox on your local Terminus Edge, with no data sent to third-party servers. Your personal data is encrypted and stored locally.
+This workflow requires an internet connection only for installation and upgrades. It operates in offline sandbox on your local Olares Edge, with no data sent to third-party servers. Your personal data is encrypted and stored locally.
 
 **Personalized Content Curation**<br>
 The recommendation algorithm adapts to your interactions, such as reading, liking, and bookmarking, to create a dynamic user profile. It automatically updates recommendations based on changes in your behavior and global news trends.
@@ -19,9 +19,9 @@ This workflow employs a classical recommendation process to achieve better resul
 
 #### WORKFLOW OVERVIEW
 
-This recommendation workflow is developed under the Terminus Recommend Protocol, which is designed with privacy protection in mind.
+This recommendation workflow is developed under the Olares Recommend Protocol, which is designed with privacy protection in mind.
 
-Upon installing this recommendation from the Terminus Market, all processes run in offline sandboxs. As the data first syncs in an unfiltered package, then gets filtered and sorted on your local Terminus edge, the content provider will not be uninformed about your interests. The recommended results are stored on you loacl Terminus Edge, and can be accessed via Wise or other compatible reading apps. This design ensures the maximum protection of your privacy. This recommendation algorithm comprises 2 types of workflows.
+Upon installing this recommendation from the Olares Market, all processes run in offline sandboxs. As the data first syncs in an unfiltered package, then gets filtered and sorted on your local Olares edge, the content provider will not be uninformed about your interests. The recommended results are stored on you loacl Olares Edge, and can be accessed via Wise or other compatible reading apps. This design ensures the maximum protection of your privacy. This recommendation algorithm comprises 2 types of workflows.
 
 **Recommendation Workflows:**
 - Executes every 10 minutes, provides you the most recent news.
