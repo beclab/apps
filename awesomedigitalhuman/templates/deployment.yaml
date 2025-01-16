@@ -1,0 +1,201 @@
+{{- $ipfsDomainENV := split  ","  .Values.domain.awesomedigitalhuman -}}
+{{- $serverDomain := index $ipfsDomainENV "_0" -}}
+
+{{- $parts := split "." $serverDomain }}
+
+{{- $subdomain := index $parts "_0" }}
+{{- $subdomain2 := split  $subdomain  .Values.domain.awesomedigitalhuman -}}
+
+{{- $domain2 := index $subdomain2 "_1" }}
+
+{{- $newServerDomain := printf "%s.local%s" $subdomain $domain2 }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: awesomedigitalhuman
+  name: awesomedigitalhuman
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: awesomedigitalhuman
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: awesomedigitalhuman
+    spec:
+      initContainers:
+      - name: init-server-config
+        image: 'docker.io/aboveos/busybox:latest'
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            if [ -z "$(ls -A /workspace/configs)" ]; then
+              mkdir -p /workspace/configs/agents
+              mkdir -p /workspace/configs/engines/asr
+              mkdir -p /workspace/configs/engines/llm
+              mkdir -p /workspace/configs/engines/tts
+
+              cp /workspace/configs-template/agents-difyAgent.yaml /workspace/configs/agents/difyAgent.yaml
+              cp /workspace/configs-template/agents-fastgptAgent.yaml /workspace/configs/agents/fastgptAgent.yaml
+              cp /workspace/configs-template/agents-olaresAgent.yaml /workspace/configs/agents/olaresAgent.yaml
+              cp /workspace/configs-template/agents-openaiAgent.yaml /workspace/configs/agents/openaiAgent.yaml
+              cp /workspace/configs-template/agents-repeaterAgent.yaml /workspace/configs/agents/repeaterAgent.yaml
+
+              cp /workspace/configs-template/asr-baiduAPI.yaml /workspace/configs/engines/asr/baiduAPI.yaml
+              cp /workspace/configs-template/asr-difyAPI.yaml /workspace/configs/engines/asr/difyAPI.yaml
+              cp /workspace/configs-template/asr-googleAPI.yaml /workspace/configs/engines/asr/googleAPI.yaml
+              cp /workspace/configs-template/asr-openaiAPI.yaml /workspace/configs/engines/asr/openaiAPI.yaml
+
+              cp /workspace/configs-template/llm-baiduAPI.yaml /workspace/configs/engines/llm/baiduAPI.yaml
+              cp /workspace/configs-template/llm-openaiAPI.yaml /workspace/configs/engines/llm/openaiAPI.yaml
+
+              cp /workspace/configs-template/tts-baiduAPI.yaml /workspace/configs/engines/tts/baiduAPI.yaml
+              cp /workspace/configs-template/tts-difyAPI.yaml /workspace/configs/engines/tts/difyAPI.yaml
+              cp /workspace/configs-template/tts-edgeAPI.yaml /workspace/configs/engines/tts/edgeAPI.yaml
+              cp /workspace/configs-template/tts-openaiAPI.yaml /workspace/configs/engines/tts/openaiAPI.yaml
+
+              cp /workspace/configs-template/config_all_in_dify.yaml /workspace/configs/config_all_in_dify.yaml
+              cp /workspace/configs-template/config_olares.yaml /workspace/configs/config_olares.yaml
+              cp /workspace/configs-template/config_template.yaml /workspace/configs/config_template.yaml
+            fi
+        volumeMounts:
+          - name: server
+            mountPath: /workspace/configs
+          - name: config-for-adh
+            mountPath: /workspace/configs-template
+        securityContext:
+          runAsUser: 0
+
+      - name: init-web-config
+        image: 'docker.io/aboveos/busybox:latest'
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            if [ ! -f /workspace/.env ]; then
+              echo 'NEXT_PUBLIC_ADH_SERVER_PROTOCOL="http"' >> /workspace/.env
+              echo 'NEXT_PUBLIC_ADH_SERVER_PORT="443"' >> /workspace/.env
+              echo 'NEXT_PUBLIC_ADH_SERVER_VERSION="v0"' >> /workspace/.env
+              echo 'NEXT_PUBLIC_ADH_SERVER_IP="{{ $newServerDomain }}"' >> /workspace/.env
+            fi
+        volumeMounts:
+          - name: web
+            mountPath: /workspace
+        securityContext:
+          runAsUser: 0
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: adh-web
+        image: "kldtks/adh-web:20250107-t1"
+        command:
+          - sh
+          - '-c'
+          - pnpm run dev;
+        ports:
+          - containerPort: 3000
+        volumeMounts:
+          - name: web
+            mountPath: /workspace/.env
+            subPath: .env
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+      - image: kldtks/adh-server:20250108-t5
+        name: awesomedigitalhuman
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 8000
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
+        ports:
+        - containerPort: 8000
+        env:
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /workspace/configs
+          name: server
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/awesomedigitalhuman'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/awesomedigitalhuman/server'
+          type: DirectoryOrCreate
+        name: server
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/awesomedigitalhuman/web'
+          type: DirectoryOrCreate
+        name: web
+      - name: config-for-adh
+        configMap:
+          name: config-for-adh
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: awesomedigitalhuman
+  name: awesomedigitalhuman
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8000"
+    port: 8000
+    targetPort: 8000
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: awesomedigitalhuman
+status:
+  loadBalancer: {}

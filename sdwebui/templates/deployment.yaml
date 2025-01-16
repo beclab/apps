@@ -18,7 +18,7 @@ spec:
     spec:
       initContainers:
         - name: initcache
-          image: 'docker.io/aboveos/busybox:latest'
+          image: 'aboveos/busybox:latest'
           command:
             - sh
             - '-c'
@@ -30,23 +30,69 @@ spec:
             - name: sddata
               mountPath: /data
           imagePullPolicy: IfNotPresent
+        - name: init-chmod-data
+          image: 'aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-cache-root
+          resources: {}
+          volumeMounts:
+            - name:  sddata
+              mountPath: /app-cache-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: update-chmod-data-ai
+          image: 'aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /ai
+          resources: {}
+          volumeMounts:
+            - name:  ai
+              mountPath: /ai
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
       - name: sdwebui
-        image: docker.io/aboveos/kldtks-sdwebui-base:v1.10.1-cn-beta12
+        image: aboveos/kldtks-sdwebui-base:v1.10.1-cn-beta12
         livenessProbe:
+          httpGet:
+            path: /info
+            port: 7860
+            scheme: HTTP
+          initialDelaySeconds: 600
+          timeoutSeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
           httpGet:
             path: /
             port: 7860
             scheme: HTTP
-          initialDelaySeconds: 30
-          timeoutSeconds: 60
-          periodSeconds: 60
+          initialDelaySeconds: 10
+          timeoutSeconds: 10
+          periodSeconds: 20
           successThreshold: 1
-          failureThreshold: 10
+          failureThreshold: 15
         startupProbe:
-          tcpSocket:
-            port: 7860
-          timeoutSeconds: 5
+          exec:
+            command:
+              - /bin/sh
+              - '-c'
+              - pgrep pt_main_thread > /dev/null 2>&1 || exit 1
+          initialDelaySeconds: 5
+          timeoutSeconds: 2
           periodSeconds: 10
           successThreshold: 1
           failureThreshold: 30
@@ -61,6 +107,8 @@ spec:
         ports:
         - containerPort: 7860
         env:
+        - name: HF_ENDPOINT
+          value: 'https://hf-mirror.com/'
         - name: CLI_ARGS
           value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers"
         volumeMounts:
@@ -102,6 +150,10 @@ spec:
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appCache}}/sdwebui
+      - name: ai
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai
       - name: modellibckp
         hostPath:
           type: DirectoryOrCreate
@@ -160,7 +212,7 @@ spec:
           type: DirectoryOrCreate
       - name: output
         hostPath:
-          path: {{ .Values.userspace.userData }}/Pictures/sdwebui
+          path: {{ .Values.sharedlib }}/ai/output/sdwebui
           type: DirectoryOrCreate  
   strategy:
     type: Recreate
