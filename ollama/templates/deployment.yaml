@@ -20,6 +20,23 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: ollama
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name:  data
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -28,7 +45,13 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        image: docker.io/aboveos/ollama-ollama:0.2.5
+        - name: GGML_CUDA_DISABLE_GRAPHS
+          value: "1"
+        - name: CUDA_INFO_FROM_OS
+          value: "{{ .Values.GPU.Cuda }}"
+        - name: GPU_TYPE_FROM_OS
+          value: "{{ .Values.GPU.Type }}"
+        image: docker.io/aboveos/ollama-ollama:0.5.2
         name: ollama
         ports:
         - containerPort: 11434
@@ -62,7 +85,7 @@ spec:
       restartPolicy: Always
       volumes:
       - hostPath:
-          path: '{{ .Values.userspace.appCache }}/ollama'
+          path: '{{ .Values.sharedlib }}/ai/ollama'
           type: DirectoryOrCreate
         name: data
 status: {}
@@ -104,3 +127,4 @@ spec:
     uri: /  
 status:
   state: active
+  
