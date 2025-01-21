@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-init-sql
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sql: |
+    CREATE DATABASE IF NOT EXISTS rag_flow;
+    USE rag_flow;
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: mysql
+        image: mysql:8.0.39
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          value: "infini_rag_flow"
+        - name: PGID
+          value: '1000'
+        - name: PUID
+          value: '1000'
+        ports:
+        - containerPort: 3306
+        args:
+          - '--init-file=/data/application/init.sql'
+          - '--max_connections=1000'
+          - '--character-set-server=utf8mb4'
+          - '--collation-server=utf8mb4_unicode_ci'
+          - '--default-authentication-plugin=mysql_native_password'
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        - name: init-sql
+          mountPath: /data/application/init.sql
+          subPath: init.sql
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+      volumes:
+      - name: init-sql
+        configMap:
+          name: mysql-init-sql
+          defaultMode: 438
+          items:
+          - key: init.sql
+            path: init.sql
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow/mysql'
+          type: DirectoryOrCreate
+        name: mysql-data
+      securityContext:
+        runAsUser: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - port: 3306
+    targetPort: 3306
+  selector:
+    app: mysql
