@@ -172,6 +172,10 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appData }}/ipfs/export
+        - name: app-data-root
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/ipfs
         - name: nginx-config
           configMap:
             name: nginx-config
@@ -204,7 +208,8 @@ spec:
         
       initContainers:
       - name: init-ipfs
-        image: ipfs/kubo:latest
+        image: docker.io/aboveos/ipfs-kubo:latest
+        imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 50m
@@ -239,7 +244,8 @@ spec:
               cp /data/cmd/init-cmd.sh /tmp/init-cmd.sh; chmod +x
               /tmp/init-cmd.sh; sh /tmp/init-cmd.sh
       - name: init-config
-        image: 'busybox:latest'
+        image: 'docker.io/aboveos/busybox:latest'
+        imagePullPolicy: IfNotPresent
         volumeMounts:
           - name: data
             mountPath: /data/ipfs
@@ -253,9 +259,26 @@ spec:
             - >-
               cp /data/cmd/init-config-cmd.sh /tmp/init-config-cmd.sh;
               chmod +x /tmp/init-config-cmd.sh; sh /tmp/init-config-cmd.sh
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name: app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - name: ipfs
-        image: ipfs/kubo:latest
+        image: docker.io/aboveos/ipfs-kubo:latest
+        imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 50m
@@ -284,13 +307,14 @@ spec:
           - name: init-config
             mountPath: /container-init.d
       - name: nginx
-        image: nginx:latest
+        image: docker.io/aboveos/nginx:latest
         volumeMounts:
         - name: nginx-config 
           mountPath: /etc/nginx/nginx.conf
           subPath: nginx.conf
         ports:
         - containerPort: 80
+        imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 10m
