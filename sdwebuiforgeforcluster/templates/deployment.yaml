@@ -1,0 +1,302 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sdwebuiforgeforcluster
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sdwebuiforgeforcluster
+  template:
+    metadata:
+      labels:
+        app: sdwebuiforgeforcluster
+    spec:
+      initContainers:
+        - name: init-app
+          image: kldtks/sdwebui-forge:250121-b4-fix-aio
+          command:
+            - sh
+            - '-c'
+            - |
+              rsync -av --update /stable-diffusion-webui/ /app/;
+              rsync -av --update /root/ /systemcache/
+          volumeMounts:
+            - name: app
+              mountPath: /app
+            - name: systemcache
+              mountPath: /systemcache
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: init-chmod-data
+          image: 'aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-cache-root
+          resources: {}
+          volumeMounts:
+            - name:  appcache
+              mountPath: /app-cache-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: update-chmod-data-ai
+          image: 'aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /ai
+          resources: {}
+          volumeMounts:
+            - name:  ai
+              mountPath: /ai
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+      - name: sdwebuiforgeforcluster
+        image: kldtks/sdwebui-forge:250121-b4-fix-aio
+        command:
+            - sh
+            - '-c'
+            - >-
+              chown -R 1000:1000 /stable-diffusion-webui;  python -u
+              /stable-diffusion-webui/webui.py --listen --port 7860 --xformers
+              --enable-insecure-extension-access --no-hashing --gradio-queue
+        livenessProbe:
+          httpGet:
+            path: /info
+            port: 7860
+            scheme: HTTP
+          initialDelaySeconds: 600
+          timeoutSeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 7860
+            scheme: HTTP
+          initialDelaySeconds: 10
+          timeoutSeconds: 30
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 5
+        startupProbe:
+          exec:
+            command:
+              - /bin/sh
+              - '-c'
+              - pgrep pt_main_thread > /dev/null 2>&1 || exit 1
+          initialDelaySeconds: 5
+          timeoutSeconds: 2
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
+        resources:
+          requests:
+            cpu: 500m
+            memory: 3Gi
+          limits:
+            cpu: 4000m
+            memory: 24Gi
+            nvidia.com/gpu: 1
+        ports:
+        - containerPort: 7860
+        - containerPort: 7861
+        - containerPort: 7862
+        - containerPort: 7863
+        - containerPort: 7864
+        - containerPort: 7865
+        env:
+        - name: PGID
+          value: '1000'
+        - name: PUID
+          value: '1000'
+        - name: HF_ENDPOINT
+          value: 'https://hf-mirror.com/'
+        - name: CLI_ARGS
+          value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers"
+        volumeMounts:
+        - name: systemcache
+          mountPath: /root
+        - name: app
+          mountPath: /stable-diffusion-webui
+        - name: modellibckp
+          mountPath: /stable-diffusion-webui/models/Stable-diffusion
+        - name: modelliblora
+          mountPath: /stable-diffusion-webui/models/Lora
+        - name: modellibvae
+          mountPath: /stable-diffusion-webui/models/VAE
+        - name: modellicontrolnet
+          mountPath: /stable-diffusion-webui/models/ControlNet
+        - name: modellibclip
+          mountPath: /stable-diffusion-webui/models/CLIP
+        - name: modellibclipvision
+          mountPath: /stable-diffusion-webui/models/clip_vision
+        - name: modellibinpaint
+          mountPath: /stable-diffusion-webui/models/Inpaint
+        - name: modellibupscale
+          mountPath: /stable-diffusion-webui/models/ESRGAN
+        - name: modellibipadapter
+          mountPath: /stable-diffusion-webui/models/ipadapter
+        - name: modellibunet
+          mountPath: /stable-diffusion-webui/models/unet
+        - name: modellibembeddings
+          mountPath: /stable-diffusion-webui/embeddings
+        - name: modellibhypernetworks
+          mountPath: /stable-diffusion-webui/models/hypernetworks
+        - name: extensions
+          mountPath: /stable-diffusion-webui/extensions
+        - name: output
+          mountPath: /stable-diffusion-webui/output
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: appcache
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/sd-webui-forge-for-cluster
+      - name: app
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/sd-webui-forge-for-cluster/app
+      - name: systemcache
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/sd-webui-forge-for-cluster/system-cache
+      - name: ai
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai
+      - name: modellibckp
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/main
+      - name: modelliblora
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/lora
+      - name: modellibvae
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/vae
+      - name: modellibclip
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/clip
+          type: DirectoryOrCreate
+      - name: modellibclipvision
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/clip_vision
+          type: DirectoryOrCreate
+      - name: modellicontrolnet
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/controlnet
+          type: DirectoryOrCreate
+      - name: modellibinpaint
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/inpaint
+          type: DirectoryOrCreate
+      - name: modellibupscale
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/upscale_models
+          type: DirectoryOrCreate
+      - name: modellibipadapter
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/ipadapter
+          type: DirectoryOrCreate
+      - name: modellibunet
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/model/unet
+          type: DirectoryOrCreate
+      - name: modellibembeddings
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/embeddings
+      - name: modellibhypernetworks
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+      - name: cacheforstartup
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/sd/cacheforstartup
+          type: DirectoryOrCreate
+      - name: extensions
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/sd/extensions
+          type: DirectoryOrCreate
+      - name: output
+        hostPath:
+          path: {{ .Values.sharedlib }}/ai/output/sd-webui-forge-for-cluster
+          type: DirectoryOrCreate  
+  strategy:
+    type: Recreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - name: '7860'
+      protocol: TCP
+      port: 7860
+      targetPort: 7860
+    - name: '7861'
+      protocol: TCP
+      port: 7861
+      targetPort: 7861
+    - name: '7862'
+      protocol: TCP
+      port: 7862
+      targetPort: 7862
+    - name: '7863'
+      protocol: TCP
+      port: 7863
+      targetPort: 7863
+    - name: '7864'
+      protocol: TCP
+      port: 7864
+      targetPort: 7864
+    - name: '7865'
+      protocol: TCP
+      port: 7865
+      targetPort: 7865
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_sdwebuiforgeforcluster
+  deployment: sdwebuiforgeforcluster
+  description: sdwebuiforgeforcluster legacy api
+  endpoint: sdwebuiforgeforcluster.{{ .Release.Namespace }}:7860
+  group: api.sdwebuiforgeforcluster
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /  
+status:
+  state: active
