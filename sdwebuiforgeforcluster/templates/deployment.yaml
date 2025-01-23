@@ -18,7 +18,7 @@ spec:
     spec:
       initContainers:
         - name: init-app
-          image: kldtks/sdwebui-forge:250121-b4-fix-aio
+          image: kldtks/sdwebui-forge:250123-b1-curl
           command:
             - sh
             - '-c'
@@ -69,7 +69,7 @@ spec:
             runAsUser: 0
       containers:
       - name: sdwebuiforgeforcluster
-        image: kldtks/sdwebui-forge:250121-b4-fix-aio
+        image: kldtks/sdwebui-forge:250123-b1-curl
         command:
             - sh
             - '-c'
@@ -78,23 +78,29 @@ spec:
               /stable-diffusion-webui/webui.py --listen --port 7860 --xformers
               --enable-insecure-extension-access --no-hashing --gradio-queue
         livenessProbe:
-          httpGet:
-            path: /info
-            port: 7860
-            scheme: HTTP
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
+              [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
           initialDelaySeconds: 600
-          timeoutSeconds: 2
-          periodSeconds: 10
+          timeoutSeconds: 60
+          periodSeconds: 120
           successThreshold: 1
-          failureThreshold: 3
+          failureThreshold: 10
         readinessProbe:
-          httpGet:
-            path: /
-            port: 7860
-            scheme: HTTP
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
+              [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
           initialDelaySeconds: 10
-          timeoutSeconds: 30
-          periodSeconds: 60
+          timeoutSeconds: 60
+          periodSeconds: 120
           successThreshold: 1
           failureThreshold: 5
         startupProbe:
