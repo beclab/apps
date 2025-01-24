@@ -17,12 +17,43 @@ spec:
         app: sdwebui
     spec:
       initContainers:
-        - name: initcache
-          image: 'aboveos/busybox:latest'
+        - name: init-app
+          image: kldtks/sdwebui:v1.10.1-curl
           command:
             - sh
             - '-c'
-            - 'if [ ! -d /data/config ]; then if [ "$(ls -A /cache)" ]; then cp -r /cache/.* /data/; fi fi'
+            - |
+              rsync -av --update /stable-diffusion-webui/ /app/;
+              rsync -av --update /root/ /systemcache/
+          volumeMounts:
+            - name: app
+              mountPath: /app
+            - name: systemcache
+              mountPath: /systemcache
+            - name: sdcache
+              mountPath: /root/.cache
+            - name: sdconfig
+              mountPath: /stable-diffusion-webui/config
+            - name: sdopenai
+              mountPath: /stable-diffusion-webui/openai
+            - name: modellibembeddings
+              mountPath: /stable-diffusion-webui/embeddings
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
+        - name: initcache
+          image: 'kldtks/sdwebui:v1.10.1-curl'
+          command:
+            - sh
+            - '-c'
+            - |
+              rsync -av --update /cache/.cache/ /data/systemcache/.cache/;
+              rsync -av --update /cache/config/ /data/app/config/;
+              rsync -av --update /cache/models/ /data/app/models/;
+              rsync -av --update /cache/openai/ /data/app/openai/;
           resources: {}
           volumeMounts:
             - name: cacheforstartup
@@ -30,6 +61,7 @@ spec:
             - name: sddata
               mountPath: /data
           imagePullPolicy: IfNotPresent
+
         - name: init-chmod-data
           image: 'aboveos/busybox:latest'
           command:
@@ -64,27 +96,47 @@ spec:
             runAsUser: 0
       containers:
       - name: sdwebui
-        image: aboveos/kldtks-sdwebui-base:v1.10.1-cn-beta12
+        securityContext:
+          runAsUser: 1000
+        image: kldtks/sdwebui:v1.10.1-curl
+        command:
+          - sh
+          - '-c'
+          - >-
+            pip config set global.index-url
+            https://pypi.tuna.tsinghua.edu.cn/simple; pip config set
+            global.extra-index-url "https://pypi.joinolares.cn/root/pypi/+simple/101903697-topsis-code/ https://mirrors.aliyun.com/pypi/simple
+            https://pypi.mirrors.ustc.edu.cn/simple
+            https://pypi.douban.com/simple";               
+            chown -R 1000:1000 /stable-diffusion-webui;  python -u
+            /stable-diffusion-webui/webui.py --listen --port 7860 --xformers
+            --allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers
         livenessProbe:
-          httpGet:
-            path: /info
-            port: 7860
-            scheme: HTTP
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
+              [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
           initialDelaySeconds: 600
-          timeoutSeconds: 2
-          periodSeconds: 10
+          timeoutSeconds: 60
+          periodSeconds: 120
           successThreshold: 1
-          failureThreshold: 3
+          failureThreshold: 10
         readinessProbe:
-          httpGet:
-            path: /
-            port: 7860
-            scheme: HTTP
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
+              [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
           initialDelaySeconds: 10
-          timeoutSeconds: 10
-          periodSeconds: 20
+          timeoutSeconds: 60
+          periodSeconds: 120
           successThreshold: 1
-          failureThreshold: 15
+          failureThreshold: 5
         startupProbe:
           exec:
             command:
@@ -111,45 +163,78 @@ spec:
           value: 'https://hf-mirror.com/'
         - name: CLI_ARGS
           value: "--allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers"
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: HOME
+          value: '/root'
         volumeMounts:
-        - mountPath: /data
-          name: sddata
-        - name: modellibckp
-          mountPath: /data/models/Stable-diffusion
-        - name: modelliblora
-          mountPath: /data/models/Lora
-        - name: modellibvae
-          mountPath: /data/models/VAE
-        - name: modellicontrolnet
-          mountPath: /data/models/ControlNet
-            
-        - name: modellibclip
-          mountPath: /data/models/CLIP
-        - name: modellibclipvision
-          mountPath: /data/models/clip_vision
-        - name: modellibinpaint
-          mountPath: /data/models/Inpaint
-        - name: modellibupscale
-          mountPath: /data/models/ESRGAN
-        - name: modellibipadapter
-          mountPath: /data/models/ipadapter
-        - name: modellibunet
-          mountPath: /data/models/unet
-
-        - name: modellibembeddings
-          mountPath: /data/embeddings
-        - name: modellibhypernetworks
-          mountPath: /data/models/hypernetworks
-        - name: extensions
-          mountPath: /data/config/auto/extensions
-        - name: output
-          mountPath: /output
+          - name: systemcache
+            mountPath: /root
+          - name: app
+            mountPath: /stable-diffusion-webui
+          - name: sdconfig
+            mountPath: /stable-diffusion-webui/config
+          - name: sdopenai
+            mountPath: /stable-diffusion-webui/openai
+          - name: modellibckp
+            mountPath: /stable-diffusion-webui/models/Stable-diffusion
+          - name: modelliblora
+            mountPath: /stable-diffusion-webui/models/Lora
+          - name: modellibvae
+            mountPath: /stable-diffusion-webui/models/VAE
+          - name: modellicontrolnet
+            mountPath: /stable-diffusion-webui/models/ControlNet
+          - name: modellibclip
+            mountPath: /stable-diffusion-webui/models/CLIP
+          - name: modellibclipvision
+            mountPath: /stable-diffusion-webui/models/clip_vision
+          - name: modellibinpaint
+            mountPath: /stable-diffusion-webui/models/Inpaint
+          - name: modellibupscale
+            mountPath: /stable-diffusion-webui/models/ESRGAN
+          - name: modellibipadapter
+            mountPath: /stable-diffusion-webui/models/ipadapter
+          - name: modellibunet
+            mountPath: /stable-diffusion-webui/models/unet
+          - name: modellibembeddings
+            mountPath: /stable-diffusion-webui/embeddings
+          - name: modellibhypernetworks
+            mountPath: /stable-diffusion-webui/models/hypernetworks
+          - name: extensions
+            mountPath: /stable-diffusion-webui/extensions
+          - name: output
+            mountPath: /stable-diffusion-webui/output
         imagePullPolicy: IfNotPresent
       volumes:
       - name: sddata
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appCache}}/sdwebui
+      - name: app
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/sdwebui/app
+      - name: systemcache
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/sdwebui/systemcache
+      - name: sdcache
+        hostPath:
+          path: >-
+            {{ .Values.userspace.appCache}}/sdwebui/.cache
+          type: DirectoryOrCreate
+      - name: sdconfig
+        hostPath:
+          path: >-
+            {{ .Values.userspace.appCache}}/sdwebui/config
+          type: DirectoryOrCreate
+      - name: sdopenai
+        hostPath:
+          path: >-
+            {{ .Values.userspace.appCache}}/sdwebui/openai
+          type: DirectoryOrCreate
       - name: ai
         hostPath:
           type: DirectoryOrCreate
