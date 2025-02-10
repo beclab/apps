@@ -6,6 +6,37 @@
 {{- $wordpressDomain := index $wordpressDomainENV "_0" -}}
 
 ---
+
+apiVersion: v1
+data:
+  nginx.conf: |
+      server {
+
+        listen 8080;
+        access_log /opt/bitnami/openresty/nginx/logs/access.log;
+        error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+        proxy_connect_timeout                          30s;
+        proxy_send_timeout                             60s;
+        proxy_read_timeout                             300s;
+        proxy_set_header      host                      $host;
+        proxy_set_header      x-forwarded-host          $http_host;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header upgrade $http_upgrade;
+        proxy_set_header connection "upgrade";
+
+        location / {
+            proxy_pass http://wordpressentrance:80;
+        }
+      }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+---
 kind: PersistentVolumeClaim
 apiVersion: v1
 metadata:
@@ -35,6 +66,20 @@ spec:
   selector:
     app: {{ .Release.Name }}-proxy
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpresspublic
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: wordpresspublic
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: {{ .Release.Name }}-proxy
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,25 +103,67 @@ spec:
         - name: db
           persistentVolumeClaim:
             claimName: wordpress-proxy
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
       containers:
+        - name: nginx
+          image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                http_code=$(curl -s -o /dev/null -w "%{http_code}" http://wordpressentrance:80)
+                [ $http_code -ge 200 ] && [ $http_code -lt 300 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
         - name: {{ .Release.Name }}-proxy
-          image: docker.io/aboveos/kldtks-wordpress-proxy:fix-domain-t9
+          image: kldtks/wordpress-proxy:fix-domain-t41
           resources:
             requests:
               cpu: 50m
               memory: 50Mi
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 2000m
+              memory: 1024Mi
           ports:
             - name: ext-port
               containerPort: 8001
               protocol: TCP
           env:
             - name: SERVER_PROXY_URL
-              value: 'https://{{$wordpressDomain}}'
+              value: 'http://wordpressentrance:80'
             - name: SERVER_PROXY_DOMAIN
-              value: '{{$wordpressDomain}}'
+              value: 'wordpressentrance'
             - name: THIS_DOMAIN
               value: '{{$wordpressproxyDomain}}'
             - name: PASSWORD
@@ -98,5 +185,5 @@ spec:
               cpu: 50m
               memory: 256Mi
             limits:
-              cpu: 1000m
+              cpu: 2000m
               memory: 1024Mi
