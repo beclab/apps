@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: memos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: memos
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: memos
+    spec:
+      containers:
+        - name: memos
+          image: docker.io/neosmemo/memos:0.24
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: MEMOS_MODE
+              value: "prod"
+            - name: MEMOS_PORT
+              value: "5230"
+            - name: MEMOS_DRIVER
+              value: "postgres"
+            - name: MEMOS_DSN
+              value: "user={{ .Values.postgres.username }} password={{ .Values.postgres.password }} dbname={{ .Values.postgres.databases.memosdb }} host={{ .Values.postgres.host }} sslmode=disable"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - name: http
+              containerPort: 5230
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /var/opt/memos
+              name: memos-data
+              subPath: memos
+      restartPolicy: Always
+      volumes:
+        - name: memos-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}/memos'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: memos
+spec:
+  ports:
+    - name: "5230"
+      port: 5230
+      targetPort: 5230
+  selector:
+    io.kompose.service: memos
+status:
+  loadBalancer: {}
