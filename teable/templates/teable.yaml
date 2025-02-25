@@ -1,0 +1,125 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: teable
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: teable
+  template:
+    metadata:
+      labels:
+        app: teable
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: teable
+          image: docker.io/teableio/teable:latest
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: teable
+                  key: app-password
+            - name: PRISMA_DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.teable }}?schema=public"
+            - name: BACKEND_CACHE_REDIS_URI
+              value: "redis://teable-redis:6379/0"
+          envFrom:
+            - configMapRef:
+                name: teable-config
+          resources:
+            requests:
+              cpu: 300m
+              memory: 300Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/.assets
+              name: teable-data
+              subPath: teable
+      volumes:
+        - name: teable-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/teable'
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teable-db-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: teable
+    component: db-migrate
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    spec:
+      containers:
+        - name: teable-db-migrate
+          image: docker.io/teableio/teable-db-migrate:latest
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: teable
+                  key: app-password
+            - name: PRISMA_DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.teable }}?schema=public"
+          resources:
+            requests:
+              cpu: 300m
+              memory: 200Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+      restartPolicy: Never
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: teable
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: teable
+spec:
+  ports:
+    - name: "http"
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    app: teable
+status:
+  loadBalancer: {}
