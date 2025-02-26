@@ -21,7 +21,11 @@ spec:
         io.kompose.service: stirlingpdf
     spec:
       containers:
-        - env:
+        - image: docker.io/stirlingtools/stirling-pdf:0.43.0-fat
+          name: stirlingpdf
+          ports:
+            - containerPort: 8080
+          env:
             - name: PGID
               value: "1000"
             - name: PUID
@@ -30,21 +34,9 @@ spec:
               value: Etc/UTC
             - name: DISPLAY
               value: ':0'
-            - name: DOCKER_ENABLE_SECURITY
-              value: 'false'
-            - name: SECURITY_ENABLELOGIN
-              value: 'false'
-            - name: SYSTEM_DEFAULTLOCALE
-              value: 'en-US'
-            - name: SYSTEM_MAXFILESIZE
-              value: '100'
-            - name: METRICS_ENABLED
-              value: 'true'
-            - name: SYSTEM_GOOGLEVISIBILITY
-              value: 'true'
-
-          image: docker.io/stirlingtools/stirling-pdf:0.42.0
-          name: stirlingpdf
+          envFrom:
+            - configMapRef:
+                name: stirlingpdf-config
           resources:
             requests:
               cpu: 250m
@@ -52,8 +44,6 @@ spec:
             limits:
               cpu: 1000m
               memory: 4Gi
-          ports:
-            - containerPort: 8080
           volumeMounts:
             - mountPath: /usr/share/tessdata
               name: training-data
@@ -65,7 +55,25 @@ spec:
               name: logs
             - mountPath: /pipeline/
               name: pipeline
-      restartPolicy: Always
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+
       volumes:
         - name: training-data
           hostPath:
@@ -87,23 +95,20 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: '{{ .Values.userspace.appData }}/StirlingPDF/pipeline'
+      restartPolicy: Always
 
-status: {}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: stirlingpdf
   name: stirlingpdf
   namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: stirlingpdf
 spec:
   ports:
-    - name: "8080"
+    - name: http
       port: 8080
       targetPort: 8080
   selector:
     io.kompose.service: stirlingpdf
-status:
-  loadBalancer: {}
