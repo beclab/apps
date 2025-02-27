@@ -13,6 +13,13 @@ data:
         proxy_read_timeout                             300s;
         proxy_set_header      host                      $host;
         proxy_set_header      x-forwarded-host          $http_host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+
+        proxy_set_header X-Original-Forwarded-For $http_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-BFL-USER {{ .Values.bfl.username}};
 
         proxy_http_version 1.1;
 
@@ -20,8 +27,11 @@ data:
         proxy_set_header connection "upgrade";
 
         location / {
+            resolver coredns.kube-system.svc.cluster.local;
             proxy_pass http://comfyui:8188;
             add_header X-Frame-Options "";
+            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream_tries 3;
         }
       }
 
@@ -61,7 +71,7 @@ spec:
               path: nginx.conf
       containers:
         - name: nginx
-          image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+          image: aboveos/bitnami-openresty:1.25.3-2
           ports:
             - containerPort: 8080
               protocol: TCP
