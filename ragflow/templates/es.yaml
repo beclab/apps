@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+        env:
+            - name: ELASTIC_PASSWORD
+              value: infini_rag_flow
+            - name: TZ
+              value: Asia/Shanghai
+            - name: network.host
+              value: 0.0.0.0
+            - name: http.port
+              value: '9200'
+            - name: node.name
+              value: es01
+            - name: bootstrap.memory_lock
+              value: 'false'
+            - name: discovery.type
+              value: single-node
+            - name: xpack.security.enabled
+              value: 'true'
+            - name: xpack.security.http.ssl.enabled
+              value: 'false'
+            - name: xpack.security.transport.ssl.enabled
+              value: 'false'
+            - name: cluster.routing.allocation.disk.watermark.low
+              value: 5gb
+            - name: cluster.routing.allocation.disk.watermark.high
+              value: 3gb
+            - name: cluster.routing.allocation.disk.watermark.flood_stage
+              value: 2gb
+        ports:
+        - containerPort: 9200
+        resources:
+          limits:
+            memory: "8Gi"
+        volumeMounts:
+        - name: esdata
+          mountPath: /usr/share/elasticsearch/data
+        resources:
+          limits:
+            cpu: "4"
+            memory: 10Gi
+          requests:
+            cpu: "2"
+            memory: 5Gi
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow/es'
+          type: DirectoryOrCreate
+        name: esdata
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: es01
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - port: 9200
+    targetPort: 9200
+  selector:
+    app: elasticsearch

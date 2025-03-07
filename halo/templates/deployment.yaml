@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: halo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: halo
+  template:
+    metadata:
+      labels:
+        app: halo
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: halo
+          image: docker.io/halohub/halo:2.20.15
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: JVM_OPTS
+              value: "-Xmx256m -Xms256m"
+            - name: HALO_WORK_DIR
+              value: /app/data/.halo2
+          args:
+            - "--spring.r2dbc.url=r2dbc:pool:postgresql://{{ .Values.postgres.host }}/{{ .Values.postgres.databases.halo }}"
+            - "--spring.r2dbc.username={{ .Values.postgres.username }}"
+            - "--spring.r2dbc.password={{ .Values.postgres.password }}"
+            - "--spring.sql.init.platform=postgresql"
+            - "--halo.external-url=http://localhost:8090/"
+            - "--server.port=8090"
+          resources:
+            requests:
+              cpu: 700m
+              memory: 800Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          ports:
+            - containerPort: 8090
+          volumeMounts:
+            - name: halo-vol
+              mountPath: /app/data/.halo2
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: halo-vol
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/halo2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: halo
+  ports:
+    - protocol: TCP
+      port: 8090
+      targetPort: 8090
