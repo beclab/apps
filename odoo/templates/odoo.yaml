@@ -1,0 +1,97 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: odoo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: odoo
+  template:
+    metadata:
+      labels:
+        app: odoo
+    spec:
+      securityContext:
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: odoo
+          image: docker.io/odoo:16.0-20250311
+          securityContext:
+            runAsUser: 1000
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: USER
+              value: "{{ .Values.postgres.username }}"
+            - name: PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: DB_NAME
+              value: "{{ .Values.postgres.databases.odoo }}"
+          command: ["odoo"]
+          args:
+            - "--init=base"
+          ports:
+            - name: http
+              containerPort: 8069
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 200m
+              memory: 200Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /var/lib/odoo
+              name: odoo-data
+            - mountPath: /etc/odoo/odoo.conf
+              name: odoo-config
+              subPath: odoo.conf
+            - mountPath: /mnt/extra-addons
+              name: odoo-addons
+      volumes:
+        - name: odoo-config
+          configMap:
+            name: odoo-config
+            items:
+              - key: odoo.conf
+                path: odoo.conf
+        - name: odoo-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/odoo/data"
+        - name: odoo-addons
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/odoo/addons"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odoo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: odoo
+spec:
+  selector:
+    app: odoo
+  ports:
+    - name: http
+      port: 8069
+      targetPort: 8069
+      protocol: TCP
