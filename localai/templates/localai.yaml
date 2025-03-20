@@ -1,0 +1,88 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: localai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: localai
+  template:
+    metadata:
+      labels:
+        app: localai
+    spec:
+      containers:
+        - name: localai
+          image: docker.io/localai/localai:master-cublas-cuda12-ffmpeg-core
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: DEBUG
+              value: "true"
+            - name: HF_ENDPOINT
+              value: "https://hf-mirror.com"
+            - name: MODELS_PATH
+              value: "/models"
+            - name: THREADS
+              value: "4"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: PROFILE
+              value: "gpu-8g"
+            - name: MODELS
+              value: ""
+            - name: DEBUG
+              value: "true"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              cpu: 2000m
+              memory: 16Gi
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /models
+              name: models-data
+          securityContext:
+            capabilities:
+              add:
+                - SYS_ADMIN
+      volumes:
+        - name: models-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.sharedlib }}/ai/localai"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localai
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: localai
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: localai
+status:
+  loadBalancer: {}
