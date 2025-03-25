@@ -1,0 +1,503 @@
+{{- $namespace := printf "%s%s" "user-system-" .Values.bfl.username -}}
+{{- $difyfusionclient_secret := (lookup "v1" "Secret" $namespace "difyfusionclient-secrets") -}}
+{{- $password := "" -}}
+{{ if $difyfusionclient_secret -}}
+{{ $password = (index $difyfusionclient_secret "data" "pg_password") }}
+{{ else -}}
+{{ $password = randAlphaNum 16 | b64enc }}
+{{- end -}}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: difyfusionclient-secrets
+  namespace: user-system-{{ .Values.bfl.username }}
+type: Opaque
+data:
+  pg_password: {{ $password }}
+
+---
+apiVersion: apr.bytetrade.io/v1alpha1
+kind: MiddlewareRequest
+metadata:
+  name: difyfusionclient-pg
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  app: difyfusionclient
+  appNamespace: user-space-{{ .Values.bfl.username }}
+  middleware: postgres
+  postgreSQL:
+    user: difyfusionclient_{{ .Values.bfl.username }}
+    password:
+      valueFrom:
+        secretKeyRef:
+          key: pg_password
+          name: difyfusionclient-secrets
+    databases:
+    - name: difyfusionclient
+
+#---
+#apiVersion: v1
+#kind: Service
+#metadata:
+#  name: difyfusion
+#  namespace: user-space-{{ .Values.bfl.username }}
+#spec:
+#  type: ExternalName
+#  externalName: difyfusion.os-system.svc.cluster.local
+#  ports:
+#    - name: nginx-port
+#      protocol: TCP
+#      port: 80
+#      targetPort: 80
+#    - name: api-port
+#      protocol: TCP
+#      port: 5001
+#      targetPort: 5001
+#    - name: web-port
+#      protocol: TCP
+#      port: 3000
+#      targetPort: 3000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: difyfusionclient
+  namespace: user-space-{{ .Values.bfl.username }}
+spec:
+  ports:
+  - name: "dify-gateway"
+    protocol: TCP
+    port: 6317
+    targetPort: 6317
+  - name: "difyfusionclient-frontend"
+    port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: difyfusionclient
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: difyfusionclient
+  namespace: user-space-{{ .Values.bfl.username }}
+  labels:
+    app: difyfusionclient
+    applications.app.bytetrade.io/author: bytetrade.io
+
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: difyfusionclient
+  template:
+    metadata:
+      labels:
+        app: difyfusionclient
+    spec:
+      initContainers:
+      - name: terminus-sidecar-init
+        image: docker.io/aboveos/openservicemesh-init:v1.2.3
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - NET_ADMIN
+          runAsNonRoot: false
+          runAsUser: 0
+        command:
+          - /bin/sh
+          - -c
+          - |
+            iptables-restore --noflush <<EOF
+            # sidecar interception rules
+            *nat
+            :PROXY_IN_REDIRECT - [0:0]
+            :PROXY_INBOUND - [0:0]
+            -A PROXY_IN_REDIRECT -p tcp -j REDIRECT --to-port 15003
+            -A PROXY_INBOUND -p tcp --dport 15000 -j RETURN
+            -A PROXY_INBOUND -p tcp -j PROXY_IN_REDIRECT
+            -A PREROUTING -p tcp -j PROXY_INBOUND
+            COMMIT
+            EOF
+
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+
+      containers:
+      - name: terminus-envoy-sidecar
+        image: docker.io/aboveos/envoyproxy-envoy-distroless:v1.25.2
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 200m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 50Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+        ports:
+          - name: proxy-admin
+            containerPort: 15000
+          - name: proxy-inbound
+            containerPort: 15003
+        volumeMounts:
+          - name: terminus-sidecar-config
+            readOnly: true
+            mountPath: /etc/envoy/envoy.yaml
+            subPath: envoy.yaml
+        command:
+          - /usr/local/bin/envoy
+          - --log-level
+          - debug
+          - -c
+          - /etc/envoy/envoy.yaml
+        env:
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+
+      - name: dify-gateway
+        image: beclab/search2-gateway:v0.0.44
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 200m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 50Mi
+        ports:
+          - name: dify-gateway
+            containerPort: 6317
+            protocol: TCP
+        env:
+          - name: OS_SYSTEM_SERVER
+            value: system-server.user-system-{{ .Values.bfl.username }}
+          - name: OS_APP_SECRET
+            value: '{{ .Values.os.difyfusionclient.appSecret }}'
+          - name: OS_APP_KEY
+            value: {{ .Values.os.difyfusionclient.appKey }}
+          - name: PREFIX
+            value: /api/controllers
+          - name: DIFY_ADMIN_USER_EMAIL
+            value: admin@bytetrade.io
+          - name: DIFY_ADMIN_USER_PASSWORD
+            value: abcd123456
+          - name: DIFY_USER_NAME
+            value: '{{ .Values.bfl.username }}'
+          - name: DIFY_USER_PASSWORD
+            value: abcd123456
+          - name: WATCH_DIR
+            value: /Home/Documents
+          - name: FS_TYPE
+            value: fs
+          - name: PG_USERNAME
+            value: difyfusionclient_{{ .Values.bfl.username }}
+          - name: PG_PASSWORD
+            value: {{ $password | b64dec }}
+          - name: PG_HOST
+            value: citus-master-svc.user-system-{{ .Values.bfl.username }}
+          - name: PG_PORT
+            value: "5432"
+          - name: PG_DATABASE
+            value: user_space_{{ .Values.bfl.username }}_difyfusionclient
+          - name: DIFY_HOST
+            value: http://difyfusion.user-space-{{ .Values.admin }}
+            # value: http://difyfusion.user-space-{{ .Values.bfl.username }}
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: CONTAINER_NAME
+            value: dify-gateway
+          - name: NOTIFY_SERVER
+            value: fsnotify-svc.user-system-{{ .Values.bfl.username }}:5079
+          {{- if and .Values.gpu (not (eq .Values.gpu "none" )) }}
+          - name: GPU
+            value: {{ .Values.gpu }}
+          {{- end }}
+        volumeMounts:
+          - name: watch-dir
+            mountPath: /Home/Documents
+          - name: userspace-dir
+            mountPath: /Home
+
+      - name: dify-proxy
+        image: docker.io/aboveos/nginx:stable-alpine3.17-slim
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: proxy
+          containerPort: 8080
+        volumeMounts:
+        - name: nginx-config
+          readOnly: true
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        resources:
+          limits:
+            cpu: 200m
+            memory: 200Mi
+          requests:
+            cpu: 50m
+            memory: 50Mi
+      volumes:
+      - name: terminus-sidecar-config
+        configMap:
+          name: sidecar-configs
+          items:
+            - key: envoy.yaml
+              path: envoy.yaml
+      - name: watch-dir
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}/Documents
+
+      - name: userspace-dir
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}
+
+      - name: nginx-config
+        configMap:
+          name: difyfusionclient-nginx-config
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+
+#---
+#apiVersion: sys.bytetrade.io/v1alpha1
+#kind: ProviderRegistry
+#metadata:
+#  name: dify-gateway-provider
+#  namespace: user-system-{{ .Values.bfl.username }}
+#spec:
+#  dataType: gateway
+#  deployment: difyfusionclient-deployment
+#  description: dify gateway provider
+#  endpoint: difyfusionclient.{{ .Release.Namespace }}
+#  group: service.difyfusionclient
+#  kind: provider
+#  namespace: {{ .Release.Namespace }}
+#  opApis:
+#    - name: DifyGatewayBaseProvider
+#      uri: /api/controllers/dify_gateway_base_provider
+#  version: v1
+#status:
+#  state: active
+#
+#---
+#apiVersion: sys.bytetrade.io/v1alpha1
+#kind: ApplicationPermission
+#metadata:
+#  name: dify-gateway
+#  namespace: user-system-{{ .Values.bfl.username }}
+#spec:
+#  app: difyfusionclient
+#  appid: difyfusionclient
+#  key: {{ .Values.os.difyfusionclient.appKey }}
+#  secret: {{ .Values.os.difyfusionclient.appSecret }}
+#  permissions:
+#    - dataType: files
+#      group: service.files
+#      ops:
+#        - GetDatasetFolderStatus
+#      version: v1
+#status:
+#  state: active
+
+---
+apiVersion: v1
+data:
+  nginx.conf: |
+    # Configuration checksum:
+    pid /var/run/nginx.pid;
+    worker_processes 2;
+    worker_rlimit_nofile 65535;
+    worker_shutdown_timeout 240s ;
+    events {
+      multi_accept        on;
+      worker_connections  16384;
+      use                 epoll;
+    }
+    http {
+      aio                 threads;
+      aio_write           on;
+      tcp_nopush          on;
+      tcp_nodelay         on;
+      log_subrequest      on;
+      reset_timedout_connection on;
+      keepalive_timeout  75s;
+      keepalive_requests 100;
+      client_body_temp_path           /tmp/client-body;
+      fastcgi_temp_path               /tmp/fastcgi-temp;
+      proxy_temp_path                 /tmp/proxy-temp;
+      client_max_body_size            1g;
+      client_header_buffer_size       1k;
+      client_header_timeout           60s;
+      large_client_header_buffers     4 8k;
+      client_body_buffer_size         8k;
+      client_body_timeout             60s;
+      types_hash_max_size             2048;
+      server_names_hash_max_size      4096;
+      server_names_hash_bucket_size   1024;
+      map_hash_bucket_size            64;
+      proxy_headers_hash_max_size     512;
+      proxy_headers_hash_bucket_size  64;
+      variables_hash_bucket_size      256;
+      variables_hash_max_size         2048;
+      underscores_in_headers          off;
+      ignore_invalid_headers          on;
+      include /etc/nginx/mime.types;
+      default_type text/html;
+      gzip on;
+      gzip_comp_level 1;
+      gzip_http_version 1.1;
+      gzip_min_length 256;
+      gzip_types application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/javascript text/plain text/x-component;
+      gzip_proxied any;
+      gzip_vary on;
+      # Custom headers for response
+      server_tokens off;
+      server_name_in_redirect off;
+      port_in_redirect        off;
+      # global log
+      log_format main $remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_length $request_time "$http_x_forwarded_for";
+      access_log /var/log/nginx/access.log main;
+      error_log /var/log/nginx/error.log error;
+      proxy_ssl_session_reuse on;
+      # Global filters
+      # timeout
+      resolver_timeout        30s;
+      send_timeout            60s;
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        ''      close;
+      }
+
+      ## start server 80
+      server {
+
+        server_name _;
+        listen 8080;
+    
+        # Gzip Settings
+        gzip off;
+        gzip_disable "msie6";
+        gzip_min_length 1k;
+        gzip_buffers 16 64k;
+        gzip_http_version 1.1;
+        gzip_comp_level 6;
+        gzip_types *;
+        root /app;
+
+        # normal routes
+        # serve given url and default to index.html if not found
+        # e.g. /, /user and /foo/bar will return index.html
+        location / {
+          add_header Access-Control-Allow-Headers "access-control-allow-headers,access-control-allow-methods,access-control-allow-origin,content-type,x-auth,x-unauth-error,x-authorization";
+          add_header Access-Control-Allow-Methods "PUT, GET, DELETE, POST, OPTIONS";
+          proxy_hide_header Access-Control-Allow-Origin;
+          add_header Access-Control-Allow-Origin $http_origin;
+          add_header Access-Control-Allow-Credentials true;			
+          proxy_connect_timeout                          30s;
+          proxy_send_timeout                             60s;
+          proxy_read_timeout                             300s;
+          proxy_set_header Host                      $host;
+          proxy_set_header X-Forwarded-Host          $http_host;
+          proxy_set_header X-Real-IP                 $remote_addr;
+          proxy_set_header X-Forwarded-For            $remote_addr;
+          proxy_set_header X-Original-Forwarded-For  $http_x_forwarded_for;
+
+          if ($request_method = 'OPTIONS') {
+            return 204;
+          }
+
+          proxy_pass http://difyfusion.user-space-{{ .Values.admin }};
+        }
+    
+        location /api/controllers {
+            add_header Access-Control-Allow-Headers "access-control-allow-headers,access-control-allow-methods,access-control-allow-origin,content-type,x-auth,x-unauth-error,x-authorization";
+            add_header Access-Control-Allow-Methods "PUT, GET, DELETE, POST, OPTIONS";
+            add_header Access-Control-Allow-Origin $http_origin;
+            add_header Access-Control-Allow-Credentials true;
+
+            proxy_pass http://127.0.0.1:6317;
+            proxy_set_header            Host $host;
+            proxy_set_header            X-real-ip $remote_addr;
+            proxy_set_header            X-Forwarded-For $proxy_add_x_forwarded_for;
+
+            add_header X-Frame-Options SAMEORIGIN;
+            # rewrite ^/server(.*)$ $1 break;
+
+            if ($request_method = 'OPTIONS') {
+                return 204;
+            }
+        }
+    
+        # # files
+        # # for all routes matching a dot, check for files and return 404 if not found
+        # # e.g. /file.js returns a 404 if not found
+        # location ~.*\.(js|css|png|jpg|svg|woff|woff2)$
+        #  {
+        #      add_header Cache-Control "public, max-age=2678400";
+        #  }
+      }
+
+      # default server, used for NGINX healthcheck and access to nginx stats
+      server {
+        listen 127.0.0.1:10246;
+
+        keepalive_timeout 0;
+        gzip off;
+        access_log off;
+
+        location /healthz {
+          return 200;
+        }
+
+        location /nginx_status {
+          stub_status on;
+        }
+
+        # location / {
+        #   return 404;
+        # }
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: difyfusionclient-nginx-config
+  namespace: user-space-{{ .Values.bfl.username }}
+

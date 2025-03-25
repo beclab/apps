@@ -1,0 +1,84 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: documenso
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: documenso
+  template:
+    metadata:
+      labels:
+        app: documenso
+    spec:
+      containers:
+        - name: documenso
+          image: docker.io/documenso/documenso:v1.8.1
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: documenso
+                  key: NEXTAUTH_SECRET
+            - name: NEXT_PRIVATE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: documenso
+                  key: NEXT_PRIVATE_ENCRYPTION_KEY
+            - name: NEXT_PRIVATE_ENCRYPTION_SECONDARY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: documenso
+                  key: NEXT_PRIVATE_ENCRYPTION_SECONDARY_KEY
+          envFrom:
+            - configMapRef:
+                name: documenso-config
+          resources:
+            requests:
+              cpu: 300m
+              memory: 200Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /opt/documenso/cert.p12
+              name: documenso-cert
+      volumes:
+        - name: documenso-cert
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/documenso/cert.p12"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: documenso
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: documenso
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    app: documenso

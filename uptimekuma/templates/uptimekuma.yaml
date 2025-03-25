@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: uptimekuma
+  name: uptimekuma
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: uptimekuma
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: uptimekuma
+    spec:
+      containers:
+        - image: docker.io/louislam/uptime-kuma:1
+          name: uptimekuma
+          ports:
+            - containerPort: 3001
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ':0'
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 4Gi
+          volumeMounts:
+            - mountPath: /app/data
+              name: uptime-kuma-data
+
+      volumes:
+        - name: uptime-kuma-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/uptime-kuma'
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: uptimekuma
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: uptimekuma
+spec:
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001
+  selector:
+    io.kompose.service: uptimekuma
