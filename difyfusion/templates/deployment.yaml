@@ -1,7 +1,4 @@
-
-{{ $difyfusion_appcache_rootpath := "/terminus/userdata/Cache/difyfusion" }}
-
-{{- $namespace := printf "%s" "os-system" -}}
+{{- $namespace := printf "%s%s" "user-system-" .Values.bfl.username -}}
 {{- $difyfusion_secret := (lookup "v1" "Secret" $namespace "difyfusion-secrets") -}}
 {{- $pg_password := "" -}}
 {{ if $difyfusion_secret -}}
@@ -25,7 +22,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: difyfusion-secrets
-  namespace: {{ .Release.Namespace }}
+  namespace: user-system-{{ .Values.bfl.username }}
 type: Opaque
 data:
   pg_password: {{ $pg_password }}
@@ -36,13 +33,13 @@ apiVersion: apr.bytetrade.io/v1alpha1
 kind: MiddlewareRequest
 metadata:
   name: difyfusion-pg
-  namespace: {{ .Release.Namespace }}
+  namespace: user-system-{{ .Values.bfl.username }}
 spec:
   app: difyfusion
-  appNamespace: {{ .Release.Namespace }}
+  appNamespace: user-space-{{ .Values.bfl.username }}
   middleware: postgres
   postgreSQL:
-    user: difyfusion_os_system
+    user: difyfusion_{{ .Values.bfl.username }}
     password:
       valueFrom:
         secretKeyRef:
@@ -56,10 +53,10 @@ apiVersion: apr.bytetrade.io/v1alpha1
 kind: MiddlewareRequest
 metadata:
   name: difyfusion-redis
-  namespace: {{ .Release.Namespace }}
+  namespace: user-system-{{ .Values.bfl.username }}
 spec:
   app: difyfusion
-  appNamespace: {{ .Release.Namespace }}
+  appNamespace: user-space-{{ .Values.bfl.username }}
   middleware: redis
   redis:
     password:
@@ -74,7 +71,7 @@ kind: ConfigMap
 apiVersion: v1
 metadata:
   name: difyfusion-nginx-config
-  namespace: {{ .Release.Namespace }}
+  namespace: user-space-{{ .Values.bfl.username }}
   annotations:
     kubesphere.io/creator: bytetrade.io
 data:
@@ -87,12 +84,36 @@ data:
         proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
+    
+      location /chat {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
+    
+      location /completion {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
+    
+      location /workflow {
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
+        include proxy.conf;
+      }
 
       location /console/api/login {
         # Check if user has logged in~
         # access_by_lua_file login.lua;
 
-        proxy_pass http://difyfusion:5001;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
+        # proxy_pass http://127.0.0.1:5001;
+        include proxy.conf;
+      }
+    
+      location /console/api/system-features {
+        # Check if user has logged in~
+        # access_by_lua_file login.lua;
+
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -102,17 +123,17 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion:5001;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
 
       location /api {
         # Check if user has logged in~
-        access_by_lua_file login.lua;
+        # access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion:5001;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -122,7 +143,7 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion:5001;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -132,7 +153,7 @@ data:
         access_by_lua_file login.lua;
 
         # Proxy pass the request to backend~
-        proxy_pass http://difyfusion:5001;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:5001;
         # proxy_pass http://127.0.0.1:5001;
         include proxy.conf;
       }
@@ -143,7 +164,7 @@ data:
 
         # Proxy pass the request to backend~
         # proxy_pass http://127.0.0.1:3000;
-        proxy_pass http://difyfusion:3000/apps;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000/apps;
         include proxy.conf;
       }
 
@@ -153,7 +174,7 @@ data:
 
         # Proxy pass the request to backend~
         # proxy_pass http://127.0.0.1:3000;
-        proxy_pass http://difyfusion:3000;
+        proxy_pass http://difyfusion.user-space-{{ .Values.bfl.username }}:3000;
         include proxy.conf;
       }
     }
@@ -161,7 +182,7 @@ data:
     local cjson = require "cjson.safe"
 
     local function processAuthorization()
-        local difyHost = "difyfusion"
+        local difyHost = "difyfusion.user-space-{{ .Values.bfl.username }}"
         ngx.log(ngx.STDERR, "HOST: " .. ngx.var.host)
         local isInner = ngx.var.host == difyHost
 
@@ -236,8 +257,8 @@ data:
             local jsonData = cjson.decode(data)
             local token_data = jsonData
 
-            if token_data and token_data.data then
-                local token = token_data.data
+            if token_data and token_data.data and token_data.data.access_token then
+                local token = token_data.data.access_token
                 ngx.req.set_header("Authorization", "Bearer " .. token)
                 ngx.header["Set-Cookie"] = "Authorization=Bearer " .. token .. "; Path=/"
                 ngx.log(ngx.STDERR, "Authorization token obtained from login API. token: " .. token)
@@ -281,7 +302,7 @@ data:
         keepalive_timeout  65;
 
         #gzip  on;
-        client_max_body_size 15M;
+        client_max_body_size 200M;
 
         include /etc/nginx/conf.d/*.conf;
     }
@@ -294,13 +315,108 @@ data:
     proxy_buffering off;
     proxy_read_timeout 3600s;
     proxy_send_timeout 3600s;
+  squid.conf.template: |-
+    acl localnet src 0.0.0.1-0.255.255.255	# RFC 1122 "this" network (LAN)
+    acl localnet src 10.0.0.0/8		# RFC 1918 local private network (LAN)
+    acl localnet src 100.64.0.0/10		# RFC 6598 shared address space (CGN)
+    acl localnet src 169.254.0.0/16 	# RFC 3927 link-local (directly plugged) machines
+    acl localnet src 172.16.0.0/12		# RFC 1918 local private network (LAN)
+    acl localnet src 192.168.0.0/16		# RFC 1918 local private network (LAN)
+    acl localnet src fc00::/7       	# RFC 4193 local private network range
+    acl localnet src fe80::/10      	# RFC 4291 link-local (directly plugged) machines
+    acl SSL_ports port 443
+    acl Safe_ports port 80		# http
+    acl Safe_ports port 21		# ftp
+    acl Safe_ports port 443		# https
+    acl Safe_ports port 70		# gopher
+    acl Safe_ports port 210		# wais
+    acl Safe_ports port 1025-65535	# unregistered ports
+    acl Safe_ports port 280		# http-mgmt
+    acl Safe_ports port 488		# gss-http
+    acl Safe_ports port 591		# filemaker
+    acl Safe_ports port 777		# multiling http
+    acl CONNECT method CONNECT
+    http_access deny !Safe_ports
+    http_access deny CONNECT !SSL_ports
+    http_access allow localhost manager
+    http_access deny manager
+    http_access allow localhost
+    include /etc/squid/conf.d/*.conf
+    http_access deny all
+    
+    ################################## Proxy Server ################################
+    http_port ${HTTP_PORT}
+    coredump_dir ${COREDUMP_DIR}
+    refresh_pattern ^ftp:		1440	20%	10080
+    refresh_pattern ^gopher:	1440	0%	1440
+    refresh_pattern -i (/cgi-bin/|\?) 0	0%	0
+    refresh_pattern \/(Packages|Sources)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+    refresh_pattern \/Release(|\.gpg)$ 0 0% 0 refresh-ims
+    refresh_pattern \/InRelease$ 0 0% 0 refresh-ims
+    refresh_pattern \/(Translation-.*)(|\.bz2|\.gz|\.xz)$ 0 0% 0 refresh-ims
+    refresh_pattern .		0	20%	4320
+
+
+    # cache_dir ufs /var/spool/squid 100 16 256
+    # upstream proxy, set to your own upstream proxy IP to avoid SSRF attacks
+    # cache_peer 172.1.1.1 parent 3128 0 no-query no-digest no-netdb-exchange default
+    
+    ################################## Reverse Proxy To Sandbox ################################
+    http_port ${REVERSE_PROXY_PORT} accel vhost
+    cache_peer ${SANDBOX_HOST} parent ${SANDBOX_PORT} 0 no-query originserver
+    acl src_all src all
+    http_access allow src_all
+
+  docker-entrypoint.sh: |-
+    #!/bin/bash
+  
+    # Modified based on Squid OCI image entrypoint
+  
+    # This entrypoint aims to forward the squid logs to stdout to assist users of
+    # common container related tooling (e.g., kubernetes, docker-compose, etc) to
+    # access the service logs.
+  
+    # Moreover, it invokes the squid binary, leaving all the desired parameters to
+    # be provided by the "command" passed to the spawned container. If no command
+    # is provided by the user, the default behavior (as per the CMD statement in
+    # the Dockerfile) will be to use Ubuntu's default configuration [1] and run
+    # squid with the "-NYC" options to mimic the behavior of the Ubuntu provided
+    # systemd unit.
+  
+    # [1] The default configuration is changed in the Dockerfile to allow local
+    # network connections. See the Dockerfile for further information.
+  
+    echo "[ENTRYPOINT] re-create snakeoil self-signed certificate removed in the build process"
+    if [ ! -f /etc/ssl/private/ssl-cert-snakeoil.key ]; then
+    /usr/sbin/make-ssl-cert generate-default-snakeoil --force-overwrite > /dev/null 2>&1
+    fi
+  
+    tail -F /var/log/squid/access.log 2>/dev/null &
+    tail -F /var/log/squid/error.log 2>/dev/null &
+    tail -F /var/log/squid/store.log 2>/dev/null &
+    tail -F /var/log/squid/cache.log 2>/dev/null &
+  
+    # Replace environment variables in the template and output to the squid.conf
+    echo "[ENTRYPOINT] replacing environment variables in the template"
+    awk '{
+      while(match($0, /\${[A-Za-z_][A-Za-z_0-9]*}/)) {
+      var = substr($0, RSTART+2, RLENGTH-3)
+      val = ENVIRON[var]
+      $0 = substr($0, 1, RSTART-1) val substr($0, RSTART+RLENGTH)
+    }
+      print
+    }' /etc/squid/squid.conf.template > /etc/squid/squid.conf
+  
+    /usr/sbin/squid -Nz
+    echo "[ENTRYPOINT] starting squid"
+    /usr/sbin/squid -f /etc/squid/squid.conf -NYC 1
 
 ---
 kind: Service
 apiVersion: v1
 metadata:
   name: difyfusion
-  namespace: {{ .Release.Namespace }}
+  namespace: user-space-{{ .Values.bfl.username }}
 spec:
   type: ClusterIP
   ports:
@@ -336,7 +452,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: difyfusion
-  namespace: {{ .Release.Namespace }}
+  namespace: user-space-{{ .Values.bfl.username }}
   labels:
     app: difyfusion
     applications.app.bytetrade.io/author: bytetrade.io
@@ -364,22 +480,22 @@ spec:
               echo -e "Checking for the availability of PostgreSQL Server deployment"; until psql -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDB1 -c "SELECT 1"; do sleep 1; printf "-"; done; sleep 5; echo -e " >> PostgreSQL DB Server has started";
           env:
             - name: PGHOST
-              value: citus-headless.os-system
+              value: citus-master-svc.user-system-{{ .Values.bfl.username }}
             - name: PGPORT
               value: "5432"
             - name: PGUSER
-              value: difyfusion_os_system
+              value: difyfusion_{{ .Values.bfl.username }}
             - name: PGPASSWORD
               value: {{ $pg_password | b64dec }}
             - name: PGDB1
-              value: os_system_difyfusion
+              value: user_space_{{ .Values.bfl.username }}_difyfusion
 
       securityContext:
         runAsUser: 0
       # terminationGracePeriodSeconds: 0
       containers:
         - name: api
-          image: beclab/dify-api:v0.0.5
+          image: beclab/dify-api:v0.0.8
           imagePullPolicy: IfNotPresent
           ports:
             - name: api-port
@@ -429,21 +545,47 @@ spec:
             # Url is signed and has expiration time.
             - name: FILES_URL
               value: ''
+            - name: ACCESS_TOKEN_EXPIRE_MINUTES
+              value: '53000000'
             # When enabled, migrations will be executed prior to application startup and the application will start after the migrations have completed.
             - name: MIGRATION_ENABLED
               value: 'true'
+            - name: NUMEXPR_MAX_THREADS
+              value: '4'
             # The configurations of postgres database connection.
             # It is consistent with the configuration in the 'db' service below.
             - name: DB_USERNAME
-              value: difyfusion_os_system
+              value: difyfusion_{{ .Values.bfl.username }}
             - name: DB_PASSWORD
               value: {{ $pg_password | b64dec }}
             - name: DB_HOST
-              value: citus-headless.os-system
+              value: citus-master-svc.user-system-{{ .Values.bfl.username }}
             - name: DB_PORT
               value: '5432'
             - name: DB_DATABASE
-              value: os_system_difyfusion
+              value: user_space_{{ .Values.bfl.username }}_difyfusion
+            - name: DB_OPTIONS
+              value: "-c connect_timeout=10000"
+            - name: SQLALCHEMY_POOL_SIZE
+              value: '5'
+            - name: SQLALCHEMY_MAX_OVERFLOW
+              value: '10'
+            - name: SQLALCHEMY_POOL_RECYCLE
+              value: '14400'
+            - name: SQLALCHEMY_ECHO
+              value: 'false'
+            - name: SQLALCHEMY_POOL_PRE_PING
+              value: 'true'
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: '15'
+            - name: POSTGRES_SHARED_BUFFERS
+              value: '128MB'
+            - name: POSTGRES_WORK_MEM
+              value: '4MB'
+            - name: POSTGRES_MAINTENANCE_WORK_MEM
+              value: '64MB'
+            - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+              value: '4096MB'
             # The configurations of redis connection.
             # It is consistent with the configuration in the 'redis' service below.
             - name: REDIS_HOST
@@ -551,6 +693,16 @@ spec:
               value: ''
             - name: RESEND_API_URL
               value: https://api.resend.com
+            - name: UPLOAD_FILE_SIZE_LIMIT
+              value: '30'
+            - name: UPLOAD_FILE_BATCH_LIMIT
+              value: '10'
+            - name: UPLOAD_IMAGE_FILE_SIZE_LIMIT
+              value: '20'
+            - name: UPLOAD_VIDEO_FILE_SIZE_LIMIT
+              value: '200'
+            - name: UPLOAD_AUDIO_FILE_SIZE_LIMIT
+              value: '100'
             # The DSN for Sentry error reporting. If not set, Sentry error reporting will be disabled.
             - name: SENTRY_DSN
               value: ''
@@ -562,7 +714,7 @@ spec:
               value: '1.0'
             # The sandbox service endpoint.
             - name: CODE_EXECUTION_ENDPOINT
-              value: "http://sandbox:8194"
+              value: "http://127.0.0.1:8194"
             - name: CODE_EXECUTION_API_KEY
               value: dify-sandbox
             - name: CODE_MAX_NUMBER
@@ -579,6 +731,10 @@ spec:
               value: '30'
             - name: CODE_MAX_NUMBER_ARRAY_LENGTH
               value: '1000'
+            - name: HTTP_PROXY
+              value: http://127.0.0.1:3128
+            - name: HTTPS_PROXY
+              value: http://127.0.0.1:3128
             - name: DIFY_PORT
               value: '5001'
           resources:
@@ -587,14 +743,14 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 1Gi
           volumeMounts:
             # Mount the storage directory to the container, for storing user files.
             - name: api-vol
               mountPath: /app/api/storage
 
         - name: worker
-          image: beclab/dify-api:v0.0.5
+          image: beclab/dify-api:v0.0.8
           imagePullPolicy: IfNotPresent
           env:
             # Startup mode, 'worker' starts the Celery worker for processing the queue.
@@ -611,18 +767,42 @@ spec:
             # same as the API service
             - name: SECRET_KEY
               value: sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U
+            - name: NUMEXPR_MAX_THREADS
+              value: '4'
             # The configurations of postgres database connection.
             # It is consistent with the configuration in the 'db' service below.
             - name: DB_USERNAME
-              value: difyfusion_os_system
+              value: difyfusion_{{ .Values.bfl.username }}
             - name: DB_PASSWORD
               value: {{ $pg_password | b64dec }}
             - name: DB_HOST
-              value: citus-headless.os-system
+              value: citus-master-svc.user-system-{{ .Values.bfl.username }}
             - name: DB_PORT
               value: '5432'
             - name: DB_DATABASE
-              value: os_system_difyfusion
+              value: user_space_{{ .Values.bfl.username }}_difyfusion
+            - name: DB_OPTIONS
+              value: "-c connect_timeout=10000"
+            - name: SQLALCHEMY_POOL_SIZE
+              value: '5'
+            - name: SQLALCHEMY_MAX_OVERFLOW
+              value: '10'
+            - name: SQLALCHEMY_POOL_RECYCLE
+              value: '14400'
+            - name: SQLALCHEMY_ECHO
+              value: 'false'
+            - name: SQLALCHEMY_POOL_PRE_PING
+              value: 'true'
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: '15'
+            - name: POSTGRES_SHARED_BUFFERS
+              value: '128MB'
+            - name: POSTGRES_WORK_MEM
+              value: '4MB'
+            - name: POSTGRES_MAINTENANCE_WORK_MEM
+              value: '64MB'
+            - name: POSTGRES_EFFECTIVE_CACHE_SIZE
+              value: '4096MB'
             # The configurations of redis cache connection.
             - name: REDIS_HOST
               value: localhost
@@ -718,20 +898,34 @@ spec:
               value: difyai123456
             - name: RELYT_DATABASE
               value: postgres
+            - name: UPLOAD_FILE_SIZE_LIMIT
+              value: '30'
+            - name: UPLOAD_FILE_BATCH_LIMIT
+              value: '10'
+            - name: UPLOAD_IMAGE_FILE_SIZE_LIMIT
+              value: '20'
+            - name: UPLOAD_VIDEO_FILE_SIZE_LIMIT
+              value: '200'
+            - name: UPLOAD_AUDIO_FILE_SIZE_LIMIT
+              value: '100'
+            - name: HTTP_PROXY
+              value: http://127.0.0.1:3128
+            - name: HTTPS_PROXY
+              value: http://127.0.0.1:3128
           resources:
             limits:
               cpu: 1000m
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 1Gi
           volumeMounts:
             # Mount the storage directory to the container, for storing user files.
             - name: worker-vol
               mountPath: /app/api/storage
 
         - name: web
-          image: docker.io/aboveos/langgenius-dify-web:0.6.2
+          image: beclab/dify-web:v0.0.8
           imagePullPolicy: IfNotPresent
           ports:
             - name: web-port
@@ -753,13 +947,20 @@ spec:
             # The DSN for Sentry error reporting. If not set, Sentry error reporting will be disabled.
             - name: SENTRY_DSN
               value: ''
+            - name: NEXT_TELEMETRY_DISABLED
+              value: '0'
+            - name: TEXT_GENERATION_TIMEOUT_MS
+              value: '60000'
+            - name: CSP_WHITELIST
+              value: ''
+
           resources:
             limits:
               cpu: 1000m
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 200Mi
         - name: weaviate
           image: docker.io/aboveos/semitechnologies-weaviate:1.19.0
           imagePullPolicy: IfNotPresent
@@ -824,7 +1025,7 @@ spec:
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 50Mi
 
         - name: redis
           image: docker.io/aboveos/redis:6.2.13-alpine3.18
@@ -845,8 +1046,11 @@ spec:
             requests:
               cpu: 20m
               memory: 50Mi
+
         - name: dify-sandbox
-          image: 'docker.io/aboveos/langgenius-dify-sandbox:latest'
+          image: 'langgenius/dify-sandbox:0.2.10'
+          ports:
+            - containerPort: 8194  # 或你需要的端口
           env:
             - name: API_KEY
               value: dify-sandbox
@@ -854,13 +1058,21 @@ spec:
               value: release
             - name: WORKER_TIMEOUT
               value: '15'
+            - name: ENABLE_NETWORK
+              value: 'true'
+            - name: HTTP_PROXY
+              value: http://127.0.0.1:3128
+            - name: HTTPS_PROXY
+              value: http://127.0.0.1:3128
+            - name: SANDBOX_PORT
+              value: '8194'
           resources:
             limits:
               cpu: 1000m
               memory: 2Gi
             requests:
               cpu: 50m
-              memory: 100Mi
+              memory: 500Mi
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -869,26 +1081,77 @@ spec:
               add:
                 - SYS_ADMIN
 
+        - name: ssrf-proxy
+          image: ubuntu/squid:latest
+#          restartPolicy: Always  # 在 K8S 中，restartPolicy 通常在 Pod 级别设置，这里仅示意为 Always
+          resources:
+            limits:
+              cpu: 200m
+              memory: 200Mi
+            requests:
+              cpu: 50m
+              memory: 100Mi
+          ports:
+            - containerPort: 3128  # 或你需要的端口
+          volumeMounts:
+            - mountPath: /etc/squid/squid.conf.template
+              subPath: squid.conf.template
+              name: difyfusion-nginx-config
+            - mountPath: /docker-entrypoint.sh
+              subPath: docker-entrypoint.sh
+              name: difyfusion-nginx-config
+          command: [ "sh", "-c" ]
+          args:
+            - >
+              cp /docker-entrypoint.sh /docker-entrypoint-mount.sh &&
+              sed -i 's/\r$$//' /docker-entrypoint-mount.sh &&
+              chmod +x /docker-entrypoint-mount.sh &&
+              /docker-entrypoint-mount.sh
+          env:
+            - name: HTTP_PORT
+              value: '3128'
+            - name: COREDUMP_DIR
+              value: '/var/spool/squid'
+            - name: REVERSE_PROXY_PORT
+              value: '8194'
+            - name: SANDBOX_HOST
+              value: '127.0.0.1'
+            - name: SANDBOX_PORT
+              value: '8194'
+            - name: SSRF_DEFAULT_MAX_RETRIES
+              value: '3'
+            - name: SSRF_DEFAULT_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_CONNECT_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_READ_TIME_OUT
+              value: '5'
+            - name: SSRF_DEFAULT_WRITE_TIME_OUT
+              value: '5'
+#          networks:
+#            - name: ssrf_proxy_network  # 在 K8S 中，网络通常在 Pod 级别通过 network policies 或在部署时指定
+#            - name: default  # 默认网络通常自动应用，如果已在 Pod 级别指定可省略
+
       volumes:
         - name: api-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $difyfusion_appcache_rootpath }}/volumes/app/storage
+            path: {{ .Values.userspace.appCache }}/difyfusion/volumes/app/storage
 
         - name: worker-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $difyfusion_appcache_rootpath }}/volumes/app/storage
+            path: {{ .Values.userspace.appCache }}/difyfusion/volumes/app/storage
 
         - name: weaviate-vol
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $difyfusion_appcache_rootpath }}/volumes/weaviate
+            path: {{ .Values.userspace.appCache }}/difyfusion/volumes/weaviate
 
         - name: redis-data
           hostPath:
             type: DirectoryOrCreate
-            path: {{ $difyfusion_appcache_rootpath }}/volumes/redis/data
+            path: {{ .Values.userspace.appCache }}/difyfusion/volumes/redis/data
 
         - name: difyfusion-nginx-config
           configMap:
@@ -902,4 +1165,8 @@ spec:
                 path: default.conf
               - key: login.lua
                 path: login.lua
+              - key: squid.conf.template
+                path: squid.conf.template
+              - key: docker-entrypoint.sh
+                path: docker-entrypoint.sh
             defaultMode: 420
