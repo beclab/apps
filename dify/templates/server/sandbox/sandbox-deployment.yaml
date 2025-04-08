@@ -1,0 +1,74 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: sandbox
+  name: sandbox
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: sandbox
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: sandbox
+    spec:
+      containers:
+        - env:
+            - name: API_KEY
+              value: dify-sandbox
+            - name: ENABLE_NETWORK
+              value: "true"
+            - name: GIN_MODE
+              value: release
+            - name: HTTPS_PROXY
+              value: http://ssrf_proxy:3128
+            - name: HTTP_PROXY
+              value: http://ssrf_proxy:3128
+            - name: SANDBOX_PORT
+              value: "8194"
+            - name: WORKER_TIMEOUT
+              value: "15"
+          image: langgenius/dify-sandbox:0.2.10
+          livenessProbe:
+            exec:
+              command:
+                - curl
+                - -f
+                - http://localhost:8194/health
+          name: sandbox
+          ports:
+            - containerPort: 8194
+              name: http
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 600m
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /dependencies
+              name: sandbox-cm0
+            - mountPath: /conf
+              name: sandbox-cm1
+      restartPolicy: Always
+      volumes:
+        - configMap:
+            name: sandbox-cm0
+          name: sandbox-cm0
+        - configMap:
+            name: sandbox-cm1
+          name: sandbox-cm1
+{{- end }}
