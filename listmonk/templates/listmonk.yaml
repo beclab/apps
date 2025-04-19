@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: listmonk
+  name: listmonk
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: listmonk
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: listmonk
+    spec:
+      containers:
+        - env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ':0'
+            - name: LISTMONK_app__address
+              value: '0.0.0.0:9000'
+            - name: LISTMONK_db__host
+              value: '{{ .Values.postgres.host }}'
+            - name: LISTMONK_db__port
+              value: '{{ .Values.postgres.port }}'
+            - name: LISTMONK_db__user
+              value: '{{ .Values.postgres.username }}'
+            - name: LISTMONK_db__password
+              value: '{{ .Values.postgres.password }}'
+            - name: LISTMONK_db__database
+              value: '{{ .Values.postgres.databases.listmonk }}'
+            - name: LISTMONK_db__ssl_mode
+              value: "disable"
+          command:
+            - /bin/sh
+            - '-c'
+          args:
+            - |
+              ./listmonk --install --idempotent --yes --config '' && \
+              ./listmonk --upgrade --yes --config '' && \
+              ./listmonk --config ''
+          image: docker.io/listmonk/listmonk:v4.1.0
+          name: listmonk
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - mountPath: /listmonk/uploads
+              name: uploads
+              subPath: uploads
+      restartPolicy: Always
+      volumes:
+        - name: uploads
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}/listmonk'
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: listmonk
+  name: listmonk
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: "9000"
+      port: 9000
+      targetPort: 9000
+  selector:
+    io.kompose.service: listmonk
+status:
+  loadBalancer: {}

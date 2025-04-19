@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: {{ .Release.Name }}
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      containers:
+      - name: {{ .Release.Name }}
+        env:
+        - name: TZ
+          value: Asia/Shanghai
+        - name: QlBaseUrl
+          value: "/"
+        - name: QlPort
+          value: "5700"
+        image: whyour/qinglong:2.18.1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5700
+          name: http
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 500Mi
+          requests:
+            cpu: 200m
+            memory: 200Mi
+        volumeMounts:
+        - mountPath: /ql/data
+          name: qinglong-data
+      volumes:
+      - hostPath:
+          path: {{ .Values.userspace.appCache }}/qinglong
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: {{ .Values.userspace.appCache }}/qinglong/data
+          type: DirectoryOrCreate
+        name: qinglong-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 5700
+  selector:
+    app: {{ .Release.Name }}
