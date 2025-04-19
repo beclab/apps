@@ -245,7 +245,7 @@ spec:
             runAsNonRoot: false
       containers:
         - name: gitlabfusion-cp
-          image: 'beclab/gitlab-client-proxy:cf6f4973'
+          image: 'beclab/gitlab-client-proxy:988961f5'
           ports:
             - name: ext-port
               containerPort: 8000
@@ -253,6 +253,19 @@ spec:
             - name: ext-port2
               containerPort: 8001
               protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                http_code=$(curl -s -o /dev/null -w "%{http_code}" http://{{ index .Values.svcs "serverproxy_host" }}:8000)
+                [ $http_code -ge 301 ] && [ $http_code -lt 303 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 30
+            periodSeconds: 120
+            successThreshold: 1
+            failureThreshold: 5
           env:
             - name: SERVER_PROXY_URL
               value: 'http://{{ index .Values.svcs "serverproxy_host" }}:8000'

@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: wewerss
+  name: wewerss
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: wewerss
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: wewerss
+    spec:
+      initContainers:
+        - name: init-db-check
+          image: busybox
+          command: [ 'sh', '-c', 'until nc -z mysql 3306; do echo waiting for mysql; sleep 2; done;' ]
+
+      containers:
+        - image: docker.io/cooderl/wewe-rss:v2.6.1
+          name: wewerss
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ':0'
+            - name: DB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: basic-secret
+                  key: mysqlRootPassword
+
+            - name: DATABASE_URL
+              value: 'mysql://root:$(DB_ROOT_PASSWORD)@mysql:3306/{{ .Values.wewerss.MYSQL_DATABASE }}?schema=public&connect_timeout=30&pool_timeout=30&socket_timeout=30'
+            - name: AUTH_CODE
+              value: '{{ .Values.wewerss.AUTH_CODE }}'
+            - name: FEED_MODE
+              value: 'fulltext'
+            - name: CRON_EXPRESSION
+              value: '35 5,17 * * *'
+            - name: MAX_REQUEST_PER_MINUTE
+              value: '60'
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 4000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/wewerss/data'
+      restartPolicy: Always
+
+
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wewerss
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: wewerss
+spec:
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+  selector:
+    io.kompose.service: wewerss
+
