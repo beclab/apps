@@ -1,0 +1,158 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: facefusion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: facefusion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: facefusion
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: facefusion
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: download-models
+          image: beclab/facefusion:facefusion-v0.6
+          envFrom:
+            - configMapRef:
+                name: facefusion-config
+          command:
+            - sh
+            - "-c"
+            - |
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
+              fi
+              apt clean && apt update && apt install -y rsync aria2 zstd pv;
+
+              DOWNLOAD_URL="${CDN_HOST}/facefusion-models.tar.zst"
+              MODEL_ROOT="/tmp/facefusion/models"
+              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
+              WORKDIR="/tmp/workspace"
+              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
+
+              rm -rf "${WORKDIR}"
+              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
+
+              if [ -f "${MODEL_MARKER}" ]; then
+                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
+                exit 0
+              fi
+
+              echo "Downloading model from $DOWNLOAD_URL..."
+              aria2c \
+                --continue=true \
+                --max-concurrent-downloads=4 \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=50M \
+                --timeout=20 \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --file-allocation=prealloc \
+                --disk-cache=64M \
+                --summary-interval=0 \
+                --quiet=false \
+                --enable-color=false \
+                --dir="$(dirname "$DOWNLOAD_TMP")" \
+                --out="$(basename "$DOWNLOAD_TMP")" \
+                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
+
+              echo "[$(date +%H:%M:%S)] Extracting files..."
+              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
+                echo "Extraction failed!"
+                rm -f "${DOWNLOAD_TMP}"
+                exit 1
+              }
+
+              echo "[$(date +%H:%M:%S)] Syncing files..."
+              rsync -av --ignore-existing "${WORKDIR}/facefusion/" "${MODEL_ROOT}/" || {
+                echo "Sync failed!"
+                exit 1
+              }
+
+              touch "${MODEL_MARKER}"
+
+              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
+              echo "[$(date +%H:%M:%S)] Initialization completed!"
+              exit 0
+          volumeMounts:
+            - name: data
+              mountPath: /tmp/facefusion/models
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: facefusion
+          image: beclab/facefusion:facefusion-v0.6
+          command:
+            - sh
+            - "-c"
+            - |
+              python3 facefusion.py run --execution-providers cuda
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: NVSHARE_MANAGED_MEMORY
+              value: "0"
+            - name: NVSHARE_DEBUG
+              value: "1"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvshare.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /app/.assets
+            - name: outputs
+              mountPath: /tmp
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/facefusion"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/facefusion/outputs"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: facefusion-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: facefusion
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
