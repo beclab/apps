@@ -1,0 +1,161 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: funclip
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: funclip
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: funclip
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: funclip
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: download-models
+          image: beclab/funclip:funclip-v0.7
+          envFrom:
+            - configMapRef:
+                name: funclip-config
+          command:
+            - sh
+            - "-c"
+            - |
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
+              fi
+              apt clean && apt update && apt install -y rsync aria2 zstd pv;
+
+              DOWNLOAD_URL="${CDN_HOST}/funclip-models.tar.zst"
+              MODEL_ROOT="/tmp/funclip/models"
+              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
+              WORKDIR="/tmp/workspace"
+              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
+
+              rm -rf "${WORKDIR}"
+              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
+
+              if [ -f "${MODEL_MARKER}" ]; then
+                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
+                exit 0
+              fi
+
+              echo "Downloading model from $DOWNLOAD_URL..."
+              aria2c \
+                --continue=true \
+                --max-concurrent-downloads=4 \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=50M \
+                --timeout=20 \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --file-allocation=prealloc \
+                --disk-cache=64M \
+                --summary-interval=0 \
+                --quiet=false \
+                --enable-color=false \
+                --dir="$(dirname "$DOWNLOAD_TMP")" \
+                --out="$(basename "$DOWNLOAD_TMP")" \
+                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
+
+              echo "[$(date +%H:%M:%S)] Extracting files..."
+              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
+                echo "Extraction failed!"
+                rm -f "${DOWNLOAD_TMP}"
+                exit 1
+              }
+
+              echo "[$(date +%H:%M:%S)] Syncing files..."
+              rsync -av --ignore-existing "${WORKDIR}/funclip/" "${MODEL_ROOT}/" || {
+                echo "Sync failed!"
+                exit 1
+              }
+
+              touch "${MODEL_MARKER}"
+
+              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
+              echo "[$(date +%H:%M:%S)] Initialization completed!"
+              exit 0
+          volumeMounts:
+            - name: data
+              mountPath: /tmp/funclip/models
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: funclip
+          image: beclab/funclip:funclip-v0.7
+          envFrom:
+            - configMapRef:
+                name: funclip-config
+          command:
+            - sh
+            - "-c"
+            - |
+              python3 funclip/launch.py -p 7860 -l ${DEFAULT_LANGUAGE} --listen 
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: NVSHARE_MANAGED_MEMORY
+              value: "0"
+            - name: NVSHARE_DEBUG
+              value: "1"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 9Gi
+              nvshare.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /root/.cache/modelscope
+            - name: outputs
+              mountPath: /app/outputs
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/funclip"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/funclip/outputs"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: funclip-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: funclip
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
