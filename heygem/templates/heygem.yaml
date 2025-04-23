@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: heygem
+  namespace: {{ .Release.Namespace }}
+  name: heygem
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: heygem
+  template:
+    metadata:
+      labels:
+        io.kompose.service: heygem
+    spec:
+      containers:
+      - name: heygem
+        image: guiji2025/fish-speech-ziming:1.0.39
+        command: ["/bin/bash", "-c", "/opt/conda/envs/python310/bin/python3 tools/api_server.py --listen 0.0.0.0:8080"]
+        env:
+          - name: NVIDIA_VISIBLE_DEVICES
+            value: "0"
+          - name: NVIDIA_DRIVER_CAPABILITIES
+            value: "compute,graphics,utility,video,display"
+        ports:
+          - containerPort: 8080
+        resources:
+          requests:
+            cpu: 100m
+            memory: 2Gi
+          limits:
+            memory: 16Gi
+            cpu: 2000m
+        readinessProbe: 
+            failureThreshold: 3
+            httpGet:
+              path: /
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+        volumeMounts:
+            - mountPath: /code/data
+              name: voice-data
+      restartPolicy: Always
+      
+      volumes:
+        - name: voice-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/heygem_data/voice/data"
+            type: DirectoryOrCreate
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: heygem
+  name: heygem-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: heygem
+  ports:
+    - protocol: TCP
+      port: 18180
+      targetPort: 8080
