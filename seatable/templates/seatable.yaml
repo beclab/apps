@@ -1,0 +1,96 @@
+{{- $seatableDomainENV := split "," .Values.domain.seatable -}}
+{{- $seatableDomain := index $seatableDomainENV "_0" -}}
+{{- $localDomain := $seatableDomain -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: seatable
+  name: seatable
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: seatable
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: seatable
+    spec:
+      initContainers:
+        - name: init-db-check
+          image: busybox
+          command: [ 'sh', '-c', 'until nc -z seatable-mysql 3306; do echo Waiting for MariaDB...; sleep 2; done;' ]
+        - name: init-redis-check
+          image: busybox
+          command: [ 'sh', '-c', 'until nc -z redis 6379; do echo “Waiting for Redis...”; sleep 2; done;' ]
+      containers:
+        - image: docker.io/seatable/seatable-enterprise:5.2.7
+          name: seatable
+          ports:
+            - containerPort: 80
+          env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ':0'
+          envFrom:
+            - configMapRef:
+                name: seatable-config
+          resources:
+            requests:
+              cpu: 300m
+              memory: 2Gi
+            limits:
+              cpu: 2000m
+              memory: 8Gi
+          volumeMounts:
+            - name: seatable-data
+              mountPath: /shared
+            - name: seatable-license
+              mountPath: /shared/seatable/seatable-license.txt
+              subPath: seatable-license.txt
+              readOnly: true
+
+      volumes:
+        - name: seatable-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
+        - name: seatable-license
+          configMap:
+            name: seatable-config
+            items:
+              - key: seatable-license.txt
+                path: seatable-license.txt
+
+      restartPolicy: Always
+
+
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seatable
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: seatable
+spec:
+  ports:
+    - name: '80'
+      port: 80
+      targetPort: 80
+  selector:
+    io.kompose.service: seatable
+

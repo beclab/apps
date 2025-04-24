@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coder
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: coder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: coder
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: coder
+    spec:
+      containers:
+        - name: docker-dind
+          image: docker:dind
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command: ["dockerd", "--host", "tcp://0.0.0.0:2375"]
+          ports:
+            - containerPort: 2375
+          volumeMounts:
+            - mountPath: /var/lib/docker
+              name: dind-storage
+          resources:
+            requests:
+              cpu: 400m
+              memory: 400Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+        - name: coder
+          image: ghcr.io/coder/coder:v2.19.0
+          env:
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            - name: CODER_PG_CONNECTION_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password | urlquery }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.coder }}?sslmode=disable"
+            - name: CODER_HTTP_ADDRESS
+              value: "0.0.0.0:7080"
+          ports:
+            - containerPort: 7080
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /home/coder
+              name: coder-data
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 7080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 7080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 0
+      volumes:
+        - name: coder-data
+          hostPath:
+            path: {{ .Values.userspace.appData }}/coder
+            type: DirectoryOrCreate
+        - name: dind-storage
+          emptyDir: {}
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: coder
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: http
+      port: 7080
+      targetPort: 7080
+  selector:
+    io.kompose.service: coder
