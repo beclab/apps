@@ -1,3 +1,8 @@
+{{- $nextcloudDomainENV := split "," .Values.domain.nextcloud -}}
+{{- $nextcloudDomain := index $nextcloudDomainENV "_0" -}}
+{{- $firstPart := regexReplaceAll "^([^.]+).*" $nextcloudDomain "${1}" -}}
+{{- $remainingParts := regexReplaceAll "^[^.]+(.*)" $nextcloudDomain "${1}" -}}
+{{- $localDomain := printf "%s.local%s" $firstPart $remainingParts -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -11,71 +16,104 @@ spec:
   selector:
     matchLabels:
       app: nextcloud
+  strategy:
+    type: Recreate      
   template:
     metadata:
       labels:
         app: nextcloud
     spec:
-      initContainers:
-      - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /app-data-root
-        resources: {}
-        volumeMounts:
-          - name:  app-data-root
-            mountPath: /app-data-root
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
+      securityContext:
+        runAsUser: 0
       containers:
-      - env:
-        - name: POSTGRES_PASSWORD
-          value: "{{ .Values.postgres.password }}"
-        - name: POSTGRES_DB
-          value: "{{ .Values.postgres.databases.nextcloud }}"
-        - name: POSTGRES_USER
-          value: "{{ .Values.postgres.username }}"
-        - name: POSTGRES_HOST
-          value: "{{ .Values.postgres.host }}"
-        # - name: REDIS_HOST
-        #   value: {{ .Values.redis.host }}
-        # - name: REDIS_HOST_PORT
-        #   value: "{{ .Values.redis.port }}"
-        # - name: REDIS_HOST_PASSWORD
-        #   value: {{ .Values.redis.password }}
-        name: nextcloud
-        image: docker.io/aboveos/nextcloud:latest
-        resources:
-          requests:
-            cpu: 500m
-            memory: 512Mi
-          limits:
-            cpu: 1000m
-            memory: 1Gi
-        ports:
-        - containerPort: 80
-        volumeMounts:
-        - name: nextcloud-vol
-          mountPath: /var/www/html
-        securityContext:
-          runAsUser: 0
-        imagePullPolicy: IfNotPresent
+        - name: nextcloud
+          image: docker.io/aboveos/zhangdangfang-nextcloud:31.0.4.2
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.databases.nextcloud }}"
+            - name: POSTGRES_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: POSTGRES_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: NEXTCLOUD_APPS_INSTALL
+              value: "files_external"
+            - name: NEXTCLOUD_APPS_ENABLE
+              value: "files_external"
+            - name: NEXTCLOUD_ADMIN_USER
+              value: "admin"
+            - name: NEXTCLOUD_ADMIN_PASSWORD
+              value: "Olares2024@"
+            - name: NEXTCLOUD_TRUSTED_DOMAINS
+              value: "{{$nextcloudDomain}} {{$localDomain}}"
+{{/*            - name: APACHE_DISABLE_REWRITE_IP*/}}
+{{/*              value: "1"*/}}
+            - name: TRUSTED_PROXIES
+              value: "127.0.0.1"
+            - name: OVERWRITECLIURL
+              value: "https://{{$nextcloudDomain}}"
+            - name: OVERWRITEPROTOCOL
+              value: "https"
+            - name: NEXTCLOUD_MOUNT_EXTERNAL_STORAGE
+              value: "true"
+            - name: NEXTCLOUD_MOUNT_EXTERNAL_STORAGE_NAME
+              value: "External Storage"
+            - name: NEXTCLOUD_MOUNT_EXTERNAL_STORAGE_PATH
+              value: "/external_storage"
+            - name: NEXTCLOUD_MOUNT_HOME_STORAGE
+              value: "true"
+            - name: NEXTCLOUD_MOUNT_HOME_STORAGE_NAME
+              value: "Home Storage"
+            - name: NEXTCLOUD_MOUNT_HOME_STORAGE_PATH
+              value: "/home_storage"
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1.5Gi
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+            - name: external-storage
+              mountPath: /external_storage
+            - name: home-storage
+              mountPath: /home_storage
       volumes:
-      - name: nextcloud-vol
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/nextcloud/app 
-      - name: app-data-root
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/nextcloud 
-        
+        - name: config-env
+          configMap:
+            name: nextcloud-config
+            items:
+              - key: config.php
+                path: config.php
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/nextcloud/data"
+            type: DirectoryOrCreate
+        - name: config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/nextcloud/config"
+            type: DirectoryOrCreate
+        - name: external-storage
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        - name: home-storage
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
 
 ---
 apiVersion: v1
@@ -86,7 +124,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: {{ .Release.Name }}
+    app: nextcloud
   ports:
     - protocol: TCP
       port: 80
