@@ -1,3 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-scripts
+  namespace: {{ .Release.Namespace }}
+data:
+  copy-config.sh: |
+    #!/bin/bash
+
+    new_dir="/config-new"
+    source_dir="/config"
+
+    if [ -z "$(ls -A $new_dir)" ]; then
+        echo "Directory $new_dir is empty. Copying contents from $source_dir..."
+        cp -r $source_dir/* $new_dir
+        echo "Contents copied successfully."
+    else
+        echo "Directory $new_dir is not empty, no action needed."
+    fi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,35 +40,82 @@ spec:
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/jellyfin/config'
+            type: DirectoryOrCreate
+          name: config
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/jellyfin/cache'
+            type: DirectoryOrCreate
+          name: cache
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/jellyfin'
+            type: DirectoryOrCreate
+          name: app-data-root
+        - name: external
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.sharedlib }}"
+        - name: config-scripts
+          configMap:
+            name: config-scripts
+            defaultMode: 438
+            items:
+            - key: copy-config.sh
+              path: copy-config.sh
       initContainers:
+        - name: init-config
+          image: jellyfin/jellyfin:10.10.6
+          resources: {}
+          command: ["/bin/bash", "-c", "chmod +x /scripts/copy-config.sh & bash /scripts/copy-config.sh"]
+          volumeMounts:
+          - name: config
+            mountPath: /config-new
+          - name: config-scripts
+            mountPath: /scripts/copy-config.sh
+            subPath: copy-config.sh
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
         - name: init-chmod-data
-          image: 'busybox:latest'
+          image: 'docker.io/aboveos/busybox:latest'
           command:
             - sh
             - '-c'
             - |
-              chown -R 1000:1000 /home
+              chown -R 1000:1000 /home; chown -R 1000:1000 /app-data-root
           resources: {}
           volumeMounts:
             - name: home
               mountPath: /home
+            - name: app-data-root
+              mountPath: /app-data-root
+          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+
       containers:
         - name: jellyfin
-          image: jellyfin/jellyfin
+          image: jellyfin/jellyfin:10.10.6
+          imagePullPolicy: IfNotPresent
           resources:
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
-              cpu: 1000m
-              memory: 512Mi
+              cpu: 4000m
+              memory: 4Gi
           ports:
           - containerPort: 8096
           volumeMounts:
           - name: home
             mountPath: /home
+          - name: config
+            mountPath: /config
+          - name: cache
+            mountPath: /cache
+          - name: external
+            mountPath: /external
           env:
           - name: PGID
             value: "1000" 

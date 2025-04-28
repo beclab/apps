@@ -1,0 +1,68 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: migpt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: migpt
+  template:
+    metadata:
+      labels:
+        app: migpt
+    spec:
+      containers:
+        - name: migpt
+          image: docker.io/lmk123/migpt-server:1.12.0
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: APP_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: migpt-config
+                  key: username
+            - name: APP_PASSWORD
+              valueFrom:
+                configMapKeyRef:
+                  name: migpt-config
+                  key: password
+          args: ["--user", "$(APP_USER)", "--pwd", "$(APP_PASSWORD)"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              cpu: 2500m
+              memory: 3Gi
+          ports:
+            - name: http
+              containerPort: 36592
+              protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: migpt-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: migpt
+spec:
+  ports:
+    - name: http
+      port: 36592
+      targetPort: 36592
+      protocol: TCP
+  selector:
+    app: migpt

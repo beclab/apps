@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mtranserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mtranserver
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mtranserver
+    spec:
+      initContainers:
+        - name: download-models
+          image: alpine/curl:8.12.1
+          envFrom:
+            - configMapRef:
+                name: mtranserver-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
+              fi
+              
+              mkdir -p /models
+              cd /models
+              apk add --no-cache curl unzip
+              
+              for model in ${MODELS}; do
+                echo "Downloading ${CDN_HOST}/${model}.zip..."
+                curl -L "https://${CDN_HOST}/${model}.zip" -o "${model}.zip"
+                unzip -q -o "${model}.zip" -d "/models/${model}"
+
+                if [ -d "/models/${model}/${model}" ]; then
+                  mv "/models/${model}/${model}"/* "/models/${model}"
+                  rmdir "/models/${model}/${model}"
+                fi
+
+                rm -f "${model}.zip"
+              done
+             
+              chown -R 1000:1000 /models
+          resources:
+            requests:
+              cpu: 50m
+              memory: 50Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+          volumeMounts:
+            - name: models-data
+              mountPath: /models
+      containers:
+        - name: mtranserver
+          image: docker.io/xxnuo/mtranserver:2.1.0
+          imagePullPolicy: Always
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+          resources:
+            requests:
+              cpu: 800m
+              memory: 800Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          ports:
+            - name: http
+              containerPort: 8989
+              protocol: TCP
+          volumeMounts:
+            - name: models-data
+              mountPath: /app/models
+      volumes:
+        - name: models-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/mtranserver/models'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mtranserver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mtranserver
+spec:
+  ports:
+    - name: "http"
+      port: 8989
+      targetPort: 8989
+      protocol: TCP
+  selector:
+    app: mtranserver

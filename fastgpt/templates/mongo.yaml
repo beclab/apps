@@ -1,0 +1,143 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mongo
+spec:
+  serviceName: mongo
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongo
+  template:
+    metadata:
+      labels:
+        app: mongo
+    spec:
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: mongo
+          image: registry.cn-hangzhou.aliyuncs.com/fastgpt/mongo:5.0.18
+          command:
+            - "bash"
+            - "-c"
+            - |
+              POD_FQDN="localhost"
+
+              /usr/local/bin/docker-entrypoint.sh mongod \
+                --keyFile /data/db/keyfile \
+                --replSet rs0 \
+                --bind_ip_all \
+                --setParameter maxNumActiveUserIndexBuilds=64 &
+
+              until mongosh --quiet "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
+                --eval "db.adminCommand({ ping: 1 })" >/dev/null; do
+                sleep 2
+              done
+
+              for i in {1..10}; do
+                echo "try init $i"
+                output=$(mongosh "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
+                  --eval "
+                    try {
+                      const cfg = {
+                        _id: 'rs0',
+                        version: 1,
+                        members: [{
+                          _id: 0,
+                          host: '${POD_FQDN}:27017',
+                          priority: 1
+                        }]
+                      };
+                      rs.initiate(cfg, { force: true });
+                      print('init_success');
+                    } catch (e) {
+                      print('init_error:' + e);
+                    }
+                  " 2>&1)
+
+                if [[ "$output" == *"init_success"* ]]; then
+                  echo "init success"
+                  break
+                elif [[ "$output" == *"already initialized"* ]]; then
+                  echo "already initialized"
+                  break
+                else
+                  echo "init error: $output"
+                  sleep 10
+                fi
+              done
+
+              until mongosh --quiet "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@localhost:27017/admin" \
+                --eval "db.hello().isWritablePrimary" | grep -q "true"; do
+                echo "Waiting for the master node election to complete..."
+                sleep 5
+              done
+
+              wait
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: "fastgpt"
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              value: "fastgpt"
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: mongo-storage
+              mountPath: /data/db
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "200Mi"
+            limits:
+              cpu: "300m"
+              memory: "800Mi"
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            allowPrivilegeEscalation: false
+
+      initContainers:
+        - name: mongo-init
+          image: alpine:3.18
+          command:
+            - "sh"
+            - "-c"
+            - |
+              apk add --no-cache openssl
+              openssl rand -base64 128 > /data/db/keyfile
+              chmod 400 /data/db/keyfile
+              chown 999:999 /data/db/keyfile
+              echo "file created"
+              ls -l /data/db/keyfile
+          volumeMounts:
+            - name: mongo-storage
+              mountPath: /data/db
+
+  volumeClaimTemplates:
+    - metadata:
+        name: mongo-storage
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: mongo
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: 27017
