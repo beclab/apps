@@ -1,0 +1,45 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: script
+  namespace: {{ .Release.Namespace }}
+data:
+  cleanup_folders.sh: |
+    #!/bin/sh
+
+    TARGET_DIR="/root/ComfyUI/custom_nodes"
+
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "Directory $TARGET_DIR does not exist. Exiting."
+        exit 0
+    fi
+
+    cd "$TARGET_DIR" || exit
+
+    folders=""
+
+    for dir in */; do
+        folder_name="${dir%/}"
+        lower_name=$(echo "$folder_name" | tr '[:upper:]' '[:lower:]')
+
+        lower_name_with_space="$lower_name "
+
+        if echo "$folders" | grep -qw "$lower_name_with_space"; then
+
+            existing_dir="$TARGET_DIR/$lower_name/"
+            
+
+            if [ "$dir" -nt "$existing_dir" ]; then
+                echo "Deleting older folder: $existing_dir"
+                rm -rf "$existing_dir"
+            else
+                echo "Deleting older folder: $dir"
+                rm -rf "$dir"
+            fi
+        else
+            folders="$folders$lower_name_with_space"
+        fi
+    done
+{{- end }}
