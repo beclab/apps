@@ -1,42 +1,54 @@
-
 apiVersion: v1
-data:
-  nginx.conf: |
-      server {
-
-        listen 8080;
-        access_log /opt/bitnami/openresty/nginx/logs/access.log;
-        error_log /opt/bitnami/openresty/nginx/logs/error.log;
-
-        proxy_connect_timeout                          30s;
-        proxy_send_timeout                             60s;
-        proxy_read_timeout                             300s;
-        proxy_set_header      host                      $host;
-        proxy_set_header      x-forwarded-host          $http_host;
-
-        proxy_http_version 1.1;
-
-        proxy_set_header upgrade $http_upgrade;
-        proxy_set_header connection "upgrade";
-
-        location / {
-            proxy_pass http://searxng:8080;
-        }
-      }
-
 kind: ConfigMap
 metadata:
   name: nginx-config
   namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      proxy_connect_timeout 30s;
+      proxy_send_timeout 60s;
+      proxy_read_timeout 300s;
+      proxy_set_header host $host;
+      proxy_set_header x-forwarded-host $http_host;
+
+      proxy_http_version 1.1;
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
+
+      location / {
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
+        add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
+          add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
+          return 204;
+        }
+
+        add_header X-Frame-Options "";
+        proxy_pass http://searxng:8080;
+      }
+    }
+
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   creationTimestamp: null
-  labels:
-    io.kompose.service: searxngclient
   name: searxngclient
   namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: searxngclient
 spec:
   replicas: 1
   selector:
@@ -56,8 +68,8 @@ spec:
             name: nginx-config
             defaultMode: 438
             items:
-            - key: nginx.conf
-              path: nginx.conf
+              - key: nginx.conf
+                path: nginx.conf
       containers:
         - name: nginx
           image: docker.io/aboveos/bitnami-openresty:1.25.3-2
@@ -67,30 +79,19 @@ spec:
           env:
             - name: OPENRESTY_CONF_FILE
               value: /etc/nginx/nginx.conf
-          startupProbe:
-            tcpSocket:
-              port: 8080
-            failureThreshold: 30
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /static/themes/simple/img/favicon.svg
-              port: 8080
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 5
             successThreshold: 1
-            failureThreshold: 10
-          # readinessProbe:
-          #   httpGet:
-          #     path: /
-          #     host: searxng.searxng-{{ .Values.admin }}
-          #     port: 8080
-          #     scheme: HTTP
-          #   initialDelaySeconds: 10
-          #   periodSeconds: 5
-          #   successThreshold: 1
-          #   failureThreshold: 10
+            failureThreshold: 240
           resources:
             limits:
               cpu: 100m
@@ -105,6 +106,7 @@ spec:
             - name: nginx-config
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
+
 ---
 apiVersion: v1
 kind: Service
