@@ -1,0 +1,137 @@
+
+apiVersion: v1
+data:
+  nginx.conf: |
+      server {
+
+        listen 8080;
+        access_log /opt/bitnami/openresty/nginx/logs/access.log;
+        error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+        proxy_connect_timeout                          30s;
+        proxy_send_timeout                             60s;
+        proxy_read_timeout                             300s;
+        proxy_set_header      host                      $host;
+        proxy_set_header      x-forwarded-host          $http_host;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header upgrade $http_upgrade;
+        proxy_set_header connection "upgrade";
+
+        location /web-apps {
+            proxy_pass http://onlyoffice-svc:80/web-apps;
+        }
+        
+        location /8.1.1-26 {
+            proxy_pass http://onlyoffice-svc:80/8.1.1-26;
+        }
+        
+        location /cache {
+            proxy_pass http://onlyoffice-svc:80/cache;
+        }
+
+        location / {
+            proxy_pass http://onlyofficeclient:3000;
+        }
+      }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: onlyofficeproxy
+  name: onlyofficeproxy
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: onlyofficeproxy
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: onlyofficeproxy
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+      containers:
+        - name: nginx
+          image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          # startupProbe:
+          #   tcpSocket:
+          #     port: 8080
+          #   failureThreshold: 30
+          #   periodSeconds: 10
+          # livenessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 8080
+          #   initialDelaySeconds: 30
+          #   timeoutSeconds: 60
+          #   periodSeconds: 60
+          #   successThreshold: 1
+          #   failureThreshold: 10
+          # readinessProbe:
+          #   exec:
+          #     command:
+          #     - /bin/sh
+          #     - -c
+          #     - |
+          #       http_code=$(curl -s -o /dev/null -w "%{http_code}" http://onlyoffice.onlyoffice-{{ .Values.admin }}:7860)
+          #       [ $http_code -ge 200 ] && [ $http_code -lt 300 ]
+          #   initialDelaySeconds: 10
+          #   timeoutSeconds: 2
+          #   periodSeconds: 5
+          #   successThreshold: 1
+          #   failureThreshold: 3
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onlyofficeproxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: onlyofficeproxy
+  ports:
+    - name: onlyofficeproxy
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
