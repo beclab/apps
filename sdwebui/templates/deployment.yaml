@@ -18,11 +18,14 @@ spec:
     spec:
       initContainers:
         - name: init-app
-          image: kldtks/sdwebui:v1.10.1-curl
+          image: kldtks/sdwebui:v1.10.1-dm-t4
           command:
             - sh
             - '-c'
             - |
+              mkdir -p /stable-diffusion-webui/openai;
+              cd /stable-diffusion-webui/openai;
+              chmod +x /runner-scripts/download.sh; /runner-scripts/download.sh;
               rsync -av --update /stable-diffusion-webui/ /app/;
               rsync -av --update /root/ /systemcache/
           volumeMounts:
@@ -45,15 +48,17 @@ spec:
             runAsUser: 0
 
         - name: initcache
-          image: 'kldtks/sdwebui:v1.10.1-curl'
+          image: 'kldtks/sdwebui:v1.10.1-dm-t4'
           command:
             - sh
             - '-c'
             - |
-              rsync -av --update /cache/.cache/ /data/systemcache/.cache/;
-              rsync -av --update /cache/config/ /data/app/config/;
-              rsync -av --update /cache/models/ /data/app/models/;
-              rsync -av --update /cache/openai/ /data/app/openai/;
+              echo "Starting cache initialization...";
+              [ -d /cache/.cache ] && echo "Found /cache/.cache" && rsync -av --update /cache/.cache/ /data/systemcache/.cache/ || echo "Directory /cache/.cache does not exist";
+              [ -d /cache/config ] && echo "Found /cache/config" && rsync -av --update /cache/config/ /data/app/config/ || echo "Directory /cache/config does not exist";
+              [ -d /cache/models ] && echo "Found /cache/models" && rsync -av --update /cache/models/ /data/app/models/ || echo "Directory /cache/models does not exist";
+              [ -d /cache/openai ] && echo "Found /cache/openai" && rsync -av --update /cache/openai/ /data/app/openai/ || echo "Directory /cache/openai does not exist";
+              echo "Cache initialization completed."
           resources: {}
           volumeMounts:
             - name: cacheforstartup
@@ -98,7 +103,7 @@ spec:
       - name: sdwebui
         securityContext:
           runAsUser: 1000
-        image: kldtks/sdwebui:v1.10.1-curl
+        image: kldtks/sdwebui:v1.10.1-dm-t4
         command:
           - sh
           - '-c'
@@ -109,19 +114,19 @@ spec:
             chown -R 1000:1000 /stable-diffusion-webui;  python -u
             /stable-diffusion-webui/webui.py --listen --port 7860 --xformers
             --allow-code --enable-insecure-extension-access --api --no-hashing --gradio-queue --xformers
-        livenessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - |
-              http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
-              [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
-          initialDelaySeconds: 600
-          timeoutSeconds: 60
-          periodSeconds: 120
-          successThreshold: 1
-          failureThreshold: 10
+        # livenessProbe:
+        #   exec:
+        #     command:
+        #     - /bin/sh
+        #     - -c
+        #     - |
+        #       http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
+        #       [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
+        #   initialDelaySeconds: 600
+        #   timeoutSeconds: 60
+        #   periodSeconds: 120
+        #   successThreshold: 1
+        #   failureThreshold: 10
         readinessProbe:
           exec:
             command:
@@ -131,10 +136,10 @@ spec:
               http_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7860/health)
               [ $http_code -ge 403 ] && [ $http_code -lt 405 ]
           initialDelaySeconds: 10
-          timeoutSeconds: 60
-          periodSeconds: 120
+          timeoutSeconds: 2
+          periodSeconds: 5
           successThreshold: 1
-          failureThreshold: 5
+          failureThreshold: 240
         startupProbe:
           exec:
             command:
@@ -174,8 +179,6 @@ spec:
             mountPath: /stable-diffusion-webui
           - name: sdconfig
             mountPath: /stable-diffusion-webui/config
-          - name: sdopenai
-            mountPath: /stable-diffusion-webui/openai
           - name: modellibckp
             mountPath: /stable-diffusion-webui/models/Stable-diffusion
           - name: modelliblora
@@ -203,7 +206,7 @@ spec:
           - name: extensions
             mountPath: /stable-diffusion-webui/extensions
           - name: output
-            mountPath: /stable-diffusion-webui/output
+            mountPath: /stable-diffusion-webui/outputs
         imagePullPolicy: IfNotPresent
       volumes:
       - name: sddata
