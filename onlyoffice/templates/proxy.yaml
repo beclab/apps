@@ -1,41 +1,62 @@
-
 apiVersion: v1
 data:
   nginx.conf: |
-      server {
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
-        listen 8080;
-        access_log /opt/bitnami/openresty/nginx/logs/access.log;
-        error_log /opt/bitnami/openresty/nginx/logs/error.log;
+      proxy_connect_timeout 30s;
+      proxy_send_timeout 60s;
+      proxy_read_timeout 300s;
+      proxy_set_header host $host;
+      proxy_set_header x-forwarded-host $http_host;
+      proxy_http_version 1.1;
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
 
-        proxy_connect_timeout                          30s;
-        proxy_send_timeout                             60s;
-        proxy_read_timeout                             300s;
-        proxy_set_header      host                      $host;
-        proxy_set_header      x-forwarded-host          $http_host;
-
-        proxy_http_version 1.1;
-
-        proxy_set_header upgrade $http_upgrade;
-        proxy_set_header connection "upgrade";
-
-        location /web-apps {
-            proxy_pass http://onlyoffice-svc:80/web-apps;
-        }
-        
-        location /8.1.1-26 {
-            proxy_pass http://onlyoffice-svc:80/8.1.1-26;
-        }
-        
-        location /cache {
-            proxy_pass http://onlyoffice-svc:80/cache;
-        }
-
-        location / {
-            proxy_pass http://onlyofficeclient:3000;
-        }
+      {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+      location /web-apps {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc:80/web-apps;
       }
 
+      location /8.1.1-26 {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc:80/8.1.1-26;
+      }
+
+      location /cache {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc:80/cache;
+      }
+
+      location / {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyofficeclient:3000;
+      }
+      {{- else }}
+      location /web-apps {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc.onlyoffice-{{ .Values.admin }}:80/web-apps;
+      }
+
+      location /8.1.1-26 {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc.onlyoffice-{{ .Values.admin }}:80/8.1.1-26;
+      }
+
+      location /cache {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyoffice-svc.onlyoffice-{{ .Values.admin }}:80/cache;
+      }
+
+      location / {
+        add_header X-Frame-Options "";
+        proxy_pass http://onlyofficeclient.onlyoffice-{{ .Values.admin }}:3000;
+      }
+      {{- end }}
+    }
 kind: ConfigMap
 metadata:
   name: nginx-config
@@ -68,8 +89,8 @@ spec:
             name: nginx-config
             defaultMode: 438
             items:
-            - key: nginx.conf
-              path: nginx.conf
+              - key: nginx.conf
+                path: nginx.conf
       containers:
         - name: nginx
           image: docker.io/aboveos/bitnami-openresty:1.25.3-2
@@ -79,33 +100,19 @@ spec:
           env:
             - name: OPENRESTY_CONF_FILE
               value: /etc/nginx/nginx.conf
-          # startupProbe:
-          #   tcpSocket:
-          #     port: 8080
-          #   failureThreshold: 30
-          #   periodSeconds: 10
-          # livenessProbe:
-          #   httpGet:
-          #     path: /
-          #     port: 8080
-          #   initialDelaySeconds: 30
-          #   timeoutSeconds: 60
-          #   periodSeconds: 60
-          #   successThreshold: 1
-          #   failureThreshold: 10
-          # readinessProbe:
-          #   exec:
-          #     command:
-          #     - /bin/sh
-          #     - -c
-          #     - |
-          #       http_code=$(curl -s -o /dev/null -w "%{http_code}" http://onlyoffice.onlyoffice-{{ .Values.admin }}:7860)
-          #       [ $http_code -ge 200 ] && [ $http_code -lt 300 ]
-          #   initialDelaySeconds: 10
-          #   timeoutSeconds: 2
-          #   periodSeconds: 5
-          #   successThreshold: 1
-          #   failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 240
           resources:
             limits:
               cpu: 100m
