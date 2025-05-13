@@ -1,0 +1,106 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisperwebuishare
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperwebuishare
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whisperwebuishare
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisperwebuishare
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: copy-configs
+          image: jhj0517/whisper-webui:v1.0.4
+          command:
+            - sh
+            - '-c'
+            - |
+              mkdir -p /tmp/configs;
+              cp -rupv /Whisper-WebUI/configs/. /tmp/configs/;
+              exit 0
+          volumeMounts:
+            - name: configs
+              mountPath: /tmp/configs
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: whisperwebuishare
+          image: jhj0517/whisper-webui:v1.0.4
+          envFrom:
+            - configMapRef:
+                name: whisperwebui-config
+          command:
+            - sh
+            - "-c"
+            - |
+              python app.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 6Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: models
+              mountPath: /Whisper-WebUI/models
+            - name: outputs
+              mountPath: /Whisper-WebUI/outputs
+            - name: configs
+              mountPath: /Whisper-WebUI/configs
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/whisperwebui"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/output/whisperwebui"
+            type: DirectoryOrCreate
+        - name: configs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/configs"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisperwebui-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: whisperwebuishare
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
+{{- end }}
