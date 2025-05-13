@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: openwebui
+  name: openwebui
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: openwebui
+  strategy: 
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: openwebui
+    spec:
+      initContainers:
+      - name: init-data
+        image: kldtks/openwebui-fix-chunked:v0.6.6-f1-m1
+        command: 
+            - sh
+            - '-c'
+            - |-
+              if [ ! -d "/app/backend/data2" ] || [ -z "$(ls -A /app/backend/data2)" ]; then
+                  if [ -n "$(ls -A /app/backend/data)" ]; then
+                      echo "start copy"; cp -a /app/backend/data/. /app/backend/data2/
+                  fi
+              fi
+        volumeMounts:
+        - mountPath: /app/backend/data2
+          name: appcache
+        securityContext:
+          runAsUser: 0
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: HF_HUB_OFFLINE
+          value: '1'
+        image: kldtks/openwebui-fix-chunked:v0.6.6-f1-m1
+        name: openwebui
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
+        ports:
+        - containerPort: 8080
+        env:
+        - name: OLLAMA_BASE_URL
+          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+        - name: OPENAI_API_BASE_URLS
+          value: "http://xinference.xinference-{{ .Values.admin }}:9997/v1;"
+        - name: OPENAI_API_KEYS
+          value: " ;"
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /app/backend/data
+          name: appcache
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/openwebui'
+          type: DirectoryOrCreate
+        name: appcache
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: openwebui
+  name: openwebui
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8080"
+    port: 8080
+    targetPort: 8080
+  selector:
+    io.kompose.service: openwebui
+status:
+  loadBalancer: {}

@@ -16,6 +16,23 @@ spec:
       labels:
         app: bazarr
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name: bazarr-config
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -27,7 +44,8 @@ spec:
         - name: TZ
           value: Etc/UTC
         name: bazarr
-        image: hotio/bazarr:latest
+        image: docker.io/aboveos/hotio-bazarr:latest
+        imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 100m
@@ -61,3 +79,24 @@ spec:
     - protocol: TCP
       port: 6767
       targetPort: 6767
+
+---
+apiVersion: sys.bytetrade.io/v1alpha1
+kind: ProviderRegistry
+metadata:
+  name: legacy-{{ .Release.Name }}
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  dataType: legacy_{{ .Release.Name }}
+  deployment: {{ .Release.Name }}
+  description: {{ .Release.Name }} legacy api v2
+  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:6767
+  group: api.{{ .Release.Name }}
+  kind: provider
+  namespace: {{ .Release.Namespace }}
+  version: v2
+  opApis:
+  - name: All
+    uri: /  
+status:
+  state: active

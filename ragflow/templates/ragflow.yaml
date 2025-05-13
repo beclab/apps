@@ -1,0 +1,171 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ragflow-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    user  root;
+    worker_processes  auto;
+
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+
+
+    events {
+        worker_connections  1024;
+    }
+
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        #tcp_nopush     on;
+
+        keepalive_timeout  65;
+
+        #gzip  on;
+        client_max_body_size 128M;
+
+        include /etc/nginx/conf.d/ragflow.conf;
+    }
+
+  proxy.conf: |
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+
+  ragflow.conf: |
+    server {
+        listen 80;
+        server_name _;
+        root /ragflow/web/dist;
+
+        gzip on;
+        gzip_min_length 1k;
+        gzip_comp_level 9;
+        gzip_types text/plain application/javascript application/x-javascript text/css application/xml text/javascript application/x-httpd-php image/jpeg image/gif image/png;
+        gzip_vary on;
+        gzip_disable "MSIE [1-6]\.";
+
+        location ~ ^/(v1|api) {
+            proxy_pass http://127.0.0.1:9380;
+            include proxy.conf;
+        }
+
+
+        location / {
+            index index.html;
+            try_files $uri $uri/ /index.html;
+        }
+
+        # Cache-Control: max-age~@~AExpires
+        location ~ ^/static/(css|js|media)/ {
+            expires 10y;
+            access_log off;
+        }
+    }
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ragflow
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ragflow
+  strategy:
+    type: Recreate         
+  template:
+    metadata:
+      labels:
+        app: ragflow
+    spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: ragflow
+        image: infiniflow/ragflow:v0.15.1
+        ports:
+        - containerPort: 9380
+        - containerPort: 80
+        env:
+        - name: TZ
+          value: "Asia/Shanghai"
+        - name: HF_ENDPOINT
+          value: 'https://hf-mirror.com/'
+        - name: MACOS
+          value: '0'
+        resources:
+          limits:
+            cpu: "4"
+            memory: 4Gi
+          requests:
+            cpu: "1"
+            memory: 1Gi
+        volumeMounts:
+          - name: nginx-config
+            mountPath: /etc/nginx/conf.d/ragflow.conf
+            subPath: ragflow.conf
+          - name: nginx-config
+            mountPath: /etc/nginx/proxy.conf
+            subPath: proxy.conf
+          - name: nginx-config
+            mountPath: /etc/nginx/nginx.conf
+            subPath: nginx.conf
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: ragflow-config
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow/ragflow'
+          type: DirectoryOrCreate
+        name: ragflow-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ragflow
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+  selector:
+    app: ragflow
