@@ -1,0 +1,165 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echomimicv2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: echomimicv2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echomimicv2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: echomimicv2
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: init-resources
+          image: beclab/echomimic_v2:echomimic-v0.10
+          envFrom:
+            - configMapRef:
+                name: echomimicv2-config
+          command:
+            - sh
+            - '-c'
+            - |
+              apt update && apt install rsync -y;
+              mkdir -p /tmp/echomimicv2/assets;
+              rsync -av --update /app/assets/ /tmp/echomimicv2/assets;
+
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
+              fi
+              apt clean && apt update && apt install -y rsync aria2 zstd pv;
+
+              DOWNLOAD_URL="${CDN_HOST}/echomimicv2-models.tar.zst"
+              MODEL_ROOT="/tmp/echomimicv2/models"
+              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
+              WORKDIR="/tmp/workspace"
+              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
+
+              rm -rf "${WORKDIR}"
+              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
+
+              if [ -f "${MODEL_MARKER}" ]; then
+                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
+                exit 0
+              fi
+
+              echo "Downloading model from $DOWNLOAD_URL..."
+              aria2c \
+                --continue=true \
+                --max-concurrent-downloads=4 \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=50M \
+                --timeout=20 \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --file-allocation=prealloc \
+                --disk-cache=64M \
+                --summary-interval=0 \
+                --quiet=false \
+                --enable-color=false \
+                --dir="$(dirname "$DOWNLOAD_TMP")" \
+                --out="$(basename "$DOWNLOAD_TMP")" \
+                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
+
+              echo "[$(date +%H:%M:%S)] Extracting files..."
+              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
+                echo "Extraction failed!"
+                rm -f "${DOWNLOAD_TMP}"
+                exit 1
+              }
+
+              echo "[$(date +%H:%M:%S)] Syncing files..."
+              rsync -av --ignore-existing "${WORKDIR}/echomimicv2/" "${MODEL_ROOT}/" || {
+                echo "Sync failed!"
+                exit 1
+              }
+
+              touch "${MODEL_MARKER}"
+
+              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
+              echo "[$(date +%H:%M:%S)] Initialization completed!"
+              exit 0
+          volumeMounts:
+            - name: assets
+              mountPath: /tmp/echomimicv2/assets
+            - name: data
+              mountPath: /tmp/echomimicv2/models
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: echomimicv2
+          image: beclab/echomimic_v2:echomimic-v0.10
+          command:
+            - sh
+            - "-c"
+            - |
+              python3 app.py
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 9Gi
+            limits:
+              cpu: "7"
+              memory: 16Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/pretrained_weights
+            - name: outputs
+              mountPath: /app/outputs
+            - name: assets
+              mountPath: /app/assets
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/echomimicv2"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/echomimicv2"
+            type: DirectoryOrCreate
+        - name: assets
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/echomimicv2/assets"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echomimicv2-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: echomimicv2
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
