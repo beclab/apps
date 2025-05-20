@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.toml: |
+    [GENERAL]
+    SIMILARITY_MEASURE = "cosine" # "cosine" or "dot"
+    KEEP_ALIVE = "5m" # How long to keep Ollama models loaded into memory. (Instead of using -1 use "-1m")
+
+    [MODELS.OPENAI]
+    API_KEY = ""
+
+    [MODELS.GROQ]
+    API_KEY = ""
+
+    [MODELS.ANTHROPIC]
+    API_KEY = ""
+
+    [MODELS.GEMINI]
+    API_KEY = ""
+
+    [MODELS.CUSTOM_OPENAI]
+    API_KEY = ""
+    API_URL = ""
+    MODEL_NAME = ""
+
+    [MODELS.OLLAMA]
+    API_URL = "http://ollama.ollama-{{ .Values.admin }}:11434" # Ollama API URL - http://host.docker.internal:11434
+
+    [MODELS.DEEPSEEK]
+    API_KEY = ""
+
+    [API_ENDPOINTS]
+    SEARXNG = "http://searxng.searxng-{{ .Values.admin }}:8080" # SearxNG API URL - http://localhost:32768
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: perplexica
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: perplexica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: perplexica
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: perplexica
+    spec:
+      initContainers:
+      - name: getconfigfile
+        image: "aboveos/itzcrazykns1337-perplexica:v1.10.2"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "if [ ! -f '/home/perplexica/config.toml' ]; then cp '/home/perplexica-config/config.toml' '/home/perplexica/config.toml'; fi"]
+        volumeMounts:
+        - mountPath: /home/perplexica
+          name: appconfig
+        - mountPath: /home/perplexica-config/config.toml
+          name: config
+          subPath: config.toml
+      - name: init-chmod-data
+        image: 'mirrors.joinolares.cn/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-cache-root
+        resources: {}
+        volumeMounts:
+          - name:  app-cache-root
+            mountPath: /app-cache-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: perplexica
+        image: aboveos/itzcrazykns1337-perplexica:v1.10.2
+        env:
+        - name: SEARXNG_API_URL
+          value: "http://searxng.searxng-{{ .Values.admin }}:8080"
+        - name: OLLAMA_API_URL
+          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+        - name: HOSTNAME
+          value: '0.0.0.0'
+        ports:
+        - containerPort: 3000
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2048Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        volumeMounts:
+        - mountPath: /home/perplexica/data
+          name: appcache
+        - mountPath: /home/perplexica/uploads
+          name: appuploads
+        - mountPath: /home/perplexica/config.toml
+          name: appconfig
+          subPath: config.toml        
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica/data'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica/uploads'
+          type: DirectoryOrCreate
+        name: appuploads
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica/config'
+          type: DirectoryOrCreate
+        name: appconfig
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/perplexica'
+          type: DirectoryOrCreate
+        name: app-cache-root
+      - name: config
+        configMap:
+          name: app-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: perplexica
+  name: perplexica
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: perplexica
+status:
+  loadBalancer: {}
+
+
+
