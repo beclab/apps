@@ -1,0 +1,160 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cosyvoice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: cosyvoice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cosyvoice
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: cosyvoice
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: download-models
+          image: beclab/cosyvoice:cosyvoice-v0.4
+          envFrom:
+            - configMapRef:
+                name: cosyvoice-config
+          command:
+            - sh
+            - "-c"
+            - |
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
+              fi
+              apt clean && apt update && apt install -y rsync aria2 zstd pv;
+              mkdir -p /tmp/cosyvoice/examples;
+              rsync -av --update /app/examples/ /tmp/cosyvoice/examples;
+
+              DOWNLOAD_URL="${CDN_HOST}/cosyvoice-models.tar.zst"
+              MODEL_ROOT="/tmp/cosyvoice/models"
+              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
+              WORKDIR="/tmp/workspace"
+              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
+
+              rm -rf "${WORKDIR}"
+              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
+
+              if [ -f "${MODEL_MARKER}" ]; then
+                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
+                exit 0
+              fi
+
+              echo "Downloading model from $DOWNLOAD_URL..."
+              aria2c \
+                --continue=true \
+                --max-concurrent-downloads=4 \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=50M \
+                --timeout=20 \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --file-allocation=prealloc \
+                --disk-cache=64M \
+                --summary-interval=0 \
+                --quiet=false \
+                --enable-color=false \
+                --dir="$(dirname "$DOWNLOAD_TMP")" \
+                --out="$(basename "$DOWNLOAD_TMP")" \
+                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
+
+              echo "[$(date +%H:%M:%S)] Extracting files..."
+              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
+                echo "Extraction failed!"
+                rm -f "${DOWNLOAD_TMP}"
+                exit 1
+              }
+
+              echo "[$(date +%H:%M:%S)] Syncing files..."
+              rsync -av --ignore-existing "${WORKDIR}/cosyvoice/" "${MODEL_ROOT}/" || {
+                echo "Sync failed!"
+                exit 1
+              }
+
+              touch "${MODEL_MARKER}"
+
+              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
+              echo "[$(date +%H:%M:%S)] Initialization completed!"
+              exit 0
+          volumeMounts:
+            - name: examples
+              mountPath: /tmp/cosyvoice/examples
+            - name: data
+              mountPath: /tmp/cosyvoice/models
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: cosyvoice
+          image: beclab/cosyvoice:cosyvoice-v0.4
+          envFrom:
+            - configMapRef:
+                name: cosyvoice-config
+          command:
+            - sh
+            - "-c"
+            - |
+              python3 ./webui.py --port 7860 --model_dir /app/pretrained_models/${INIT_MODELS}
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 6Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/pretrained_models
+            - name: examples
+              mountPath: /app/examples
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/cosyvoice"
+            type: DirectoryOrCreate
+        - name: examples
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/cosyvoice/examples"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cosyvoice-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: cosyvoice
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP

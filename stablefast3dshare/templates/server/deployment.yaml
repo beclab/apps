@@ -1,0 +1,138 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: v1
+data:
+  nginx.conf: |
+      server {
+
+        listen 8080;
+        access_log /opt/bitnami/openresty/nginx/logs/access.log;
+        error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+        proxy_connect_timeout                          30s;
+        proxy_send_timeout                             60s;
+        proxy_read_timeout                             300s;
+        proxy_set_header      host                      $host;
+        proxy_set_header      x-forwarded-host          $http_host;
+
+        proxy_http_version 1.1;
+
+        proxy_set_header upgrade $http_upgrade;
+        proxy_set_header connection "upgrade";
+
+        location / {
+            proxy_pass http://127.0.0.1:7860;
+        }
+      }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config-server
+  namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: stablefast3d
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stablefast3d
+  template:
+    metadata:
+      labels:
+        app: stablefast3d
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: 'docker.io/aboveos/busybox:latest'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-cache-root
+          resources: {}
+          volumeMounts:
+            - name:  sf3d
+              mountPath: /app-cache-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+      - name: stablefast3d
+        image: kldtks/fast3d:r1
+        resources:
+          requests:
+            cpu: 500m
+            memory: 3Gi
+          limits:
+            cpu: 4000m
+            memory: 24Gi
+        ports:
+        - containerPort: 7860
+        env:
+        - name: TMPDIR
+          value: /codes/sf3d
+        # volumeMounts:
+        # - mountPath: /codes/sf3d/gradio
+        #   name: sf3d
+        imagePullPolicy: IfNotPresent
+      - name: nginx
+        image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+        ports:
+          - containerPort: 8080
+            protocol: TCP
+        env:
+          - name: OPENRESTY_CONF_FILE
+            value: /etc/nginx/nginx.conf
+        resources:
+          limits:
+            cpu: 100m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        volumeMounts:
+          - name: nginx-config-server
+            mountPath: /etc/nginx/nginx.conf
+            subPath: nginx.conf
+          - name: nginx-config-server
+            mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+            subPath: nginx.conf
+      volumes:
+      - name: sf3d
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appCache}}/stablefast3d
+      - name: nginx-config-server
+        configMap:
+          name: nginx-config-server
+          defaultMode: 438
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+  strategy:
+    type: Recreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: stablefast3d
+  ports:
+    - protocol: TCP
+      port: 7860
+      targetPort: 8080
+---
+{{- end }}
