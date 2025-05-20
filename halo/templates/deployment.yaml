@@ -1,3 +1,7 @@
+{{- $haloDomainENV := split "," .Values.domain.halo -}}
+{{- $haloDomain := index $haloDomainENV "_0" -}}
+  {{- $localDomain := $haloDomain -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,21 +14,19 @@ spec:
   selector:
     matchLabels:
       app: halo
+  strategy:
+    type: Recreate  
   template:
     metadata:
       labels:
         app: halo
     spec:
-      securityContext:
-        fsGroup: 1000
       containers:
         - name: halo
-          image: docker.io/halohub/halo:2.20.15
+          image: docker.io/halohub/halo:2.20.17
+          securityContext:
+            runAsUser: 0
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: "Etc/UTC"
             - name: JVM_OPTS
@@ -36,7 +38,7 @@ spec:
             - "--spring.r2dbc.username={{ .Values.postgres.username }}"
             - "--spring.r2dbc.password={{ .Values.postgres.password }}"
             - "--spring.sql.init.platform=postgresql"
-            - "--halo.external-url=http://localhost:8090/"
+            - "--halo.external-url=https://{{$haloDomain}}"
             - "--server.port=8090"
           resources:
             requests:
@@ -51,6 +53,23 @@ spec:
             - name: halo-vol
               mountPath: /app/data/.halo2
           imagePullPolicy: IfNotPresent
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 8090
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
       volumes:
         - name: halo-vol
           hostPath:

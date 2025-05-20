@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: cloudreve
+  name: cloudreve
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: cloudreve
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: cloudreve
+    spec:
+      containers:
+        - image: docker.io/cloudreve/cloudreve:3.8.3
+          name: cloudreve
+          ports:
+            - containerPort: 5212
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ':0'
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /cloudreve/conf.ini
+              subPath: conf.ini
+
+            - name: db
+              mountPath: /cloudreve/cloudreve.db
+              subPath: cloudreve.db
+            - name: uploads
+              mountPath: /cloudreve/uploads
+            - name: avatar
+              mountPath: /cloudreve/avatar
+            - name: temp-data
+              mountPath: /data
+          startupProbe:
+            httpGet:
+              path: /
+              port: 5212
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+
+        - name: aria2
+          image: docker.io/p3terx/aria2-pro:202209060423
+          env:
+            - name: RPC_SECRET
+              value: {{ randAlphaNum 16 | b64enc }}
+            - name: RPC_PORT
+              value: '6800'
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 250m
+              memory: 1Gi
+          volumeMounts:
+            - name: aria2-config
+              mountPath: /config
+            - name: temp-data
+              mountPath: /data
+      volumes:
+        - name: temp-data
+          emptyDir: { }
+        - name: config
+          configMap:
+            name: cloudreve-config
+            items:
+              - key: conf.ini
+                path: conf.ini
+        - name: db
+          configMap:
+            name: cloudreve-config
+            items:
+              - key: cloudreve.db
+                path: cloudreve.db
+        - name: uploads
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/cloudreve/uploads'
+        - name: avatar
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/cloudreve/avatar'
+
+        - name: aria2-config
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/aria2/config'
+
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aria2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: aria2
+spec:
+  ports:
+    - name: http
+      port: 6800
+      targetPort: 6800
+  selector:
+    io.kompose.service: cloudreve
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudreve
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: cloudreve
+spec:
+  ports:
+    - name: http
+      port: 5212
+      targetPort: 5212
+  selector:
+    io.kompose.service: cloudreve
+

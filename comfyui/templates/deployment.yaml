@@ -21,7 +21,7 @@ spec:
     spec:
       initContainers:
       - name: upversion
-        image: 'aboveos/kldtks-comfyui:v0.3.14-b1'
+        image: 'aboveos/kldtks-comfyui:v0.3.22-b1'
         command:
           - sh
           - '-c'
@@ -61,6 +61,8 @@ spec:
             mountPath: /root/ComfyUI/models/style_models
           - name: modellibfacerestore
             mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
@@ -69,7 +71,7 @@ spec:
         securityContext:
           runAsUser: 0
       - name: installcomfyui
-        image: 'aboveos/kldtks-comfyui:v0.3.14-b1'
+        image: 'aboveos/kldtks-comfyui:v0.3.22-b1'
         command:
           - sh
           - '-c'
@@ -108,6 +110,8 @@ spec:
             mountPath: /root/ComfyUI/models/style_models
           - name: modellibfacerestore
             mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
@@ -116,7 +120,7 @@ spec:
         securityContext:
           runAsUser: 0
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: 'aboveos/busybox:latest'
         command:
           - sh
           - '-c'
@@ -154,11 +158,13 @@ spec:
             mountPath: /root/ComfyUI/models/style_models
           - name: modellibfacerestore
             mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
       - name: update-chmod-data-ai
@@ -178,7 +184,7 @@ spec:
         securityContext:
           runAsUser: 0
       - name: cleanup-folders
-        image: 'docker.io/aboveos/busybox:latest'
+        image: 'aboveos/busybox:latest'
         command:
           - sh
           - '-c'
@@ -193,7 +199,7 @@ spec:
             mountPath: /volume-script
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
       containers:
@@ -205,7 +211,7 @@ spec:
             - name: TZ
               value: Etc/UTC
             - name: CLI_ARGS
-              value: '--normalvram --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@v1.10.6'
+              value: '--normalvram --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@v1.12.6'
             - name: HOME
               value: /root
             - name: PIP_CACHE_DIR
@@ -216,9 +222,11 @@ spec:
               value: /root/.cache
             - name: PIP_CONFIG_FILE
               value: /root/.config/pip/pip.conf
+            - name: PIP_INDEX_URL
+              value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
           securityContext:
             runAsUser: 1000
-          image: "aboveos/kldtks-comfyui:v0.3.14-b1"
+          image: "aboveos/kldtks-comfyui:v0.3.22-b1"
           name: comfyui
           command:
             - sh
@@ -237,25 +245,25 @@ spec:
             limits:
               cpu: 4
               memory: 30Gi
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8188
-              scheme: HTTP
-            initialDelaySeconds: 600
-            timeoutSeconds: 60
-            periodSeconds: 120
-            successThreshold: 1
-            failureThreshold: 10
+          # livenessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 8188
+          #     scheme: HTTP
+          #   initialDelaySeconds: 600
+          #   timeoutSeconds: 60
+          #   periodSeconds: 120
+          #   successThreshold: 1
+          #   failureThreshold: 10
           readinessProbe:
             httpGet:
               path: /
               port: 8188
-            initialDelaySeconds: 10
-            timeoutSeconds: 30
-            periodSeconds: 120
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+            periodSeconds: 5
             successThreshold: 1
-            failureThreshold: 5
+            failureThreshold: 240
           startupProbe:
             exec:
               command:
@@ -298,6 +306,8 @@ spec:
               mountPath: /root/ComfyUI/models/style_models
             - name: modellibfacerestore
               mountPath: /root/ComfyUI/models/facerestore_models
+            - name: modeldiffusion
+              mountPath: /root/ComfyUI/models/diffusion_models
             - name: output
               mountPath: /root/ComfyUI/output
           imagePullPolicy: IfNotPresent
@@ -382,7 +392,10 @@ spec:
           hostPath:
             path: {{ .Values.sharedlib }}/ai/model/facerestore_models
             type: DirectoryOrCreate
-            
+        - name: modeldiffusion
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/diffusion_models
+            type: DirectoryOrCreate
         - name: volume-script
           configMap:
             name: script

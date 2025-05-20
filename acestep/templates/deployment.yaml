@@ -1,0 +1,160 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acestep
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: acestep
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: acestep
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: acestep
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: download-models
+          image: harveyff/acestep:v1.0.6
+          envFrom:
+            - configMapRef:
+                name: acestep-config
+          command:
+            - sh
+            - "-c"
+            - |
+              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
+                echo "use China mirrors..."
+                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
+              fi
+              apt clean && apt update && apt install -y rsync aria2 zstd pv;
+
+              DOWNLOAD_URL="${CDN_HOST}/acestep_models.tar.zst"
+              MODEL_ROOT="/tmp/acestep/models"
+              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
+              WORKDIR="/tmp/workspace"
+              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
+
+              rm -rf "${WORKDIR}"
+              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
+
+              if [ -f "${MODEL_MARKER}" ]; then
+                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
+                exit 0
+              fi
+
+              echo "Downloading model from $DOWNLOAD_URL..."
+              aria2c \
+                --continue=true \
+                --max-concurrent-downloads=4 \
+                --split=4 \
+                --max-connection-per-server=4 \
+                --min-split-size=50M \
+                --timeout=20 \
+                --max-tries=0 \
+                --retry-wait=10 \
+                --check-certificate=false \
+                --allow-overwrite=true \
+                --file-allocation=prealloc \
+                --disk-cache=64M \
+                --summary-interval=0 \
+                --quiet=false \
+                --enable-color=false \
+                --dir="$(dirname "$DOWNLOAD_TMP")" \
+                --out="$(basename "$DOWNLOAD_TMP")" \
+                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
+
+              echo "[$(date +%H:%M:%S)] Extracting files..."
+              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
+                echo "Extraction failed!"
+                rm -f "${DOWNLOAD_TMP}"
+                exit 1
+              }
+
+              ls -ld "${WORKDIR}"
+
+              echo "[$(date +%H:%M:%S)] Syncing files..."
+              rsync -av --ignore-existing "${WORKDIR}/" "${MODEL_ROOT}/" || {
+                echo "Sync failed!"
+                exit 1
+              }
+
+              touch "${MODEL_MARKER}"
+
+              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
+              echo "[$(date +%H:%M:%S)] Initialization completed!"
+              exit 0
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /tmp/acestep/models
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: acestep
+          image: harveyff/acestep:v1.0.6
+          ports:
+            - containerPort: 7865
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /root/.cache/ace-step/checkpoints
+            - name: outputs
+              mountPath: /app/outputs
+            - name: logs
+              mountPath: /app/exps/logs
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: checkpoints
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/checkpoints"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/acestep/logs"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acestep-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: acestep
+  ports:
+    - name: api
+      port: 7865
+      targetPort: 7865
+  type: ClusterIP
