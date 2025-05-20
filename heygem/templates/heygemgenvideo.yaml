@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: heygemgenvideo
+  namespace: {{ .Release.Namespace }}
+  name: heygemgenvideo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: heygemgenvideo
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: heygemgenvideo
+    spec:
+      runtimeClassName: nvidia
+      containers:
+      - name: heygemgenvideo
+        image: guiji2025/heygem.ai:0.0.7_sdk_slim
+        command: ["python", "/code/app_local.py"]
+        env:
+          - name: PYTORCH_CUDA_ALLOC_CONF
+            value: "max_split_size_mb:512"
+        ports:
+          - containerPort: 8383
+        resources:
+          requests:
+            cpu: 100m
+            memory: 2Gi
+          limits:
+            memory: 12Gi
+            cpu: 1000m
+        volumeMounts:
+            - mountPath: /code/data
+              name: face2face-data
+      restartPolicy: Always      
+      volumes:
+        - name: face2face-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/heygem/face2face-data"
+            type: DirectoryOrCreate
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: heygemgenvideo
+  name: heygemgenvideo-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: heygemgenvideo
+  ports:
+    - protocol: TCP
+      port: 8383
+      targetPort: 8383
