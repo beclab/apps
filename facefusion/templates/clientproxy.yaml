@@ -1,50 +1,94 @@
+---
 apiVersion: v1
-data:
-  nginx.conf: |
-    server {
-        listen 8080;
-        access_log /opt/bitnami/openresty/nginx/logs/access.log;
-        error_log /opt/bitnami/openresty/nginx/logs/error.log;
-
-        proxy_connect_timeout 600s;
-        proxy_send_timeout 600s;
-        proxy_read_timeout 600s;
-        proxy_set_header host $host;
-        proxy_set_header x-forwarded-host $http_host;
-
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_set_header upgrade $http_upgrade;
-        proxy_set_header connection "upgrade";
-
-        location / {
-            proxy_hide_header Access-Control-Allow-Origin;
-            proxy_hide_header Access-Control-Allow-Methods;
-            proxy_hide_header Access-Control-Allow-Headers;
-            add_header Access-Control-Allow-Origin *;
-            add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
-            add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
-            if ($request_method = 'OPTIONS') {
-                add_header Access-Control-Allow-Origin *;
-                add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
-                add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
-                return 204;
-            }
-            proxy_pass http://facefusion-svc:7860;
-        }
-    }
 kind: ConfigMap
 metadata:
   name: nginx-config
   namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    upstream facefusion_backend {
+      {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+      server {{ .Release.Name }}-svc:7860 max_fails=1 fail_timeout=2s;
+      server download-svc:8090 backup;
+      {{- else }}
+      server {{ .Release.Name }}-svc.{{ .Release.Name }}-{{ .Values.admin }}:7860 max_fails=1 fail_timeout=2s;
+      server download-svc.{{ .Release.Name }}-{{ .Values.admin }}:8090 backup;
+      {{- end }}
+    }
+
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      location /config {
+        {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+        proxy_pass http://{{ .Release.Name }}-svc:7860;
+        {{- else }}
+        proxy_pass http://{{ .Release.Name }}-svc.{{ .Release.Name }}-{{ .Values.admin }}:7860;
+        {{- end }}
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+
+      location / {
+        proxy_pass http://facefusion_backend;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+        proxy_connect_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+    }
+
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+  name: facefusionproxy
+  {{- else }}
+  name: facefusion
+  {{- end }}
+  namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: facefusionweb
-  name: facefusionweb
-  namespace: '{{ .Release.Namespace }}'
 spec:
   replicas: 1
   selector:
@@ -55,14 +99,12 @@ spec:
   template:
     metadata:
       labels:
-        io.kompose.network/chrome-default: "true"
         io.kompose.service: facefusionweb
     spec:
       volumes:
         - name: nginx-config
           configMap:
             name: nginx-config
-            defaultMode: 438
             items:
               - key: nginx.conf
                 path: nginx.conf
@@ -83,11 +125,11 @@ spec:
                 - |
                   http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
                   [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
-            initialDelaySeconds: 10
-            timeoutSeconds: 10
-            periodSeconds: 5
+            initialDelaySeconds: 2
+            timeoutSeconds: 3
+            periodSeconds: 3
             successThreshold: 1
-            failureThreshold: 240
+            failureThreshold: 60
           resources:
             limits:
               cpu: 500m
@@ -102,6 +144,7 @@ spec:
             - name: nginx-config
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
+
 ---
 apiVersion: v1
 kind: Service
@@ -109,11 +152,10 @@ metadata:
   name: facefusion-web-svc
   namespace: {{ .Release.Namespace }}
 spec:
-  type: ClusterIP
   selector:
     io.kompose.service: facefusionweb
   ports:
-    - name: facefusionweb
+    - name: http
       protocol: TCP
       port: 8080
       targetPort: 8080
