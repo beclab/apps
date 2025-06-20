@@ -14,6 +14,7 @@ data:
   ext_redis.py: |
     from typing import Any, Union
 
+    import socket
     import redis
     from redis.cluster import ClusterNode, RedisCluster
     from redis.connection import Connection, SSLConnection
@@ -120,7 +121,23 @@ data:
                 }
             )
             # Create pool with the pool parameters
-            pool = redis.ConnectionPool(**redis_params, **pool_params)
+            pool = redis.ConnectionPool(
+              host=dify_config.REDIS_HOST,
+              port=dify_config.REDIS_PORT,
+              connection_class=connection_class,
+              socket_keepalive=True,
+              username=dify_config.REDIS_USERNAME,
+              password=dify_config.REDIS_PASSWORD or None,  
+              db=dify_config.REDIS_DB,
+              encoding="utf-8",
+              encoding_errors="strict",
+              decode_responses=False,
+              
+              socket_keepalive_options={
+                  socket.TCP_KEEPIDLE: 60,
+                  socket.TCP_KEEPINTVL: 10,
+                  socket.TCP_KEEPCNT: 3,
+              })
             redis_client.initialize(redis.Redis(connection_pool=pool))
 
         app.extensions["redis"] = redis_client
@@ -355,6 +372,8 @@ spec:
               value: elastic
             - name: ENABLE_OTEL
               value: "false"
+            - name: ENABLE_REQUEST_LOGGING
+              value: "False"
             - name: ENABLE_WEBSITE_FIRECRAWL
               value: "true"
             - name: ENABLE_WEBSITE_JINAREADER
@@ -456,7 +475,7 @@ spec:
             - name: MARKETPLACE_ENABLED
               value: "true"
             - name: MAX_ITERATIONS_NUM
-              value: "5"
+              value: "99"
             - name: MAX_PARALLEL_LIMIT
               value: "10"
             - name: MAX_SUBMIT_COUNT
@@ -613,6 +632,8 @@ spec:
               value: "true"
             - name: OPENSEARCH_USER
               value: admin
+            - name: OPENSEARCH_VERIFY_CERTS
+              value: "true"
             - name: ORACLE_CHARACTERSET
               value: AL32UTF8
             - name: ORACLE_CONFIG_DIR
@@ -688,6 +709,13 @@ spec:
             - name: PGVECTO_RS_USER
               value: "{{ .Values.postgres.username }}"
             - name: PIP_MIRROR_URL
+            - name: PLUGIN_ALIYUN_OSS_ACCESS_KEY_ID
+            - name: PLUGIN_ALIYUN_OSS_ACCESS_KEY_SECRET
+            - name: PLUGIN_ALIYUN_OSS_AUTH_VERSION
+              value: v4
+            - name: PLUGIN_ALIYUN_OSS_ENDPOINT
+            - name: PLUGIN_ALIYUN_OSS_PATH
+            - name: PLUGIN_ALIYUN_OSS_REGION
             - name: PLUGIN_AWS_ACCESS_KEY
             - name: PLUGIN_AWS_REGION
             - name: PLUGIN_AWS_SECRET_KEY
@@ -728,6 +756,7 @@ spec:
             - name: PLUGIN_REMOTE_INSTALL_PORT
               value: "5003"
             - name: PLUGIN_S3_ENDPOINT
+            - name: PLUGIN_S3_USE_AWS
             - name: PLUGIN_S3_USE_AWS_MANAGED_IAM
               value: "false"
             - name: PLUGIN_S3_USE_PATH_STYLE
@@ -740,6 +769,10 @@ spec:
             - name: PLUGIN_TENCENT_COS_REGION
             - name: PLUGIN_TENCENT_COS_SECRET_ID
             - name: PLUGIN_TENCENT_COS_SECRET_KEY
+            - name: PLUGIN_VOLCENGINE_TOS_ACCESS_KEY
+            - name: PLUGIN_VOLCENGINE_TOS_ENDPOINT
+            - name: PLUGIN_VOLCENGINE_TOS_REGION
+            - name: PLUGIN_VOLCENGINE_TOS_SECRET_KEY
             - name: PLUGIN_WORKING_PATH
               value: /app/storage/cwd
             - name: POSITION_PROVIDER_EXCLUDES
@@ -770,8 +803,15 @@ spec:
               value: "false"
             - name: QDRANT_GRPC_PORT
               value: "6334"
+            - name: QDRANT_REPLICATION_FACTOR
+              value: "1"
             - name: QDRANT_URL
               value: http://qdrant:6333
+            - name: QUEUE_MONITOR_ALERT_EMAILS
+            - name: QUEUE_MONITOR_INTERVAL
+              value: "30"
+            - name: QUEUE_MONITOR_THRESHOLD
+              value: "200"
             - name: REDIS_CLUSTERS
             - name: REDIS_CLUSTERS_PASSWORD
             - name: REDIS_DB
@@ -1062,7 +1102,10 @@ spec:
               value: rdbms
             - name: WORKFLOW_PARALLEL_DEPTH_LIMIT
               value: "3"
-          image: langgenius/dify-api:1.4.0
+            - name: DB_EXTRAS
+              value: >-
+                keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3
+          image: beclab/dify-api:1.4.3
           name: api
           ports:
             - containerPort: 5001
