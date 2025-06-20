@@ -1,0 +1,65 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: owncast
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: owncast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: owncast
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: owncast
+    spec:
+      containers:
+        - name: owncast
+          image: owncast/owncast:0.2.3
+          ports:
+            - containerPort: 8080
+            - containerPort: 1935
+          env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 500Mi
+            limits:
+              cpu: "3"
+              memory: 3Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/owncast/data"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: owncast-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: owncast
+  ports:
+    - name: admin
+      port: 8080
+      targetPort: 8080
+    - name: steam
+      port: 1935
+      targetPort: 1935
+  type: ClusterIP
