@@ -1,0 +1,181 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $hunyuan3dv21DomainENV := split "," .Values.domain.hunyuan3dv21 -}}
+{{- $hunyuan3dv21Domain := index $hunyuan3dv21DomainENV "_0" -}}
+{{- $localDomain := $hunyuan3dv21Domain -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hunyuan3dv21
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: hunyuan3dv21
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hunyuan3dv21
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hunyuan3dv21
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: hunyuan3dv21
+          image: beclab/hunyuan3dv21:latest
+          envFrom:
+            - configMapRef:
+                name: hunyuan3dv21-config
+          command:
+            - sh
+            - -c
+            - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /root/.cache/.success.{{ $model.name }} ]; do
+                echo "Waiting for model file /root/.cache/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+              echo "Starting application..."
+              python gradio_app.py
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True,max_split_size_mb:64"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 28Gi
+          volumeMounts:
+            - name: cache
+              mountPath: /root/.cache
+            - name: u2net
+              mountPath: /root/.u2net
+            - name: output
+              mountPath: /workspace/Hunyuan3D-2.1/save_dir
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: cache
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: u2net
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: output
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-downloadmodels
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-downloadmodels
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-downloadmodels
+          image: beclab/downloader-init:v0.1.0
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: hunyuan3dv21-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 Hunyuan3D21 https://{{ $hunyuan3dv21Domain }}/config && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hunyuan3dv21-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: hunyuan3dv21
+  ports:
+    - name: api
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-downloadmodels
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+{{- end }}
