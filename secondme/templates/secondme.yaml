@@ -1,0 +1,182 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secondme
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: backend
+    io.kompose.service: secondme
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: backend
+        io.kompose.service: secondme
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: copy-files
+          image: harveyff/second-backend-cuda:v1.2.3
+          command:
+            - "sh"
+            - "-c"
+            - |
+              mkdir -p /mnt/pvc/docker && \
+              cp -r /app/docker/* /mnt/pvc/docker/ && \
+              cp -r /app/resources1/* /mnt/pvc/resources/ 
+          volumeMounts:
+            - name: backend-app-docker
+              mountPath: /mnt/pvc/docker
+            - name: backend-app-resources
+              mountPath: /mnt/pvc/resources
+      containers:
+        - name: backend
+          image: harveyff/second-backend-cuda:v1.2.3
+          ports:
+            - containerPort: 8002
+              name: api
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: LOCAL_APP_PORT
+              value: "8002"
+            - name: IN_DOCKER_ENV
+              value: "1"
+            - name: HF_ENDPOINT
+              value: "https://hf-mirror.com"
+            - name: PLATFORM
+              value: ${PLATFORM:-linux}
+            - name: USE_CUDA
+              value: "1"
+            - name: USE_GPU
+              value: "1"
+          resources:
+            requests:
+              cpu: 1
+              memory: 8Gi
+            limits:
+              cpu: 8
+              memory: 32Gi
+          volumeMounts:
+            - name: backend-app-data
+              mountPath: /app/data
+            - name: backend-app-logs
+              mountPath: /app/logs
+            - name: backend-app-run
+              mountPath: /app/run
+            - name: backend-app-docker
+              mountPath: /app/docker
+            - name: env-config
+              mountPath: /app/.env
+              subPath: .env
+            - name: backend-app-resources
+              mountPath: /app/resources
+          securityContext:
+            runAsUser: 0
+        - name: frontend
+          image: harveyff/second-frontend:v1.2.3
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: VITE_API_BASE_URL
+              value: "http://127.0.0.1:8002"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: 1000m
+              memory: 12Gi
+          volumeMounts:
+            - name: frontend-app-logs
+              mountPath: /app/logs
+            - name: frontend-app-resources
+              mountPath: /app/resources
+      volumes:
+        - name: env-config
+          configMap:
+            name: secondme-config
+            items:
+              - key: .env
+                path: .env
+        - name: backend-app-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/backend/data'
+        - name: backend-app-logs
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/backend/logs'
+        - name: backend-app-run
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/backend/run'
+        - name: backend-app-resources
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/app/resources'
+        - name: backend-app-docker
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/backend/docker'
+        - name: frontend-app-logs
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/frontend/logs'
+        - name: frontend-app-resources
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/secondme/app/resources'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: secondme
+  ports:
+    - name: api
+      protocol: TCP
+      port: 8002
+      targetPort: 8002
+    - name: admin
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: secondme
+  ports:
+    - name: frontend
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
