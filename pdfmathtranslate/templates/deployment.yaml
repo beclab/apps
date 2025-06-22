@@ -1,0 +1,62 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdfmathtranslate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: pdfmathtranslate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pdfmathtranslate
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: pdfmathtranslate
+    spec:
+      containers:
+        - name: pdfmathtranslate
+          image: aboveos/byaidu-pdfmathtranslate:dev
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: outputs
+              mountPath: /app/pdf2zh_files
+      volumes:
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/pdfmathtranslate/outputs"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pdfmathtranslate-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: pdfmathtranslate
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
