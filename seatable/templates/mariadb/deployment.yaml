@@ -16,11 +16,49 @@ spec:
       labels:
         app: seatable-mysql
     spec:
+      terminationGracePeriodSeconds: 90
       securityContext:
         runAsUser: 0
+
+      initContainers:
+        - name: tc-log-cleaner
+          image: alpine:3.18
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              # Debug mounts
+              echo "Mount contents of /var/lib/mysql:";
+              ls -la /var/lib/mysql || true;
+              
+              if [ -f /var/lib/mysql/tc.log ]; then
+                echo "Detected tc.log, deleting..."
+                rm -f /var/lib/mysql/tc.log
+                echo "tc.log removed successfully"
+              else
+                echo "No tc.log found, proceeding normally"
+              fi
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          securityContext:
+            runAsUser: 0
+
       containers:
         - name: seatable-mysql
           image: docker.io/mariadb:11.4.3-noble
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - |
+                    timeout 30 /usr/bin/mariadb-admin \
+                      --user=root \
+                      --password=$MYSQL_ROOT_PASSWORD \
+                      shutdown || \
+                    pkill -SIGTERM mariadbd
           env:
             - name: PGID
               value: "0"
@@ -37,19 +75,19 @@ spec:
             - name: MARIADB_AUTO_UPGRADE
               value: "0"
           ports:
-            - name: http
+            - name: mysql
               containerPort: 3306
               protocol: TCP
           volumeMounts:
-            - name: mysql
+            - name: mysql-data
               mountPath: /var/lib/mysql
           resources:
-            limits:
-              cpu: 500m
-              memory: 1000Mi
             requests:
               cpu: 50m
               memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2000Mi
           livenessProbe:
             exec:
               command:
@@ -64,7 +102,7 @@ spec:
           securityContext:
             runAsUser: 0
       volumes:
-        - name: mysql
+        - name: mysql-data
           hostPath:
             path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/mysql-data"
             type: DirectoryOrCreate
