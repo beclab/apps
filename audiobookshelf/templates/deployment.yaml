@@ -1,0 +1,83 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audiobookshelf
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: audiobookshelf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: audiobookshelf
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: audiobookshelf
+    spec:
+      containers:
+      - name: audiobookshelf
+        image: docker.io/aboveos/advplyr-audiobookshelf:2.25.1
+        ports:
+        - containerPort: 80
+        env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        resources:
+          limits:
+            cpu: 500m
+            memory: 2048Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /audiobooks
+          name: app-data-audiobooks
+        - mountPath: /podcasts
+          name: app-data-podcasts
+        - mountPath: /metadata
+          name: app-data-metadata
+        - mountPath: /config
+          name: app-data-config
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/audiobookshelf/audiobooks/'
+          type: DirectoryOrCreate
+        name: app-data-audiobooks
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/audiobookshelf/podcasts'
+          type: DirectoryOrCreate
+        name: app-data-podcasts
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/audiobookshelf/metadata'
+          type: DirectoryOrCreate
+        name: app-data-metadata
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/audiobookshelf/config'
+          type: DirectoryOrCreate
+        name: app-data-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audiobookshelf
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: audiobookshelf
+spec:
+  ports:
+  - name: "80"
+    port: 80
+    targetPort: 80
+  selector:
+    io.kompose.service: audiobookshelf
