@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflow
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deerflow
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deerflow
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deerflow
+    spec:
+      securityContext:
+        runAsUser: 0
+      initContainers:
+        - name: cp-configs
+          image: harveyff/deerflow:v1.0.5
+          command:
+            - sh
+            - '-c'
+            - |
+              if [ -f /mnt/config/conf.yaml ]; then
+                echo "Existing conf.yaml found in image, using it..."
+                exit 0
+              else
+                echo "Initializing conf.yaml from example..."
+                cp /app/conf.yaml.example /app/conf.yaml
+              fi
+
+              mkdir -p /mnt/config
+              cp -f /app/conf.yaml /mnt/config/conf.yaml
+              echo "Current config content:"
+              cat /mnt/config/conf.yaml
+          volumeMounts:
+            - name: config-yaml
+              mountPath: /mnt/config
+      containers:
+        - name: deerflow
+          image: harveyff/deerflow:v1.0.5
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          envFrom:
+            - configMapRef:
+                name: deerflow-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /root/.cache
+            - name: outputs
+              mountPath: /app/outputs
+            - name: logs
+              mountPath: /app/exps/logs
+            - name: config-yaml
+              mountPath: /app/conf.yaml
+              subPath: conf.yaml
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: checkpoints
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/checkpoints"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/deerflow/logs"
+            type: DirectoryOrCreate
+        - name: config-yaml
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/deerflow/config"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflow-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deerflow
+  ports:
+    - name: api
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
