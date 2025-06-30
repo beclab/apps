@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nocobase
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: nocobase
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: nocobase
+  strategy: 
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: nocobase
+    spec:
+      containers:
+      - name: nocobase
+        image: docker.io/aboveos/nocobase-nocobase:1.7.17
+        ports:
+        - containerPort: 80
+        env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: APP_KEY
+          value: default-olares-keys
+        - name: ENCRYPTION_FIELD_KEY
+          value: default-olares-keys-for-ssl
+        - name: DB_DIALECT
+          value: postgres
+        - name: DB_HOST
+          value: {{ .Values.postgres.host }}
+        - name: DB_DATABASE
+          value: {{ .Values.postgres.databases.nocobase }}
+        - name: DB_USER
+          value: {{ .Values.postgres.username }}
+        - name: DB_PASSWORD
+          value: {{ .Values.postgres.password }}
+        # - name: DB_TIMEZONE
+        #   value: '+08:00'
+        - name: DB_UNDERSCORED
+          value: 'true'
+        resources:
+          limits:
+            cpu: 500m
+            memory: 2048Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - name: app-data-storage
+          mountPath: /app/nocobase/storage
+      restartPolicy: Always
+      volumes:
+      - name: app-data-storage
+        hostPath:
+          type: DirectoryOrCreate
+          path: '{{ .Values.userspace.appData }}/nocobase/storage'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nocobase
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: nocobase
+spec:
+  ports:
+  - name: "80"
+    port: 80
+    targetPort: 80
+  selector:
+    io.kompose.service: nocobase
