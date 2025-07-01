@@ -20,15 +20,32 @@ spec:
     spec:
       initContainers:
         - name: focalboard-init
-          image: mattermost/focalboard:7.8.9
+          image: aboveos/mattermost-focalboard:7.8.9
           command:
             - /bin/sh
             - -c
           args:
             - |
-              echo "[Init] Syncing config.json..."
-              apt clean && apt update && apt install -y rsync
+              echo "[Init] Syncing focalboard files..."
+
+              mkdir -p /mnt/data
+
+              sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list
+              apt clean && apt update && apt install -y rsync jq
+
               rsync -av --update /opt/focalboard/ /mnt/data/
+
+              echo "[Init] Modifying config.json..."
+              jq '. + {
+                "dbtype": "postgres",
+                "dbconfig": "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}/{{ .Values.postgres.databases.focalboard }}?sslmode=disable&connect_timeout=10",
+                "enablepublicsharedboards": true
+              }' /mnt/data/config.json > /mnt/data/config.new.json
+
+              mv /mnt/data/config.new.json /mnt/data/config.json
+
+              echo "[Init] Changing ownership..."
+              chown -R root:root /mnt/data
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -37,12 +54,12 @@ spec:
 
       containers:
         - name: focalboard
-          image: mattermost/focalboard:7.8.9
+          image: aboveos/mattermost-focalboard:7.8.9
           env:
             - name: PGID
-              value: "1000"
+              value: "0"
             - name: PUID
-              value: "1000"
+              value: "0"
             - name: TZ
               value: Etc/UTC
           ports:
@@ -54,15 +71,22 @@ spec:
             requests:
               cpu: "500m"
               memory: 1Gi
+          securityContext:
+            runAsUser: 0
           volumeMounts:
             - name: data-root
+              mountPath: /opt/focalboard
+            - name: data
               mountPath: /opt/focalboard/data
-              subPath: data
       restartPolicy: Always
       volumes:
         - name: data-root
           hostPath:
             path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
             type: DirectoryOrCreate
 
 ---
