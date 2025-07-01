@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: focalboard
+  name: focalboard
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: focalboard
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: focalboard
+    spec:
+      initContainers:
+        - name: focalboard-init
+          image: mattermost/focalboard:7.8.9
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              echo "[Init] Syncing config.json..."
+              apt clean && apt update && apt install -y rsync
+              rsync -av --update /opt/focalboard/ /mnt/data/
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data-root
+              mountPath: /mnt/data
+
+      containers:
+        - name: focalboard
+          image: mattermost/focalboard:7.8.9
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+          volumeMounts:
+            - name: data-root
+              mountPath: /opt/focalboard/data
+              subPath: data
+      restartPolicy: Always
+      volumes:
+        - name: data-root
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: {{ .Release.Name }}
+  name: {{ .Release.Name }}-svc
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    io.kompose.service: {{ .Release.Name }}
