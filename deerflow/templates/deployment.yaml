@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,30 +22,49 @@ spec:
       securityContext:
         runAsUser: 0
       initContainers:
-        - name: cp-configs
-          image: harveyff/deerflow:v1.0.5
+        - name: copy-app-to-host
+          image: harveyff/deerflow:v1.0.11
           command:
             - sh
-            - '-c'
+            - -c
             - |
-              if [ -f /mnt/config/conf.yaml ]; then
-                echo "Existing conf.yaml found in image, using it..."
-                exit 0
-              else
-                echo "Initializing conf.yaml from example..."
-                cp /app/conf.yaml.example /app/conf.yaml
-              fi
+                set -e
+                apt update && apt install -y rsync
+                mkdir -p /mnt/app
 
-              mkdir -p /mnt/config
-              cp -f /app/conf.yaml /mnt/config/conf.yaml
-              echo "Current config content:"
-              cat /mnt/config/conf.yaml
+                if [ ! -f /mnt/app/conf.yaml ]; then
+                  echo "HostPath /mnt/app is empty. Copying image /app to hostPath using rsync..."
+                  rsync -av --update /app/. /mnt/app/
+                else
+                  echo "HostPath /mnt/app already exists. Skipping full copy."
+                fi
+
+                if [ ! -f /mnt/app/conf.yaml ]; then
+                  echo "/mnt/app/conf.yaml missing. Initializing from example..."
+                  cp /app/conf.yaml.example /mnt/app/conf.yaml
+                fi
+
+                if [ -d /mnt/app/.env ]; then
+                  echo "/mnt/app/.env is a directory. Removing..."
+                  rm -rf /mnt/app/.env
+                fi
+
+                if [ ! -f /mnt/app/.env ]; then
+                  echo "/mnt/app/.env missing. Initializing from example..."
+                  cp /app/.env.example /mnt/app/.env
+                fi
+
+                echo "conf.yaml contents:"
+                [ -f /mnt/app/conf.yaml ] && cat /mnt/app/conf.yaml || echo "conf.yaml not found."
+
+                echo ".env contents:"
+                [ -f /mnt/app/.env ] && cat /mnt/app/.env || echo ".env not found."
           volumeMounts:
-            - name: config-yaml
-              mountPath: /mnt/config
+            - name: app-volume
+              mountPath: /mnt/app
       containers:
         - name: deerflow
-          image: harveyff/deerflow:v1.0.5
+          image: harveyff/deerflow:v1.0.11
           ports:
             - containerPort: 8000
           env:
@@ -73,9 +91,8 @@ spec:
               mountPath: /app/outputs
             - name: logs
               mountPath: /app/exps/logs
-            - name: config-yaml
-              mountPath: /app/conf.yaml
-              subPath: conf.yaml
+            - name: app-volume
+              mountPath: /app
           securityContext:
             runAsUser: 0
       volumes:
@@ -91,9 +108,9 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/deerflow/logs"
             type: DirectoryOrCreate
-        - name: config-yaml
+        - name: app-volume
           hostPath:
-            path: "{{ .Values.userspace.appData }}/deerflow/config"
+            path: "{{ .Values.userspace.appData }}/deerflow/app"
             type: DirectoryOrCreate
 ---
 apiVersion: v1
