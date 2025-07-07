@@ -1,3 +1,9 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+
+{{- $acestepDomainENV := split "," .Values.domain.acestep -}}
+{{- $acestepDomain := index $acestepDomainENV "_0" -}}
+{{- $localDomain := $acestepDomain -}}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -5,105 +11,26 @@ metadata:
   name: acestep
   namespace: {{ .Release.Namespace }}
   labels:
-    app: acestep
+    app: multi-port
   annotations:
     applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: acestep
+      app: multi-port
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        app: acestep
+        app: multi-port
     spec:
       securityContext:
         runAsUser: 0
-      initContainers:
-        - name: download-models
-          image: harveyff/acestep:v1.0.6
-          envFrom:
-            - configMapRef:
-                name: acestep-config
-          command:
-            - sh
-            - "-c"
-            - |
-              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
-                echo "use China mirrors..."
-                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
-              fi
-              apt clean && apt update && apt install -y rsync aria2 zstd pv;
-
-              DOWNLOAD_URL="${CDN_HOST}/acestep_models.tar.zst"
-              MODEL_ROOT="/tmp/acestep/models"
-              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
-              WORKDIR="/tmp/workspace"
-              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
-
-              rm -rf "${WORKDIR}"
-              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
-
-              if [ -f "${MODEL_MARKER}" ]; then
-                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
-                exit 0
-              fi
-
-              echo "Downloading model from $DOWNLOAD_URL..."
-              aria2c \
-                --continue=true \
-                --max-concurrent-downloads=4 \
-                --split=4 \
-                --max-connection-per-server=4 \
-                --min-split-size=50M \
-                --timeout=20 \
-                --max-tries=0 \
-                --retry-wait=10 \
-                --check-certificate=false \
-                --allow-overwrite=true \
-                --file-allocation=prealloc \
-                --disk-cache=64M \
-                --summary-interval=0 \
-                --quiet=false \
-                --enable-color=false \
-                --dir="$(dirname "$DOWNLOAD_TMP")" \
-                --out="$(basename "$DOWNLOAD_TMP")" \
-                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
-
-              echo "[$(date +%H:%M:%S)] Extracting files..."
-              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
-                echo "Extraction failed!"
-                rm -f "${DOWNLOAD_TMP}"
-                exit 1
-              }
-
-              ls -ld "${WORKDIR}"
-
-              echo "[$(date +%H:%M:%S)] Syncing files..."
-              rsync -av --ignore-existing "${WORKDIR}/" "${MODEL_ROOT}/" || {
-                echo "Sync failed!"
-                exit 1
-              }
-
-              touch "${MODEL_MARKER}"
-
-              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
-              echo "[$(date +%H:%M:%S)] Initialization completed!"
-              exit 0
-          volumeMounts:
-            - name: checkpoints
-              mountPath: /tmp/acestep/models
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
       containers:
         - name: acestep
-          image: harveyff/acestep:v1.0.6
+          image: harveyff/acestep:v1.1.1
           ports:
             - containerPort: 7865
           env:
@@ -113,6 +40,24 @@ spec:
               value: "1000"
             - name: TZ
               value: Etc/UTC
+          envFrom:
+            - configMapRef:
+                name: acestep-config
+          command:
+            - sh
+            - -c
+            - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /root/.cache/ace-step/.success.{{ $model.name }} ]; do
+                echo "Waiting for /root/.cache/ace-step/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+              echo "Starting application..."
+              python3 acestep/gui.py --server_name 0.0.0.0 --bf16 true
           resources:
             requests:
               cpu: "500m"
@@ -120,10 +65,9 @@ spec:
             limits:
               cpu: "4"
               memory: 16Gi
-              nvidia.com/gpu: 1
           volumeMounts:
             - name: checkpoints
-              mountPath: /root/.cache/ace-step/checkpoints
+              mountPath: /root/.cache/ace-step
             - name: outputs
               mountPath: /app/outputs
             - name: logs
@@ -133,7 +77,7 @@ spec:
       volumes:
         - name: checkpoints
           hostPath:
-            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/checkpoints"
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
             type: DirectoryOrCreate
         - name: outputs
           hostPath:
@@ -143,7 +87,69 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/acestep/logs"
             type: DirectoryOrCreate
-
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-download-models
+          image: beclab/downloader-init:v0.1.0
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: acestep-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 ACE-Step https://{{ $acestepDomain }}/gradio_api/info && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
 ---
 apiVersion: v1
 kind: Service
@@ -152,9 +158,25 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   selector:
-    app: acestep
+    app: multi-port
   ports:
-    - name: api
+    - name: main-api
       port: 7865
       targetPort: 7865
   type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+{{- end }}
