@@ -1,0 +1,89 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: gitea
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitea
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      containers:
+        - name: gitea
+          image: gitea/gitea:1.23.8
+          ports:
+            - containerPort: 3000
+            - containerPort: 22
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: GITEA__database__DB_TYPE
+              value: postgres
+            - name: GITEA__database__HOST
+              value: {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+            - name: GITEA__database__NAME
+              value: {{ .Values.postgres.databases.gitea }}
+            - name: GITEA__database__USER
+              value: {{ .Values.postgres.username }}
+            - name: GITEA__database__PASSWD
+              value: {{ .Values.postgres.password }}
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 500Mi
+            limits:
+              cpu: "4"
+              memory: 7Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: timezone
+              mountPath: /etc/timezone
+              readOnly: false
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: false
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/gitea/data"
+            type: DirectoryOrCreate
+        - name: timezone
+          hostPath:
+            path: "/etc/timezonea"
+            type: DirectoryOrCreate
+        - name: localtime
+          hostPath:
+            path: "/etc/localtime"
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: gitea
+  ports:
+    - name: port-3000
+      port: 3000
+      targetPort: 3000
+    - name: port-22
+      port: 22
+      targetPort: 22
+  type: ClusterIP
