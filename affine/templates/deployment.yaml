@@ -15,7 +15,8 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: affine
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -23,6 +24,23 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: affine
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-cache-root
+        resources: {}
+        volumeMounts:
+          - name: app-cache-root
+            mountPath: /app-cache-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -31,12 +49,10 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        - name: NODE_OPTIONS
-          value: "--import=./scripts/register.js"
         - name: AFFINE_CONFIG_PATH
           value: "/root/.affine/config"
         - name: REDIS_SERVER_HOST
-          value: "localhost"
+          value: "redis-svc"
         - name: DATABASE_URL
           value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
         - name: NODE_ENV
@@ -49,8 +65,8 @@ spec:
           value: '{{$affineDomain}}'
         - name: AFFINE_SERVER_HTTPS
           value: 'false'
-        image: ghcr.io/toeverything/affine-graphql:stable
-        command: ['sh', '-c', 'node ./scripts/self-host-predeploy && node ./dist/index.js']
+        image: harveyff/affine-graphql:stable-e98f035
+        command: ['sh', '-c', 'node ./scripts/self-host-predeploy && node ./dist/main.js']
         name: affine
         ports:
         - name: proxy-affine
@@ -69,18 +85,6 @@ spec:
           name: blob
         - mountPath: /userdata
           name: userdata
-      - name: affine-redis
-        image: redis
-        resources:
-          limits:
-            cpu: "1"
-            memory: 2Gi
-          requests:
-            cpu: 100m
-            memory: 1Gi
-        volumeMounts:
-        - mountPath: /data
-          name: redis
       restartPolicy: Always
       volumes:
       - hostPath:
@@ -92,9 +96,9 @@ spec:
           type: DirectoryOrCreate
         name: blob
       - hostPath:
-          path: '{{ .Values.userspace.appData }}/affine/redis'
+          path: '{{ .Values.userspace.appData }}/affine'
           type: DirectoryOrCreate
-        name: redis
+        name: app-cache-root
       - hostPath:
           path: '{{ .Values.userspace.userData }}'
           type: DirectoryOrCreate

@@ -1,0 +1,67 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: komga
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: komga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: komga
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: komga
+    spec:
+      containers:
+        - name: komga
+          image: gotson/komga:1.22.0
+          ports:
+            - containerPort: 25600
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data 
+              mountPath: /data 
+      volumes:
+        - name: config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/komga/config"
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/komga/data"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: komga-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: komga
+  ports:
+    - name: api
+      port: 25600
+      targetPort: 25600
+  type: ClusterIP

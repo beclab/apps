@@ -92,6 +92,8 @@ spec:
   selector:
     matchLabels:
       app: obsidian
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -99,7 +101,7 @@ spec:
     spec:
       initContainers:
       - name: init-config
-        image: 'couchdb:3.1.2'
+        image: 'docker.io/aboveos/couchdb:3.5.0'
         command:
           - sh
           - '-c'
@@ -114,9 +116,25 @@ spec:
         - name: init-config 
           mountPath: /init.sh
           subPath: init.sh
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name:  app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - name: nginx
-        image: nginx:latest
+        image: docker.io/aboveos/nginx:latest
         volumeMounts:
         - name: nginx-config 
           mountPath: /etc/nginx/nginx.conf
@@ -128,17 +146,17 @@ spec:
             cpu: 10m
             memory: 64Mi
           limits:
-            cpu: 100m
-            memory: 128Mi
+            cpu: "500m"
+            memory: 1Gi
       - name: server
-        image: couchdb:3.1.2
+        image: docker.io/aboveos/couchdb:3.5.0
         resources:
           requests:
             cpu: 100m
             memory: 64Mi
           limits:
-            cpu: 500m
-            memory: 128Mi
+            cpu: "4"
+            memory: 2Gi
         ports:
         - containerPort: 5984
         volumeMounts:
@@ -165,6 +183,10 @@ spec:
         hostPath:
           type: DirectoryOrCreate
           path: {{ .Values.userspace.appData }}/obsidian/etc   
+      - name: app-data-root
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}/obsidian   
       - name: obsidian-config
         configMap:
           defaultMode: 420

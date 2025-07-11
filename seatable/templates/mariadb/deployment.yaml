@@ -1,0 +1,108 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seatable-mysql
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: seatable-mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: seatable-mysql
+    spec:
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsUser: 0
+
+      initContainers:
+        - name: tc-log-cleaner
+          image: alpine:3.18
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              # Debug mounts
+              echo "Mount contents of /var/lib/mysql:";
+              ls -la /var/lib/mysql || true;
+              
+              if [ -f /var/lib/mysql/tc.log ]; then
+                echo "Detected tc.log, deleting..."
+                rm -f /var/lib/mysql/tc.log
+                echo "tc.log removed successfully"
+              else
+                echo "No tc.log found, proceeding normally"
+              fi
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: seatable-mysql
+          image: docker.io/mariadb:11.4.3-noble
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - "/bin/sh"
+                  - "-c"
+                  - |
+                    timeout 30 /usr/bin/mariadb-admin \
+                      --user=root \
+                      --password=$MYSQL_ROOT_PASSWORD \
+                      shutdown || \
+                    pkill -SIGTERM mariadbd
+          env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: DISPLAY
+              value: ":0"
+            - name: MYSQL_ROOT_PASSWORD
+              value: "seatable"
+            - name: MYSQL_LOG_CONSOLE
+              value: "true"
+            - name: MARIADB_AUTO_UPGRADE
+              value: "0"
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          resources:
+            requests:
+              cpu: 50m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2000Mi
+          livenessProbe:
+            exec:
+              command:
+                - "/usr/local/bin/healthcheck.sh"
+                - "--connect"
+                - "--mariadbupgrade"
+                - "--innodb_initialized"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: mysql-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/mysql-data"
+            type: DirectoryOrCreate

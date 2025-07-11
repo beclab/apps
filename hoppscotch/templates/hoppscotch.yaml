@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: hoppscotch
+  namespace: {{ .Release.Namespace }}
+  name: hoppscotch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: hoppscotch
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: hoppscotch
+    spec:
+      containers:
+      - name: hoppscotch
+        image: hoppscotch/hoppscotch:2025.6.0
+        command: ["sh", "-c", "pnpm exec prisma migrate deploy && node /usr/src/app/aio_run.mjs"]
+        envFrom:
+        - configMapRef:
+            name: hoppscotch-config
+        livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+            timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 500Mi
+          limits:
+            memory: 2Gi
+            cpu: 1000m
+      restartPolicy: Always
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: hoppscotch
+  name: hoppscotch-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: hoppscotch
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

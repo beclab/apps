@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: infinity
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: infinity
+  strategy:
+    type: Recreate     
+  template:
+    metadata:
+      labels:
+        app: infinity
+    spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /appcache
+        resources: {}
+        volumeMounts:
+          - name:  appcache
+            mountPath: /appcache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: infinity
+        image: infiniflow/infinity:v0.6.0-dev3
+        ports:
+        - containerPort: 23820
+        env:
+        - name: TZ
+          value: "Asia/Shanghai"
+        volumeMounts:
+        - name: infinity-data
+          mountPath: /var/infinity
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow/infinity'
+          type: DirectoryOrCreate
+        name: infinity-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: infinity
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - port: 23820
+    targetPort: 23820
+  selector:
+    app: infinity

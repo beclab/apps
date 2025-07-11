@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xybotv2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: xybotv2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: xybotv2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: xybotv2
+    spec:
+      initContainers:
+        - name: init-data
+          image: docker.io/henryxiaoyang/xybotv2:6278ec6
+          command:
+            - sh
+            - -c
+            - |
+              if [ -z "$(ls -A /mnt/volume)" ]; then
+                echo "The target directory is empty, start copying the initial files..."
+                cp -r /app/* /mnt/volume/
+              else
+                echo "The target directory already has files, so copying is skipped."
+              fi
+          volumeMounts:
+            - name: app-data
+              mountPath: /mnt/volume
+      containers:
+        - name: xybotv2
+          image: docker.io/henryxiaoyang/xybotv2:6278ec6
+          ports:
+            - containerPort: 9999
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Asia/Shanghai
+            - name: DISPLAY
+              value: ":0"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 200Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          volumeMounts:
+            - name: redis-data
+              mountPath: /var/lib/redis
+            - name: app-data
+              mountPath: /app
+      volumes:
+        - name: redis-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/xybotv2/redis-data'
+            type: DirectoryOrCreate
+        - name: app-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/xybotv2/app-data'
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xybotv2-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: xybotv2
+spec:
+  ports:
+    - name: http
+      port: 9999
+      targetPort: 9999
+  selector:
+    io.kompose.service: xybotv2

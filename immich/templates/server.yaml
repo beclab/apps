@@ -1,3 +1,22 @@
+apiVersion: v1
+data:
+  config.json: |
+    {
+      oauth: {
+        autoLaunch: false,
+        autoRegister: true,
+        clientId: '{{ .Values.oidc.client.id }}',
+        clientSecret: '{{ .Values.oidc.client.secret }}',
+        enabled: true,
+        issuerUrl: '{{ .Values.oidc.issuer }}',
+        scope: 'openid email profile',
+      }
+    }
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: {{ .Release.Namespace }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,7 +30,8 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: immich
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -19,7 +39,37 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: immich
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-data-root
+        resources: {}
+        volumeMounts:
+          - name: app-data-root
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
+      - name: immich-redis
+        image: aboveos/redis:latest
+        resources:
+          limits:
+            cpu: "1"
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /data
+          name: redis
+        imagePullPolicy: IfNotPresent
       - args:
         - sed -i "s/RedisConnection.minimumVersion = '5.0.0';/RedisConnection.minimumVersion = '4.0.0';/" ./node_modules/bullmq/dist/cjs/classes/redis-connection.js; sed -i 's/0.2.x/0.3.x/' ./dist/constants.js; exec ./start.sh
         command:
@@ -32,10 +82,12 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
+        # - name: REDIS_HOSTNAME
+        #   value: {{ .Values.redis.host }}
+        # - name: REDIS_PASSWORD
+        #   value: {{ .Values.redis.password }}
         - name: REDIS_HOSTNAME
-          value: {{ .Values.redis.host }}
-        - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
+          value: "localhost"
         - name: DB_HOSTNAME
           value: {{ .Values.postgres.host }}
         - name: DB_USERNAME
@@ -46,35 +98,29 @@ spec:
           value: {{ .Values.postgres.databases.immich }}
         - name: IMMICH_PORT
           value: "3001"
-        image: ghcr.io/immich-app/immich-server:v1.108.0
+        - name: OAUTH_ENABLED
+          value: "true"
+        - name: OAUTH_CLIENT_ID
+          value: "{{ .Values.oidc.client.id }}"
+        - name: OAUTH_CLIENT_SECRET
+          value: "{{ .Values.oidc.client.secret }}"
+        - name: OAUTH_ISSUER_URL
+          value: "{{ .Values.oidc.issuer }}"
+        - name: OAUTH_SCOPE
+          value: "openid,profile,email"
+        - name: IMMICH_CONFIG_FILE
+          value: "/config.json"
+        image: aboveos/immich-app-immich-server:v1.135.1
         imagePullPolicy: IfNotPresent
         name: immich
         ports:
         - containerPort: 3001
           name: http
           protocol: TCP
-        livenessProbe:
-          httpGet:
-            path: /api/server-info/ping
-            port: http
-          initialDelaySeconds: 0
-          periodSeconds: 10
-          timeoutSeconds: 1
-          successThreshold: 1
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /api/server-info/ping
-            port: http
-          initialDelaySeconds: 10
-          periodSeconds: 10
-          timeoutSeconds: 1
-          successThreshold: 1
-          failureThreshold: 3
         resources:
           limits:
-            cpu: 500m
-            memory: 1000Mi
+            cpu: 2000m
+            memory: 2000Mi
           requests:
             cpu: 200m
             memory: 300Mi
@@ -83,16 +129,38 @@ spec:
           mountPath: /usr/src/app/upload          
         - name: home  
           mountPath: /home
+        - name: config
+          mountPath: /config.json
+          subPath: config.json
       restartPolicy: Always
       volumes:
       - name: appcache
         hostPath:
           path: '{{ .Values.userspace.appData }}/immich/data/upload'
-          type: DirectoryOrCreate        
+          type: DirectoryOrCreate  
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/redis'
+          type: DirectoryOrCreate
+        name: redis
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich/machine-learning'
+          type: DirectoryOrCreate
+        name: learningcache      
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/immich'
+          type: DirectoryOrCreate
+        name: app-data-root   
       - name: home
         hostPath:
           path: '{{ .Values.userspace.userData }}'
           type: DirectoryOrCreate  
+      - name: config
+        configMap:
+          name: config
+          defaultMode: 438
+          items:
+          - key: config.json
+            path: config.json
 status: {}
 
 ---
@@ -102,7 +170,7 @@ metadata:
   creationTimestamp: null
   labels:
     io.kompose.service: immich
-  name: immich
+  name: immich-svc
   namespace: '{{ .Release.Namespace }}'
 spec:
   ports:
