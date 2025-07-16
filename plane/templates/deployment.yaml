@@ -1,0 +1,529 @@
+{{- $planeDomainENV := split  ","  .Values.domain.plane -}}
+{{- $planeDomain := index $planeDomainENV "_0" -}}
+
+# -------------------------
+# PLANE PROXY
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-proxy
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-proxy
+  template:
+    metadata:
+      labels:
+        app: plane-proxy
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              web:3000,api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: proxy
+          image: harveyff/plane-proxy-commercial:v1.12.1
+          ports:
+            - containerPort: 80
+          env:
+            - name: SITE_ADDRESS
+              value: "http://{{$planeDomain}}"
+            - name: TRUSTED_PROXIES
+              value: "0.0.0.0/0"
+            - name: FILE_SIZE_LIMIT
+              value: "5242880"
+            - name: BUCKET_NAME
+              value: "uploads"
+            - name: CERT_ACME_CA
+              value: "https://acme-v02.api.letsencrypt.org/directory"
+            - name: CERT_EMAIL
+              value: "example@olares.com"
+            - name: CERT_ACME_DNS
+              value: ""
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 80
+      name: http
+  selector:
+    app: plane-proxy
+
+---
+
+# -------------------------
+# PLANE WEB
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane
+  template:
+    metadata:
+      labels:
+        app: plane
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: web
+          image: harveyff/plane-web:v1.12.1
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_WEB_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_PATH
+              value: "/god-mode"
+            - name: NEXT_PUBLIC_SPACE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_PATH
+              value: "/spaces"
+            - name: NEXT_PUBLIC_LIVE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_PATH
+              value: "/live"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane
+
+---
+
+# -------------------------
+# PLANE ADMIN
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-admin
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-admin
+  template:
+    metadata:
+      labels:
+        app: plane-admin
+    spec:
+      containers:
+        - name: admin
+          image: harveyff/plane-admin:v1.12.1
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_PATH
+              value: "/god-mode"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-admin
+
+---
+
+# -------------------------
+# PLANE SPACE
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-space
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-space
+  template:
+    metadata:
+      labels:
+        app: plane-space
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: space
+          image: harveyff/plane-space:v1.12.1
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_PATH
+              value: "/spaces"
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: space
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-space
+
+---
+
+# -------------------------
+# PLANE LIVE
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-live
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-live
+  template:
+    metadata:
+      labels:
+        app: plane-live
+    spec:
+      containers:
+        - name: live
+          image: harveyff/plane-live:v1.12.1
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_PATH
+              value: "/live"
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: live
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-live
+
+---
+
+# -------------------------
+# PLANE API
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-api
+  template:
+    metadata:
+      labels:
+        app: plane-api
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - redis-svc:6379
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        - name: data-migrator
+          image: harveyff/plane-api:v1.12.1
+          command:
+            - sh
+            - -c
+            - ./bin/docker-entrypoint-migrator.sh
+          env:
+            - name: WEB_URL
+              value: "https://{{$planeDomain}}"
+          envFrom:
+            - configMapRef:
+                name: api-config
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: api
+          image: harveyff/plane-api:v1.12.1
+          command:
+            - sh
+            - -c
+            - ./bin/docker-entrypoint-api.sh
+          env:
+            - name: WEB_URL
+              value: "https://{{$planeDomain}}"
+          envFrom:
+            - configMapRef:
+                name: api-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: plane-api
+
+---
+
+# -------------------------
+# PLANE MQ
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-mq
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-mq
+  template:
+    metadata:
+      labels:
+        app: plane-mq
+    spec:
+      containers:
+        - name: plane-mq
+          image: rabbitmq:3.13.6-management-alpine
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: plane
+            - name: RABBITMQ_DEFAULT_PASS
+              value: plane
+            - name: RABBITMQ_DEFAULT_VHOST
+              value: plane
+          volumeMounts:
+            - mountPath: /var/lib/rabbitmq
+              name: rabbitmq-data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: rabbitmq-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/rabbitmq"
+            type: DirectoryOrCreate
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: plane-mq
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 5672
+      targetPort: 5672
+      name: amqp
+  selector:
+    app: plane-mq
+
+---
+
+# -------------------------
+# PLANE MINIO
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-minio
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plane-minio
+  template:
+    metadata:
+      labels:
+        app: plane-minio
+    spec:
+      containers:
+        - name: plane-minio
+          image: minio/minio
+          command: ["minio", "server", "/export", "--console-address", ":9090"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: plane
+            - name: MINIO_ROOT_PASSWORD
+              value: plane2024
+          volumeMounts:
+            - mountPath: /export
+              name: uploads
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: uploads
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/minio"
+            type: DirectoryOrCreate
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: minio-api
+    - port: 9090
+      targetPort: 9090
+      name: minio-console
+  selector:
+    app: plane-minio
