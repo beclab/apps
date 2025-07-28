@@ -2,12 +2,17 @@
 
 {{- $clsENV := split  ","  .Values.domain.comfyuilauncherweb -}}
 {{- $cls := index $clsENV "_0" -}}
+
+{{- $comfyuiENV := split  ","  .Values.domain.comfyuientrance -}}
+{{- $comfyuientrance := index $comfyuiENV "_0" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
     io.kompose.service: comfyui
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
   name: comfyuishare
   namespace: {{ .Release.Namespace }}
 spec:
@@ -25,7 +30,11 @@ spec:
     spec:
       initContainers:
       - name: upversion
-        image: 'kldtks/comfyui:v0.3.27-b4-frontend-1-15-12-t91'
+{{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
+        image: 'kldtks/comfyui:c128-0d3d44-1d24d0-launcher-nunchaku-b1'
+{{ else }}
+        image: 'kldtks/comfyui:c124-0d3d44-1d24d0-launcher-b2'
+{{ end }}
         command:
           - sh
           - '-c'
@@ -67,6 +76,8 @@ spec:
             mountPath: /root/ComfyUI/models/facerestore_models
           - name: modeldiffusion
             mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
@@ -75,7 +86,11 @@ spec:
         securityContext:
           runAsUser: 0
       - name: installcomfyui
-        image: 'kldtks/comfyui:v0.3.27-b4-frontend-1-15-12-t91'
+{{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
+        image: 'kldtks/comfyui:c128-0d3d44-1d24d0-launcher-nunchaku-b1'
+{{ else }}
+        image: 'kldtks/comfyui:c124-0d3d44-1d24d0-launcher-b2'
+{{ end }}
         command:
           - sh
           - '-c'
@@ -116,6 +131,8 @@ spec:
             mountPath: /root/ComfyUI/models/facerestore_models
           - name: modeldiffusion
             mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
@@ -164,6 +181,8 @@ spec:
             mountPath: /root/ComfyUI/models/facerestore_models
           - name: modeldiffusion
             mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
           - name: output
             mountPath: /root/ComfyUI/output
         terminationMessagePath: /dev/termination-log
@@ -206,6 +225,22 @@ spec:
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
+      - name: fix-crystools-save
+        image: 'aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - >
+            rm -rf /root/ComfyUI/custom_nodes/ComfyUI-Crystools-save
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
         - env:
             - name: PGID
@@ -215,7 +250,7 @@ spec:
             - name: TZ
               value: Etc/UTC
             - name: CLI_ARGS
-              value: '--normalvram --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@v1.15.12'
+              value: '--normalvram --disable-smart-memory --disable-cuda-malloc --front-end-version Comfy-Org/ComfyUI_frontend@v1.24.0'
             - name: HOME
               value: /root
             - name: PIP_CACHE_DIR
@@ -246,9 +281,17 @@ spec:
               value: '443'
             - name: OS_SYSTEM_SERVER
               value: system-server.user-system-{{ .Values.bfl.username }}
+            - name: DOMAIN_COMFYUI_FOR_ADMIN
+              value: '{{ $comfyuientrance }}'
+            - name: DOMAIN_LAUNCHER_FOR_ADMIN
+              value: https://{{ $cls }}
           securityContext:
             runAsUser: 0
-          image: "kldtks/comfyui:v0.3.27-b4-frontend-1-15-12-t91"
+{{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
+          image: 'kldtks/comfyui:c128-0d3d44-1d24d0-launcher-nunchaku-b1'
+{{ else }}
+          image: 'kldtks/comfyui:c124-0d3d44-1d24d0-launcher-b2'
+{{ end }}
           name: comfyui
           # command:
           #   - sh
@@ -303,35 +346,37 @@ spec:
             - name: appdata
               mountPath: /root
             - name: modellibckp
-              mountPath: /root/ComfyUI/models/checkpoints
+              mountPath: /root/ComfyUI/models/checkpoints/public
             - name: modelliblora
-              mountPath: /root/ComfyUI/models/loras
+              mountPath: /root/ComfyUI/models/loras/public
             - name: modellibvae
-              mountPath: /root/ComfyUI/models/vae
+              mountPath: /root/ComfyUI/models/vae/public
             - name: modellibhypernetworks
-              mountPath: /root/ComfyUI/models/hypernetworks
+              mountPath: /root/ComfyUI/models/hypernetworks/public
             - name: modellibembeddings
-              mountPath: /root/ComfyUI/models/embeddings
+              mountPath: /root/ComfyUI/models/embeddings/public
             - name: modellibclip
-              mountPath: /root/ComfyUI/models/clip
+              mountPath: /root/ComfyUI/models/clip/public
             - name: modellibclipvision
-              mountPath: /root/ComfyUI/models/clip_vision
+              mountPath: /root/ComfyUI/models/clip_vision/public
             - name: modellibcontrolnet
-              mountPath: /root/ComfyUI/models/controlnet
+              mountPath: /root/ComfyUI/models/controlnet/public
             - name: modellibinpaint
-              mountPath: /root/ComfyUI/models/inpaint
+              mountPath: /root/ComfyUI/models/inpaint/public
             - name: modellibupscale
-              mountPath: /root/ComfyUI/models/upscale_models
+              mountPath: /root/ComfyUI/models/upscale_models/public
             - name: modellibipadapter
-              mountPath: /root/ComfyUI/models/ipadapter
+              mountPath: /root/ComfyUI/models/ipadapter/public
             - name: modellibunet
-              mountPath: /root/ComfyUI/models/unet
+              mountPath: /root/ComfyUI/models/unet/public
             - name: modellibstyle
-              mountPath: /root/ComfyUI/models/style_models
+              mountPath: /root/ComfyUI/models/style_models/public
             - name: modellibfacerestore
-              mountPath: /root/ComfyUI/models/facerestore_models
+              mountPath: /root/ComfyUI/models/facerestore_models/public
             - name: modeldiffusion
-              mountPath: /root/ComfyUI/models/diffusion_models
+              mountPath: /root/ComfyUI/models/diffusion_models/public
+            - name: modeltextencoders
+              mountPath: /root/ComfyUI/models/text_encoders/public
             - name: output
               mountPath: /root/ComfyUI/output
           imagePullPolicy: IfNotPresent
@@ -420,6 +465,10 @@ spec:
           hostPath:
             path: {{ .Values.sharedlib }}/ai/model/diffusion_models
             type: DirectoryOrCreate
+        - name: modeltextencoders
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/text_encoders
+            type: DirectoryOrCreate 
         - name: volume-script
           configMap:
             name: script

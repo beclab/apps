@@ -22,7 +22,7 @@ spec:
         runAsUser: 0
       containers:
         - name: redroid
-          image: docker.io/redroid/redroid:12.0.0-240527
+          image: redroid/redroid:12.0.0-240527
           imagePullPolicy: Always
           args:
             - "androidboot.redroid_width=720"
@@ -83,94 +83,6 @@ spec:
         - name: dev-dri
           hostPath:
             path: /dev/dri
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: redroid-apk-installer
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: redroid
-    component: apk-installer
-spec:
-  ttlSecondsAfterFinished: 300
-  backoffLimit: 2
-  template:
-    spec:
-      restartPolicy: OnFailure 
-      containers:
-        - name: installer
-          image: ubuntu:22.04 
-          imagePullPolicy: IfNotPresent
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              #!/bin/bash
-              set -euo pipefail
-              export PS4='+ [$(date +%T)] '
-              set -x
-              echo "️ Installing dependencies..."
-              apt-get update -qq
-              apt-get install -qq -y --no-install-recommends android-tools-adb netcat-traditional wget
-              echo " Downloading APK..."
-              for i in {1..3}; do
-                if wget -nv --no-check-certificate -O /tmp/yyb.apk https://cdn.joinolares.cn/apk/yyb.apk; then
-                  if [ -f /tmp/yyb.apk ]; then
-                    echo " APK verify succeed"
-                    break
-                  else
-                    echo " apk verify Failed,retry download..."
-                  fi
-                fi
-                sleep $((i * 5))
-              done
-              echo "init adb..."
-              adb start-server
-              sleep 5
-              max_retries=6
-              retry_interval=5
-              success=0
-              for ((i=1; i<=max_retries; i++)); do
-                if adb connect redroid-svc:5555 | grep -q "connected"; then
-                  if adb wait-for-device; then
-                    success=1
-                    break
-                  fi
-                fi
-                echo "wait device connect (try $i/$max_retries)..."
-                sleep $retry_interval
-              done
-              if [ $success -eq 0 ]; then
-                echo "devices connect error"
-                adb devices -l
-                exit 1
-              fi
-              echo "Installing APK..."
-              if ! adb install -t -r -g --user 0 /tmp/yyb.apk; then
-                echo "install error,device status:"
-                adb devices -l
-                exit 1
-              fi
-              if adb shell pm list packages | grep -q "com.tencent.android.qqdownloader"; then
-                echo "install succeed"
-                rm -f /tmp/yyb.apk
-              else
-                echo "apk not found"
-                exit 1
-              fi
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
-          volumeMounts:
-            - name: adb-cache
-              mountPath: /root/.android
-      volumes:
-        - name: adb-cache
-          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

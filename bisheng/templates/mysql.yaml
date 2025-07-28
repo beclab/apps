@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-mysql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-mysql
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/mysql/ /mnt/docker/mysql/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: "1234"
+            - name: MYSQL_DATABASE
+              value: bisheng
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /etc/mysql/my.cnf
+              name: mysql-conf
+              subPath: my.cnf
+            - mountPath: /var/lib/mysql
+              name: mysql-data
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: mysql-conf
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/mysql/conf"
+            type: DirectoryOrCreate
+        - name: mysql-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/mysql"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql

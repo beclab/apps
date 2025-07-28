@@ -1,17 +1,17 @@
----
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: mongo
   namespace: {{ .Release.Namespace }}
   labels:
     app: mongo
 spec:
-  serviceName: mongo
   replicas: 1
   selector:
     matchLabels:
       app: mongo
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -19,9 +19,29 @@ spec:
     spec:
       securityContext:
         fsGroup: 999
+      initContainers:
+        - name: mongo-init
+          image: alpine:3.18
+          securityContext:
+            runAsUser: 0
+          command:
+            - "sh"
+            - "-c"
+            - |
+              apk add --no-cache openssl
+              openssl rand -base64 128 > /data/db/keyfile
+              chmod 400 /data/db/keyfile
+              chown -R 999:999 /data/db
+              echo "ownership fixed"
+              ls -ld /data/db
+              ls -l /data/db
+          volumeMounts:
+            - name: mongo-storage
+              mountPath: /data/db
+
       containers:
         - name: mongo
-          image: registry.cn-hangzhou.aliyuncs.com/fastgpt/mongo:5.0.18
+          image: mongo:5.0.18
           command:
             - "bash"
             - "-c"
@@ -101,33 +121,14 @@ spec:
             runAsGroup: 999
             allowPrivilegeEscalation: false
 
-      initContainers:
-        - name: mongo-init
-          image: alpine:3.18
-          command:
-            - "sh"
-            - "-c"
-            - |
-              apk add --no-cache openssl
-              openssl rand -base64 128 > /data/db/keyfile
-              chmod 400 /data/db/keyfile
-              chown 999:999 /data/db/keyfile
-              echo "file created"
-              ls -l /data/db/keyfile
-          volumeMounts:
-            - name: mongo-storage
-              mountPath: /data/db
-
-  volumeClaimTemplates:
-    - metadata:
-        name: mongo-storage
-      spec:
-        accessModes: [ "ReadWriteOnce" ]
-        resources:
-          requests:
-            storage: 10Gi
+      volumes:
+        - name: mongo-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/fastgpt/mongo-storage"
+            type: DirectoryOrCreate
 
 ---
+
 apiVersion: v1
 kind: Service
 metadata:
