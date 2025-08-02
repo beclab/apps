@@ -1,4 +1,7 @@
 {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $whisperwebuiDomainENV := split "," .Values.domain.whisperwebui -}}
+{{- $whisperwebuiDomain := index $whisperwebuiDomainENV "_0" -}}
+{{- $localDomain := $whisperwebuiDomain -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,95 +24,9 @@ spec:
       labels:
         app: whisperwebui
     spec:
-      securityContext:
-        runAsUser: 0
-      initContainers:
-        - name: copy-configs-download-models
-          image: jhj0517/whisper-webui:v1.0.4
-          envFrom:
-            - configMapRef:
-                name: whisperwebui-config
-          command:
-            - sh
-            - '-c'
-            - |
-              mkdir -p /tmp/configs;
-              cp -rupv /Whisper-WebUI/configs/. /tmp/configs/;
-              
-              if echo "${CDN_HOST}" | grep -q "joinolares.cn"; then
-                echo "use China mirrors..."
-                sed -i "s@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g" /etc/apt/sources.list
-              fi
-              
-              DOWNLOAD_URL="${CDN_HOST}/whisperwebui_models.tar.zst"
-              MODEL_ROOT="/tmp/whisperwebui/models"
-              DOWNLOAD_TMP="${MODEL_ROOT}/download/models.tar.zst"
-              WORKDIR="/tmp/workspace"
-              MODEL_MARKER="${MODEL_ROOT}/.success_marker"
-
-              rm -rf "${WORKDIR}"
-              mkdir -p "${MODEL_ROOT}" "${WORKDIR}"
-
-              if [ -f "${MODEL_MARKER}" ]; then
-                echo "Directory ${MODEL_ROOT} is not empty, skip initialization."
-                exit 0
-              fi
-              apt clean && apt update && apt install -y rsync aria2 zstd pv;
-
-              echo "Downloading model from $DOWNLOAD_URL..."
-              aria2c \
-                --continue=true \
-                --max-concurrent-downloads=4 \
-                --split=4 \
-                --max-connection-per-server=4 \
-                --min-split-size=50M \
-                --timeout=20 \
-                --max-tries=0 \
-                --retry-wait=10 \
-                --check-certificate=false \
-                --allow-overwrite=true \
-                --file-allocation=prealloc \
-                --disk-cache=64M \
-                --summary-interval=0 \
-                --quiet=false \
-                --enable-color=false \
-                --dir="$(dirname "$DOWNLOAD_TMP")" \
-                --out="$(basename "$DOWNLOAD_TMP")" \
-                "$DOWNLOAD_URL" || { echo "Download failed!"; exit 1; }
-
-              echo "[$(date +%H:%M:%S)] Extracting files..."
-              pv "${DOWNLOAD_TMP}" | tar -I 'zstd -T0' -C "${WORKDIR}" --strip-components=1 -xf - || {
-                echo "Extraction failed!"
-                rm -f "${DOWNLOAD_TMP}"
-                exit 1
-              }
-
-              ls -ld "${WORKDIR}"
-
-              echo "[$(date +%H:%M:%S)] Syncing files..."
-              rsync -av --ignore-existing "${WORKDIR}/" "${MODEL_ROOT}/" || {
-                echo "Sync failed!"
-                exit 1
-              }
-
-              touch "${MODEL_MARKER}"
-
-              rm -rf "${WORKDIR}" "${DOWNLOAD_TMP}"
-              echo "[$(date +%H:%M:%S)] Initialization completed!"
-              exit 0
-          volumeMounts:
-            - name: configs
-              mountPath: /tmp/configs
-            - name: models
-              mountPath: /tmp/whisperwebui/models
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
       containers:
         - name: whisperwebui
-          image: jhj0517/whisper-webui:v1.0.4
+          image: jhj0517/whisper-webui:v1.0.5
           envFrom:
             - configMapRef:
                 name: whisperwebui-config
@@ -117,6 +34,16 @@ spec:
             - sh
             - "-c"
             - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /Whisper-WebUI/models/.success.{{ $model.name }} ]; do
+                echo "Waiting for model file /Whisper-WebUI/models/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+              echo "Starting application..."
               python app.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
           ports:
             - containerPort: 7860
@@ -146,16 +73,79 @@ spec:
       volumes:
         - name: models
           hostPath:
-            path: "{{ .Values.sharedlib }}/ai/whisperwebui"
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
             type: DirectoryOrCreate
         - name: outputs
           hostPath:
-            path: "{{ .Values.sharedlib }}/ai/output/whisperwebui"
+            path: "{{ .Values.sharedlib }}/ai/output/{{ .Release.Name }}"
             type: DirectoryOrCreate
         - name: configs
           hostPath:
             path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/configs"
             type: DirectoryOrCreate
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-downloadmodels
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-downloadmodels
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-downloadmodels
+          image: beclab/downloader-init:v0.1.0
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: whisperwebui-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 Whisper-WebUI https://{{ $whisperwebuiDomain }}/config && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
 ---
 apiVersion: v1
 kind: Service
@@ -169,5 +159,19 @@ spec:
     - name: api
       port: 7860
       targetPort: 7860
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-downloadmodels
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
   type: ClusterIP
 {{- end }}
