@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: firecrawl
+  namespace: {{ .Release.Namespace }}
+  name: firecrawl
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: firecrawl
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: firecrawl
+    spec:
+      containers:
+      - name: api
+        image: harveyff/firecrawl:v1.13.0
+        args: [ "pnpm", "run", "start:production" ]
+        ports:
+          - containerPort: 3002
+        envFrom:
+          - configMapRef:
+              name: firecrawl-config
+        env:
+          - name: FLY_PROCESS_GROUP
+            value: "app"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 1Gi
+          limits:
+            memory: 2Gi
+            cpu: 2
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: firecrawl
+  name: firecrawl-api-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: firecrawl
+  ports:
+    - protocol: TCP
+      port: 3002
+      targetPort: 3002

@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: docmost
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: docmost
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: docmost
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: docmost
+    spec:
+      containers:
+        - name: docmost
+          image: docker.io/docmost/docmost:0.21.0
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: APP_URL
+              value: 'https://{{ last (splitList "," .Values.domain.docmost) }}'
+            - name: APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: docmost
+                  key: app-password
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.docmost}}?schema=public"
+            - name: REDIS_URL
+              value: "redis://docmost-redis:6379/0"
+          envFrom:
+            - configMapRef:
+                name: docmost-config
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/data/storage
+              name: docmost-data
+              subPath: docmost
+      restartPolicy: Always
+      volumes:
+        - name: docmost-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}/docmost'
+        - name: redis-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appdata }}/docmost/redisdata'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docmost
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: docmost
+spec:
+  ports:
+    - name: "3000"
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: docmost
+status:
+  loadBalancer: {}

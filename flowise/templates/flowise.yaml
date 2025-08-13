@@ -1,0 +1,94 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: flowise
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flowise
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: flowise
+    spec:
+      containers:
+        - name: flowise
+          image: docker.io/flowiseai/flowise:3.0.3
+          imagePullPolicy: Always
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: DISPLAY
+              value: ":0"
+          envFrom:
+            - configMapRef:
+                name: flowise-config
+          resources:
+            requests:
+              cpu: "300m"
+              memory: "300Mi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - mountPath: /root/.flowise
+              name: flowise-data
+      volumes:
+        - name: flowise-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/flowise"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flowise-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: flowise
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    app: flowise
+status:
+  loadBalancer: {}

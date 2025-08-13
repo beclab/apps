@@ -1,0 +1,124 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fastgpt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastgpt
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: fastgpt
+    spec:
+      containers:
+        - name: postgres
+          image: pgvector/pgvector:0.8.0-pg15
+          env:
+            - name: POSTGRES_USER
+              value: "fastgpt"
+            - name: POSTGRES_PASSWORD
+              value: "fastgpt"
+            - name: POSTGRES_DB
+              value: "postgres"
+          volumeMounts:
+            - name: pg-storage
+              mountPath: /var/lib/postgresql/data
+          ports:
+            - containerPort: 5432
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "200Mi"
+            limits:
+              cpu: "300m"
+              memory: "800Mi"
+
+        - name: fastgpt
+          image: aboveos/fastgpt-fastgpt:v4.10.0
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+          envFrom:
+            - configMapRef:
+                name: fastgpt-config
+            - secretRef:
+                name: fastgpt-secrets
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - name: appdata-config
+              mountPath: /app/data/config.json
+              subPath: config.json
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+          securityContext:
+            runAsUser: 0
+        - name: sandbox
+          image: aboveos/fastgpt-fastgpt-sandbox:v4.10.0
+          ports:
+            - containerPort: 3001
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "100Mi"
+            limits:
+              cpu: "200m"
+              memory: "500Mi"
+
+      volumes:
+        - name: appdata-config
+          configMap:
+            name: app-config
+        - name: pg-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/fastgpt/pg"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastgpt-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: fastgpt
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: sandbox
+  ports:
+    - name: http
+      port: 3001
+      targetPort: 3001

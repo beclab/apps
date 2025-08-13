@@ -1,0 +1,106 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: redroid
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redroid
+  strategy:
+    type: Recreate      
+  template:
+    metadata:
+      labels:
+        app: redroid
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: redroid
+          image: redroid/redroid:12.0.0-240527
+          imagePullPolicy: Always
+          args:
+            - "androidboot.redroid_width=720"
+            - "androidboot.redroid_height=1280"
+            - "androidboot.redroid_dpi=320"
+            - "androidboot.redroid_fps=30"
+            - "androidboot.redroid_video_codec=h264"
+            - "androidboot.redroid_gpu_mode=guest"
+            - "androidboot.hardware=qcom"
+            - "ro.boot.hwc=GLOBAL"
+            - "ro.ril.oem.imei=861503068361145"
+            - "ro.ril.oem.imei1=861503068361145"
+            - "ro.ril.oem.imei2=861503068361148"
+            - "ro.product.manufacturer=Xiaomi"
+            - "ro.build.product=ziyi"
+            - "ro.product.model=23031PN0DC"
+            - "ro.product.name=ziyi"
+            - "ro.product.device=ziyi"
+            - "ro.build.characteristics=default"
+            - "ro.secure=0"
+          env:
+            - name: redroid.gpu.mode
+              value: "guest"
+            - name: redroid.gpu.vulkanEnable
+              value: "1"
+            - name: redroid.gpu.angleBackend
+              value: "vulkan"
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+          resources:
+            requests:
+              cpu: "2000m"
+              memory: "4Gi"
+            limits:
+              cpu: "12000m"
+              memory: "16Gi"
+          ports:
+            - name: tcp-5555
+              containerPort: 5555
+              protocol: TCP
+            - name: udp-5555
+              containerPort: 5555
+              protocol: UDP
+          volumeMounts:
+            - mountPath: /data
+              name: redroid-data
+            - mountPath: /dev/dri
+              name: dev-dri
+      volumes:
+        - name: redroid-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/redroid"
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redroid-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: redroid
+spec:
+  ports:
+    - name: "tcp-5555"
+      port: 5555
+      targetPort: 5555
+      protocol: TCP
+    - name: "udp-5555"
+      port: 5555
+      targetPort: 5555
+      protocol: UDP
+  selector:
+    app: redroid
+  type: ClusterIP
