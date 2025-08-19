@@ -17,10 +17,25 @@ spec:
       labels:
         app: redis
     spec:
-      securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /data..."
+              chown -R 1000:1000 /data
+              chmod -R 770 /data
+          resources: {}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
       containers:
         - name: redis
           image: docker.io/aboveos/redis:7
@@ -36,8 +51,12 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: data
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       volumes:
         - name: data
           hostPath:
-            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/redis'
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/redis"
             type: DirectoryOrCreate
