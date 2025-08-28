@@ -1,0 +1,463 @@
+{{- $langfuseDomainENV := split "," .Values.domain.langfuse -}}
+{{- $langfuseDomain := index $langfuseDomainENV "_0" -}}
+
+# ==========================
+# Secrets & Config
+# ==========================
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: langfuse-secrets
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  CLICKHOUSE_PASSWORD: "olares"
+  NEXTAUTH_SECRET: "olares"
+  ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+  SALT: "mysalt"
+  MINIO_ROOT_USER: "minio"
+  MINIO_ROOT_PASSWORD: "olarestestpwd"
+  REDIS_PASSWORD: "olares"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: langfuse-config
+  namespace: {{ .Release.Namespace }}
+data:
+  NEXTAUTH_URL: "https://{{ $langfuseDomain }}"
+  TELEMETRY_ENABLED: "true"
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "true"
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "langfuse"
+  LANGFUSE_S3_BATCH_EXPORT_ENABLED: "false"
+  LANGFUSE_S3_BATCH_EXPORT_BUCKET: "langfuse"
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: "auto"
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: "auto"
+  LANGFUSE_S3_BATCH_EXPORT_REGION: "auto"
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: "events/"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: "media/"
+  LANGFUSE_S3_BATCH_EXPORT_PREFIX: "exports/"
+
+# ==========================
+# ClickHouse
+# ==========================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+  namespace: {{ .Release.Namespace }}
+  labels: { app: clickhouse }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: clickhouse } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: clickhouse }
+    spec:
+      securityContext:
+        fsGroup: 101
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              redis-svc:6379,{{ .Values.postgres.host }}:5432
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:25.5
+          env:
+            - name: CLICKHOUSE_DB
+              value: default
+            - name: CLICKHOUSE_USER
+              value: clickhouse
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: CLICKHOUSE_PASSWORD } }
+          ports:
+            - containerPort: 8123  # HTTP
+            - containerPort: 9000  # Native TCP (official port)
+          resources:
+            requests: { cpu: "100m", memory: "500Mi" }
+            limits:   { cpu: "2", memory: "4Gi" }
+          volumeMounts:
+            - name: ch-data
+              mountPath: /var/lib/clickhouse
+            - name: ch-logs
+              mountPath: /var/log/clickhouse-server
+      volumes:
+        - name: ch-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/langfuse/docker/data/clickhouse"
+            type: DirectoryOrCreate
+        - name: ch-logs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/langfuse/docker/logs/clickhouse"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: clickhouse }
+  ports:
+    - port: 8123
+      targetPort: 8123
+      name: http
+    - port: 4222
+      targetPort: 9000
+      name: native
+
+# ==========================
+# MinIO (S3-compatible)
+# ==========================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: {{ .Release.Namespace }}
+  labels: { app: minio }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: minio } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: minio }
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+          args: ["server","/data","--address",":9002","--console-address",":9003"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+          ports:
+            - containerPort: 9002
+            - containerPort: 9003
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: 9002 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: 9002 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: "100m", memory: "200Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      volumes:
+        - name: minio-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/langfuse/docker/data/minio"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: minio }
+  ports:
+    - name: s3
+      port: 9002
+      targetPort: 9002
+    - name: console
+      port: 9003
+      targetPort: 9003
+
+# Create bucket `langfuse` once MinIO is up
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-make-bucket
+  namespace: {{ .Release.Namespace }}
+spec:
+  template:
+    metadata:
+      labels: { job: minio-make-bucket }
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mc
+          image: minio/mc:RELEASE.2025-07-16T15-35-03Z
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+          command:
+            - /bin/sh
+            - -c
+            - >-
+              until (mc alias set local http://minio:9002 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb -p local/langfuse); do echo waiting for minio; sleep 2; done; echo done;
+
+# ==========================
+# Langfuse Web (UI & API)
+# ==========================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse
+  namespace: {{ .Release.Namespace }}
+  labels: { app: langfuse }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: langfuse } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: langfuse }
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              redis-svc:6379,{{ .Values.postgres.host }}:5432,clickhouse:8123
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: web
+          image: langfuse/langfuse:3.103.0
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXTAUTH_URL
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: NEXTAUTH_URL } }
+            - name: NEXTAUTH_SECRET
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: NEXTAUTH_SECRET } }
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.langfuse }}"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: SALT
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: SALT } }
+            - name: ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: ENCRYPTION_KEY } }
+            - name: TELEMETRY_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: TELEMETRY_ENABLED } }
+            - name: LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES } }
+            - name: CLICKHOUSE_MIGRATION_URL              
+              value: "clickhouse://clickhouse:4222"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
+            - name: CLICKHOUSE_USER
+              value: "clickhouse"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: CLICKHOUSE_PASSWORD } }
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: CLICKHOUSE_CLUSTER_ENABLED } }
+            - name: LANGFUSE_USE_AZURE_BLOB
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_BUCKET } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_REGION } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_PREFIX } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            # Internal endpoint for uploading, plus optional external for download links
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_REGION } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_ENABLED } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_BUCKET } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT
+              value: "https://minio.example.com"  # CHANGEME if exposing S3 via ingress
+            - name: LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_REGION } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE } }
+            - name: REDIS_HOST
+              value: "redis-svc"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_AUTH
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: REDIS_PASSWORD } }
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+          resources:
+            requests: { cpu: "100m", memory: "200Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: langfuse-web
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app: langfuse }
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+
+# ==========================
+# Langfuse Worker
+# ==========================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: langfuse-worker
+  namespace: {{ .Release.Namespace }}
+  labels: { app: langfuse-worker }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: langfuse-worker } }
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels: { app: langfuse-worker }
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              redis-svc:6379,{{ .Values.postgres.host }}:5432,clickhouse:8123
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: worker
+          image: langfuse/langfuse-worker:3.103.0
+          env:
+            - name: NEXTAUTH_URL
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: NEXTAUTH_URL } }
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.langfuse }}"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: SALT
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: SALT } }
+            - name: ENCRYPTION_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: ENCRYPTION_KEY } }
+            - name: TELEMETRY_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: TELEMETRY_ENABLED } }
+            - name: LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES } }
+            - name: CLICKHOUSE_MIGRATION_URL
+              value: "clickhouse://clickhouse:4222"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
+            - name: CLICKHOUSE_USER
+              value: "clickhouse"
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: CLICKHOUSE_PASSWORD } }
+            - name: CLICKHOUSE_CLUSTER_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: CLICKHOUSE_CLUSTER_ENABLED } }
+            - name: LANGFUSE_USE_AZURE_BLOB
+              value: "false"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_BUCKET } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_EVENT_UPLOAD_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_REGION } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE } }
+            - name: LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_EVENT_UPLOAD_PREFIX } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_BUCKET } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_REGION } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE } }
+            - name: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_MEDIA_UPLOAD_PREFIX } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENABLED
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_ENABLED } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_BUCKET
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_BUCKET } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_ENDPOINT
+              value: "http://minio:9002"
+            - name: LANGFUSE_S3_BATCH_EXPORT_EXTERNAL_ENDPOINT
+              value: "https://minio.example.com"  # CHANGEME
+            - name: LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_USER } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: MINIO_ROOT_PASSWORD } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_REGION
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_REGION } }
+            - name: LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE
+              valueFrom: { configMapKeyRef: { name: langfuse-config, key: LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE } }
+            - name: REDIS_HOST
+              value: "redis-svc"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_AUTH
+              valueFrom: { secretKeyRef: { name: langfuse-secrets, key: REDIS_PASSWORD } }
+            - name: REDIS_TLS_ENABLED
+              value: "false"
+          resources:
+            requests: { cpu: "100m", memory: "500Mi" }
+            limits:   { cpu: "1", memory: "2Gi" }
+
