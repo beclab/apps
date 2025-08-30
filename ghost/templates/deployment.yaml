@@ -1,14 +1,14 @@
 {{- $ghostDomainENV := split  ","  .Values.domain.ghost -}}
 {{- $ghostDomain := index $ghostDomainENV "_0" -}}
 
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: ghost
   name: ghost
   namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: ghost
 spec:
   replicas: 1
   selector:
@@ -17,118 +17,89 @@ spec:
   strategy: {}
   template:
     metadata:
-      creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: ghost
     spec:
       initContainers:
-      - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /app-data-root
-        resources: {}
-        volumeMounts:
-          - name: app-data-root
-            mountPath: /app-data-root
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
+        - name: init-chmod-data
+          image: docker.io/aboveos/busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 1000:1000 /app-data-root"]
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+          securityContext:
+            runAsUser: 0
+        - name: wait-mysql
+          image: owncloudci/wait-for:latest
+          imagePullPolicy: IfNotPresent
+          args: ["-it", "mysql-svc:3306"]
       containers:
-      - env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
-        - name: TZ
-          value: Etc/UTC
-        - name: database__client
-          value: "mysql"
-        - name: database__connection__host
-          value: "127.0.0.1"
-        - name: database__connection__user
-          value: "root"
-        - name: database__connection__password
-          value: "example"
-        - name: database__connection__database
-          value: "ghost"
-        - name: url
-          value: 'https://{{$ghostDomain}}'
-        image: docker.io/aboveos/ghost:5-alpine
-        name: ghost
-        ports:
-        - name: proxy-ghost
-          containerPort: 2368
-        resources:
-          limits:
-            cpu: "2"
-            memory: 3Gi
-          requests:
-            cpu: 50m
-            memory: 256Mi
-        volumeMounts:
-        - mountPath: /var/lib/ghost/content
-          name: ghost
-        - mountPath: /userdata
-          name: userdata
-      - name: ghost-mysql
-        image: docker.io/aboveos/mysql:8.0
-        env:
-        - name: MYSQL_ROOT_PASSWORD
-          value: "example"
-        resources:
-          limits:
-            cpu: "2"
-            memory: 4Gi
-          requests:
-            cpu: 20m
-            memory: 800Mi
-        ports:
-        - name: ghost-mysql
-          containerPort: 3306
-        volumeMounts:
-        - mountPath: /var/lib/ghost/content
-          name: db
+        - name: ghost
+          image: docker.io/aboveos/ghost:6.0.5-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: database__client
+              value: "mysql"
+            - name: database__connection__host
+              value: "mysql-svc"
+            - name: database__connection__user
+              value: "root"
+            - name: database__connection__password
+              value: "example"
+            - name: database__connection__database
+              value: "ghost"
+            - name: url
+              value: 'https://{{$ghostDomain}}'
+          ports:
+            - name: http
+              containerPort: 2368
+          resources:
+            limits:
+              cpu: "2"
+              memory: 3Gi
+            requests:
+              cpu: 50m
+              memory: 256Mi
+          volumeMounts:
+            - name: ghost
+              mountPath: /var/lib/ghost/content
+            - name: userdata
+              mountPath: /userdata
       restartPolicy: Always
       volumes:
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/ghost'
-          type: DirectoryOrCreate
-        name: app-data-root
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/ghost/ghost'
-          type: DirectoryOrCreate
-        name: ghost
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/ghost/db'
-          type: DirectoryOrCreate
-        name: db
-      - hostPath:
-          path: '{{ .Values.userspace.userData }}'
-          type: DirectoryOrCreate
-        name: userdata
-status: {}
+        - name: app-data-root
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/ghost'
+            type: DirectoryOrCreate
+        - name: ghost
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/ghost/ghost'
+            type: DirectoryOrCreate
+        - name: userdata
+          hostPath:
+            path: '{{ .Values.userspace.userData }}'
+            type: DirectoryOrCreate
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: ghost
   name: ghost
   namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: ghost
 spec:
-  ports:
-  - name: "2368"
-    port: 2368
-    targetPort: 2368
   selector:
     io.kompose.service: ghost
-status:
-  loadBalancer: {}
+  ports:
+    - name: http
+      port: 2368
+      targetPort: 2368
