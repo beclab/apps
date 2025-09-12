@@ -32,24 +32,29 @@ spec:
                 sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
               fi
               
-              mkdir -p /models
-              cd /models
-              apk add --no-cache curl unzip
+              if [ -n "${MODELS}" ]; then
+                echo "MODELS not empty, start initialization..."
+                mkdir -p /models
+                cd /models
+                apk add --no-cache curl unzip
               
-              for model in ${MODELS}; do
-                echo "Downloading ${CDN_HOST}/${model}.zip..."
-                curl -L "https://${CDN_HOST}/${model}.zip" -o "${model}.zip"
-                unzip -q -o "${model}.zip" -d "/models/${model}"
-
-                if [ -d "/models/${model}/${model}" ]; then
-                  mv "/models/${model}/${model}"/* "/models/${model}"
-                  rmdir "/models/${model}/${model}"
-                fi
-
-                rm -f "${model}.zip"
-              done
-             
-              chown -R 1000:1000 /models
+                for model in ${MODELS}; do
+                  echo "Downloading ${CDN_HOST}/${model}.zip..."
+                  curl -L "https://${CDN_HOST}/${model}.zip" -o "${model}.zip"
+                  unzip -q -o "${model}.zip" -d "/models/${model}"
+              
+                  if [ -d "/models/${model}/${model}" ]; then
+                    mv "/models/${model}/${model}"/* "/models/${model}"
+                    rmdir "/models/${model}/${model}"
+                  fi
+              
+                  rm -f "${model}.zip"
+                done
+              
+                chown -R 1000:1000 /models
+              else
+                echo "MODELS is empty, skip initialization."
+              fi
           resources:
             requests:
               cpu: 50m
@@ -62,7 +67,7 @@ spec:
               mountPath: /models
       containers:
         - name: mtranserver
-          image: docker.io/xxnuo/mtranserver:2.1.0
+          image: docker.io/xxnuo/mtranserver:main-zh
           imagePullPolicy: Always
           env:
             - name: PGID
@@ -103,7 +108,7 @@ metadata:
     io.kompose.service: mtranserver
 spec:
   ports:
-    - name: "http"
+    - name: http
       port: 8989
       targetPort: 8989
       protocol: TCP

@@ -1,0 +1,431 @@
+# ---------------------------
+# MinIO
+# ---------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refly-minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: refly-minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: refly-minio
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: refly-minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+          command: ["minio", "server", "/data", "--address", ":9000", "--console-address", ":9001"]
+          envFrom:
+            - configMapRef:
+                name: refly-shared-config
+          ports:
+            - containerPort: 9000
+              name: minio-api
+            - containerPort: 9001
+              name: minio-console
+          livenessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: "300m"
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 256Mi
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      volumes:
+        - name: minio-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/minio"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: refly-minio
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: refly-minio
+  ports:
+    - name: minio-api
+      port: 9000
+      targetPort: 9000
+    - name: minio-console
+      port: 9001
+      targetPort: 9001
+
+# ---------------------------
+# Qdrant
+# ---------------------------
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qdrant-config
+  namespace: {{ .Release.Namespace }}
+data:
+  production.yaml: |
+    log_level: INFO
+    service:
+      enable_cors: true
+      enable_tls: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refly-qdrant
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: refly-qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: refly-qdrant
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: refly-qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: reflyai/qdrant:v1.13.1
+          env:
+            - name: TZ
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: TZ
+          ports:
+            - containerPort: 6333
+              name: http
+            - containerPort: 6334
+              name: grpc
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "curl -s http://localhost:6333/healthz | grep -q 'healthz check passed' || exit 1"
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: "300m"
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+          volumeMounts:
+            - name: qdrant-config
+              mountPath: /qdrant/config/production.yaml
+              subPath: production.yaml
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+      volumes:
+        - name: qdrant-config
+          configMap:
+            name: qdrant-config
+        - name: qdrant-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/qdrant"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: refly-qdrant
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: refly-qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: 6333
+    - name: grpc
+      port: 6334
+      targetPort: 6334
+
+# ---------------------------
+# Elasticsearch
+# ---------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refly-elasticsearch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: refly-elasticsearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: refly-elasticsearch
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: refly-elasticsearch
+    spec:
+      initContainers:
+        - name: init-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "[Init] Fixing permissions on /usr/share/elasticsearch/data..."
+              chown -R 1000:1000 /usr/share/elasticsearch/data
+              chmod -R 770 /usr/share/elasticsearch/data
+          volumeMounts:
+            - name: es-data
+              mountPath: /usr/share/elasticsearch/data
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: elasticsearch
+          image: reflyai/elasticsearch:7.10.2
+          env:
+            - name: TZ
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: TZ
+            - name: discovery.type
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: discovery.type
+            - name: xpack.license.self_generated.type
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: xpack.license.self_generated.type
+            - name: xpack.security.enabled
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: xpack.security.enabled
+            - name: xpack.security.http.ssl.enabled
+              valueFrom:
+                configMapKeyRef:
+                  name: refly-shared-config
+                  key: xpack.security.http.ssl.enabled
+          ports:
+            - containerPort: 9200
+              name: http
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - curl -s http://localhost:9200 >/dev/null || exit 1
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: "300m"
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 2Gi
+          volumeMounts:
+            - name: es-data
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: es-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/es"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: refly-elasticsearch
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: refly-elasticsearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+
+# ---------------------------
+# API
+# ---------------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refly
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: refly
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: refly
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: refly
+    spec:
+      initContainers:
+        - name: wait-postgres
+          image: owncloudci/wait-for:latest
+          args: ["-it", "{{ .Values.postgres.host }}:5432"]
+          imagePullPolicy: IfNotPresent
+        - name: wait-redis
+          image: owncloudci/wait-for:latest
+          args: ["-it", "redis-svc:6379"]
+          imagePullPolicy: IfNotPresent
+        - name: wait-qdrant
+          image: owncloudci/wait-for:latest
+          args: ["-it", "refly-qdrant:6333"]
+          imagePullPolicy: IfNotPresent
+        - name: wait-elasticsearch
+          image: owncloudci/wait-for:latest
+          args: ["-it", "refly-elasticsearch:9200"]
+          imagePullPolicy: IfNotPresent
+        - name: wait-minio
+          image: owncloudci/wait-for:latest
+          args: ["-it", "refly-minio:9000"]
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: api
+          image: reflyai/refly-api:0.9.1
+          envFrom:
+            - configMapRef:
+                name: refly-shared-config
+          env:
+            - name: AUTO_MIGRATE_DB_SCHEMA
+              value: '1'
+          ports:
+            - containerPort: 5800
+              name: http
+            - containerPort: 5801
+              name: ws
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5800
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: refly-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: refly
+  ports:
+    - name: http
+      port: 5800
+      targetPort: 5800
+    - name: ws
+      port: 5801
+      targetPort: 5801
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: refly-web
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: refly-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: refly-web
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: refly-web
+    spec:
+      initContainers:
+        - name: wait-for-api
+          image: curlimages/curl:8.8.0
+          command:
+            - sh
+            - -c
+            - until curl -sf http://refly-api:5800 >/dev/null; do echo waiting for api; sleep 2; done;
+      containers:
+        - name: web
+          image: reflyai/refly-web:0.9.1
+          envFrom:
+            - configMapRef:
+                name: refly-shared-config
+          ports:
+            - containerPort: 80
+              name: http
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: refly-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: refly-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: refly-web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 80
