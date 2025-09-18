@@ -1,0 +1,674 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-onlyoffice
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-onlyoffice
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-onlyoffice
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-onlyoffice
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/office/ /mnt/docker/office/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+      containers:
+        - name: onlyoffice
+          image: onlyoffice/documentserver:7.1.1
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: JWT_ENABLED
+              value: "false"
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "1000m"
+              memory: 2Gi
+          command:
+            - /bin/bash
+            - /app/ds/run-document-server.sh
+            - bash
+            - -c
+            - supervisorctl restart all
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /var/www/onlyoffice/documentserver/sdkjs-plugins/bisheng
+              name: bisheng-office
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: bisheng-office
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/office"
+            type: DirectoryOrCreate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-es
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-es
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-es
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-es
+    spec:
+      containers:
+        - name: elasticsearch
+          image: bitnami/elasticsearch:8.12.0
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - containerPort: 9200
+            - containerPort: 9300
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "1000m"
+              memory: 2000Mi
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /bitnami/elasticsearch/data
+              name: es-data
+      volumes:
+        - name: es-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/es"
+            type: DirectoryOrCreate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-etcd
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-etcd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-etcd
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-etcd
+    spec:
+      containers:
+        - name: etcd
+          image: aboveos/coreos-etcd:v3.5.5
+          command:
+            - etcd
+            - --advertise-client-urls=http://127.0.0.1:2379
+            - --listen-client-urls=http://0.0.0.0:2379
+            - --data-dir=/etcd
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 500Mi
+          volumeMounts:
+            - mountPath: /etcd
+              name: etcd-data
+      volumes:
+        - name: etcd-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/milvus-etcd"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-es
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: office
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-onlyoffice
+  ports:
+    - port: 8071
+      targetPort: 80
+      name: http
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-minio
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-minio
+    spec:
+      containers:
+        - name: minio
+          image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+          command: ["minio", "server", "/minio_data", "--address", ":9000", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              value: minioadmin
+            - name: MINIO_ROOT_PASSWORD
+              value: minioadmin
+          ports:
+            - containerPort: 9000
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 500Mi
+          volumeMounts:
+            - mountPath: /minio_data
+              name: minio-data
+            - mountPath: /etc/localtime
+              name: localtime
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: minio-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/minio"
+            type: DirectoryOrCreate
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-minio
+  ports:
+    - port: 9000
+      targetPort: 9000
+      name: http
+    - name: console
+      port: 9001
+      targetPort: 9001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-etcd
+  ports:
+    - port: 2379
+      targetPort: 2379
+      name: http
+---
+# Deployment: bisheng-backend
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-backend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-backend
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/bisheng/ /mnt/docker/bisheng/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              redis:6379,mysql:3306,office:8071
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: backend
+          image: dataelement/bisheng-backend:v2.0.0
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: BS_MILVUS_CONNECTION_ARGS
+              value: '{"host":"milvus","port":"19530","user":"","password":"","secure":false}'
+            - name: BS_MILVUS_IS_PARTITION
+              value: 'true'
+            - name: BS_MILVUS_PARTITION_SUFFIX
+              value: '1'
+            - name: BS_ELASTICSEARCH_URL
+              value: 'http://elasticsearch:9200'
+            - name: BS_ELASTICSEARCH_SSL_VERIFY
+              value: '{}'
+            - name: BS_MINIO_SCHEMA
+              value: 'false'
+            - name: BS_MINIO_CERT_CHECK
+              value: 'false'
+            - name: BS_MINIO_ENDPOINT
+              value: 'minio:9000'
+            - name: BS_MINIO_SHAREPOINT
+              value: 'minio:9000'
+            - name: BS_MINIO_ACCESS_KEY
+              value: 'minioadmin'
+            - name: BS_MINIO_SECRET_KEY
+              value: 'minioadmin'
+          command:
+            - sh
+            - '-c'
+            - >-
+              uvicorn bisheng.main:app --host 0.0.0.0 --port 7860
+              --no-access-log --workers 4
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "1000m"
+              memory: 5Gi
+          ports:
+            - containerPort: 7860
+          volumeMounts:
+            - mountPath: /app/bisheng/config.yaml
+              name: bisheng-config
+              subPath: config.yaml
+            - mountPath: /app/entrypoint.sh
+              name: bisheng-entry
+              subPath: entrypoint.sh
+            - mountPath: /app/data
+              name: bisheng-data
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: bisheng-config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/bisheng/config"
+            type: DirectoryOrCreate
+        - name: bisheng-entry
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/bisheng"
+            type: DirectoryOrCreate
+        - name: bisheng-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/bisheng"
+            type: DirectoryOrCreate
+---
+# Service: bisheng-backend-worker
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-backend
+  ports:
+    - port: 7860
+      targetPort: 7860
+      name: http
+---
+# Deployment: bisheng-backend-worker
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-backend-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-backend-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-backend-worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-backend-worker
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/bisheng/ /mnt/docker/bisheng/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              redis:6379,mysql:3306,office:8071
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: backend-worker
+          image: dataelement/bisheng-backend:v2.0.0
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+            - name: BS_MILVUS_CONNECTION_ARGS
+              value: '{"host":"milvus","port":"19530","user":"","password":"","secure":false}'
+            - name: BS_MILVUS_IS_PARTITION
+              value: 'true'
+            - name: BS_MILVUS_PARTITION_SUFFIX
+              value: '1'
+            - name: BS_ELASTICSEARCH_URL
+              value: 'http://elasticsearch:9200'
+            - name: BS_ELASTICSEARCH_SSL_VERIFY
+              value: '{}'
+            - name: BS_MINIO_SCHEMA
+              value: 'false'
+            - name: BS_MINIO_CERT_CHECK
+              value: 'false'
+            - name: BS_MINIO_ENDPOINT
+              value: 'minio:9000'
+            - name: BS_MINIO_SHAREPOINT
+              value: 'minio:9000'
+            - name: BS_MINIO_ACCESS_KEY
+              value: 'minioadmin'
+            - name: BS_MINIO_SECRET_KEY
+              value: 'minioadmin'
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "1000m"
+              memory: 2Gi
+          command: ["sh", "entrypoint.sh", "worker"]
+          volumeMounts:
+            - mountPath: /app/bisheng/config.yaml
+              name: bisheng-config
+              subPath: config.yaml
+            - mountPath: /app/entrypoint.sh
+              name: bisheng-entry
+              subPath: entrypoint.sh
+            - mountPath: /app/data
+              name: bisheng-data
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: bisheng-config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/bisheng/config"
+            type: DirectoryOrCreate
+        - name: bisheng-entry
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/bisheng"
+            type: DirectoryOrCreate
+        - name: bisheng-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/bisheng"
+            type: DirectoryOrCreate
+---
+# Deployment: bisheng-frontend
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-frontend
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/nginx/ /mnt/docker/nginx/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              backend:7860
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: frontend
+          image: dataelement/bisheng-frontend:v2.0.0
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - containerPort: 3001
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 500Mi
+          volumeMounts:
+            - mountPath: /etc/nginx/nginx.conf
+              name: nginx-conf
+              subPath: nginx.conf
+            - mountPath: /etc/nginx/conf.d
+              name: nginx-conf-d
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: nginx-conf
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/nginx"
+            type: DirectoryOrCreate
+        - name: nginx-conf-d
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/nginx/conf.d"
+            type: DirectoryOrCreate
+---
+# Service: bisheng-frontend
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-frontend
+  ports:
+    - port: 3001
+      targetPort: 3001
+      name: http
+---
+# Deployment: milvus
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: milvus
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: milvus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: milvus
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: milvus
+    spec:
+      initContainers:
+        - name: check-ready
+          image: owncloudci/wait-for:latest
+          args:
+            - '-it'
+            - >-
+              etcd:2379,minio:9000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: milvus
+          image: milvusdb/milvus:v2.5.10
+          command: ["milvus", "run", "standalone"]
+          env:
+            - name: ETCD_ENDPOINTS
+              value: etcd:2379
+            - name: MINIO_ADDRESS
+              value: minio:9000
+            - name: TZ
+              value: Asia/Shanghai
+          ports:
+            - containerPort: 19530
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 500Mi
+          volumeMounts:
+            - mountPath: /var/lib/milvus
+              name: milvus-data
+            - mountPath: /etc/localtime
+              name: localtime
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: milvus-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/data/milvus"
+            type: DirectoryOrCreate
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+---
+# Service: milvus
+apiVersion: v1
+kind: Service
+metadata:
+  name: milvus
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: milvus
+  ports:
+    - port: 19530
+      targetPort: 19530
+      name: grpc

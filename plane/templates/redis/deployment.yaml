@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /data..."
+              chown -R 1000:1000 /data
+              chmod -R 770 /data
+          resources: {}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        - name: redis
+          image: docker.io/aboveos/redis:7
+          resources:
+            requests:
+              cpu: 10m
+              memory: 10Mi
+            limits:
+              cpu: 1000m
+              memory: 1000Mi
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: data
+              mountPath: /data
+
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/redis"
+            type: DirectoryOrCreate

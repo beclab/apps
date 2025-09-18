@@ -1,0 +1,89 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiproxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: aiproxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiproxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: aiproxy
+    spec:
+      containers:
+        - name: aiproxy
+          image: aboveos/labring-aiproxy:v0.3.1
+          env:
+            - name: ADMIN_KEY
+              value: "aiproxy"
+            - name: LOG_DETAIL_STORAGE_HOURS
+              value: "1"
+            - name: SQL_DSN
+              value: "postgres://postgres:aiproxy@localhost:5432/aiproxy"
+            - name: RETRY_TIMES
+              value: "3"
+            - name: BILLING_ENABLED
+              value: "false"
+            - name: DISABLE_MODEL_CONFIG
+              value: "true"
+          ports:
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "100Mi"
+            limits:
+              cpu: "200m"
+              memory: "500Mi"
+
+        - name: aiproxy-pg
+          image: pgvector/pgvector:0.8.0-pg15
+          env:
+            - name: TZ
+              value: "Asia/Shanghai"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_DB
+              value: "aiproxy"
+            - name: POSTGRES_PASSWORD
+              value: "aiproxy"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "100Mi"
+            limits:
+              cpu: "200m"
+              memory: "500Mi"
+      volumes:
+        - name: pg-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/fastgpt/aiproxy/pg"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiproxy-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: LoadBalancer
+  selector:
+    app: aiproxy
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000

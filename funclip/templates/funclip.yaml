@@ -1,0 +1,176 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $funclipDomainENV := split "," .Values.domain.funclip -}}
+{{- $funclipDomain := index $funclipDomainENV "_0" -}}
+{{- $localDomain := $funclipDomain -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: funclip
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: funclip
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: funclip
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: funclip
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: funclip
+          image: beclab/funclip:funclip-v0.7
+          envFrom:
+            - configMapRef:
+                name: funclip-config
+          command:
+            - sh
+            - -c
+            - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /root/.cache/modelscope/.success.{{ $model.name }} ]; do
+                echo "Waiting for model file /root/.cache/modelscope/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+              echo "Starting application..."
+              python3 funclip/launch.py -p 7860 -l ${DEFAULT_LANGUAGE} --listen
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 10Gi
+          volumeMounts:
+            - name: data
+              mountPath: /root/.cache/modelscope
+            - name: outputs
+              mountPath: /app/outputs
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-downloadmodels
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-downloadmodels
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-downloadmodels
+          image: beclab/downloader-init:v0.0.19
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: funclip-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 FunClip https://{{ $funclipDomain }}/config && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: funclip-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: funclip
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-downloadmodels
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+ 
+{{- end }}

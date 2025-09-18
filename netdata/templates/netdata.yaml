@@ -1,0 +1,86 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: netdata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netdata
+  strategy:
+    type: Recreate      
+  template:
+    metadata:
+      labels:
+        app: netdata
+    spec:
+      containers:
+        - name: netdata
+          image: docker.io/netdata/netdata:v2.5.4
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 500Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - name: http
+              containerPort: 19999
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /host/proc
+              name: proc-data
+              readOnly: true
+            - mountPath: /host/sys
+              name: sys-data
+              readOnly: true
+            - name: smtp-config
+              mountPath: /etc/msmtprc
+              subPath: msmtprc
+          securityContext:
+            privileged: true
+      volumes:
+        - name: proc-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/netdata/proc"
+        - name: sys-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/netdata/sys"
+        - name: smtp-config
+          configMap:
+            name: netdata-smtp-config
+            items:
+              - key: msmtprc 
+                path: msmtprc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: netdata
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: netdata
+spec:
+  ports:
+    - name: http
+      port: 19999
+      targetPort: 19999
+      protocol: TCP
+  selector:
+    app: netdata

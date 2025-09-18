@@ -1,0 +1,80 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: maxkb
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"    
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: maxkb
+  strategy:
+    type: Recreate      
+  template:
+    metadata:
+      labels:
+        app: maxkb
+    spec:
+      containers:
+        - name: maxkb
+          image: docker.io/1panel/maxkb:v2.0.2
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: DEBUG
+              value: "true"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 4Gi
+            limits:
+              cpu: 2000m
+              memory: 12Gi
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: python-packages
+              mountPath: /opt/maxkb/app/sandbox/python-packages
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/maxkb/pg"
+        - name: python-packages
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/maxkb/packages"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maxkb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: maxkb
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: maxkb
+status:
+  loadBalancer: {}

@@ -1,0 +1,506 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+
+{{- $clsENV := split  ","  .Values.domain.comfyuilauncherweb -}}
+{{- $cls := index $clsENV "_0" -}}
+
+{{- $comfyuiENV := split  ","  .Values.domain.comfyuientrance -}}
+{{- $comfyuientrance := index $comfyuiENV "_0" -}}
+
+{{ $image := "" }}
+{{ if .Values.GPU }}
+  {{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
+    {{ $image = "beclab/comfyui:v0.3.59-fe1.27.2-launcher0.2.5" }}
+  {{ else }}
+    {{ $image = "kldtks/comfyui:c124-0d3d51-1d26d6-launcher-b1" }}
+  {{ end }}
+{{ else }}
+    {{ $image = "beclab/comfyui:v0.3.59-fe1.27.2-launcher0.2.5" }}
+{{ end }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  name: comfyuishare
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: comfyui
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: comfyui
+    spec:
+      initContainers:
+      - name: upversion
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - >-
+              chmod +x /runner-scripts/up-version-cp.sh; sh
+              /runner-scripts/up-version-cp.sh; rsync -av --update 
+              /runner-scripts/ /root/runner-scripts/;
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: modellibckp
+            mountPath: /root/ComfyUI/models/checkpoints
+          - name: modelliblora
+            mountPath: /root/ComfyUI/models/loras
+          - name: modellibvae
+            mountPath: /root/ComfyUI/models/vae
+          - name: modellibhypernetworks
+            mountPath: /root/ComfyUI/models/hypernetworks
+          - name: modellibembeddings
+            mountPath: /root/ComfyUI/models/embeddings
+          - name: modellibclip
+            mountPath: /root/ComfyUI/models/clip
+          - name: modellibclipvision
+            mountPath: /root/ComfyUI/models/clip_vision
+          - name: modellibcontrolnet
+            mountPath: /root/ComfyUI/models/controlnet
+          - name: modellibinpaint
+            mountPath: /root/ComfyUI/models/inpaint
+          - name: modellibupscale
+            mountPath: /root/ComfyUI/models/upscale_models
+          - name: modellibipadapter
+            mountPath: /root/ComfyUI/models/ipadapter
+          - name: modellibunet
+            mountPath: /root/ComfyUI/models/unet
+          - name: modellibstyle
+            mountPath: /root/ComfyUI/models/style_models
+          - name: modellibfacerestore
+            mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
+          - name: output
+            mountPath: /root/ComfyUI/output
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: installcomfyui
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - >-
+            if [ ! -d /root/ComfyUI ]; then chmod u+x
+            /runner-scripts/download.sh; /runner-scripts/download.sh; fi
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: modellibckp
+            mountPath: /root/ComfyUI/models/checkpoints
+          - name: modelliblora
+            mountPath: /root/ComfyUI/models/loras
+          - name: modellibvae
+            mountPath: /root/ComfyUI/models/vae
+          - name: modellibhypernetworks
+            mountPath: /root/ComfyUI/models/hypernetworks
+          - name: modellibembeddings
+            mountPath: /root/ComfyUI/models/embeddings
+          - name: modellibclip
+            mountPath: /root/ComfyUI/models/clip
+          - name: modellibclipvision
+            mountPath: /root/ComfyUI/models/clip_vision
+          - name: modellibcontrolnet
+            mountPath: /root/ComfyUI/models/controlnet
+          - name: modellibinpaint
+            mountPath: /root/ComfyUI/models/inpaint
+          - name: modellibupscale
+            mountPath: /root/ComfyUI/models/upscale_models
+          - name: modellibipadapter
+            mountPath: /root/ComfyUI/models/ipadapter
+          - name: modellibunet
+            mountPath: /root/ComfyUI/models/unet
+          - name: modellibstyle
+            mountPath: /root/ComfyUI/models/style_models
+          - name: modellibfacerestore
+            mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
+          - name: output
+            mountPath: /root/ComfyUI/output
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: init-chmod-data
+        image: 'aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /root
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: modellibckp
+            mountPath: /root/ComfyUI/models/checkpoints
+          - name: modelliblora
+            mountPath: /root/ComfyUI/models/loras
+          - name: modellibvae
+            mountPath: /root/ComfyUI/models/vae
+          - name: modellibhypernetworks
+            mountPath: /root/ComfyUI/models/hypernetworks
+          - name: modellibembeddings
+            mountPath: /root/ComfyUI/models/embeddings
+          - name: modellibclip
+            mountPath: /root/ComfyUI/models/clip
+          - name: modellibclipvision
+            mountPath: /root/ComfyUI/models/clip_vision
+          - name: modellibcontrolnet
+            mountPath: /root/ComfyUI/models/controlnet
+          - name: modellibinpaint
+            mountPath: /root/ComfyUI/models/inpaint
+          - name: modellibupscale
+            mountPath: /root/ComfyUI/models/upscale_models
+          - name: modellibipadapter
+            mountPath: /root/ComfyUI/models/ipadapter
+          - name: modellibunet
+            mountPath: /root/ComfyUI/models/unet
+          - name: modellibstyle
+            mountPath: /root/ComfyUI/models/style_models
+          - name: modellibfacerestore
+            mountPath: /root/ComfyUI/models/facerestore_models
+          - name: modeldiffusion
+            mountPath: /root/ComfyUI/models/diffusion_models
+          - name: modeltextencoders
+            mountPath: /root/ComfyUI/models/text_encoders
+          - name: output
+            mountPath: /root/ComfyUI/output
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: update-chmod-data-ai
+        image: 'aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /ai
+        resources: {}
+        volumeMounts:
+          - name:  ai
+            mountPath: /ai
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: cleanup-folders
+        image: 'aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - >
+            cp /volume-script/cleanup_folders.sh /tmp/cleanup_folders.sh;
+            chmod +x /tmp/cleanup_folders.sh; sh /tmp/cleanup_folders.sh
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: volume-script
+            mountPath: /volume-script
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: fix-crystools-save
+        image: 'aboveos/busybox:latest'
+        command:
+          - sh
+          - '-c'
+          - >
+            rm -rf /root/ComfyUI/custom_nodes/ComfyUI-Crystools-save
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+        - env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+            - name: CLI_ARGS
+              value: '--normalvram --disable-smart-memory --disable-cuda-malloc --front-end-version Comfy-Org/ComfyUI_frontend@v1.27.2'
+            - name: HOME
+              value: /root
+            - name: PIP_CACHE_DIR
+              value: /root/.cache/pip
+            - name: CACHE_DIR
+              value: /root/.cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /root/.cache
+            - name: PIP_CONFIG_FILE
+              value: /root/.config/pip/pip.conf
+            - name: PIP_INDEX_URL
+              value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
+            - name: MODELS_DIR
+              value: '/root/ComfyUI/models'
+            - name: PLUGIN_PATH
+              value: '/root/ComfyUI/custom_nodes'
+            - name: DATA_DIR
+              value: '/root/ComfyUI/launchercache'
+            - name: COMFYUI_PATH
+              value: '/root/ComfyUI'
+            - name: NODE_ENV
+              value: 'production'
+            - name: API_PROTOCOL
+              value: 'https'
+            - name: API_HOST
+              value: '{{ $cls }}'
+            - name: API_PORT
+              value: '443'
+            - name: OS_SYSTEM_SERVER
+              value: system-server.user-system-{{ .Values.bfl.username }}
+            - name: DOMAIN_COMFYUI_FOR_ADMIN
+              value: '{{ $comfyuientrance }}'
+            - name: DOMAIN_LAUNCHER_FOR_ADMIN
+              value: https://{{ $cls }}
+            - name: DOWNLOAD_CDN_URL
+              value: '{{ .Values.downloadCdnURL }}'
+          securityContext:
+            runAsUser: 0
+          image: {{ $image }}
+          name: comfyui
+          # command:
+          #   - sh
+          #   - '-c'
+          #   - >-
+          #     pip config set global.index-url
+          #     https://pypi.joinolares.cn/root/olares3/+simple/; pip config set
+          #     global.extra-index-url ""; bash
+          #     /runner-scripts/entrypoint.sh
+          ports:
+            - containerPort: 8188
+            - containerPort: 8080
+            - containerPort: 3000
+          resources: 
+            requests:
+              cpu: 250m
+              memory: 2Gi
+            limits:
+              cpu: 4
+              memory: 30Gi
+          # livenessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 8188
+          #     scheme: HTTP
+          #   initialDelaySeconds: 600
+          #   timeoutSeconds: 60
+          #   periodSeconds: 120
+          #   successThreshold: 1
+          #   failureThreshold: 10
+          # readinessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 8188
+          #   initialDelaySeconds: 5
+          #   timeoutSeconds: 5
+          #   periodSeconds: 5
+          #   successThreshold: 1
+          #   failureThreshold: 240
+          # startupProbe:
+          #   exec:
+          #     command:
+          #       - /bin/sh
+          #       - -c
+          #       - "pgrep python3 > /dev/null 2>&1 || exit 1"
+          #   initialDelaySeconds: 5
+          #   periodSeconds: 15
+          #   timeoutSeconds: 2
+          #   successThreshold: 1
+          #   failureThreshold: 40
+          volumeMounts:
+            - name: appdata
+              mountPath: /root
+            - name: modellibckp
+              mountPath: /root/ComfyUI/models/checkpoints/public
+            - name: modelliblora
+              mountPath: /root/ComfyUI/models/loras/public
+            - name: modellibvae
+              mountPath: /root/ComfyUI/models/vae/public
+            - name: modellibhypernetworks
+              mountPath: /root/ComfyUI/models/hypernetworks/public
+            - name: modellibembeddings
+              mountPath: /root/ComfyUI/models/embeddings/public
+            - name: modellibclip
+              mountPath: /root/ComfyUI/models/clip/public
+            - name: modellibclipvision
+              mountPath: /root/ComfyUI/models/clip_vision/public
+            - name: modellibcontrolnet
+              mountPath: /root/ComfyUI/models/controlnet/public
+            - name: modellibinpaint
+              mountPath: /root/ComfyUI/models/inpaint/public
+            - name: modellibupscale
+              mountPath: /root/ComfyUI/models/upscale_models/public
+            - name: modellibipadapter
+              mountPath: /root/ComfyUI/models/ipadapter/public
+            - name: modellibunet
+              mountPath: /root/ComfyUI/models/unet/public
+            - name: modellibstyle
+              mountPath: /root/ComfyUI/models/style_models/public
+            - name: modellibfacerestore
+              mountPath: /root/ComfyUI/models/facerestore_models/public
+            - name: modeldiffusion
+              mountPath: /root/ComfyUI/models/diffusion_models/public
+            - name: modeltextencoders
+              mountPath: /root/ComfyUI/models/text_encoders/public
+            - name: output
+              mountPath: /root/ComfyUI/output
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+        - name: script
+          configMap:
+            name: script
+            defaultMode: 438
+            items:
+            - key: cleanup_folders.sh
+              path: cleanup_folders.sh
+        - name: output
+          hostPath:
+            type: DirectoryOrCreate
+            path:  {{ .Values.sharedlib }}/ai/output/comfyui
+        - name: ai
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/comfyui
+        - name: appcache
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache}}/comfyui
+        - name: modellibckp
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/main
+        - name: modelliblora
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/lora
+        - name: modellibvae
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/vae
+        - name: modellibembeddings
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/embeddings
+        - name: modellibhypernetworks
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+        - name: modellibclip
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/clip
+        - name: modellibclipvision
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/clip_vision
+            type: DirectoryOrCreate
+        - name: modellibcontrolnet
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/controlnet
+            type: DirectoryOrCreate
+        - name: modellibinpaint
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/inpaint
+            type: DirectoryOrCreate
+        - name: modellibupscale
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/upscale_models
+            type: DirectoryOrCreate
+        - name: modellibipadapter
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/ipadapter
+            type: DirectoryOrCreate
+        - name: modellibunet
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/unet
+            type: DirectoryOrCreate
+        - name: modellibstyle
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/style_models
+            type: DirectoryOrCreate
+        - name: modellibfacerestore
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/facerestore_models
+            type: DirectoryOrCreate
+        - name: modeldiffusion
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/diffusion_models
+            type: DirectoryOrCreate
+        - name: modeltextencoders
+          hostPath:
+            path: {{ .Values.sharedlib }}/ai/model/text_encoders
+            type: DirectoryOrCreate 
+        - name: volume-script
+          configMap:
+            name: script
+            defaultMode: 420
+                      
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  name: comfyui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+
+    - name: "8190"
+      port: 8190
+      targetPort: 8190
+    - name: "8080"
+      port: 8080
+      targetPort: 8080
+    - name: "3000"
+      port: 3000
+      targetPort: 3000
+                    
+  selector:
+    io.kompose.service: comfyui
+status:
+  loadBalancer: {}
+                  
+{{- end }}
