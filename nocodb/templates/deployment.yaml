@@ -11,57 +11,62 @@ spec:
   selector:
     matchLabels:
       app: nocodb
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app: nocodb
     spec:
       initContainers:
-      - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /app-data-root
-        resources: {}
-        volumeMounts:
-          - name: app-data-root
-            mountPath: /app-data-root
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
+        - name: init-chmod-data
+          image: docker.io/aboveos/busybox:latest
+          command:
+            - sh
+            - "-c"
+            - |
+              chown -R 1000:1000 /app-data-root
+          resources: {}
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
-      - name: nocodb
-        image: docker.io/aboveos/nocodb-nocodb:latest
-        imagePullPolicy: IfNotPresent
-        resources:
-          requests:
-            cpu: 250m
-            memory: 256Mi
-          limits:
-            cpu: 500m
-            memory: 512Mi
-        ports:
-        - containerPort: 8080
-        env:
-          - name: NC_DB
-            value: "pg://{{ .Values.postgres.host }}:{{ .Values.postgres.port }}?u={{ .Values.postgres.username }}&p={{ .Values.postgres.password }}&d={{ .Values.postgres.databases.nocodb }}"
-        volumeMounts:
-        - name: nc-data
-          mountPath: /usr/app/data
+        - name: nocodb
+          image: nocodb/nocodb:0.263.8
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8080
+          env:
+            - name: NC_DB
+              value: "pg://{{ .Values.postgres.host }}:{{ .Values.postgres.port }}?u={{ .Values.postgres.username }}&p={{ .Values.postgres.password }}&d={{ .Values.postgres.databases.nocodb }}"
+            - name: NC_ATTACHMENT_FIELD_SIZE
+              value: "104857600"
+            - name: NC_MAX_ATTACHMENTS_ALLOWED
+              value: "10"
+          volumeMounts:
+            - name: nc-data
+              mountPath: /usr/app/data
       volumes:
-      - name: nc-data
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData}}/nocodb/nc-data
-      - name: app-data-root
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData}}/nocodb
-    
+        - name: nc-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/nocodb/nc-data"
+        - name: app-data-root
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/nocodb"
 
 ---
 apiVersion: v1
@@ -78,4 +83,3 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 8080
-      

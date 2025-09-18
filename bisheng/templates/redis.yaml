@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bisheng-redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-redis
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: harveyff/bisheng-init:v1.0.2
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/redis/ /mnt/docker/redis/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: redis
+          image: redis:7.0.4
+          ports:
+            - containerPort: 6379
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          command: ["redis-server", "/etc/redis.conf"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /data
+              name: redis-data
+            - mountPath: /etc/redis.conf
+              name: redis-conf
+              subPath: redis.conf
+
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            type: DirectoryOrCreate
+        - name: redis-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/redis"
+            type: DirectoryOrCreate
+        - name: redis-conf
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/redis"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis
