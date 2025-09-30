@@ -46,6 +46,30 @@ spec:
           sub: allow
 
 ---
+apiVersion: apr.bytetrade.io/v1alpha1
+kind: MiddlewareRequest
+metadata:
+  name: vectorcrawl-nats
+  namespace: {{ .Release.Namespace }}
+spec:
+  app: knowledge
+  appNamespace: os
+  middleware: nats
+  nats:
+    password:
+      valueFrom:
+        secretKeyRef:
+          key: nats_password
+          name: knowledge-secrets
+    user: "{{ .Release.Namespace }}-vectorcrawl"
+    subjects:
+      - name: rssubscribe_status
+        permission:
+          pub: allow
+          sub: allow
+      
+
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -64,6 +88,7 @@ rules:
     - statefulsets
     - daemonsets
     - namespaces   
+    - serviceaccounts/token
   verbs: 
     - '*'
 
@@ -146,7 +171,7 @@ spec:
             value: {{ .Values.postgres.databases.knowledge }}
       containers:
       - name: knowledge
-        image: "beclab/knowledge-base-api:v0.12.21"
+        image: "beclab/knowledge-base-api:v0.12.30"
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
@@ -156,6 +181,8 @@ spec:
         env:
         - name: BACKEND_URL
           value: http://127.0.0.1:8080
+        - name: SUBSCRIBE_URL
+          value: 'http://rssubscribe.knowledge-shared:8082'
         - name: RSSHUB_URL
           value: 'http://rss-server.knowledge-shared:1200'
         - name: UPLOAD_SAVE_PATH
@@ -213,8 +240,8 @@ spec:
             cpu: "4"
             memory: 6Gi
 
-      - name: backend-server
-        image: "beclab/recommend-backend:v0.12.14"
+      - name: vectorcrawl
+        image: "beclab/vectorcrawl:v0.1.1"
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
@@ -228,10 +255,6 @@ spec:
           value: "{{ .Values.redis.host }}:{{ .Values.redis.port }}"
         - name: RSS_HUB_URL
           value: 'http://rss-server.knowledge-shared:1200/'
-        - name: WE_CHAT_REFRESH_FEED_URL
-          value: https://recommend-wechat-prd.bttcdn.com/api/wechat/entries
-        - name: WECHAT_ENTRY_CONTENT_GET_API_URL
-          value: https://recommend-wechat-prd.bttcdn.com/api/wechat/entry/content
         - name: PG_USERNAME
           value: {{ .Values.postgres.username }}
         - name: PG_PASSWORD
@@ -242,15 +265,23 @@ spec:
           value: "{{ .Values.postgres.port }}"
         - name: PG_DATABASE
           value: {{ .Values.postgres.databases.knowledge }}
-        - name: WATCH_DIR
-          value: /data/
+        - name: NATS_ENABLED
+          value: "true"
+        - name: NATS_URL
+          value: nats://nats.os-platform:4222
+        - name: NATS_USERNAME
+          value: {{ .Release.Namespace }}-vectorcrawl
+        - name: NATS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: nats_password
+              name: knowledge-secrets
+        - name: NATS_SUBJECT
+          value: os.rssubscribe_status
         - name: YT_DLP_API_URL
           value: http://download-svc.knowledge-shared:3082/api
         - name: DOWNLOAD_API_URL
           value: http://download-svc.knowledge-shared:3080/api
-        volumeMounts:
-          - name: userspace-dir
-            mountPath: /data
         ports:
         - containerPort: 8080
         resources:
@@ -455,7 +486,7 @@ spec:
             cpu: "1"
             memory: 300Mi
       - name: yt-dlp
-        image: "beclab/yt-dlp:v0.12.15"
+        image: "beclab/yt-dlp:v0.12.20"
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
@@ -504,7 +535,7 @@ spec:
             cpu: "1"
             memory: 300Mi
       - name: download-spider
-        image: "beclab/download-spider:v0.12.16"
+        image: "beclab/download-spider:v0.12.20"
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
