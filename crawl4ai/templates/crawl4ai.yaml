@@ -1,0 +1,67 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: crawl4ai
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crawl4ai
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: crawl4ai
+      annotations:
+        applications.app.bytetrade.io/gpu-inject: "true"
+    spec:
+      containers:
+        - name: crawl4ai
+          image: docker.io/unclecode/crawl4ai:0.7.4
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: SHM_SIZE
+              value: 2G
+          envFrom:
+            - configMapRef:
+                name: crawl4ai-config
+          resources:
+            requests:
+              cpu: 500m
+              memory: 800Mi
+            limits:
+              cpu: 4000m
+              memory: 6Gi
+          ports:
+            - name: http
+              containerPort: 11235
+              protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crawl4ai-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: crawl4ai
+spec:
+  ports:
+    - name: http
+      port: 11235
+      targetPort: 11235
+      protocol: TCP
+  selector:
+    app: crawl4ai
