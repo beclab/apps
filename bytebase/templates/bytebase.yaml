@@ -9,7 +9,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: bytebase
-    app.kubernetes.io/version: 2.11.1
+    app.kubernetes.io/version: 3.11.0
     app.kubernetes.io/managed-by: Helm
 spec:
   type: LoadBalancer
@@ -28,7 +28,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: bytebase
-    app.kubernetes.io/version: 2.11.1
+    app.kubernetes.io/version: 3.11.0
     app.kubernetes.io/managed-by: Helm
 spec:
   selector:
@@ -36,6 +36,10 @@ spec:
       app: bytebase
   serviceName: "bytebase"
   replicas: 1
+  strategy:
+    type: Recreate
+  updateStrategy:
+    type: OnDelete
   template:
     metadata:
       labels:
@@ -43,15 +47,15 @@ spec:
     spec:
       containers:
         - name: bytebase
-          image: docker.io/aboveos/kldtks-edge:bytebase-2-11-1
+          image: bytebase/bytebase:3.11.1
           imagePullPolicy: IfNotPresent
           resources:
             requests:
               cpu: 50m
               memory: 512Mi
             limits:
-              cpu: 500m
-              memory: 1024Mi
+              cpu: "3"
+              memory: 3Gi
           env:
           # If user specifies the external pg connection string directly, we should use that.
           - name: PG_URL
@@ -75,9 +79,18 @@ spec:
             httpGet:
               path: /healthz
               port: 8080
-            initialDelaySeconds: 300
-            periodSeconds: 300
-            timeoutSeconds: 60
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - mountPath: /var/opt/bytebase
               # Either user disable persistence or enable persistence but not specify an existing PVC, use "bytebase-volume" as the volume name. It means
@@ -86,8 +99,11 @@ spec:
             - mountPath: /mnt/bytebase-shared-volume
               name: bytebase-shared-volume
       volumes:
-        # Mount the shared volume.
-        - name: bytebase-volume
-          emptyDir: {}
-        - name: bytebase-shared-volume
-          emptyDir: {}
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/bytebase/data'
+          type: DirectoryOrCreate
+        name: bytebase-volume
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/bytebase/shared/data'
+          type: DirectoryOrCreate
+        name: bytebase-shared-volume
