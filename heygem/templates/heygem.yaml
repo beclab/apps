@@ -1,74 +1,107 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
+  name: heygem
+  namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: heygem
-  namespace: {{ .Release.Namespace }}
-  name: heygem
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"  
+    applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       io.kompose.service: heygem
-  strategy:
-    type: Recreate        
   template:
     metadata:
       labels:
         io.kompose.service: heygem
     spec:
       containers:
-      - name: heygem
-        image: guiji2025/fish-speech-ziming:1.0.39
-        command: ["/bin/bash", "-c", "/opt/conda/envs/python310/bin/python3 tools/api_server.py --listen 0.0.0.0:8080"]
-        env:
-          - name: NVIDIA_VISIBLE_DEVICES
-            value: "0"
-          - name: NVIDIA_DRIVER_CAPABILITIES
-            value: "compute,graphics,utility,video,display"
-        ports:
-          - containerPort: 8080
-        resources:
-          requests:
-            cpu: 100m
-            memory: 2Gi
-          limits:
-            memory: 8Gi
-            cpu: 2000m
-        readinessProbe: 
-            failureThreshold: 3
+        - name: heygem
+          image: guiji2025/fish-speech-ziming:1.0.39
+          command: ["/bin/bash", "-c", "/opt/conda/envs/python310/bin/python3 tools/api_server.py --listen 0.0.0.0:8080"]
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,graphics,utility,video,display"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+            limits:
+              cpu: "2000m"
+              memory: 8Gi
+          readinessProbe:
             httpGet:
               path: /
               port: 8080
               scheme: HTTP
             initialDelaySeconds: 10
             periodSeconds: 10
-            successThreshold: 1
             timeoutSeconds: 1
-        volumeMounts:
-            - mountPath: /code/data
-              name: voice-data
-      restartPolicy: Always
-      
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: voice-data
+              mountPath: /code/data
+
+        - name: heygem-asr
+          image: guiji2025/fun-asr:1.0.2
+          command: ["sh", "/run.sh"]
+          workingDir: /workspace/FunASR/runtime
+          ports:
+            - containerPort: 10095
+          resources:
+            requests:
+              cpu: 100m
+              memory: 8Gi
+            limits:
+              cpu: "1000m"
+              memory: 16Gi
+
+        - name: heygemgenvideo
+          image: guiji2025/heygem.ai:0.0.7_sdk_slim
+          command: ["python", "/code/app_local.py"]
+          env:
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "max_split_size_mb:512"
+          ports:
+            - containerPort: 8383
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+            limits:
+              cpu: "1000m"
+              memory: 12Gi
+          volumeMounts:
+            - name: face2face-data
+              mountPath: /code/data
+
       volumes:
         - name: voice-data
           hostPath:
             path: "{{ .Values.userspace.appData }}/heygem/voice/data"
             type: DirectoryOrCreate
-
-
+        - name: face2face-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/heygem/face2face-data"
+            type: DirectoryOrCreate
+      restartPolicy: Always
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: heygem
   name: heygem-svc
   namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: heygem
 spec:
   selector:
     io.kompose.service: heygem
@@ -76,3 +109,33 @@ spec:
     - protocol: TCP
       port: 18180
       targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: heygem-asr
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: heygem
+spec:
+  selector:
+    io.kompose.service: heygem
+  ports:
+    - protocol: TCP
+      port: 10095
+      targetPort: 10095
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: heygemgenvideo-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: heygem
+spec:
+  selector:
+    io.kompose.service: heygem
+  ports:
+    - protocol: TCP
+      port: 8383
+      targetPort: 8383
