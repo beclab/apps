@@ -1,0 +1,144 @@
+
+apiVersion: v1
+data:
+  nginx.conf: |
+      # Custom log format with detailed cookie and header information
+      log_format detailed '$remote_addr - $remote_user [$time_local] "$request" '
+                          '$status $body_bytes_sent "$http_referer" '
+                          '"$http_user_agent" "$http_x_forwarded_for" '
+                          'host="$host" x_forwarded_host="$http_x_forwarded_host" '
+                          'cookie="$http_cookie" set_cookie="$sent_http_set_cookie" '
+                          'upstream_addr="$upstream_addr" upstream_status="$upstream_status"';
+      
+      server {
+
+        listen 8080;
+        access_log /opt/bitnami/openresty/nginx/logs/access.log detailed;
+        error_log /opt/bitnami/openresty/nginx/logs/error.log debug;
+
+        proxy_connect_timeout                          30s;
+        proxy_send_timeout                             60s;
+        proxy_read_timeout                             300s;
+        
+        # Essential proxy headers - NO HTTPS indicators!
+        proxy_set_header      Host                      $host;
+        proxy_set_header      X-Real-IP                 $remote_addr;
+        proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+        # DO NOT set X-Forwarded-Proto or X-Forwarded-Port
+        # WordPress will detect HTTPS and set secure cookies that browser rejects
+        proxy_set_header      X-Forwarded-Host          $http_host;
+        proxy_set_header      X-Forwarded-Server        $host;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header upgrade $http_upgrade;
+        proxy_set_header connection "upgrade";
+        
+          location / {
+              proxy_pass http://wordpressentrance:80;
+              
+              # Enable buffering for Lua header filter
+              proxy_buffering on;
+              proxy_buffer_size 4k;
+              proxy_buffers 8 4k;
+              
+              # Critical proxy headers - tell WordPress it's HTTPS
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-Host $host;
+              proxy_set_header X-Forwarded-Proto https;
+              proxy_set_header X-Forwarded-Ssl on;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              
+              # Rewrite Location headers - fix domain and scheme
+              proxy_redirect http://wordpressentrance/ https://$host/;
+              proxy_redirect https://wordpressentrance/ https://$host/;
+              proxy_redirect http:// https://;
+              
+              # No cookie manipulation - WordPress MU-plugin uses JavaScript to set cookies
+              # This bypasses Envoy's Set-Cookie header merging issue
+          }
+      }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpresspublic
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: wordpresspublic
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+  selector:
+    app: {{ .Release.Name }}-proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-proxy
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+      containers:
+        - name: nginx
+          image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          readinessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                http_code=$(curl -s -o /dev/null -w "%{http_code}" http://wordpressentrance:80)
+                [ $http_code -ge 200 ] && [ $http_code -lt 300 ]
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            periodSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf

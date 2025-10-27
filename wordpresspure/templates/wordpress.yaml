@@ -1,76 +1,4 @@
 
-# Source: wordpress/charts/mariadb/templates/primary/configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: wordpress-mariadb
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/instance: wordpress
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: mariadb
-    app.kubernetes.io/version: 11.2.2
-    helm.sh/chart: mariadb-15.0.1
-    app.kubernetes.io/component: primary
-data:
-  my.cnf: |-
-    [mysqld]
-    skip-name-resolve
-    explicit_defaults_for_timestamp
-    basedir=/opt/bitnami/mariadb
-    datadir=/bitnami/mariadb/data
-    plugin_dir=/opt/bitnami/mariadb/plugin
-    port=3306
-    socket=/opt/bitnami/mariadb/tmp/mysql.sock
-    tmpdir=/opt/bitnami/mariadb/tmp
-    max_allowed_packet=16M
-    bind-address=*
-    pid-file=/opt/bitnami/mariadb/tmp/mysqld.pid
-    log-error=/opt/bitnami/mariadb/logs/mysqld.log
-    character-set-server=UTF8
-    collation-server=utf8_general_ci
-    slow_query_log=0
-    long_query_time=10.0
-    
-    [client]
-    port=3306
-    socket=/opt/bitnami/mariadb/tmp/mysql.sock
-    default-character-set=UTF8
-    plugin_dir=/opt/bitnami/mariadb/plugin
-    
-    [manager]
-    port=3306
-    socket=/opt/bitnami/mariadb/tmp/mysql.sock
-    pid-file=/opt/bitnami/mariadb/tmp/mysqld.pid
----
-# Source: wordpress/charts/mariadb/templates/primary/svc.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: wordpress-mariadb
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/instance: wordpress
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: mariadb
-    app.kubernetes.io/version: 11.2.2
-    helm.sh/chart: mariadb-15.0.1
-    app.kubernetes.io/component: primary
-  annotations:
-spec:
-  type: ClusterIP
-  sessionAffinity: None
-  ports:
-    - name: mysql
-      port: 3306
-      protocol: TCP
-      targetPort: mysql
-      nodePort: null
-  selector:
-    app.kubernetes.io/instance: wordpress
-    app.kubernetes.io/name: mariadb
-    app.kubernetes.io/component: primary
----
 # Source: wordpress/templates/svc.yaml
 apiVersion: v1
 kind: Service
@@ -137,8 +65,6 @@ spec:
           ip: 127.0.0.1
       # yamllint enable rule:indentation
       affinity:
-        podAffinity:
-          
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
             - podAffinityTerm:
@@ -162,7 +88,7 @@ spec:
 
       initContainers:
         - name: init-chmod-data
-          image: 'docker.io/aboveos/busybox:latest'
+          image: 'aboveos/busybox:1.34.0'
           command:
             - sh
             - '-c'
@@ -183,8 +109,116 @@ spec:
 
       containers:
         - name: wordpress
-          image: docker.io/aboveos/bitnami-wordpress:6.4.2-debian-11-r14
-          imagePullPolicy: "IfNotPresent"
+          image: aboveos/bitnami-wordpress:6.4.2-debian-11-r14
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Create fix script
+              /opt/bitnami/scripts/wordpress/entrypoint.sh /opt/bitnami/scripts/apache/run.sh &
+              APACHE_PID=$!
+              echo "Waiting for wp-config.php..."
+              for i in {1..60}; do
+                if [ -f /bitnami/wordpress/wp-config.php ]; then
+                  # Debug: Show what Bitnami defined
+                  echo "=== Checking Bitnami wp-config.php for WP_HOME/WP_SITEURL ==="
+                  grep -n "WP_HOME\|WP_SITEURL" /bitnami/wordpress/wp-config.php || echo "No WP_HOME/WP_SITEURL found"
+                  
+                  # Remove Bitnami's hardcoded HTTP_HOST - let proxy headers work
+                  if grep -q "\$_SERVER\['HTTP_HOST'\] = '127.0.0.1';" /bitnami/wordpress/wp-config.php; then
+                    sed -i "/\$_SERVER\['HTTP_HOST'\] = '127.0.0.1';/d" /bitnami/wordpress/wp-config.php
+                    echo "Removed Bitnami hardcoded HTTP_HOST - will use proxy Host header"
+                  fi
+                  
+                  # Keep WP_HOME/WP_SITEURL as HTTP to avoid secure cookies
+                  echo "Keeping WP_HOME/WP_SITEURL as HTTP to avoid secure cookies"
+                  
+                  echo "=== After fix, checking WP_HOME/WP_SITEURL again ==="
+                  grep -n "WP_HOME\|WP_SITEURL" /bitnami/wordpress/wp-config.php || echo "No WP_HOME/WP_SITEURL found"
+                  
+                  # Force cookie paths - override Bitnami defaults
+                  echo "Forcibly overriding Bitnami cookie path constants..."
+                  
+                  # Use sed to replace Bitnami's cookie constant definitions (match anywhere in line)
+                  sed -i "/define.*COOKIEPATH/d" /bitnami/wordpress/wp-config.php
+                  sed -i "/define.*SITECOOKIEPATH/d" /bitnami/wordpress/wp-config.php
+                  sed -i "/define.*ADMIN_COOKIE_PATH/d" /bitnami/wordpress/wp-config.php
+                  sed -i "/define.*PLUGINS_COOKIE_PATH/d" /bitnami/wordpress/wp-config.php
+                  sed -i "/define.*COOKIE_DOMAIN/d" /bitnami/wordpress/wp-config.php
+                  
+                  # Add our definitions
+                  echo "" >> /bitnami/wordpress/wp-config.php
+                  echo "// Cookie paths for HTTPS proxy - force all to root" >> /bitnami/wordpress/wp-config.php
+                  echo "define('COOKIEPATH', '/');" >> /bitnami/wordpress/wp-config.php
+                  echo "define('SITECOOKIEPATH', '/');" >> /bitnami/wordpress/wp-config.php
+                  echo "define('ADMIN_COOKIE_PATH', '/');" >> /bitnami/wordpress/wp-config.php
+                  echo "define('PLUGINS_COOKIE_PATH', '/');" >> /bitnami/wordpress/wp-config.php
+                  echo "define('COOKIE_DOMAIN', false);" >> /bitnami/wordpress/wp-config.php
+                  echo "Cookie paths forcibly overridden"
+                  
+                  # Create MU-plugin to set cookies via JavaScript
+                  echo "Creating mu-plugin to set cookies via JavaScript..."
+                  mkdir -p /bitnami/wordpress/wp-content/mu-plugins
+                  printf '<?php\n' > /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '/**\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf ' * Plugin Name: Fix Login with JS Cookies\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf ' * Description: Set cookies via JavaScript to bypass Envoy\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf ' */\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '// Intercept successful login\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf 'add_action("wp_login", function($user_login, $user) {\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    // Generate auth cookies but do not set them via setcookie()\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    $expiration = time() + 14 * DAY_IN_SECONDS;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    $expire = $expiration + 12 * HOUR_IN_SECONDS;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    \n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    $auth_cookie = wp_generate_auth_cookie($user->ID, $expire, "secure_auth");\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    $logged_in_cookie = wp_generate_auth_cookie($user->ID, $expire, "logged_in");\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    \n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    // Store in global for use in login_redirect\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    global $wp_js_cookies;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    $wp_js_cookies = array(\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '        SECURE_AUTH_COOKIE => array("value" => $auth_cookie, "expires" => $expire),\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '        LOGGED_IN_COOKIE => array("value" => $logged_in_cookie, "expires" => $expire)\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    );\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '}, 10, 2);\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '// Clear default auth cookies and return JS-based HTML\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf 'add_filter("login_redirect", function($redirect_to, $requested_redirect_to, $user) {\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    global $wp_js_cookies;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    if (!$user instanceof WP_User || empty($wp_js_cookies)) return $redirect_to;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    \n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    // Clear any cookies WordPress already set\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    header_remove("Set-Cookie");\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    \n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    status_header(200);\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    nocache_headers();\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    ?>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<!DOCTYPE html>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<html><head><meta charset="UTF-8">\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<title>Setting up your session...</title>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<style>body{font-family:sans-serif;text-align:center;padding-top:100px;background:#f0f0f0}</style>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '</head><body>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<h1>Login Successful</h1>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<p>Setting up your session...</p>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<script>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<?php foreach ($wp_js_cookies as $name => $data): ?>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf 'document.cookie = "<?php echo esc_js($name); ?>=<?php echo esc_js($data["value"]); ?>; path=/; secure; max-age=1252800";\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<?php endforeach; ?>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf 'document.cookie = "wordpress_test_cookie=WP Cookie check; path=/; secure";\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf 'setTimeout(function() { window.location.replace("<?php echo esc_js($redirect_to); ?>"); }, 1000);\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '</script>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '</body></html>\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '<?php\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '    exit;\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  printf '}, 10, 3);\n' >> /bitnami/wordpress/wp-content/mu-plugins/fix-login.php
+                  echo "MU-plugin created"
+                  
+                  break
+                fi
+                sleep 1
+              done
+              wait $APACHE_PID
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -209,18 +243,15 @@ spec:
             - name: WORDPRESS_SKIP_BOOTSTRAP
               value: "no"
             - name: MARIADB_HOST
-              value: "wordpress-mariadb"
+              value: {{ .Values.mariadb.host }}
             - name: MARIADB_PORT_NUMBER
               value: "3306"
             - name: WORDPRESS_DATABASE_NAME
-              value: "bitnami_wordpress"
+              value: {{ .Values.mariadb.databases.wordpress}}
             - name: WORDPRESS_DATABASE_USER
-              value: "bn_wordpress"
+              value: {{ .Values.mariadb.username }}
             - name: WORDPRESS_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: wordpress-mariadb
-                  key: mariadb-password
+              value: {{ .Values.mariadb.password }}
             - name: WORDPRESS_USERNAME
               value: "user"
             - name: WORDPRESS_PASSWORD
@@ -244,8 +275,8 @@ spec:
               value: "wp_"
             - name: WORDPRESS_SCHEME
               value: "http"
-            - name: WORDPRESS_EXTRA_WP_CONFIG_CONTENT
-              value: ""
+            - name: SITE_DOMAIN
+              value: {{ .Values.domain.wordpress | default "" | quote }}
             - name: WORDPRESS_PLUGINS
               value: "none"
             - name: WORDPRESS_OVERRIDE_DATABASE_SETTINGS
@@ -254,7 +285,6 @@ spec:
               value: "8080"
             - name: APACHE_HTTPS_PORT_NUMBER
               value: "8443"
-          envFrom:
           ports:
             - name: http
               containerPort: 8080
@@ -298,154 +328,3 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache}}/wordpress
----
-# Source: wordpress/charts/mariadb/templates/primary/statefulset.yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: wordpress-mariadb
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app.kubernetes.io/instance: wordpress
-    app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/name: mariadb
-    app.kubernetes.io/version: 11.2.2
-    helm.sh/chart: mariadb-15.0.1
-    app.kubernetes.io/component: primary
-spec:
-  replicas: 1
-  revisionHistoryLimit: 10
-  selector:
-    matchLabels:
-      app.kubernetes.io/instance: wordpress
-      app.kubernetes.io/name: mariadb
-      app.kubernetes.io/component: primary
-  serviceName: wordpress-mariadb
-  updateStrategy:
-    type: RollingUpdate
-  template:
-    metadata:
-      annotations:
-        checksum/configuration: f4c985db908bdeb9775bcabd503cace7266d5b67ff093a3795190ef0a24ad719
-      labels:
-        app.kubernetes.io/instance: wordpress
-        app.kubernetes.io/managed-by: Helm
-        app.kubernetes.io/name: mariadb
-        app.kubernetes.io/version: 11.2.2
-        helm.sh/chart: mariadb-15.0.1
-        app.kubernetes.io/component: primary
-    spec:
-      
-      affinity:
-        podAffinity:
-          
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/instance: wordpress
-                    app.kubernetes.io/name: mariadb
-                    app.kubernetes.io/component: primary
-                topologyKey: kubernetes.io/hostname
-              weight: 1
-        nodeAffinity:
-          
-      securityContext:
-        fsGroup: 1000
-      containers:
-        - name: mariadb
-          image: docker.io/aboveos/bitnami-mariadb:11.2.2-debian-11-r1
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-            privileged: false
-            runAsNonRoot: true
-            runAsUser: 1000
-            seccompProfile:
-              type: RuntimeDefault
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MARIADB_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: wordpress-mariadb
-                  key: mariadb-root-password
-            - name: MARIADB_USER
-              value: "bn_wordpress"
-            - name: MARIADB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: wordpress-mariadb
-                  key: mariadb-password
-            - name: MARIADB_DATABASE
-              value: "bitnami_wordpress"
-          ports:
-            - name: mysql
-              containerPort: 3306
-          livenessProbe:
-            failureThreshold: 3
-            initialDelaySeconds: 120
-            periodSeconds: 10
-            successThreshold: 1
-            timeoutSeconds: 1
-            exec:
-              command:
-                - /bin/bash
-                - -ec
-                - |
-                  password_aux="${MARIADB_ROOT_PASSWORD:-}"
-                  if [[ -f "${MARIADB_ROOT_PASSWORD_FILE:-}" ]]; then
-                      password_aux=$(cat "$MARIADB_ROOT_PASSWORD_FILE")
-                  fi
-                  mysqladmin status -uroot -p"${password_aux}"
-          readinessProbe:
-            failureThreshold: 3
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            successThreshold: 1
-            timeoutSeconds: 1
-            exec:
-              command:
-                - /bin/bash
-                - -ec
-                - |
-                  password_aux="${MARIADB_ROOT_PASSWORD:-}"
-                  if [[ -f "${MARIADB_ROOT_PASSWORD_FILE:-}" ]]; then
-                      password_aux=$(cat "$MARIADB_ROOT_PASSWORD_FILE")
-                  fi
-                  mysqladmin status -uroot -p"${password_aux}"
-          resources: 
-            limits: 
-              cpu: 1000m
-              memory: 1024Mi
-            requests: 
-              cpu: 100m
-              memory: 256Mi
-          volumeMounts:
-            - name: data
-              mountPath: /bitnami/mariadb
-            - name: config
-              mountPath: /opt/bitnami/mariadb/conf/my.cnf
-              subPath: my.cnf
-      volumes:
-        - name: config
-          configMap:
-            name: wordpress-mariadb
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-        labels:
-          app.kubernetes.io/instance: wordpress
-          app.kubernetes.io/name: mariadb
-          app.kubernetes.io/component: primary
-      spec:
-        accessModes:
-          - "ReadWriteOnce"
-        resources:
-          requests:
-            storage: "8Gi"
