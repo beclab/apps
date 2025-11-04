@@ -1,0 +1,89 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homebox
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: homebox
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: homebox
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: homebox
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+        - image: aboveos/aby913-homebox:1.0.0
+          name: homebox
+          ports:
+            - containerPort: 7745
+          resources:
+            requests:
+              cpu: 50m
+              memory: 20Mi
+            limits:
+              cpu: 100m
+              memory: 100Mi
+          volumeMounts:
+            - mountPath: /data
+              name: data
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: HBOX_MODE
+              value: "production"
+            - name: HBOX_STORAGE_CONN_STRING
+              value: "file:///?no_tmp_dir=true"
+            - name: HBOX_STORAGE_PREFIX_PATH
+              value: "data"
+            - name: HBOX_DATABASE_DRIVER
+              value: "postgres"
+            - name: HBOX_DATABASE_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: HBOX_DATABASE_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: HBOX_DATABASE_USERNAME
+              value: "{{ .Values.postgres.username }}"
+            - name: HBOX_DATABASE_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: HBOX_DATABASE_DATABASE
+              value: "{{ .Values.postgres.databases.homebox }}"
+            - name: HBOX_DATABASE_SSL_MODE
+              value: disable
+            - name: HBOX_WEB_MAX_FILE_UPLOAD
+              value: "10"
+            - name: HBOX_OPTIONS_ALLOW_ANALYTICS
+              value: "false"
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/homebox"
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homebox
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  type: ClusterIP
+  selector:
+    app: homebox
+  ports:
+    - name: "homebox"
+      port: 3100
+      targetPort: 7745
