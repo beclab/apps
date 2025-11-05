@@ -5,9 +5,8 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   name: vllm
-  namespace: "{{ .Release.Namespace }}"
+  namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: vllm
   annotations:
@@ -21,7 +20,6 @@ spec:
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: vllm
@@ -59,67 +57,29 @@ spec:
               value: "8000"
           ports:
             - containerPort: 8000
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 40
-            failureThreshold: 120
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-              scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
-            successThreshold: 1
-            failureThreshold: 10
           resources:
             limits:
-              cpu: "20"
-              memory: 29Gi
+              cpu: "18"
+              memory: 28Gi
             requests:
               cpu: 500m
               memory: 9Gi
           volumeMounts:
-            - mountPath: /models/gemma-3-27b
-              name: data
-      volumes:
-        - name: data
-          hostPath:
-            path: "{{ .Values.userspace.userData }}/Huggingface/gemma327bqat"
-            type: DirectoryOrCreate
-      restartPolicy: Always
-status: {}
-
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: {{ .Release.Name }}-download-models
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: {{ .Release.Name }}-download-models
-spec:
-  ttlSecondsAfterFinished: 100
-  backoffLimit: 3
-  template:
-    metadata:
-      labels:
-        app: {{ .Release.Name }}-download-models
-    spec:
-      restartPolicy: OnFailure
-      containers:
+            - name: data
+              mountPath: /models/gemma-3-27b
         - name: download-model
-          image: harveyff/hf-downloader:v0.0.5
+          image: harveyff/hf-downloader:v0.0.13
           env:
             - name: HF_ENDPOINT
-              value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
             - name: HF_TOKEN
-              value: "{{ .Values.olaresEnv.HF_TOKEN }}"
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
+            - name: VLLM_PROXY_TARGET
+              value: http://localhost:8000
+            - name: MODEL_NAME
+              value: /models/gemma-3-27b
+            - name: APP_URL
+              value: "https://{{ $vllmDomain }}"
           args:
             - "--repo"
             - "leon-se/gemma-3-27b-it-qat-W4A16-G128"
@@ -132,19 +92,37 @@ spec:
             - "--port"
             - "8090"
             - "--probe-url"
-            - "https://{{ $vllmDomain }}/backend_health"
+            - "https://{{ $vllmDomain }}/health"
             - "--done-name"
             - ".gemma-3-27b-it-qat-W4A16-G128.done"
           ports:
-            - containerPort: 8090
-              name: http
+            - name: http
+              containerPort: 8090
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+            initialDelaySeconds: 10
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
           volumeMounts:
             - name: data
               mountPath: /data
           resources:
             requests:
-              cpu: "500m"
-              memory: "500Mi"
+              cpu: 100m
+              memory: 500Mi
             limits:
               cpu: "1"
               memory: 1Gi
@@ -156,36 +134,20 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.userData }}/Huggingface/gemma327bqat"
             type: DirectoryOrCreate
+      restartPolicy: Always
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: download-svc
   namespace: {{ .Release.Namespace }}
-spec:
-  selector:
-    app: {{ .Release.Name }}-download-models
-  ports:
-    - name: download-status
-      port: 8090
-      targetPort: 8090
-  type: ClusterIP
----
-apiVersion: v1
-kind: Service
-metadata:
-  creationTimestamp: null
-  name: vllm
-  namespace: "{{ .Release.Namespace }}"
   labels:
     io.kompose.service: vllm
 spec:
-  ports:
-    - name: http
-      port: 8000
-      targetPort: 8000
   selector:
     io.kompose.service: vllm
-status:
-  loadBalancer: {}
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
 {{- end }}
