@@ -6,76 +6,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   app_backend.conf: |
-    upstream app_backend {
-      zone app_backend 64k;
-      {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
-      server vllm:8000 max_fails=1 fail_timeout=2s;
-      server download-svc:8090 backup;
-      {{- else }}
-      server vllm.{{ .Release.Name }}-{{ .Values.admin }}:8000 max_fails=1 fail_timeout=2s;
-      server download-svc.{{ .Release.Name }}-{{ .Values.admin }}:8090 backup;
-      {{- end }}
-    }
-
     server {
       listen 8080;
       access_log /opt/bitnami/openresty/nginx/logs/access.log;
       error_log  /opt/bitnami/openresty/nginx/logs/error.log;
-
-      location = /ping   { return 200 'pong'; }
-      location = /health { return 200 'ok'; }
-
-      location /progress {
-        {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
-        proxy_pass http://download-svc:8090;
-        {{- else }}
-        proxy_pass http://download-svc.{{ .Release.Name }}-{{ .Values.admin }}:8090;
-        {{- end }}
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        add_header Access-Control-Allow-Origin *;
-        if ($request_method = 'OPTIONS') { return 204; }
-      }
-
-      location = /backend_health {
-        {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
-        proxy_pass http://vllm:8000/health;
-        {{- else }}
-        proxy_pass http://vllm.{{ .Release.Name }}-{{ .Values.admin }}:8000/health;
-        {{- end }}
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $host;
-      }
-
+      proxy_connect_timeout                          60s;
+      proxy_send_timeout                             60s;
+      proxy_read_timeout                             1800s;
       location / {
-        proxy_pass http://app_backend;
-
-        proxy_connect_timeout 60s;
-        proxy_read_timeout    60s;
-        proxy_send_timeout    60s;
-
-        proxy_next_upstream         error timeout http_500 http_502 http_503 http_504 non_idempotent;
-        proxy_next_upstream_tries   2;
-        proxy_next_upstream_timeout 3s;
-
-        proxy_intercept_errors on;
-        error_page 500 502 503 504 = @download;
-
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-
-        add_header Access-Control-Allow-Origin *;
-        if ($request_method = 'OPTIONS') { return 204; }
-      }
-
-      location @download {
         {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
         proxy_pass http://download-svc:8090;
         {{- else }}
@@ -87,6 +25,7 @@ data:
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         add_header Access-Control-Allow-Origin *;
+        if ($request_method = 'OPTIONS') { return 204; }
       }
     }
 ---
@@ -133,7 +72,7 @@ spec:
             httpGet:
               path: /ping
               port: 8080
-            initialDelaySeconds: 2
+            initialDelaySeconds: 5
             timeoutSeconds: 2
             periodSeconds: 5
             failureThreshold: 3
@@ -144,7 +83,7 @@ spec:
             initialDelaySeconds: 10
             timeoutSeconds: 3
             periodSeconds: 10
-            failureThreshold: 3
+            failureThreshold: 10
           volumeMounts:
             - name: nginx-config
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/app_backend.conf
