@@ -5,10 +5,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  labels:
-    io.kompose.service: seatable
   name: seatable
   namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: seatable
 spec:
   replicas: 1
   selector:
@@ -25,13 +25,35 @@ spec:
       initContainers:
         - name: init-db-check
           image: busybox
-          command: [ 'sh', '-c', 'until nc -z seatable-mysql 3306; do echo Waiting for MariaDB...; sleep 2; done;' ]
+          command:
+            - sh
+            - -c
+            - until nc -z seatable-mysql 3306; do echo Waiting for MariaDB...; sleep 2; done;
         - name: init-redis-check
           image: busybox
-          command: [ 'sh', '-c', 'until nc -z redis 6379; do echo “Waiting for Redis...”; sleep 2; done;' ]
+          command:
+            - sh
+            - -c
+            - until nc -z redis 6379; do echo "Waiting for Redis..."; sleep 2; done;
+        - name: copy-license-if-absent
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /shared/seatable
+              if [ ! -f /shared/seatable/seatable-license.txt ]; then
+                cp /config-default/seatable-license.txt /shared/seatable/seatable-license.txt
+              fi
+          volumeMounts:
+            - name: seatable-data
+              mountPath: /shared
+            - name: seatable-license-cm
+              mountPath: /config-default
+              readOnly: true
       containers:
-        - image: docker.io/seatable/seatable-enterprise:5.2.7
-          name: seatable
+        - name: seatable
+          image: docker.io/seatable/seatable-enterprise:5.2.7
           ports:
             - containerPort: 80
           env:
@@ -42,7 +64,7 @@ spec:
             - name: TZ
               value: Etc/UTC
             - name: DISPLAY
-              value: ':0'
+              value: ":0"
           envFrom:
             - configMapRef:
                 name: seatable-config
@@ -56,28 +78,18 @@ spec:
           volumeMounts:
             - name: seatable-data
               mountPath: /shared
-            - name: seatable-license
-              mountPath: /shared/seatable/seatable-license.txt
-              subPath: seatable-license.txt
-              readOnly: true
-
       volumes:
         - name: seatable-data
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
-        - name: seatable-license
+            path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data"
+        - name: seatable-license-cm
           configMap:
             name: seatable-config
             items:
               - key: seatable-license.txt
                 path: seatable-license.txt
-
       restartPolicy: Always
-
-
-
-
 ---
 apiVersion: v1
 kind: Service
@@ -88,9 +100,8 @@ metadata:
     io.kompose.service: seatable
 spec:
   ports:
-    - name: '80'
+    - name: "http"
       port: 80
       targetPort: 80
   selector:
     io.kompose.service: seatable
-
