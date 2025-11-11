@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: penpot
-          image: docker.io/aboveos/penpotapp-frontend:latest
+          image: aboveos/penpotapp-frontend:2.10.1
           resources:
             requests:
               cpu: 10m
@@ -28,30 +28,31 @@ spec:
             limits:
               cpu: 200m
               memory: 200Mi
-          readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - >
-                  response=$(curl -s -o /dev/null -w "%{http_code}" http://127.1/api/rpc/command/get-profile);
-                  if [ $response -lt 500 ]; then
-                    exit 0;
-                  else
-                    exit 1;
-                  fi
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 1
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 3
           ports:
-            - containerPort: 80
+            - containerPort: 8080
           volumeMounts:
             - mountPath: /opt/data/assets
               name: data-assets
           env:
             - name: PENPOT_FLAGS
-#              value: "disable-registration disable-login-with-password disable-email-verification disable-smtp disable-prepl-server disable-secure-session-cookies"
-              value: "enable-registration enable-login-with-password disable-email-verification disable-smtp enable-prepl-server enable-secure-session-cookies"
-#              value: "enable-registration enable-login-with-password"
+              value: "enable-registration enable-login-with-password disable-email-verification enable-smtp enable-prepl-server enable-secure-session-cookies"
             - name: PENPOT_EXPORTER_URI
               value: "http://penpot-exporter:6061"
             - name: PENPOT_BACKEND_URI

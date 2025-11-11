@@ -23,13 +23,13 @@ spec:
     spec:
       initContainers:
         - name: init-chmod-data
-          image: 'docker.io/aboveos/busybox:latest'
+          image: aboveos/busybox:1.37.0
           command:
             - sh
-            - '-c'
+            - -c
             - |
               chown -R 1001:1001 /opt/data/
-          resources: { }
+          resources: {}
           volumeMounts:
             - name: data-assets
               mountPath: /opt/data/assets
@@ -38,7 +38,7 @@ spec:
             runAsUser: 0
       containers:
         - name: penpot-backend
-          image: docker.io/aboveos/penpotapp-backend:latest
+          image: aboveos/penpotapp-backend:2.10.1
           resources:
             requests:
               cpu: 10m
@@ -56,8 +56,7 @@ spec:
               protocol: TCP
           env:
             - name: PENPOT_FLAGS
-#              value: "disable-registration disable-login-with-password disable-email-verification disable-smtp disable-prepl-server disable-secure-session-cookies"
-              value: "enable-registration enable-login-with-password disable-email-verification disable-smtp enable-prepl-server enable-secure-session-cookies"
+              value: "enable-registration enable-login-with-password disable-email-verification enable-smtp enable-prepl-server enable-secure-session-cookies"
             - name: PENPOT_DATABASE_URI
               value: "postgresql://{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.penpot }}"
             - name: PENPOT_DATABASE_USERNAME
@@ -65,7 +64,6 @@ spec:
             - name: PENPOT_DATABASE_PASSWORD
               value: "{{ .Values.postgres.password }}"
             - name: PENPOT_REDIS_URI
-#              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
               value: "redis://penpot-redis:6379/0"
             - name: PENPOT_ASSETS_STORAGE_BACKEND
               value: "assets-fs"
@@ -73,14 +71,16 @@ spec:
               value: "/opt/data/assets"
             - name: PENPOT_TELEMETRY_ENABLED
               value: "false"
-            - name: PENPOT_SMTP_ENABLED
-              value: "false"
-#            - name: PENPOT_HTTP_SERVER_PORT
-#              value: "80"
-#            - name: PENPOT_HTTP_SERVER_HOST
-#              value: "localhost"
             - name: PENPOT_PUBLIC_URI
-              value: "https://{{$penpotDomain}}"
+              value: "https://{{ $penpotDomain }}"
+            - name: PENPOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: penpot-secret
+                  key: penpot-secret
+          envFrom:
+            - configMapRef:
+                name: smtp-config
       volumes:
         - name: data-assets
           hostPath:
