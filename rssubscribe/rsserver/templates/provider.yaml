@@ -1,0 +1,108 @@
+﻿
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rss-provider
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rss-provider
+    applications.app.bytetrade.io/author: bytetrade.io
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rss-provider
+  template:
+    metadata:
+      labels:
+        app: rss-provider
+        provider: 'true'
+    spec:
+      containers:
+        - name: provider-proxy
+          image: "docker.io/beclab/provider-proxy:0.1.0"
+          imagePullPolicy: IfNotPresent
+          args:
+          - --logtostderr
+          - --insecure-listen-address=:28080
+          - --upstream=http://rssubscribe-svc:8082/
+          ports:
+          - containerPort: 28080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 200Mi
+            limits:
+              cpu: "500m"
+              memory: 350Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rssubscribe-provider
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: rss-provider
+  ports:
+    - name: server
+      protocol: TCP
+      port: 28080
+      targetPort: 28080
+ 
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backend:{{ .Release.Namespace }}:rssubscribe-provider
+  annotations:
+    provider-registry-ref: '{{ .Release.Namespace }}/rssubscribe-provider'
+    provider-service-ref: 'rssubscribe-provider.{{ .Release.Namespace }}:28080'
+rules:
+- nonResourceURLs: ["*"]
+  verbs: ["*"]
+
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: backend:sa:default:rssubscribe
+rules:
+  - apiGroups:
+      - '*'
+    resources:
+      - clusterrolebindings
+      - clusterroles
+      - namespaces
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - '*'
+    resources:
+      - tokenreviews
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backend:sa:default:rssubscribe
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backend:sa:default:rssubscribe
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: {{ .Release.Namespace }}
+
