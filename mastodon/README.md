@@ -11,7 +11,7 @@ You need an SMTP mail service to provide registration and notification services 
     
     Open Control Hub, in Mastodon-> Configmaps, find the `mastodon-default`, and click Edit YAML to configure SMTP service information.
 
-    ![SMTP](https://file.bttcdn.com/appstore/mastodon/readme/SMTP.png)
+    ![SMTP](https://app.cdn.olares.com/appstore/mastodon/readme/SMTP.png)
 
     ```yaml
     - name: SMTP_SERVER
@@ -35,7 +35,7 @@ You need an SMTP mail service to provide registration and notification services 
 2.  Restart the Mastodon service.
 
     Open Settings and locate Mastodon in the Application Section. Click 'Suspend'. Once the suspension is successful, click 'Resume' to restart Mastodon.
-    ![restart](https://file.bttcdn.com/appstore/mastodon/readme/restart.webp)
+    ![restart](https://app.cdn.olares.com/appstore/mastodon/readme/restart.webp)
 
 3.  Create an administrator account
 
@@ -45,7 +45,7 @@ You need an SMTP mail service to provide registration and notification services 
     ```
     tootctl accounts create **NICKNAME** --email **EXMAPLE_EMAILADDRESS** --approve --confirmed --role Owner
     ```
-    ![get_password](https://file.bttcdn.com/appstore/mastodon/readme/get_password.png)
+    ![get_password](https://app.cdn.olares.com/appstore/mastodon/readme/get_password.png)
 
     **Note**: Setting up the account takes approximately 30 seconds. During this time, please stay on this page and refrain from performing any other operations. You will receive the account password once everything is ready.
 
@@ -68,7 +68,7 @@ You need an SMTP mail service to provide registration and notification services 
 1.  Invite users to register
 
     By default, only users invited by the administrator can join the server. To invite others, go to Preferences -> Invite People to generate an invitation link. New users can then register on this Mastodon Server by visiting the address provided in the invitation link.
-    ![invite](https://file.bttcdn.com/appstore/mastodon/readme/invite.png)
+    ![invite](https://app.cdn.olares.com/appstore/mastodon/readme/invite.png)
 
 
 2. Follow users
@@ -76,8 +76,8 @@ You need an SMTP mail service to provide registration and notification services 
     You can follow users regardless of whether they're registered on your server instance or another server. To find people, search for the User Address. The User Address can either be in the format `@USER_NAME@SERVER_NAME` or `https://SERVER_NAME/@USER_NAME`.
 
     <p style="display: flex; justify-content: center;">
-    <img src="https://file.bttcdn.com/appstore/mastodon/readme/follow.png" alt="follow" style="max-width: 45%; height: auto; margin-right: 8px;">
-    <img src="https://file.bttcdn.com/appstore/mastodon/readme/feed.png" alt="feed"  style="max-width: 45%; height: auto;">
+    <img src="https://app.cdn.olares.com/appstore/mastodon/readme/follow.png" alt="follow" style="max-width: 45%; height: auto; margin-right: 8px;">
+    <img src="https://app.cdn.olares.com/appstore/mastodon/readme/feed.png" alt="feed"  style="max-width: 45%; height: auto;">
     </p>
     
     **Note**: The USER_NAME is not the same as the Display Name. It is an unmodifiable field that is filled in at the time of registration.
