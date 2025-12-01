@@ -2,21 +2,21 @@
 
 This is the official application repository of Olares Market.
 
-Olares distributes applications in a permissionless manner using the Market Protocol, thereby maximizing the freedom of developers. Meanwhile, Olares provides a default indexing service that is based on this repository, enhancing the flexibility and scalability of application distribution. Learn more about the [Market Protocol](https://docs.jointerminus.com/overview/protocol/market.html).
+Olares distributes applications in a permissionless manner using the Market Protocol, thereby maximizing the freedom of developers. Meanwhile, Olares provides a default indexing service that is based on this repository, enhancing the flexibility and scalability of application distribution.
 
 
 ## Olares Application Chart
 
-The **Olares Application Chart (OAC)** describes essential information about applications to the **Olares OS** and **Olares Market**. It is an extension of the Helm Chart package. Before you submit your application to **Olares Market**, here is some information you need to know about OAC:
-- [The structure of the Olares Application Chart](https://docs.olares.xyz/developer/develop/package/chart.html)
-- [Configuration guide and field descriptions of OlaresManifest.yaml](https://docs.olares.xyz/developer/develop/package/manifest.html)
-- [Extensions field to Helm in Olares](https://docs.olares.xyz/developer/develop/package/extension.html)
+The **Olares Application Chart (OAC)** describes essential information about applications in the **Olares OS** and **Olares Market**. It is an extension of the Helm Chart package. Before you submit your application to **Olares Market**, here is some information you may need to know:
+- [The structure of the Olares Application Chart](https://docs.olares.com/developer/develop/package/chart.html)
+- [Configuration guide and field descriptions of OlaresManifest.yaml](https://docs.olares.com/developer/develop/package/manifest.html)
+- [Extensions field to Helm in Olares](https://docs.olares.com/developer/develop/package/extension.html)
 
 
 ## Submitting Your Application
 ### Brief Process
 
-1. Test your application on Olares,  create the OAC according to guideline.
+1. Test your application on Olares, create the OAC according to guideline.
 2. Fork this repository. Add your application's OAC. Create a PR to `beclab/apps:main`.
 3. Wait for GitBot to check your PR. If needed, modify PR until it passes.
 4. Once the PR is merged, your application is ready to launch.
@@ -25,36 +25,37 @@ The **Olares Application Chart (OAC)** describes essential information about app
 ### Detail Process
 
 #### 1. Develop and test your application
-Developing applications on Olares doesn't differ greatly from the current mainstream web development practices. You only need to grasp some basic Olares development concepts [here](https://docs.olares.xyz/developer/develop/).
+Developing applications on Olares doesn't differ greatly from the current mainstream web development practices. 
 
 Before submitting an application, please ensure that it has been thoroughly tested on your Olares OS.
-- Use DevBox's dev-container to test and debug your applciation in a real online environment. [Learn more about DevBox.](https://docs.olares.xyz/developer/develop/tutorial/devbox.html)
-- Use the [custom installation](https://docs.olares.xyz/manual/tasks/install-uninstall-update.html#install-custom-applications) in the Market app for user testing.
+- Install Studio to test and debug your applciation in a real online environment. [Learn more about Studio.](https://docs.olares.com/developer/develop/tutorial/studio.html)
+- Use the [custom installation](https://docs.olares.com/manual/olares/market.html#install-custom-applications) in the Market app for user testing.
 
 #### 2. Submit an application
 The submission of the application needs to be completed through a Pull Request. Here's how:
 - Fork this repository and add your application's OAC in your Forked repository.
 - Create a `Draft PR` pointing to `beclab/apps:main`.
 - Please edit your PR Title and text according to the template.
-    - PR Title must in this format: [PR Type][FolderName][version]Title Content
-    - `PR Type` includes:
-        - NEW: Submit a new application
-        - UPDATE: Update an already successfully merged application
-        - REMOVE: Remove an already successfully merged application
-        - SUSPEND: Suspend an already successfully merged application from distribution through the application store
-    - `FolderName` is your Olares Application Chart name. It must adhere to the naming requirements in [OAC specification](hhttps://docs.olares.xyz/developer/develop/package/chart.html).
+    - PR Title must in this format: [PR Type][FolderName][version]Title
+    - `PR Type`:
+        - `NEW`: Submit a new application
+        - `UPDATE`: Update an already successfully merged application
+        - `REMOVE`: Remove an already successfully merged application
+        - `SUSPEND`: Suspend an already successfully merged application from distribution through the Market
+    - `FolderName` is your Olares Application Chart name. It must adhere to the naming requirements in [OAC specification](https://docs.olares.com/developer/develop/package/manifest.html).
     - `version` refers to your OAC's Chart Version, which needs to be consistent with the `version` field in `Chart.yaml` and metadata section of `OlaresManifest.yaml`
 - To prevent your PR from being incorrectly parsed or closed, please adhere to the following rules:
     - Your PR title must contain only one PR Type, FolderName, and version.
     - Your PR Type must be one of the predefined types.
+    - No special characters in PR Title.
     - A PR should only add or modify content under the FolderName declared in the PR title.
     - Only one Open PR or Draft PR can exist at a time with the same FolderName.
     - You must be one of the owners of the folder you wish to modify. Owners are listed in the `owners` file within the chart. If you're submitting a new application, your GitHub username should be included in the `owners` file.
 
 - During the Draft PR phase, you can continuously adjust your PR content and add new commits. Once everything is ready, click on the `Ready for review` button to submit the PR and call on GitBot to check.
 
-> Note: The title and content of the PR are crucial for GitBot. Please adhere to the template specifications when filling them out. GitBot may automatically close any invalid PRs.
-
+> [!NOTE]
+> The title and content of the PR are crucial for GitBot. Please adhere to the template specifications when filling them out. GitBot may automatically close any invalid PRs.
 
 #### 3. Track your PR status
 - When your PR is labeled with `PR type`, it indicates that your PR title is valid. Please **do not modify the `PR Type` afterwards.** If it doesn't reflect your intentions, simply close it and create a new one.
