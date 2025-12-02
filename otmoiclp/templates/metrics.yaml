@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: metrics
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics
+  template:
+    metadata:
+      labels:
+        app: metrics
+    spec:
+      containers:
+        - name: alert
+          image: otmoic/metrics:V2.5.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+          args:
+            - dist/alert.main.js
+          env:
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_DBNAME
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 300Mi
+        - name: http
+          image: otmoic/metrics:V2.5.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+          args:
+            - dist/main-http.js
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: RUN_SIDE
+              value: "LPNODE"
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_DBNAME
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 300Mi
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lpnode-metrics-server
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: lpnode-metrics-server
+spec:
+  selector:
+    app: metrics
+  type: ClusterIP
+  ports:
+    - name: http
+      protocol: TCP
+      port: 18000
+      targetPort: 3001
