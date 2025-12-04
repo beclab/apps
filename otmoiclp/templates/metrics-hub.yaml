@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: metrics-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-hub
+  template:
+    metadata:
+      labels:
+        app: metrics-hub
+    spec:
+      containers:
+        - name: metrics-hub
+          image: otmoic/metrics-hub:v0.1.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+          args:
+            - dist/main.js
+          ports:
+            - name: http
+              containerPort: 9500
+              protocol: TCP
+          env:
+            - name: MONGODB_HOST
+              value:  {{ .Values.mongodb.host }}
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PORT
+              value: {{ .Values.mongodb.port | quote }}
+            - name: MONGODB_DBNAME
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: PORT
+              value: "9500"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 128Mi
+            limits:
+              cpu: 300m
+              memory: 300Mi
+      restartPolicy: Always
+---
+# Source: metrics-hub/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-hub-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: metrics-hub-service
+spec:
+  ports:
+    - name: http-9500
+      protocol: TCP
+      port: 9500
+      targetPort: 9500
+  selector:
+    app: metrics-hub
+  type: ClusterIP
+  sessionAffinity: None

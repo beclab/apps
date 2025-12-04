@@ -1,4 +1,4 @@
-{{ $dbbackup_rootpath := printf "%s%s" .Values.rootPath "/rootfs/middleware-backup" }}
+﻿{{ $dbbackup_rootpath := printf "%s%s" .Values.rootPath "/rootfs/middleware-backup" }}
 {{- $knowledge_secret := (lookup "v1" "Secret" .Release.Namespace "knowledge-secrets") -}}
 {{- $nats_password := "" -}}
 {{ if $knowledge_secret -}}
@@ -135,7 +135,7 @@ spec:
       serviceAccount: knowledge-cluster-view
       initContainers:
       - name: init-data
-        image: busybox:1.28
+        image: "docker.io/aboveos/busybox:1.37.0"
         securityContext:
           privileged: true
           runAsNonRoot: false
@@ -152,7 +152,7 @@ spec:
           chown -R 1000:1000 /data && \
           chown -R 1000:1000 /appCache
       - name: init-container
-        image: 'postgres:16.0-alpine3.18'
+        image: "docker.io/postgres:16.0-alpine3.18"
         command:
           - sh
           - '-c'
@@ -171,7 +171,7 @@ spec:
             value: {{ .Values.postgres.databases.knowledge }}
       containers:
       - name: knowledge
-        image: "beclab/knowledge-base-api:v0.12.30"
+        image: "docker.io/beclab/knowledge-base-api:v0.12.47"
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
@@ -181,10 +181,10 @@ spec:
         env:
         - name: BACKEND_URL
           value: http://127.0.0.1:8080
+        - name: COOKIE_URL
+          value: http://integration-provider-svc.os-protected:28080
         - name: SUBSCRIBE_URL
-          value: 'http://rssubscribe.knowledge-shared:8082'
-        - name: RSSHUB_URL
-          value: 'http://rss-server.knowledge-shared:1200'
+          value: 'http://rssubscribe-provider.rsserver-shared:28080'
         - name: UPLOAD_SAVE_PATH
           value: '/data/'
         - name: SEARCH_URL
@@ -206,12 +206,11 @@ spec:
         - name: PG_DATABASE
           value: {{ .Values.postgres.databases.knowledge }}
         - name: DOWNLOAD_URL
-          value: http://download-svc.knowledge-shared:3080
+          value: http://download-svc.os-framework:8080
         - name: YTDLP_DOWNLOAD_URL
-          value: http://download-svc.knowledge-shared:3082
+          value: http://ytdlp-provider.ytserver-shared:28080
         - name: NATS_HOST
           value: nats.os-platform
-          #value: nats.os-platform
         - name: NATS_PORT
           value: "4222"
         - name: NATS_USERNAME
@@ -241,7 +240,7 @@ spec:
             memory: 6Gi
 
       - name: vectorcrawl
-        image: "beclab/vectorcrawl:v0.1.1"
+        image: "docker.io/beclab/vectorcrawl:v0.1.7"
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
@@ -254,7 +253,7 @@ spec:
         - name: REDIS_ADDR
           value: "{{ .Values.redis.host }}:{{ .Values.redis.port }}"
         - name: RSS_HUB_URL
-          value: 'http://rss-server.knowledge-shared:1200/'
+          value: 'http://rss-server.rsserver-shared:1200/'
         - name: PG_USERNAME
           value: {{ .Values.postgres.username }}
         - name: PG_PASSWORD
@@ -279,9 +278,9 @@ spec:
         - name: NATS_SUBJECT
           value: os.rssubscribe_status
         - name: YT_DLP_API_URL
-          value: http://download-svc.knowledge-shared:3082/api
+          value: http://ytdlp-provider.ytserver-shared:28080/api
         - name: DOWNLOAD_API_URL
-          value: http://download-svc.knowledge-shared:3080/api
+          value: http://download-svc.os-framework:8080/api
         ports:
         - containerPort: 8080
         resources:
@@ -293,7 +292,7 @@ spec:
             memory: 2Gi
 
       - name: sync
-        image: "beclab/recommend-sync:v0.12.1"
+        image: "docker.io/beclab/recommend-sync:v0.12.1"
         securityContext:
           runAsUser: 0
           runAsNonRoot: false
@@ -328,7 +327,7 @@ spec:
             mountPath: /data
        
       - name: crawler
-        image: "beclab/recommend-crawler:v0.12.2"
+        image: "docker.io/beclab/recommend-crawler:v0.12.2"
         securityContext:
           allowPrivilegeEscalation: false
           runAsUser: 1000
@@ -359,7 +358,7 @@ spec:
         hostPath:
           path: '{{ $dbbackup_rootpath }}/pg_backup'
           type: DirectoryOrCreate
-      - name: terminus-sidecar-config
+      - name: olares-sidecar-config
         configMap:
           name: sidecar-ws-configs
           items:
@@ -391,229 +390,3 @@ spec:
       port: 3100
       targetPort: 3100
 
-
----
-
-
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: download
-  # namespace: knowledge-shared
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: download
-    applications.app.bytetrade.io/author: bytetrade.io
-spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app: download
-  template:
-    metadata:
-      labels:
-        app: download
-    spec:
-      serviceAccountName: knowledge-cluster-view
-      serviceAccount: knowledge-cluster-view
-      securityContext:
-        runAsUser: 0
-        runAsNonRoot: false
-
-      initContainers:
-      - name: init-data
-        image: busybox:1.28
-        securityContext:
-          privileged: true
-          runAsNonRoot: false
-          runAsUser: 0
-        volumeMounts:
-        - name: config-dir
-          mountPath: /config
-        - name: download-dir
-          mountPath: /downloads
-        command:
-        - sh
-        - -c
-        - |
-          chown -R 1000:1000 /config && \
-          chown -R 1000:1000 /downloads
-      - name: init-container
-        image: 'postgres:16.0-alpine3.18'
-        command:
-          - sh
-          - '-c'
-          - >-
-            echo -e "Checking for the availability of PostgreSQL Server deployment"; until psql -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDB -c "SELECT 1"; do sleep 1; printf "-"; done; sleep 5; echo -e " >> PostgreSQL DB Server has started";
-        env:
-          - name: PGHOST
-            value: {{ .Values.postgres.host }}
-          - name: PGPORT
-            value: "{{ .Values.postgres.port }}"
-          - name: PGUSER
-            value: {{ .Values.postgres.username }}
-          - name: PGPASSWORD
-            value: {{ .Values.postgres.password }}
-          - name: PGDB
-            value: {{ .Values.postgres.databases.knowledge }}
-      containers:
-      - name: aria2
-        image: "beclab/aria2:v0.0.4"
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsNonRoot: false
-          runAsUser: 0
-        ports:
-        - containerPort: 6800
-        - containerPort: 6888
-        env:
-        - name: RPC_SECRET
-          value: kubespider
-        - name: PUID
-          value: "1000"
-        - name: PGID
-          value: "1000"
-        volumeMounts:
-        - name: download-dir
-          mountPath: /downloads
-        resources:
-          requests:
-            cpu: 20m
-            memory: 50Mi
-          limits:
-            cpu: "1"
-            memory: 300Mi
-      - name: yt-dlp
-        image: "beclab/yt-dlp:v0.12.20"
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          allowPrivilegeEscalation: false
-          runAsUser: 1000
-
-        ports:
-        - containerPort: 3082
-        env:
-        - name: PG_USERNAME
-          value: {{ .Values.postgres.username }}
-        - name: PG_PASSWORD
-          value: {{ .Values.postgres.password }}
-        - name: PG_HOST
-          value: {{ .Values.postgres.host }}
-        - name: PG_PORT
-          value: "{{ .Values.postgres.port }}"
-        - name: PG_DATABASE
-          value: {{ .Values.postgres.databases.knowledge }}
-        - name: REDIS_HOST
-          value: {{ .Values.redis.host }}
-        - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
-        - name: NATS_HOST
-          value: nats.os-platform
-        - name: NATS_PORT
-          value: "4222"
-        - name: NATS_USERNAME
-          value: {{ .Release.Namespace }}-knowledge
-        - name: NATS_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: nats_password
-              name: knowledge-secrets
-        - name: NATS_SUBJECT
-          value: os.download_status
-        volumeMounts:
-        - name: config-dir
-          mountPath: /app/config
-        - name: download-dir
-          mountPath: /app/downloads
-        resources:
-          requests:
-            cpu: 20m
-            memory: 50Mi
-          limits:
-            cpu: "1"
-            memory: 300Mi
-      - name: download-spider
-        image: "beclab/download-spider:v0.12.20"
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          allowPrivilegeEscalation: false
-          runAsUser: 1000
-
-        env:
-        - name: PG_USERNAME
-          value: {{ .Values.postgres.username }}
-        - name: PG_PASSWORD
-          value: {{ .Values.postgres.password }}
-        - name: PG_HOST
-          value: {{ .Values.postgres.host }}
-        - name: PG_PORT
-          value: "{{ .Values.postgres.port }}"
-        - name: PG_DATABASE
-          value: {{ .Values.postgres.databases.knowledge }}
-        - name: REDIS_HOST
-          value: {{ .Values.redis.host }}
-        - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
-        - name: NATS_HOST
-          value: nats.os-platform
-        - name: NATS_PORT
-          value: "4222"
-        - name: NATS_USERNAME
-          value: {{ .Release.Namespace }}-knowledge
-        - name: NATS_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: nats_password
-              name: knowledge-secrets
-        - name: NATS_SUBJECT
-          value: os.download_status
-        volumeMounts:
-        - name: download-dir
-          mountPath: /downloads
-        
-        ports:
-        - containerPort: 3080
-        resources:
-          requests:
-            cpu: 20m
-            memory: 50Mi
-          limits:
-            cpu: "1"
-            memory: 300Mi
-
-      volumes:
-      - name: config-dir
-        hostPath: 
-          type: DirectoryOrCreate
-          path: '{{ .Values.rootPath }}/userdata/Cache/download'
-      - name: download-dir
-        hostPath:
-          type: DirectoryOrCreate
-          path: '{{ .Values.rootPath }}/rootfs/userspace'
----
-
-apiVersion: v1
-kind: Service
-metadata:
-  name: download-svc
-  # namespace: knowledge-shared
-  namespace: {{ .Release.Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: download
-  ports:
-    - name: "download-spider"
-      protocol: TCP
-      port: 3080
-      targetPort: 3080
-    - name: "aria2-server"
-      protocol: TCP
-      port: 6800
-      targetPort: 6800
-    - name: ytdlp-server
-      protocol: TCP
-      port: 3082
-      targetPort: 3082
