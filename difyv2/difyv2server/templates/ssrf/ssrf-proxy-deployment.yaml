@@ -1,0 +1,77 @@
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: ssrf-proxy
+  name: ssrf-proxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: ssrf-proxy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: ssrf-proxy
+    spec:
+      containers:
+        - command:
+            - sh
+            - -c
+            - "cp /docker-entrypoint-mount.sh /docker-entrypoint.sh && sed -i 's/\r$//' /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh && /docker-entrypoint.sh"
+          env:
+            - name: COREDUMP_DIR
+              value: /var/spool/squid
+            - name: HTTP_PORT
+              value: "3128"
+            - name: REVERSE_PROXY_PORT
+              value: "8194"
+            - name: SANDBOX_HOST
+              value: sandbox
+            - name: SANDBOX_PORT
+              value: "8194"
+          image: "docker.io/beclab/ubuntu-squid:6.1-23.10_beta"
+          imagePullPolicy: IfNotPresent
+          name: ssrf-proxy
+          ports:
+            - containerPort: 3128
+              name: http
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /etc/squid/squid.conf.template
+              name: ssrf-proxy-cm0
+              subPath: squid.conf.template
+            - mountPath: /docker-entrypoint-mount.sh
+              name: ssrf-proxy-cm1
+              subPath: docker-entrypoint-mount.sh
+      restartPolicy: Always
+      volumes:
+        - configMap:
+            items:
+              - key: squid.conf.template
+                path: squid.conf.template
+            name: ssrf-proxy-cm0
+          name: ssrf-proxy-cm0
+        - configMap:
+            items:
+              - key: docker-entrypoint.sh
+                path: docker-entrypoint-mount.sh
+            name: ssrf-proxy-cm1
+          name: ssrf-proxy-cm1
+{{- end }}
