@@ -1,0 +1,125 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $is50Series := $gpuInfo.is50Series -}}
+{{- $heygemImage := "" -}}
+{{- $heygemCommandArg1 := "" -}}
+{{- $heygemCommandArg2 := "" -}}
+{{- $heygemgenvideoImage := "" -}}
+{{- $enableASR := false -}}
+{{- if eq $is50Series "true" -}}
+  {{- $heygemImage = "docker.io/beclab/guiji2025-fish-speech-5090:0.0.7" -}}
+  {{- $heygemCommandArg1 = "/bin/bash" -}}
+  {{- $heygemCommandArg2 = "python /code/tools/api_server.py --listen 0.0.0.0:8080" -}}
+  {{- $heygemgenvideoImage = "docker.io/beclab/guiji2025-duix.avatar-5090:0.1.0_sdk_slim" -}}
+  {{- $enableASR = false -}}
+{{- else -}}
+  {{- $heygemImage = "docker.io/beclab/guiji2025-fish-speech-ziming:1.0.39" -}}
+  {{- $heygemCommandArg1 = "/bin/bash" -}}
+  {{- $heygemCommandArg2 = "/opt/conda/envs/python310/bin/python3 tools/api_server.py --listen 0.0.0.0:8080" -}}
+  {{- $heygemgenvideoImage = "docker.io/beclab/guiji2025-heygem.ai:0.0.7_sdk_slim" -}}
+  {{- $enableASR = true -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: heygem
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: heygem
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: heygem
+  template:
+    metadata:
+      labels:
+        io.kompose.service: heygem
+    spec:
+      containers:
+        - name: heygem
+          image: {{ $heygemImage }}
+{{- if eq $is50Series "true" }}
+          workingDir: /code
+{{- end }}
+          command:
+            - {{ $heygemCommandArg1 }}
+            - -c
+            - |
+              {{ $heygemCommandArg2 }}
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,graphics,utility,video,display"
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+            limits:
+              cpu: "2000m"
+              memory: 9Gi
+          volumeMounts:
+            - name: voice-data
+              mountPath: /code/data
+            - name: logfile
+              mountPath: /logfile
+        - name: heygemgenvideo
+          image: {{ $heygemgenvideoImage }}
+          command:
+            - python
+            - /code/app_local.py
+          env:
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "max_split_size_mb:512"
+          ports:
+            - containerPort: 8383
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+            limits:
+              cpu: "1000m"
+              memory: 13Gi
+          volumeMounts:
+            - name: face2face-data
+              mountPath: /code/data
+{{ if $enableASR }}
+        - name: heygem-asr
+          image: "docker.io/beclab/guiji2025-fun-asr:1.0.2"
+          command:
+            - sh
+            - /run.sh
+          workingDir: /workspace/FunASR/runtime
+          ports:
+            - containerPort: 10095
+          resources:
+            requests:
+              cpu: 100m
+              memory: 8Gi
+            limits:
+              cpu: "1000m"
+              memory: 17Gi
+{{ end }}
+      restartPolicy: Always
+      volumes:
+        - name: voice-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/voice/data"
+            type: DirectoryOrCreate
+        - name: face2face-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/face2face-data"
+            type: DirectoryOrCreate
+        - name: logfile
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/heygem/logfile"
+            type: DirectoryOrCreate
+{{- end }}
