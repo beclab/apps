@@ -1,0 +1,211 @@
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: mtranserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mtranserver
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: mtranserver
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /models /configs
+              chown -R 1000:1000 /models /configs
+              chmod -R 775 /models /configs
+          resources: {}
+          volumeMounts:
+            - name: models-data
+              mountPath: /models
+            - name: models-config
+              mountPath: /configs
+      containers:
+        - name: mtranserver
+          image: docker.io/beclab/xxnuo-mtranserver:3.1.11
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DISPLAY
+              value: ":0"
+            - name: MT_MODEL_DIR
+              value: /app/models
+            - name: MT_CONFIG_DIR
+              value: /app/configs
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /app/models/.success.{{ $model.name }} ]; do
+                echo "Waiting for /app/models/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+
+              echo "Starting application..."
+              exec ./mtranserver \
+                --port 8989 \
+                --model-dir "${MT_MODEL_DIR}" \
+                --config-dir "${MT_CONFIG_DIR}"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 5000Mi
+            limits:
+              cpu: 4000m
+              memory: 19Gi
+          ports:
+            - name: http
+              containerPort: 8989
+              protocol: TCP
+          volumeMounts:
+            - name: models-data
+              mountPath: /app/models
+            - name: models-config
+              mountPath: /app/configs
+      volumes:
+        - name: models-data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/models"
+            type: DirectoryOrCreate
+        - name: models-config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/configs"
+            type: DirectoryOrCreate
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-download-models
+          image: docker.io/beclab/downloader-init:v0.1.1
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: mtranserver-config
+          command:
+            - sh
+            - "-c"
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 MTranServer /health && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: 500m
+              memory: 500Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/models/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/models"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mtranserver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mtranserver
+spec:
+  selector:
+    app: mtranserver
+  ports:
+    - name: http
+      port: 8989
+      targetPort: 8989
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mtranserver
+spec:
+  selector:
+    app: mtranserver
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8989
+      protocol: TCP
+{{- end }}
