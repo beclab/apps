@@ -1,4 +1,4 @@
-
+﻿
 # ---------------------------
 # Qdrant
 # ---------------------------
@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
         - name: qdrant
-          image: reflyai/qdrant:v1.13.1
+          image: "docker.io/beclab/reflyai-qdrant:v1.13.1"
           env:
             - name: TZ
               valueFrom:
@@ -76,7 +76,15 @@ spec:
             name: qdrant-config
         - name: qdrant-data
           hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/data/qdrant"
+              {{- else }}
             path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/qdrant"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/qdrant"
+            {{- end }}
             type: DirectoryOrCreate
 ---
 apiVersion: v1
@@ -120,7 +128,7 @@ spec:
     spec:
       initContainers:
         - name: init-permissions
-          image: busybox:1.36
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - -c
@@ -135,7 +143,7 @@ spec:
             runAsUser: 0
       containers:
         - name: elasticsearch
-          image: reflyai/elasticsearch:7.10.2
+          image: "docker.io/beclab/reflyai-elasticsearch:7.10.2"
           env:
             - name: TZ
               valueFrom:
@@ -187,7 +195,15 @@ spec:
       volumes:
         - name: es-data
           hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/data/es"
+              {{- else }}
             path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/es"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/es"
+            {{- end }}
             type: DirectoryOrCreate
 ---
 apiVersion: v1
@@ -228,28 +244,28 @@ spec:
     spec:
       initContainers:
         - name: wait-postgres
-          image: harveyff/wait-for:2025-08-20
+          image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "{{ .Values.postgres.host }}:5432"]
           imagePullPolicy: IfNotPresent
         - name: wait-redis
-          image: harveyff/wait-for:2025-08-20
+          image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "redis-svc:6379"]
           imagePullPolicy: IfNotPresent
         - name: wait-qdrant
-          image: harveyff/wait-for:2025-08-20
+          image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "refly-qdrant:6333"]
           imagePullPolicy: IfNotPresent
         - name: wait-elasticsearch
-          image: harveyff/wait-for:2025-08-20
+          image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "refly-elasticsearch:9200"]
           imagePullPolicy: IfNotPresent
         - name: wait-minio
-          image: harveyff/wait-for:2025-08-20
+          image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "{{ .Values.minio.host}}:{{ .Values.minio.port }}"]
           imagePullPolicy: IfNotPresent
       containers:
         - name: api
-          image: reflyai/refly-api:0.9.1
+          image: "docker.io/beclab/reflyai-refly-api:0.9.1"
           envFrom:
             - configMapRef:
                 name: refly-shared-config
@@ -314,14 +330,14 @@ spec:
     spec:
       initContainers:
         - name: wait-for-api
-          image: curlimages/curl:8.8.0
+          image: "docker.io/beclab/curlimages-curl:8.8.0"
           command:
             - sh
             - -c
             - until curl -sf http://refly-api:5800 >/dev/null; do echo waiting for api; sleep 2; done;
       containers:
         - name: web
-          image: reflyai/refly-web:0.9.1
+          image: "docker.io/beclab/reflyai-refly-web:0.9.1"
           envFrom:
             - configMapRef:
                 name: refly-shared-config
