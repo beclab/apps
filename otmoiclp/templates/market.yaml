@@ -32,11 +32,10 @@ spec:
     spec:
       containers:
         - name: amm-market-price
-          image: otmoic/lpnode-exchange-adapter:V2.4.7
+          image: otmoic/lpnode-ccxt-adapter:V2.5.2
           command:
-            - python3
-            - ./app.py
-          workingDir: /app
+            - node
+            - dist/main.js
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -44,7 +43,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 300m
-              memory: 512Mi
+              memory: 256Mi
           ports:
             - containerPort: 18080
           env:
@@ -64,7 +63,7 @@ spec:
               value: "{{ .Values.mongodb.port }}"
             - name: MONGODB_ACCOUNT
               value: {{ .Values.mongodb.username }}
-            - name: MONGODB_PASS
+            - name: MONGODB_PASSWORD
               value: {{ .Values.mongodb.password }}
             - name: MONGODB_DBNAME_LP_STORE
               value: {{ .Values.mongodb.databases.lp_store }}
@@ -75,13 +74,16 @@ spec:
                   fieldPath: metadata.namespace
 
         - name: amm-market-price-ccxt
-          image: otmoic/lpnode-exchange-adapter:V2.4.7
+          image: otmoic/lpnode-ccxt-adapter:V2.5.2
           command:
-            - ts-node
-            - ./src/App.ts
-          workingDir: /app/otmoic-ccxt-market
+            - node
+            - dist/market.js
           imagePullPolicy: IfNotPresent
           env:
+            - name: METRICS_ENDPOINT
+              value: 'http://metrics-hub-service:9500/metrics'
+            - name: INSTANCE_NAME
+              value: {{ regexFind "^[^.]+" (toString .Values.user.zone) | default "default" }}
             - name: STATUS_KEY
               value: amm-market-status-report-price
             - name: REDIS_HOST
@@ -112,5 +114,5 @@ spec:
               cpu: 10m
               memory: 64Mi
             limits:
-              cpu: 300m
-              memory: 600Mi
+              cpu: 500m
+              memory: 400Mi

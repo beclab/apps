@@ -1,4 +1,4 @@
-
+﻿
 # Source: wordpress/templates/svc.yaml
 apiVersion: v1
 kind: Service
@@ -32,7 +32,7 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: wordpresspure
+  name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/instance: wordpress
@@ -78,7 +78,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
                 - matchExpressions:
-                    - key: node-role.kubernetes.io/master
+                    - key: node-role.kubernetes.io/control-plane
                       operator: Exists
       securityContext:
         fsGroup: 1000
@@ -88,7 +88,7 @@ spec:
 
       initContainers:
         - name: init-chmod-data
-          image: 'aboveos/busybox:1.34.0'
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
@@ -109,7 +109,7 @@ spec:
 
       containers:
         - name: wordpress
-          image: aboveos/bitnami-wordpress:6.4.2-debian-11-r14
+          image: "docker.io/beclab/aboveos-bitnami-wordpress:6.4.2-debian-11-r14"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -324,4 +324,12 @@ spec:
         - name: wordpress-data
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appCache}}
+              {{- else }}
             path: {{ .Values.userspace.appCache}}/{{ .Release.Name }}
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appCache}}/{{ .Release.Name }}
+            {{- end }}

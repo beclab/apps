@@ -1,5 +1,4 @@
-
----
+﻿---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,68 +18,44 @@ spec:
       labels:
         app: {{ .Release.Name }}
     spec:
-      initContainers:
-      - name: wait-for-postgres
-        image: postgres:16.0-alpine3.18
-        command:
-          - sh
-          - '-c'
-          - >-
-            echo -e "Checking for the availability of PostgreSQL Server deployment"; until psql -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDB
-            -c "SELECT 1"; do sleep 1; echo "-"; done; echo -e " >> PostgreSQL DB Server has started";
-        env:
-        - name: PGHOST
-          value: {{ .Values.postgres.host }}
-        - name: PGPORT
-          value: "5432"
-        - name: PGUSER
-          value: {{ .Values.postgres.username }}
-        - name: PGPASSWORD
-          value: {{ .Values.postgres.password }}
-        - name: PGDB
-          value: {{ .Values.postgres.databases.lobechat }}
-        imagePullPolicy: IfNotPresent
       containers:
-      - args:
-        env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
-        - name: TZ
-          value: Etc/UTC
-        - name: DATABASE_URL
-          value: postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:5432/{{ .Values.postgres.databases.lobechat }}
-        image: lobehub/lobe-chat:1.96.11
-        imagePullPolicy: IfNotPresent
-        name: lobechat
-        ports:
-        - containerPort: 3210
-          name: http
-          protocol: TCP
-        livenessProbe:
-          httpGet:
-            path: /
-            port: http
-        readinessProbe:
-          httpGet:
-            path: /
-            port: http
-        resources:
-          limits:
-            cpu: 2000m
-            memory: 2000Mi
-          requests:
-            cpu: 200m
-            memory: 300Mi
-        securityContext:
-          privileged: false
-          readOnlyRootFilesystem: true
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-
+        - name: lobechat
+          image: "docker.io/beclab/harveyff-lobe-chat:v1.143.1-fix_7_ollama_download"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DATABASE_URL
+              value: postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.lobechat }}
+          ports:
+            - name: http
+              containerPort: 3210
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: 3210
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 3210
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            limits:
+              cpu: 2000m
+              memory: 2000Mi
+            requests:
+              cpu: 200m
+              memory: 300Mi
 ---
 apiVersion: v1
 kind: Service
@@ -89,9 +64,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   ports:
-  - name: http
-    port: 80
-    protocol: TCP
-    targetPort: 3210
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 3210
   selector:
     app: {{ .Release.Name }}

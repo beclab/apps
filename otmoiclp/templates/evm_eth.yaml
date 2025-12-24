@@ -1,3 +1,4 @@
+# Service configuration
 apiVersion: v1
 kind: Service
 metadata:
@@ -9,11 +10,11 @@ spec:
   type: ClusterIP
   ports:
     - protocol: TCP
-      name: chain-client-evm-eth-api-60
+      name: nginx-proxy-port
       port: 9100
-      targetPort: 9100
+      targetPort: 80
 ---
-# Source: chain-client-evm/templates/deployment.yaml
+# Multi-container deployment with inline nginx config
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,61 +33,29 @@ spec:
         app: chain-client-evm-eth-60
     spec:
       containers:
-        - name: chain-client-evm-eth-60
-          image: otmoic/chainclient-evm:V2.4.4
+        # Message producer container
+        - name: message-producer
+          image: otmoic/chainclient:v2.5.60
           imagePullPolicy: IfNotPresent
-          resources:
-            requests:
-              cpu: 1m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 800Mi
+          command: ["node"]
+          args: ["dist/message-producer"]
           ports:
-            - containerPort: 9100
+            - containerPort: 3001
           env:
-            - name: CLEAR_PADDING
-              value: 'true'
-            - name: "STATUS_KEY"
-              value: "chain-client-status-report-eth"
-            - name: CHAIN_TYPE
-              value: "evm"
-            - name: REDIS_PASSWORD
-              value: {{ .Values.redis.password }}
-            - name: EVM_CLIENT_PORT
-              value: "9100"
             - name: REDIS_HOST
               value: {{ .Values.redis.host }}
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
             - name: REDIS_PORT
               value: "{{ .Values.redis.port }}"
-            - name: SYSTEM_CHAIN_ID
-              value: "60"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "chain-client-status-report-eth"
             - name: CHAIN_ID
               value: "1"
-            - name: OS_API_KEY
-              value: {{ .Values.os.appKey }}
-            - name: OS_API_SECRET
-              value: {{ .Values.os.appSecret }}
-            - name: OS_SYSTEM_SERVER
-              value: system-server.user-system-{{ .Values.bfl.username }}
-            - name: CONTRACT_ADDRESS
-              value: "0x6F12FED6Cd5BeBFA3351c447f7873B76178B1b84" # Update with actual contract address
-            - name: START_BLOCK
-              value: "21071432" # Update with actual start block
-            - name: RPC_URL
-              value: "https://rpc.ankr.com/eth/03d9d2b8997b65d5f47fac176fba922549abdb85fd3581669a82192c69ca4420" # Update with actual RPC URL
-            - name: START_TOP_HEIGHT
-              value: 'true'
-            - name: AUTO_START
-              value: 'false'
-            - name: USE_DOTNET
-              value: 'false'
-            - name: AUTO_RPC
-              value: 'false'
-            - name: LOG_LEVEL
-              value: "1"
-            - name: PROJECT_EXPANSION
-              value: 'true'
+            - name: MESSAGE_PRODUCER_PORT
+              value: "3001"
             - name: MONGODB_HOST
               value: {{ .Values.mongodb.host }}
             - name: MONGODB_ACCOUNT
@@ -97,3 +66,345 @@ spec:
               value: "{{ .Values.mongodb.port }}"
             - name: MONGODB_DBNAME_LP_STORE
               value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+
+        # Monitor container
+        - name: monitor
+          image: otmoic/chainclient:v2.5.60
+          imagePullPolicy: IfNotPresent
+          command: ["node"]
+          args: ["dist/monitor"]
+          ports:
+            - containerPort: 3002
+          env:
+            - name: MONITOR_NAME
+              value: chain-client-evm-eth-60-monitor
+            - name: METRICS_HUB_URL
+              value: "http://metrics-hub-service:9500/metrics"
+            - name: INSTANCE
+              value: "{{ .Values.user.zone | toString | regexFind "^[^.]+" | default "default" }}"
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "chain-client-status-report-eth"
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+
+            - name: START_TOP_HEIGHT
+              value: "true"
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: SYSTEM_CHAIN_ID
+              value: "60"
+            - name: CHAIN_ID
+              value: "1"
+            - name: OBRIDGE_CONTRACT
+              value: "0x6F12FED6Cd5BeBFA3351c447f7873B76178B1b84"
+            - name: OBRIDGE_CONTRACT_START_BLOCK
+              value: "21071432"
+            - name: OBRIDGE_SWAP_CONTRACT
+              value: "0x0D8fBda3509E72f39b272Df8f25d1490ef7bcD61"
+            - name: OBRIDGE_SWAP_CONTRACT_START_BLOCK
+              value: "21929538"
+            - name: RPCS
+              value: "https://ethereum-rpc.publicnode.com"
+            - name: RPC_TIMEOUT
+              value: "30000"
+            - name: BLOCK_MARGIN
+              value: "3"
+            - name: BLOCK_MODE_SWITCH_THRESHOLD
+              value: "20"
+            - name: BLOCK_INTERVAL
+              value: "12000"
+            - name: BATCH_SIZE
+              value: "80"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: START_TOP_HEIGHT
+              value: "true"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 800Mi
+
+        # Public service container
+        - name: public-service
+          image: otmoic/chainclient:v2.5.60
+          imagePullPolicy: IfNotPresent
+          command: ["node"]
+          args: ["dist/public-service"]
+          ports:
+            - containerPort: 3003
+          env:
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "chain-client-status-report-eth"
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONITOR_NAME
+              value: chain-client-evm-eth-60-monitor
+            - name: PUBLIC_SERVICE_PORT
+              value: "3003"
+            - name: CHAIN_ID
+              value: "1"
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: SYSTEM_CHAIN_ID
+              value: "60"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: RPCS
+              value: "https://ethereum-rpc.publicnode.com"
+            - name: RPC_TIMEOUT
+              value: "30000"
+            - name: RELAY_WALLET
+              value: "false"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+
+        # Sender container
+        - name: sender
+          image: otmoic/chainclient:v2.5.60
+          imagePullPolicy: IfNotPresent
+          command: ["node"]
+          args: ["dist/sender"]
+          ports:
+            - containerPort: 3004
+          env:
+            - name: METRICS_HUB_URL
+              value: "http://metrics-hub-service:9500/metrics"
+            - name: INSTANCE
+              value: "{{ .Values.user.zone | toString | regexFind "^[^.]+" | default "default" }}"
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host }}
+            - name: REDIS_PASSWORD
+              value: {{ .Values.redis.password }}
+            - name: REDIS_PORT
+              value: "{{ .Values.redis.port }}"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "chain-client-status-report-eth"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: CHAIN_ID
+              value: "1"
+            - name: MONITOR_NAME
+              value: chain-client-evm-eth-60-monitor
+            - name: SENDER_RPC_URL
+              value: "https://ethereum-rpc.publicnode.com"
+            - name: MONGODB_HOST
+              value: {{ .Values.mongodb.host }}
+            - name: MONGODB_ACCOUNT
+              value: {{ .Values.mongodb.username }}
+            - name: MONGODB_PASSWORD
+              value: {{ .Values.mongodb.password }}
+            - name: MONGODB_PORT
+              value: "{{ .Values.mongodb.port }}"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: MONGODB_AUTH_SOURCE
+              value: {{ .Values.mongodb.databases.lp_store }}
+            - name: SENDER_SERVICE_PORT
+              value: "3004"
+            - name: SYSTEM_CHAIN_ID
+              value: "60"
+            - name: RELAY_WALLET
+              value: "false"
+            - name: TX_TIMEOUT
+              value: "30000"
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: OBRIDGE_CONTRACT
+              value: "0x6F12FED6Cd5BeBFA3351c447f7873B76178B1b84"
+            - name: OBRIDGE_SWAP_CONTRACT
+              value: "0x0D8fBda3509E72f39b272Df8f25d1490ef7bcD61"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 400m
+              memory: 500Mi
+
+        # Nginx proxy container
+        - name: nginx-proxy
+          image: nginx:1.25.3
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          resources:
+            requests:
+              cpu: 100m
+              memory: 56Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: chain-client-evm-eth-server-60-nginx-conf
+---
+# Inline ConfigMap definition
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chain-client-evm-eth-server-60-nginx-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  1;
+
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                         '$status $body_bytes_sent "$http_referer" '
+                         '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        server {
+            listen 80;
+
+            # Message Producer endpoints
+            location ~ ^/producer/getNextEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/producer/getLatestEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # RPC endpoint
+            location ~ ^/rpc {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Public Service endpoints
+            location ~ ^/evm-client-[0-9]+/lpnode/get_wallets {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/evm-client-[0-9]+/lpnode/get_wallet_balances {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender endpoints
+            location = /submitTokenTransfer {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ "/queryJobStatus/[a-f0-9]+" {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender lpnode endpoints
+            location ~ ^/evm-client-[0-9]+/lpnode/(transfer_in|confirm|refund|sign_message_712|single_chain/sign_message_712|single_swap/confirm_swap) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender relay endpoints
+            location ~ ^/evm-client-[0-9]+/relay/(get_hashlock|get_system_fee|get_signer_from_eip712) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender relay behalf endpoints
+            location ~ ^/evm-client-[0-9]+/relay/behalf/(confirm_out|confirm_in|refund_out|refund_in) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Default fallback route
+            location / {
+                return 404;
+            }
+        }
+    }

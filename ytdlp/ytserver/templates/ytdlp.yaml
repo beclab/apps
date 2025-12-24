@@ -1,0 +1,154 @@
+﻿apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ytdlp-cluster-account
+  namespace:  {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ytdlp-cluster-role
+rules:
+- apiGroups: 
+    - '*'            
+  resources: 
+    - statefulsets
+    - daemonsets
+    - namespaces   
+    - serviceaccounts/token
+  verbs: 
+    - '*'
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ytdlp-cluster-binding
+subjects:
+- kind: ServiceAccount
+  name: ytdlp-cluster-account
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: ytdlp-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ytdlp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: ytdlp
+    applications.app.bytetrade.io/author: bytetrade.io
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ytdlp
+  template:
+    metadata:
+      labels:
+        app: ytdlp
+    spec:
+      serviceAccountName: ytdlp-cluster-account
+      serviceAccount: ytdlp-cluster-account
+      securityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+
+      initContainers:
+      - name: init-data
+        image: "beclab/aboveos-busybox:1.37.0"
+        securityContext:
+          privileged: true
+          runAsNonRoot: false
+          runAsUser: 0
+        volumeMounts:
+        - name: config-dir
+          mountPath: /config
+        - name: download-dir
+          mountPath: /downloads
+        command:
+        - sh
+        - -c
+        - |
+          chown -R 1000:1000 /config && \
+          chown -R 1000:1000 /downloads
+      containers:
+      - name: yt-dlp
+        image: "beclab/ytdlp-server:v0.1.15"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsUser: 1000
+
+        ports:
+        - containerPort: 3082
+        env:
+        - name: DEBUG
+          value: "false"
+        - name: DOWNLOAD_SERVER_URL
+          value: http://download-provider-svc.os-framework:28080/
+        volumeMounts:
+        - name: config-dir
+          mountPath: /app/config
+        - name: download-dir
+          mountPath: /app/downloads
+        resources:
+          requests:
+            cpu: 20m
+            memory: 50Mi
+          limits:
+            cpu: "1"
+            memory: 300Mi
+
+      volumes:
+      - name: config-dir
+        hostPath: 
+          type: DirectoryOrCreate
+          path: '{{ .Values.rootPath }}/userdata/Cache/download'
+      - name: download-dir
+        hostPath:
+          type: DirectoryOrCreate
+          path: '{{ .Values.rootPath }}/rootfs/userspace'
+          
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: ytdlp-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: ytdlp
+  ports:
+    - name: ytdlp-server
+      protocol: TCP
+      port: 3082
+      targetPort: 3082
+      
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: ytdlp
+  name: sharedentrances-ytdlp
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "3082"
+      port: 80
+      targetPort: 3082
+  selector:
+    io.kompose.service: ytdlp
+status:
+  loadBalancer: {}

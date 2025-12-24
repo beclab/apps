@@ -1,0 +1,140 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adguardhome
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: adguardhome
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: adguardhome
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: adguardhome
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      containers:
+        - name: adguardhome
+          image: docker.io/beclab/harveyff-adguardhome:v0.107.69
+          args:
+            - --web-addr
+            - 0.0.0.0:80
+            - --config
+            - /opt/adguardhome/conf/AdGuardHome.yaml
+            - --no-check-update
+          ports:
+            - name: 53-tcp
+              containerPort: 53
+              protocol: TCP
+            - name: 53-udp
+              containerPort: 53
+              protocol: UDP
+            - name: 80-tcp
+              containerPort: 80
+              protocol: TCP
+            - name: 443-tcp
+              containerPort: 443
+              protocol: TCP
+            - name: 853-tcp
+              containerPort: 853
+              protocol: TCP
+            - name: 853-udp
+              containerPort: 853
+              protocol: UDP
+            - name: 3000-tcp
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources: 
+            limits:
+              memory: 1Gi
+              cpu: "2"
+            requests:
+              memory: 100Mi
+              cpu: 200m
+          volumeMounts:
+            - name: data
+              mountPath: /opt/adguardhome/data
+            - name: work
+              mountPath: /opt/adguardhome/work
+            - name: conf
+              mountPath: /opt/adguardhome/conf
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+        - name: work
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/work"
+            type: DirectoryOrCreate
+        - name: conf
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/conf"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguardhome-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: adguardhome
+spec:
+  selector:
+    io.kompose.service: adguardhome
+  ports:
+    - name: http-ui
+      protocol: TCP
+      port: 80
+      targetPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguardhome-53-tcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: adguardhome
+spec:
+  selector:
+    io.kompose.service: adguardhome
+  ports:
+    - name: adguardhome-53-tcp
+      protocol: TCP
+      port: 30053
+      targetPort: 53
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adguardhome-53-udp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: adguardhome
+spec:
+  selector:
+    io.kompose.service: adguardhome
+  ports:
+    - name: adguardhome-53-udp
+      protocol: UDP
+      port: 30054
+      targetPort: 53
