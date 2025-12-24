@@ -1,0 +1,69 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+apiVersion: v1
+data:
+  squid.conf.template: |-
+    # 基本 ACL 定义
+    acl localnet src 10.0.0.0/8
+    acl localnet src 172.16.0.0/12
+    acl localnet src 192.168.0.0/16
+    acl localnet src fc00::/7
+    acl localnet src fe80::/10
+    
+    # 端口定义
+    acl SSL_ports port 443
+    acl SSL_ports port 1025-65535
+    acl Safe_ports port 80
+    acl Safe_ports port 21
+    acl Safe_ports port 443
+    acl Safe_ports port 70
+    acl Safe_ports port 210
+    acl Safe_ports port 1025-65535
+    acl Safe_ports port 280
+    acl Safe_ports port 488
+    acl Safe_ports port 591
+    acl Safe_ports port 777
+    
+    # CONNECT方法和允许域名
+    acl CONNECT method CONNECT
+    acl allowed_domains dstdomain .marketplace.dify.ai .api.openai.com .langchain.com
+    
+    # 访问控制规则
+    http_access allow allowed_domains
+    http_access deny !Safe_ports
+    http_access deny CONNECT !SSL_ports
+    http_access allow localhost manager
+    http_access deny manager
+    http_access allow localhost
+    http_access deny all
+    
+    # 代理服务器配置
+    http_port ${HTTP_PORT}
+    
+    # 图标目录
+    icon_directory /usr/share/squid/icons
+    
+    # 缓存设置
+    coredump_dir ${COREDUMP_DIR}
+    cache_mem 64 MB
+    maximum_object_size_in_memory 256 KB
+    
+    # 刷新模式
+    refresh_pattern ^ftp:           1440    20%     10080
+    refresh_pattern ^gopher:        1440    0%      1440
+    refresh_pattern -i (/cgi-bin/|\?) 0     0%      0
+    refresh_pattern .              0       20%     4320
+    
+    # 反向代理配置
+    http_port ${REVERSE_PROXY_PORT} accel vhost
+    cache_peer ${SANDBOX_HOST} parent ${SANDBOX_PORT} 0 no-query originserver
+    acl src_all src all
+    http_access allow src_all
+kind: ConfigMap
+metadata:
+  annotations:
+    use-subpath: "true"
+  labels:
+    io.kompose.service: ssrf-proxy
+  name: ssrf-proxy-cm0
+  namespace: {{ .Release.Namespace }}
+{{- end }}

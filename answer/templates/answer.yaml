@@ -1,0 +1,105 @@
+﻿{{- $answerDomainENV := split  ","  .Values.domain.answer -}}
+{{- $answerDomain := index $answerDomainENV "_0" -}}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: answer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: answer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: answer
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: answer
+    spec:
+      containers:
+        - name: answer
+          image: "docker.io/beclab/apache-answer:1.7.1"
+          env:
+            - name: INSTALL_PORT
+              value: "80"
+            - name: AUTO_INSTALL
+              value: "true"
+            - name: DB_TYPE
+              value: "postgres"
+            - name: DB_USERNAME
+              value: {{ .Values.postgres.username }}
+            - name: DB_PASSWORD
+              value: {{ .Values.postgres.password }}
+            - name: DB_HOST
+              value: {{ .Values.postgres.host }}
+            - name: DB_NAME
+              value: {{ .Values.postgres.databases.answerdb }}
+            - name: LANGUAGE
+              value: en-US
+            - name: SITE_NAME
+              value: Apache Answer
+            - name: SITE_URL
+              value: 'https://{{ $answerDomain }}'
+            - name: CONTACT_EMAIL
+              value: {{ .Values.olaresEnv.CONTACT_EMAIL }}
+            - name: ADMIN_NAME
+              value: {{ .Values.olaresEnv.ADMIN_NAME }}
+            - name: ADMIN_PASSWORD
+              value: {{ .Values.olaresEnv.ADMIN_PASSWORD }}
+            - name: ADMIN_EMAIL
+              value: {{ .Values.olaresEnv.ADMIN_EMAIL }}
+            - name: EXTERNAL_CONTENT_DISPLAY
+              value: always_display
+            - name: LOG_LEVEL
+              value: INFO
+            - name: LOG_PATH
+              value: /data/log
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: answer-data
+              mountPath: /data
+      restartPolicy: Always
+      volumes:
+        - name: answer-data
+          hostPath:
+            type: DirectoryOrCreate
+                  {{- if .Values.sysVersion }}
+                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                    {{- else }}
+            path: '{{ .Values.userspace.appCache }}/answer'
+                    {{- end }}
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/answer'
+                  {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: answer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: answer
+spec:
+  ports:
+    - protocol: TCP
+      port: 9080
+      targetPort: 80
+  selector:
+    io.kompose.service: answer
+status:
+  loadBalancer: {}

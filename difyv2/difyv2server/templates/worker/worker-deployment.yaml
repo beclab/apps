@@ -1,0 +1,57 @@
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: worker
+  name: worker
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: worker
+    spec:
+      containers:
+        - name: worker
+          image: "docker.io/beclab/langgenius-dify-api:1.11.1"
+          envFrom:
+            - configMapRef:
+                name: dify-api-env
+          ports:
+            - containerPort: 5001
+              name: http
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /app/api/storage
+              name: worker-claim0
+          command: ["/bin/bash", "-c", "sleep 30 && /entrypoint.sh"]
+      restartPolicy: Always
+      volumes:
+        - name: worker-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/volumes/app/storage
+        - name: redis-extension
+          configMap:
+            name: dify-redis-extension
+{{- end }}
