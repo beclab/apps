@@ -1,0 +1,82 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseekocrwebuiv2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv2
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepseekocrwebuiv2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deepseekocrwebuiv2
+    spec:
+      containers:
+        - name: deepseekocrwebuiv2
+          image: "docker.io/beclab/harveyff-deepseekocr-webui:v1.0.8"
+          ports:
+            - containerPort: 8001
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: GPU_IDLE_TIMEOUT
+              value: "60"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: SHM_SIZE
+              value: 8G
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 32Gi
+          volumeMounts:
+            - name: models
+              mountPath: /root/.cache/huggingface
+            - name: logs
+              mountPath: /app/log
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/logs"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseekocrwebuiv2-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deepseekocrwebuiv2
+  ports:
+    - name: api
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP
