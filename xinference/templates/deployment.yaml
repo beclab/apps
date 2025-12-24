@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   creationTimestamp: null
@@ -22,9 +22,9 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: xinference
     spec:
-      initContainers:
+      # initContainers:
       # - name: init-chmod-data
-      #   image: 'docker.io/aboveos/busybox:latest'
+      #   image: 'docker.io/beclab/aboveos-busybox:1.37.0'
       #   command:
       #     - sh
       #     - '-c'
@@ -41,7 +41,7 @@ spec:
       #     runAsUser: 0
       containers:
       - name: xinference
-        image: 'xprobe/xinference:v1.2.1'
+        image: "docker.io/beclab/xprobe-xinference:v1.13.0-cu128"
         command: ["sh", "-c", "unset LD_PRELOAD;xinference-local -H 0.0.0.0 --log-level debug"]
         args:
           - xinference-local
@@ -59,6 +59,8 @@ spec:
             value: modelscope
           - name: VLLM_PORT
             value: "8000"
+          - name: HF_ENDPOINT
+            value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
         resources:
           limits:
             cpu: "5"
@@ -89,29 +91,18 @@ spec:
       #     value: 'https://hf-mirror.com/'
       #   - name: VLLM_PORT
       #     value: "8000"
-      #   image: vllm/vllm-openai:latest
-      #   securityContext:
-      #     runAsUser: 0
-      #   command: ["sh", "-c", "unset LD_PRELOAD;python3 -m vllm.entrypoints.openai.api_server --trust-remote-code --chat-template=/vllm-workspace/examples/template_chatml.jinja;"]
-      #   name: vllm
-      #   ports:
-      #   - containerPort: 8000
-      #   resources:
-      #     limits:
-      #       cpu: "5"
-      #       memory: 20Gi
-      #     requests:
-      #       cpu: "1"
-      #       memory: 2Gi
-      #   volumeMounts:
-      #   - mountPath: /root/.cache/huggingface
-      #     name: data
-      #   - name: shm
-      #     mountPath: /dev/shm
       restartPolicy: Always
       volumes:
       - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appCache }}'
+            {{- else }}
           path: '{{ .Values.userspace.appCache }}/xinference'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appCache }}/xinference'
+          {{- end }}
           type: DirectoryOrCreate
         name: data
       - name: shm
@@ -140,27 +131,3 @@ spec:
     io.kompose.service: xinference
 status:
   loadBalancer: {}
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_xinference
-  deployment: xinference
-  description: xinference legacy api
-  endpoint: xinference.{{ .Release.Namespace }}:8000
-  group: api.xinference
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active
-  {{- end }}
-{{- end }}
