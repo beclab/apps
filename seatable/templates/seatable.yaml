@@ -1,4 +1,4 @@
-{{- $seatableDomainENV := split "," .Values.domain.seatable -}}
+﻿{{- $seatableDomainENV := split "," .Values.domain.seatable -}}
 {{- $seatableDomain := index $seatableDomainENV "_0" -}}
 {{- $localDomain := $seatableDomain -}}
 ---
@@ -24,19 +24,19 @@ spec:
     spec:
       initContainers:
         - name: init-db-check
-          image: busybox
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - -c
             - until nc -z seatable-mysql 3306; do echo Waiting for MariaDB...; sleep 2; done;
         - name: init-redis-check
-          image: busybox
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - -c
             - until nc -z redis 6379; do echo "Waiting for Redis..."; sleep 2; done;
         - name: copy-license-if-absent
-          image: busybox
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - -c
@@ -53,7 +53,7 @@ spec:
               readOnly: true
       containers:
         - name: seatable
-          image: docker.io/seatable/seatable-enterprise:5.2.7
+          image: "docker.io/beclab/seatable-seatable-enterprise:5.2.7"
           ports:
             - containerPort: 80
           env:
@@ -82,7 +82,15 @@ spec:
         - name: seatable-data
           hostPath:
             type: DirectoryOrCreate
-            path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data"
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/opt/seatable/seatable-data'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
+            {{- end }}
         - name: seatable-license-cm
           configMap:
             name: seatable-config

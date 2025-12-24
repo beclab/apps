@@ -18,8 +18,6 @@ spec:
       labels:
         app: homebox
     spec:
-      securityContext:
-        runAsUser: 0
       containers:
         - image: aboveos/aby913-homebox:1.0.0
           name: homebox
@@ -35,6 +33,8 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: data
+            - mountPath: /.cache
+              name: cache
           env:
             - name: PGID
               value: "1000"
@@ -67,10 +67,30 @@ spec:
             - name: HBOX_OPTIONS_ALLOW_ANALYTICS
               value: "false"
       volumes:
+        - name: cache
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appCache }}"
+              {{- else }}
+            path: "{{ .Values.userspace.appCache }}/homebox"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appCache }}/homebox"
+            {{- end }}
         - name: data
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}"
+              {{- else }}
             path: "{{ .Values.userspace.appData }}/homebox"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/homebox"
+            {{- end }}
       restartPolicy: Always
 
 ---

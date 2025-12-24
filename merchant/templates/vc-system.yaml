@@ -1,0 +1,399 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-vc-gate-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.json: |
+    {
+        "issuer_id": "did:key:z6MktdEpjYpYocHibuZqMsjXmaVusyUHckMnkzM3xUCxpfa4",
+        "didName": "magicCow",
+        "issuer_privatekey": ""
+    }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-vc-gate-state-pvc
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-vc-gate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: vc-gate
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vc-gate
+  template:
+    metadata:
+      labels:
+        app: vc-gate
+    spec:
+      containers:
+      - name: vc-gate
+        image: aboveos/vc-gate:v3.4.13
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi      
+        ports:
+        - containerPort: 6004
+          protocol: TCP
+        env:
+        - name: SSI_SERVICE_URL
+          value: "http://merchant-ssi-svc:6003"
+        - name: SERVER_DID_GATE
+        {{- if hasSuffix ".cn" .Values.user.zone }}
+          value: "https://api.olares.cn/did"
+        {{- else }}
+          value: "https://api.olares.com/did"
+        {{- end }}
+        - name: ENVIRONMENT
+          value: "pro"
+        - name: NODE_ENV
+          value: "production"
+        - name: "NAME_BLACK_LIST"
+          value: "olares"
+        - name: "OLARES_DOMAIN"
+        {{- if hasSuffix ".cn" .Values.user.zone }}
+          value: "olares.cn"
+        {{- else }}
+          value: "olares.com"
+        {{- end }}
+        volumeMounts:
+        - name: vc-gate-config
+          mountPath: /app/dist/config.json
+          subPath: config.json
+          readOnly: true
+        - name: vc-gate-state
+          mountPath: /app/state
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: vc-gate-config
+        configMap:
+          name: {{ .Release.Name }}-vc-gate-config
+      - name: vc-gate-state
+        persistentVolumeClaim:
+          claimName: {{ .Release.Name }}-vc-gate-state-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-vc-gate-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: vc-gate
+  ports:
+    - name: vc-gate-port
+      port: 6004            
+      targetPort: 4001       
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-ssi-config
+  namespace: {{ .Release.Namespace }}
+data:
+  dev.toml: |
+    title = "SSI Service Config"
+    
+    svn = "0.0.1"
+    desc = "Dev configuration to be used while running the service for testing as a single go process."
+    
+    # http service configuration
+    [server]
+    env = "dev" # either 'dev', 'test', or 'prod'
+    api_host = "0.0.0.0:6003"
+    
+    jager_enabled = false
+    
+    # 5 seconds, time is in nanoseconds
+    read_timeout = 5000000000
+    write_timeout = 5000000000
+    shutdown_timeout = 5000000000
+    
+    log_location = ""
+    # options: trace, debug, info, warn, error, fatal, panic
+    log_level = "trace"
+    
+    enable_schema_caching = true
+    enable_allow_all_cors = true
+    
+    # Storage Configuration
+    [services]
+    service_endpoint = "http://localhost:6003"
+    
+    # use pg as storage
+    storage = "database_sql"
+    
+    [services.storage_encryption]
+    # encryption
+    disable_encryption = true
+    
+    [[services.storage_option]]
+    id = "sql-connection-string-option"
+    option = "host={{ .Values.postgres.host }} port={{ .Values.postgres.port }} user={{ .Values.postgres.username }} password={{ .Values.postgres.password }} dbname={{ .Values.postgres.databases.merchant }} sslmode=disable"
+    
+    [[services.storage_option]]
+    id = "sql-driver-name-option"
+    option = "postgres"
+    
+    # per-service configuration
+    [services.keystore]
+    name = "keystore"
+    
+    [services.did]
+    name = "did"
+    methods = ["key", "web"]
+    #local_resolution_methods = ["key", "web", "pkh", "peer"]
+    local_resolution_methods = []
+    batch_create_max_items = 100
+    #universal_resolver_url = "https://dev.uniresolver.io/"
+    #universal_resolver_methods = ["ion"]
+    universal_resolver_url = "https://api.olares.com/did"
+    universal_resolver_methods = ["key"]
+    
+    
+    [services.schema]
+    name = "schema"
+    
+    [services.credential]
+    name = "credential"
+    batch_create_max_items = 100
+    
+    [services.issuance]
+    name = "issuance"
+    
+    [services.manifest]
+    name = "manifest"
+    
+    [services.presentation]
+    name = "presentation"
+    
+    [services.webhook]
+    name = "webhook"
+    webhook_timeout = "10s"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ssi
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-ssi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: merchant-ssi
+  template:
+    metadata:
+      labels:
+        app: merchant-ssi
+    spec:
+      containers:
+      - name: merchant-ssi
+        image: aboveos/ssi-service:v3.4.13
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi      
+        ports:
+        - containerPort: 6003
+          protocol: TCP
+        env:
+        - name: USE_DETERMINISTIC_ID
+          value: "true"
+        volumeMounts:
+        - name: ssi-config
+          mountPath: /app/config
+          readOnly: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: ssi-config
+        configMap:
+          name: {{ .Release.Name }}-ssi-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ssi-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: merchant-ssi
+  ports:
+    - name: ssi-port
+      port: 6003            
+      targetPort: 6003       
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-vc-gate-admin-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.json: |
+    {
+        "issuer_id": "did:key:z6MktdEpjYpYocHibuZqMsjXmaVusyUHckMnkzM3xUCxpfa4",
+        "didName": "magicCow",
+        "issuer_privatekey": ""
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-vc-gate-admin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: vc-gate-admin
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vc-gate-admin
+  template:
+    metadata:
+      labels:
+        app: vc-gate-admin
+    spec:
+      containers:
+      - name: vc-gate-admin
+        image: aboveos/vc-gate-admin:v3.4.13
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi      
+        ports:
+        - containerPort: 6006
+          protocol: TCP
+        env:
+        - name: SSI_SERVICE_URL
+          value: "http://merchant-ssi-svc:6003"
+        - name: SERVER_DID_GATE
+        {{- if hasSuffix ".cn" .Values.user.zone }}
+          value: "https://api.olares.cn/did"
+        {{- else }}
+          value: "https://api.olares.com/did"
+        {{- end }}
+        - name: ENVIRONMENT
+          value: "pro"
+        - name: NODE_ENV
+          value: "production"
+        - name: "NAME_BLACK_LIST"
+          value: "olares"
+        - name: "INIT_SCHEMA"
+          value: "true"
+        - name: PG_HOST
+          value: "{{ .Values.postgres.host }}"
+        - name: PG_PORT
+          value: "{{ .Values.postgres.port }}"
+        - name: PG_USER
+          value: "{{ .Values.postgres.username }}"
+        - name: PG_PASSWORD
+          value: "{{ .Values.postgres.password }}"
+        - name: PG_DB
+          value: "{{ .Values.postgres.databases.merchant }}"
+        volumeMounts:
+        - name: vc-gate-admin-config
+          mountPath: /app/dist/config.json
+          subPath: config.json
+          readOnly: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: vc-gate-admin-config
+        configMap:
+          name: {{ .Release.Name }}-vc-gate-admin-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-vc-gate-admin-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: vc-gate-admin
+  ports:
+    - name: vc-gate-admin-port
+      port: 6006
+      targetPort: 4002
+      protocol: TCP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pg-client
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-pg-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: merchant-pg-client
+  template:
+    metadata:
+      labels:
+        app: merchant-pg-client
+    spec:
+      containers:
+      - name: pg-client
+        image: postgres:15-alpine
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
+        env:
+        - name: PGHOST
+          value: "{{ .Values.postgres.host }}"
+        - name: PGPORT
+          value: "{{ .Values.postgres.port }}"
+        - name: PGUSER
+          value: "{{ .Values.postgres.username }}"
+        - name: PGPASSWORD
+          value: "{{ .Values.postgres.password }}"
+        - name: PGDATABASE
+          value: "{{ .Values.postgres.databases.merchant }}"
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do sleep 3600; done"]
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent

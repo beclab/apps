@@ -1,4 +1,4 @@
----
+﻿---
 apiVersion: v1
 kind: Service
 metadata:
@@ -26,7 +26,7 @@ kind: Deployment
 metadata:
   labels:
     name: windows
-  name: windows
+  name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
@@ -41,54 +41,62 @@ spec:
         name: windows
     spec:
       containers:
-      - name: windows
-        image: docker.io/beclab/dockur-windows:5.14
-        envFrom:
-          - configMapRef:
-              name: windows-config
-        env:
-        - name: VERSION
-          value: "$(CDN_HOST)/iso/Win11_24H2_English_x64.iso"
-        - name: RAM_SIZE
-          value: "4G"
-        - name: CPU_CORES
-          value: "4"
-        - name: DISK_SIZE
-          value: "128G"
-        - name: USERNAME
-          value: {{ .Values.olaresEnv.WINDOWS_USERNAME }}
-        - name: PASSWORD
-          value: {{ .Values.olaresEnv.WINDOWS_PASSWORD }}
-        ports:
-        - containerPort: 8006
-        - containerPort: 3389
-        - containerPort: 3389
-          protocol: UDP
-        securityContext:
-          capabilities:
-            add:
-            - NET_ADMIN
-          privileged: true
-        volumeMounts:
-          - mountPath: /storage
-            name: storage
-          - mountPath: /dev/kvm
-            name: dev-kvm
-          - mountPath: /dev/net/tun
-            name: dev-tun
-          - mountPath: /dev/dri
-            name: dev-dri
-        resources:
-          requests:
-            cpu: 4000m
-            memory: 6Gi
-          limits:
-            cpu: 12000m
-            memory: 24Gi
+        - name: windows
+          image: "beclab/dockurr-windows:igpu1"
+          envFrom:
+            - configMapRef:
+                name: windows-config
+          env:
+            - name: VERSION
+              value: "$(CDN_HOST)/{{ .Values.olaresEnv.VERSION }}"
+            - name: RAM_SIZE
+              value: "{{ .Values.olaresEnv.RAM_SIZE }}"
+            - name: CPU_CORES
+              value: "{{ .Values.olaresEnv.CPU_CORES }}"
+            - name: DISK_SIZE
+              value: "{{ .Values.olaresEnv.DISK_SIZE }}"
+            - name: USERNAME
+              value: "{{ .Values.olaresEnv.USERNAME }}"
+            - name: PASSWORD
+              value: "{{ .Values.olaresEnv.PASSWORD }}"
+        {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+            - name: GPU
+              value: "Y"
+            - name: VGA
+              value: 'vfio-pci,host=0000:00:02.1,multifunction=on,x-vga=on -vga virtio'
+            - name: RENDERNODE
+              value: /dev/dri/renderD129
+        {{- end }}
+          ports:
+            - containerPort: 8006
+            - containerPort: 3389
+            - containerPort: 3389
+              protocol: UDP
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+            privileged: true
+          volumeMounts:
+            - mountPath: /storage
+              name: storage
+            - mountPath: /dev/kvm
+              name: dev-kvm
+            - mountPath: /dev/net/tun
+              name: dev-tun
+            - mountPath: /dev/dri
+              name: dev-dri
+          resources:
+            requests:
+              cpu: 4000m
+              memory: 6Gi
+            limits:
+              cpu: 12000m
+              memory: 24Gi
       terminationGracePeriodSeconds: 300
       volumes:
         - hostPath:
-            path: '{{ .Values.userspace.appCache }}/windows'
+            path: '{{ .Values.userspace.appCache }}'
             type: DirectoryOrCreate
           name: storage
         - hostPath:
