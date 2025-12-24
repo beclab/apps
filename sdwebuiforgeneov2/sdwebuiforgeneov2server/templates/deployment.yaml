@@ -1,0 +1,241 @@
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sdwebuiforgeneo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: sdwebuiforgeneo
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sdwebuiforgeneo
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: sdwebuiforgeneo
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - chown -R 1000:1000 /app-cache-root
+          volumeMounts:
+            - name: appcache
+              mountPath: /app-cache-root
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: update-chmod-data-ai
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - chown -R 1000:1000 /ai
+          volumeMounts:
+            - name: ai
+              mountPath: /ai
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: sdwebuiforgeneo
+          image: "docker.io/beclab/sdwebui-forge-neo:2.5"
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: 4000m
+              memory: 24Gi
+          ports:
+            - containerPort: 7860
+            - containerPort: 7861
+            - containerPort: 7862
+            - containerPort: 7863
+            - containerPort: 7864
+            - containerPort: 7865
+          env:
+            - name: COMMANDLINE_ARGS
+              value: >-
+                --api --listen --port 7860 --fast-fp16 --sage2-function
+                fp16_cuda --sage-quant-gran per_warp --sage-accum-dtype
+                fp16+fp32
+            - name: MODEL_REF
+              value: /stable-diffusion-webui/models
+            - name: PGID
+              value: '0'
+            - name: PUID
+              value: '0'
+          volumeMounts:
+            - name: systemcache
+              mountPath: /root
+            - name: app
+              mountPath: /stable-diffusion-webui
+            - name: modellibckp
+              mountPath: /stable-diffusion-webui/models/Stable-diffusion/public
+            - name: modelliblora
+              mountPath: /stable-diffusion-webui/models/Lora/public
+            - name: modellibvae
+              mountPath: /stable-diffusion-webui/models/VAE/public
+            - name: modellicontrolnet
+              mountPath: /stable-diffusion-webui/models/ControlNet/public
+            - name: modellibclip
+              mountPath: /stable-diffusion-webui/models/CLIP/public
+            - name: modellibclipvision
+              mountPath: /stable-diffusion-webui/models/clip_vision/public
+            - name: modellibinpaint
+              mountPath: /stable-diffusion-webui/models/Inpaint/public
+            - name: modellibupscale
+              mountPath: /stable-diffusion-webui/models/ESRGAN/public
+            - name: modellibipadapter
+              mountPath: /stable-diffusion-webui/models/ipadapter/public
+            - name: modellibunet
+              mountPath: /stable-diffusion-webui/models/unet/public
+            - name: modellibembeddings
+              mountPath: /stable-diffusion-webui/embeddings/public
+            - name: modellibhypernetworks
+              mountPath: /stable-diffusion-webui/models/hypernetworks/public
+            - name: modellibtextencoder
+              mountPath: /stable-diffusion-webui/models/text_encoder/public
+            - name: modellibtextencoder
+              mountPath: /stable-diffusion-webui/models/CLIP/link_text_encoder
+            - name: modellibclip
+              mountPath: /stable-diffusion-webui/models/text_encoder/link_clip
+            - name: output
+              mountPath: /stable-diffusion-webui/outputs
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: appcache
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}
+        - name: app
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/app
+        - name: systemcache
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/system-cache
+        - name: ai
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai
+        - name: modellibckp
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/main
+        - name: modelliblora
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/lora
+        - name: modellibvae
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/vae
+        - name: modellibclip
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/clip
+        - name: modellibclipvision
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/clip_vision
+        - name: modellicontrolnet
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/controlnet
+        - name: modellibinpaint
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/inpaint
+        - name: modellibupscale
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/upscale_models
+        - name: modellibipadapter
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/ipadapter
+        - name: modellibunet
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/unet
+        - name: modellibembeddings
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/embeddings
+        - name: modellibhypernetworks
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/hypernetworks
+        - name: modellibtextencoder
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model/text_encoders
+        - name: output
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/output/sd-webui-forge-neo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sdwebuiforgeneov2
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: sdwebuiforgeneo
+  ports:
+    - name: '7860'
+      protocol: TCP
+      port: 7860
+      targetPort: 7860
+    - name: '7861'
+      protocol: TCP
+      port: 7861
+      targetPort: 7861
+    - name: '7862'
+      protocol: TCP
+      port: 7862
+      targetPort: 7862
+    - name: '7863'
+      protocol: TCP
+      port: 7863
+      targetPort: 7863
+    - name: '7864'
+      protocol: TCP
+      port: 7864
+      targetPort: 7864
+    - name: '7865'
+      protocol: TCP
+      port: 7865
+      targetPort: 7865
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: sdwebuiforgeneo
+  ports:
+    - name: '7860'
+      protocol: TCP
+      port: 80
+      targetPort: 7860
+{{- end }}

@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: elasticsearch
@@ -17,7 +17,7 @@ spec:
     spec:
       initContainers:
         - name: init-chmod-data
-          image: docker.io/aboveos/busybox:1.37.0
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - -c
@@ -33,7 +33,7 @@ spec:
             runAsUser: 0
       containers:
         - name: elasticsearch
-          image: aboveos/elasticsearch-elasticsearch:8.11.3
+          image: "docker.io/beclab/elasticsearch-elasticsearch:8.11.3"
           env:
             - name: ELASTIC_PASSWORD
               value: infini_rag_flow
@@ -74,14 +74,30 @@ spec:
             - name: esdata
               mountPath: /usr/share/elasticsearch/data
       volumes:
-        - name: appcache
-          hostPath:
-            path: "{{ .Values.userspace.appCache }}/ragflow"
-            type: DirectoryOrCreate
-        - name: esdata
-          hostPath:
-            path: "{{ .Values.userspace.appCache }}/ragflow/es"
-            type: DirectoryOrCreate
+      - name: appcache  
+        hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appCache }}'
+            {{- else }}
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          {{- end }}
+          type: DirectoryOrCreate
+      - name: esdata
+        hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appCache }}/es'
+            {{- else }}
+          path: '{{ .Values.userspace.appCache }}/ragflow/es'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appCache }}/ragflow/es'
+          {{- end }}
+          type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
