@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mongo
@@ -21,7 +21,7 @@ spec:
         fsGroup: 999
       initContainers:
         - name: mongo-init
-          image: alpine:3.18
+          image: "docker.io/beclab/alpine:3.18"
           securityContext:
             runAsUser: 0
           command:
@@ -29,7 +29,7 @@ spec:
             - "-c"
             - |
               apk add --no-cache openssl
-              openssl rand -base64 128 > /data/db/keyfile
+              openssl rand -base64 128 > -data/db/keyfile
               chmod 400 /data/db/keyfile
               chown -R 999:999 /data/db
               echo "ownership fixed"
@@ -41,14 +41,14 @@ spec:
 
       containers:
         - name: mongo
-          image: mongo:5.0.18
+          image: "docker.io/beclab/mongo:5.0.18"
           command:
             - "bash"
             - "-c"
             - |
               POD_FQDN="localhost"
 
-              /usr/local/bin/docker-entrypoint.sh mongod \
+              -usr/local/bin/docker-entrypoint.sh mongod \
                 --keyFile /data/db/keyfile \
                 --replSet rs0 \
                 --bind_ip_all \
@@ -124,7 +124,15 @@ spec:
       volumes:
         - name: mongo-storage
           hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/mongo-storage"
+              {{- else }}
             path: "{{ .Values.userspace.appData }}/fastgpt/mongo-storage"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/fastgpt/mongo-storage"
+            {{- end }}
             type: DirectoryOrCreate
 
 ---
