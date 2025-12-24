@@ -1,0 +1,158 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: indextts
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: indextts
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: indextts
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: indextts
+    spec:
+      containers:
+        - name: indextts
+          image: "docker.io/beclab/harveyff-indextts:v0.0.1"
+          ports:
+            - containerPort: 7860
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+          envFrom:
+            - configMapRef:
+                name: indextts-config
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="/app/checkpoints/.IndexTTS-2.done"
+              echo "[wait] Waiting for $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[wait] Detected $DONE_FILE, starting server."
+
+              echo "[start] Starting server..."
+              uv run webui.py --host 0.0.0.0 --port 7860
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 18Gi
+          volumeMounts:
+            - name: models
+              mountPath: /app/checkpoints
+            - name: outputs
+              mountPath: /app/outputs
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.1"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+          args:
+            - "--tasks"
+            - '{"tasks":[{"repo":"IndexTeam/IndexTTS-2","file":"","ref":"main","outDir":"/data/models","doneNameTpl":".IndexTTS-2.done"}]}'
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/gradio_api/info"
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: models
+              mountPath: /data/models
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: indextts-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: indextts
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
