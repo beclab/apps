@@ -1,0 +1,137 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-front
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-front
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: merchant-front
+  template:
+    metadata:
+      labels:
+        app: merchant-front
+    spec:
+      containers:
+      - name: merchant-front
+        image: docker.io/beclab/merchant-frontend:v0.4.9
+        resources:
+          requests:
+            cpu: 400m
+            memory: 400Mi
+          limits:
+            cpu: 500m
+            memory: 800Mi      
+        ports:
+        - containerPort: 9000
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: merchant
+  template:
+    metadata:
+      labels:
+        app: merchant
+    spec:
+      containers:
+      - name: merchant
+        image: docker.io/beclab/merchant-server:v0.4.9
+        env:
+        - name: BFL_DOMAIN
+          value: {{ .Values.user.zone }}
+        - name: DB_HOST
+          value: {{ .Values.postgres.host }}
+        - name: DB_PORT
+          value: "{{ .Values.postgres.port }}"
+        - name: DB_USER
+          value: {{ .Values.postgres.username }}
+        - name: DB_PASSWORD
+          value: {{ .Values.postgres.password }}
+        - name: DB_NAME
+          value: {{ .Values.postgres.databases.merchant }}
+        - name: DB_SSL
+          value: "false"
+        - name: GITBOT_API_HOST
+          value: "https://appstore-server-test.bttcdn.com/appstore-git-bot/v1"
+        - name: DID_GATE_HOST
+        {{- if hasSuffix ".cn" .Values.user.zone }}
+          value: "https://api.olares.cn/did"
+        {{- else }}
+          value: "https://api.olares.com/did"
+        {{- end }}
+        - name: MERCHANT_VC_GATE_HOST
+          value: "http://merchant-vc-gate-svc:6004"
+        - name: MERCHANT_VC_GATE_ADMIN_HOST
+          value: "http://merchant-vc-gate-admin-svc:6006"
+        - name: BLOCKCHAIN_PROXY_HOST
+        {{- if hasSuffix ".cn" .Values.user.zone }}
+          value: "https://api.olares.cn"
+        {{- else }}
+          value: "https://api.olares.com"
+        {{- end }}
+        - name: BLOCKCHAIN_PROXY_PATH
+          value: "/web3-rpc/multichain/"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi      
+        ports:
+        - containerPort: 6000
+          protocol: TCP
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-front-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: merchant-front
+  ports:
+    - name: frontend-port
+      port: 9000            
+      targetPort: 9000       
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: merchant
+  ports:
+    - name: webui-port
+      port: 6000            
+      targetPort: 6000       
+      protocol: TCP
+
