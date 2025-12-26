@@ -1,11 +1,14 @@
 ﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
 data:
   nginx.conf: |
-    
     http {
         server {
             listen 8001;
-        
+
             location = / {
                 rewrite ^ /_utils;
             }
@@ -20,12 +23,12 @@ data:
       # Your event-related configurations go here
     }
 
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
 data:
   init.sh: |
     #!/bin/bash
@@ -40,13 +43,12 @@ data:
       echo "$new_etc_dir is not an empty directory or does not exist"
     fi
 
-
-kind: ConfigMap
-metadata:
-  name: init-config
-  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: obsidian-config
+  namespace: {{ .Release.Namespace }}
 data:
   local.ini: |
     [admins]
@@ -74,10 +76,6 @@ data:
     headers = accept, authorization, content-type, origin, referer
     methods = GET, PUT, POST, HEAD, DELETE
     max_age = 3600
-kind: ConfigMap
-metadata:
-  name: obsidian-config
-  namespace: {{ .Release.Namespace }}
 
 ---
 apiVersion: apps/v1
@@ -100,114 +98,127 @@ spec:
         app: obsidian
     spec:
       initContainers:
-      - name: init-config
-        image: "docker.io/beclab/aboveos-couchdb:3.5.0"
-        command:
-          - sh
-          - '-c'
-          - |
-            chmod +x /init.sh & bash /init.sh
-        volumeMounts:
-        - mountPath: /opt/couchdb/etc/local.ini
-          name: obsidian-config
-          subPath: local.ini  
-        - mountPath: /new-etc
-          name: server-etc
-        - name: init-config 
-          mountPath: /init.sh
-          subPath: init.sh
-      - name: init-chmod-data
-        image: "docker.io/beclab/aboveos-busybox:1.37.0"
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /app-data-root
-        resources: {}
-        volumeMounts:
-          - name:  app-data-root
-            mountPath: /app-data-root
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
+        - name: init-config
+          image: "docker.io/beclab/couchdb:3.5.1"
+          command:
+            - sh
+            - '-c'
+            - |
+              chmod +x /init.sh && bash /init.sh
+          volumeMounts:
+            - mountPath: /opt/couchdb/etc/local.ini
+              name: obsidian-config
+              subPath: local.ini
+            - mountPath: /new-etc
+              name: server-etc
+            - name: init-config
+              mountPath: /init.sh
+              subPath: init.sh
+
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-data-root
+              chown -R 1000:1000 /nginx-cache
+              chown -R 1000:1000 /nginx-run
+          resources: {}
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+            - name: nginx-cache
+              mountPath: /nginx-cache
+            - name: nginx-run
+              mountPath: /nginx-run
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
       containers:
-      - name: nginx
-        image: "docker.io/beclab/aboveos-nginx:1.27.0"
-        volumeMounts:
-        - name: nginx-config 
-          mountPath: /etc/nginx/nginx.conf
-          subPath: nginx.conf
-        ports:
-        - containerPort: 8001
-        resources:
-          requests:
-            cpu: 10m
-            memory: 64Mi
-          limits:
-            cpu: "500m"
-            memory: 1Gi
-      - name: server
-        image: "docker.io/beclab/aboveos-couchdb:3.5.0"
-        resources:
-          requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: "4"
-            memory: 2Gi
-        ports:
-        - containerPort: 5984
-        volumeMounts:
-        - mountPath: /opt/couchdb/data
-          name: server-data
-        - mountPath: /opt/couchdb/etc
-          name: server-etc
-        command:
-        - tini
-        - --
-        - /opt/couchdb/bin/couchdb
-        # env:
-        # - name: COUCHDB_USER
-        #   value: admin 
-        # - name: COUCHDB_PASSWORD
-        #   value: password 
-        
+        - name: nginx
+          image: "docker.io/beclab/aboveos-nginx:1.27.0"
+          ports:
+            - containerPort: 8001
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - mountPath: /var/cache/nginx
+              name: nginx-cache
+            - mountPath: /var/run
+              name: nginx-run
+
+        - name: server
+          image: "docker.io/beclab/couchdb:3.5.1"
+          ports:
+            - containerPort: 5984
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /opt/couchdb/data
+              name: server-data
+            - mountPath: /opt/couchdb/etc
+              name: server-etc
+          command:
+            - tini
+            - --
+            - /opt/couchdb/bin/couchdb
+
       volumes:
-      - name: server-data
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/obsidian/data
-      - name: server-etc
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/obsidian/etc   
-      - name: app-data-root
-        hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/obsidian   
-      - name: obsidian-config
-        configMap:
-          defaultMode: 420
-          name: obsidian-config
-          items:
-          - key: local.ini
-            path: local.ini        
-      - name: init-config
-        configMap:
-          name: init-config
-          defaultMode: 438
-          items:
-          - key: init.sh
-            path: init.sh
-      - name: nginx-config
-        configMap:
-          name: nginx-config
-          defaultMode: 438
-          items:
-          - key: nginx.conf
-            path: nginx.conf
+        - name: server-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/obsidian/data
+        - name: server-etc
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/obsidian/etc
+        - name: app-data-root
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/obsidian
+        - name: obsidian-config
+          configMap:
+            defaultMode: 420
+            name: obsidian-config
+            items:
+              - key: local.ini
+                path: local.ini
+        - name: init-config
+          configMap:
+            name: init-config
+            defaultMode: 438
+            items:
+              - key: init.sh
+                path: init.sh
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+
 ---
 apiVersion: v1
 kind: Service
