@@ -3,8 +3,8 @@ data:
   nginx.conf: |
     stream {
       server {
-          listen  8001;  
-          proxy_pass 127.0.0.1:8080;
+        listen 8001;  
+        proxy_pass 127.0.0.1:8080;
       }
     }
 
@@ -15,7 +15,6 @@ data:
     http {
       # Your HTTP server configurations go here
     }
-
 kind: ConfigMap
 metadata:
   name: nginx-config
@@ -28,6 +27,7 @@ data:
 
     appDataDir="/appData"
     configDir="/config/qBittorrent"
+    confFile="$appDataDir/qBittorrent.conf"
 
     if [ "$(ls -A $appDataDir)" ]; then
       echo "$appDataDir not empty"
@@ -37,7 +37,15 @@ data:
       echo "copy succeed"
     fi
 
+    mkdir -p "$(dirname "$confFile")"
+    touch "$confFile"
 
+    grep -q "^\[Preferences\]" "$confFile" || echo "[Preferences]" >> "$confFile"
+    grep -q "^WebUI\\\\CSRFProtection=" "$confFile" || echo "WebUI\\CSRFProtection=false" >> "$confFile"
+    grep -q "^WebUI\\\\HostHeaderValidation=" "$confFile" || echo "WebUI\\HostHeaderValidation=false" >> "$confFile"
+    grep -q "^WebUI\\\\Authentication=" "$confFile" || echo "WebUI\\Authentication=false" >> "$confFile"
+    grep -q "^WebUI\\\\LocalHostAuth=" "$confFile" || echo "WebUI\\LocalHostAuth=false" >> "$confFile"
+    echo "qBittorrent CSRF and HostHeaderValidation ensured"
 kind: ConfigMap
 metadata:
   name: init-config
@@ -82,15 +90,15 @@ spec:
             name: nginx-config
             defaultMode: 438
             items:
-            - key: nginx.conf
-              path: nginx.conf
+              - key: nginx.conf
+                path: nginx.conf
         - name: init-config
           configMap:
             name: init-config
             defaultMode: 438
             items:
-            - key: init.sh
-              path: init.sh
+              - key: init.sh
+                path: init.sh
       initContainers:
         - name: init-chmod-data
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
@@ -109,7 +117,7 @@ spec:
           securityContext:
             runAsUser: 0
         - name: init-qbittorrent-config
-          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.2"
+          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.4"
           command:
             - sh
             - '-c'
@@ -124,16 +132,16 @@ spec:
               mountPath: /init.sh
               subPath: init.sh
           securityContext:
-            runAsUser: 0            
+            runAsUser: 0
       containers:
         - name: nginx
           image: "docker.io/beclab/aboveos-nginx:1.27.0"
           volumeMounts:
-          - name: nginx-config 
-            mountPath: /etc/nginx/nginx.conf
-            subPath: nginx.conf
+            - name: nginx-config 
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
           ports:
-          - containerPort: 8001
+            - containerPort: 8001
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -143,7 +151,7 @@ spec:
               cpu: 100m
               memory: 128Mi
         - name: qbittorrent
-          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.2"
+          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.4"
           resources:
             requests:
               cpu: 100m
@@ -225,8 +233,6 @@ spec:
   version: v1
 status:
   state: active
-
-
 ---
 apiVersion: sys.bytetrade.io/v1alpha1
 kind: ProviderRegistry
@@ -243,8 +249,8 @@ spec:
   namespace: {{ .Release.Namespace }}
   version: v2
   opApis:
-  - name: All
-    uri: /  
+    - name: All
+      uri: /  
 status:
   state: active
   {{- end }}
