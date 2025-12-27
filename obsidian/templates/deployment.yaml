@@ -1,4 +1,12 @@
-﻿apiVersion: v1
+{{- $basePath := default "" .Values.userspace.appData -}}
+{{- $appRoot := "" -}}
+{{- if and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+  {{- $appRoot = $basePath -}}
+{{- else -}}
+  {{- $appRoot = printf "%s/obsidian" $basePath -}}
+{{- end -}}
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: nginx-config
@@ -6,21 +14,20 @@ metadata:
 data:
   nginx.conf: |
     http {
-        server {
-            listen 8001;
+      server {
+        listen 8001;
 
-            location = / {
-                rewrite ^ /_utils;
-            }
-
-            location / {
-                proxy_pass http://127.0.0.1:5984;
-            }
+        location = / {
+          rewrite ^ /_utils;
         }
+
+        location / {
+          proxy_pass http://127.0.0.1:5984;
+        }
+      }
     }
 
     events {
-      # Your event-related configurations go here
     }
 
 ---
@@ -31,16 +38,13 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   init.sh: |
-    #!/bin/bash
-
+    #!/bin/sh
     new_etc_dir="/new-etc"
     couchdb_etc_dir="/opt/couchdb/etc"
 
     if [ -d "$new_etc_dir" ] && [ -z "$(ls -A $new_etc_dir)" ]; then
       cp -r $couchdb_etc_dir/. $new_etc_dir
-      echo "Files and directories from $couchdb_etc_dir copied to $new_etc_dir"
-    else
-      echo "$new_etc_dir is not an empty directory or does not exist"
+      echo "Files copied from $couchdb_etc_dir to $new_etc_dir"
     fi
 
 ---
@@ -99,32 +103,32 @@ spec:
     spec:
       initContainers:
         - name: init-config
-          image: "docker.io/beclab/couchdb:3.5.1"
+          image: docker.io/beclab/couchdb:3.5.1
           command:
             - sh
-            - '-c'
+            - -c
             - |
-              chmod +x /init.sh && bash /init.sh
+              bash /init.sh
           volumeMounts:
-            - mountPath: /opt/couchdb/etc/local.ini
-              name: obsidian-config
+            - name: obsidian-config
+              mountPath: /opt/couchdb/etc/local.ini
               subPath: local.ini
-            - mountPath: /new-etc
-              name: server-etc
+            - name: server-etc
+              mountPath: /new-etc
             - name: init-config
               mountPath: /init.sh
               subPath: init.sh
-
+          securityContext:
+            runAsUser: 0
         - name: init-chmod-data
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          image: docker.io/beclab/aboveos-busybox:1.37.0
           command:
             - sh
-            - '-c'
+            - -c
             - |
               chown -R 1000:1000 /app-data-root
               chown -R 1000:1000 /nginx-cache
               chown -R 1000:1000 /nginx-run
-          resources: {}
           volumeMounts:
             - name: app-data-root
               mountPath: /app-data-root
@@ -132,17 +136,24 @@ spec:
               mountPath: /nginx-cache
             - name: nginx-run
               mountPath: /nginx-run
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: nginx
-          image: "docker.io/beclab/aboveos-nginx:1.27.0"
+          image: docker.io/beclab/nginx:1.27.0
           ports:
             - containerPort: 8001
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
           resources:
             requests:
               cpu: 10m
@@ -154,13 +165,19 @@ spec:
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
-            - mountPath: /var/cache/nginx
-              name: nginx-cache
-            - mountPath: /var/run
-              name: nginx-run
-
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
         - name: server
-          image: "docker.io/beclab/couchdb:3.5.1"
+          image: docker.io/beclab/couchdb:3.5.1
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
           ports:
             - containerPort: 5984
           resources:
@@ -171,28 +188,27 @@ spec:
               cpu: "4"
               memory: 2Gi
           volumeMounts:
-            - mountPath: /opt/couchdb/data
-              name: server-data
-            - mountPath: /opt/couchdb/etc
-              name: server-etc
+            - name: server-data
+              mountPath: /opt/couchdb/data
+            - name: server-etc
+              mountPath: /opt/couchdb/etc
           command:
             - tini
             - --
             - /opt/couchdb/bin/couchdb
-
       volumes:
         - name: server-data
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/obsidian/data
+            path: {{ $appRoot }}/data
         - name: server-etc
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/obsidian/etc
+            path: {{ $appRoot }}/etc
         - name: app-data-root
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/obsidian
+            path: {{ $appRoot }}
         - name: obsidian-config
           configMap:
             defaultMode: 420
