@@ -8,9 +8,9 @@ data:
         access_log /opt/bitnami/openresty/nginx/logs/access.log;
         error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
-        proxy_connect_timeout                          30s;
-        proxy_send_timeout                             60s;
-        proxy_read_timeout                             300s;
+        proxy_connect_timeout                          300s;
+        proxy_send_timeout                             600s;
+        proxy_read_timeout                             1800s;
         proxy_set_header      host                      $host;
         proxy_set_header      x-forwarded-host          $http_host;
 
@@ -18,6 +18,11 @@ data:
 
         proxy_set_header upgrade $http_upgrade;
         proxy_set_header connection "upgrade";
+
+        # Disable buffering for streaming responses (SSE)
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header X-Accel-Buffering no;
 
         # location /ws {
         #     proxy_pass http://perplexica-backend:3001/;
@@ -29,6 +34,10 @@ data:
 
         location / {
             proxy_pass http://perplexica:3000;
+            # Ensure streaming works properly
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_set_header X-Accel-Buffering no;
         }
       }
 
@@ -84,7 +93,6 @@ spec:
             periodSeconds: 10
           livenessProbe:
             httpGet:
-              path: /api/models
               port: 8080
             initialDelaySeconds: 30
             timeoutSeconds: 60
