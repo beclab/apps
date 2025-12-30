@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mastodon-sidekiq
@@ -13,7 +13,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: mastodon
@@ -42,102 +42,35 @@ spec:
                 topologyKey: kubernetes.io/hostname
               weight: 1
       securityContext:
-        fsGroup: 1001
-        fsGroupChangePolicy: Always
+        # LinuxServer.io image requires root permissions
+        # fsGroup: 1001
+        # fsGroupChangePolicy: Always
         supplementalGroups: []
         sysctls: []
       initContainers:
         - name: wait-for-web
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              mastodon-web:80
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
-          securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
-            runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
-          command:
-            - bash
-            - -ec
-            - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_web_connection "http://${MASTODON_WEB_HOST}:${MASTODON_WEB_PORT}"
-              info "Mastodon web is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_WEB_HOST
-              value: "mastodon-web"
-            - name: MASTODON_WEB_PORT
-              value: "80"
-          volumeMounts:
-            - name: empty-dir
-              mountPath: /tmp
-              subPath: tmp-dir
         - name: wait-for-s3
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              {{ .Values.minio.host }}:{{ .Values.minio.port }}
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
-          securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
-            runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
-          command:
-            - bash
-            - -ec
-            - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_s3_connection "$MASTODON_S3_HOSTNAME" "$MASTODON_S3_PORT_NUMBER"
-              info "S3 is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_S3_HOSTNAME
-              value: "mastodon-minio"
-            - name: MASTODON_S3_PORT_NUMBER
-              value: "80"
-          volumeMounts:
-            - name: empty-dir
-              mountPath: /tmp
-              subPath: tmp-dir
       containers:
         - name: mastodon
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -147,35 +80,42 @@ spec:
               cpu: 500m
               memory: 1Gi
           securityContext:
-            # allowPrivilegeEscalation: false
+            # LinuxServer.io image requires root permissions to write to certain directories
+            allowPrivilegeEscalation: true
             # capabilities:
             #   drop:
             #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
+            privileged: false
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
             runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
+            seLinuxOptions: {}
+            seccompProfile:
+              type: RuntimeDefault
+          # LinuxServer.io image requires direct startup command to run sidekiq service
           command:
-            - /opt/bitnami/scripts/mastodon/run.sh
+            - /bin/bash
+            - -ec
+            - |
+              mkdir -p /app/www/config/initializers
+              cp /config/initializers/*.rb /app/www/config/initializers/ 2>/dev/null || true
+              cd /app/www
+              bundle exec sidekiq
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_MODE
-              value: "sidekiq"
+            - name: PUID
+              value: "0"
+            - name: PGID
+              value: "0"
+            - name: RAILS_ENV
+              value: "production"
+            - name: NODE_ENV
+              value: "production"
             - name: MASTODON_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
+
             - name: DB_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
             - name: MASTODON_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -186,16 +126,90 @@ spec:
                 secretKeyRef:
                   name: mastodon-redis
                   key: "redis-password"
+            {{- if .Values.storage.s3Enabled }}
             - name: MASTODON_AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-user"
+              value: {{ .Values.minio.username }}
             - name: MASTODON_AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-password"
+              value: {{ .Values.minio.password }}
+            {{- end }}
+            # SMTP configuration - extracted to env for special scenario needs
+            {{- if .Values.olaresEnv.SMTP_SERVER }}
+            - name: SMTP_SERVER
+              value: "{{ .Values.olaresEnv.SMTP_SERVER }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PORT }}
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_LOGIN }}
+            - name: SMTP_LOGIN
+              value: "{{ .Values.olaresEnv.SMTP_LOGIN }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+            - name: SMTP_PASSWORD
+              value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_FROM_ADDRESS }}
+            - name: SMTP_FROM_ADDRESS
+              value: "{{ .Values.olaresEnv.SMTP_FROM_ADDRESS }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_DOMAIN }}
+            - name: SMTP_DOMAIN
+              value: "{{ .Values.olaresEnv.SMTP_DOMAIN }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_DELIVERY_METHOD }}
+            - name: SMTP_DELIVERY_METHOD
+              value: "{{ .Values.olaresEnv.SMTP_DELIVERY_METHOD }}"
+            {{- else }}
+            - name: SMTP_DELIVERY_METHOD
+              value: "smtp"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_AUTH_METHOD }}
+            - name: SMTP_AUTH_METHOD
+              value: "{{ .Values.olaresEnv.SMTP_AUTH_METHOD }}"
+            {{- else }}
+            - name: SMTP_AUTH_METHOD
+              value: "plain"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_CA_FILE }}
+            - name: SMTP_CA_FILE
+              value: "{{ .Values.olaresEnv.SMTP_CA_FILE }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}
+            - name: SMTP_OPENSSL_VERIFY_MODE
+              value: "{{ .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}"
+            {{- else }}
+            - name: SMTP_OPENSSL_VERIFY_MODE
+              value: "peer"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_SSL }}
+            - name: SMTP_SSL
+              value: "{{ .Values.olaresEnv.SMTP_SSL }}"
+            {{- else }}
+            - name: SMTP_SSL
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_TLS }}
+            - name: SMTP_TLS
+              value: "{{ .Values.olaresEnv.SMTP_TLS }}"
+            {{- else }}
+            - name: SMTP_TLS
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}
+            - name: SMTP_ENABLE_STARTTLS
+              value: "{{ .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}"
+            {{- else }}
+            - name: SMTP_ENABLE_STARTTLS
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}
+            - name: SMTP_ENABLE_STARTTLS_AUTO
+              value: "{{ .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}"
+            {{- else }}
+            - name: SMTP_ENABLE_STARTTLS_AUTO
+              value: "false"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: mastodon-default
@@ -227,7 +241,26 @@ spec:
             - name: empty-dir
               mountPath: /tmp
               subPath: tmp-dir
+            - name: initializers
+              mountPath: /config/initializers
+            - name: system-data
+              mountPath: /app/www/public/system
       volumes:
         - name: empty-dir
           emptyDir:
             medium: Memory
+        - name: initializers
+          configMap:
+            name: mastodon-initializers
+        - name: system-data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/mastodon/system'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/mastodon/mastodon/system'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/mastodon/mastodon/system'
+            {{- end }}
+            type: DirectoryOrCreate

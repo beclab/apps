@@ -1,4 +1,4 @@
-apiVersion: batch/v1
+﻿apiVersion: batch/v1
 kind: Job
 metadata:
   name: mastodon-init
@@ -27,14 +27,15 @@ spec:
       
       restartPolicy: OnFailure
       securityContext:
-        fsGroup: 1001
-        fsGroupChangePolicy: Always
+        # LinuxServer.io image requires root permissions
+        # fsGroup: 1001
+        # fsGroupChangePolicy: Always
         supplementalGroups: []
         sysctls: []
       automountServiceAccountToken: false
       initContainers:
         - name: copy-assets-dir
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -42,7 +43,8 @@ spec:
             - -ec
             - |
               #!/bin/bash
-              cp -r /opt/bitnami/mastodon/public/* /public
+              # LinuxServer.io image path is /app/www
+              cp -r /app/www/public/* /public 2>/dev/null || echo "Assets directory may not exist yet, skipping..."
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -53,7 +55,7 @@ spec:
             runAsGroup: 1001
             runAsNonRoot: true
             runAsUser: 1001
-            seLinuxOptions: null
+            seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
           resources:
@@ -77,7 +79,7 @@ spec:
         # as it follows the Job Pattern best practices
         # https://kubernetes.io/docs/concepts/workloads/controllers/job/#job-patterns
         - name: migrate-and-create-admin
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -85,35 +87,31 @@ spec:
           args:
             - /scripts/migrate-and-create-admin.sh
           securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
             runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
+            seLinuxOptions: {}
+            seccompProfile:
+              type: RuntimeDefault
           env:
-            - name: BITNAMI_DEBUG
-              value: "true"
+            - name: PUID
+              value: "0"
+            - name: PGID
+              value: "0"
             - name: MASTODON_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
             - name: MASTODON_ELASTICSEARCH_HOST
               value: "mastodon-elasticsearch"
             - name: MASTODON_ELASTICSEARCH_PORT_NUMBER
               value: "9200"
             - name: DB_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
             # The rake db:migrate job requires access to Redis
             - name: MASTODON_REDIS_PASSWORD
               valueFrom:
@@ -137,7 +135,7 @@ spec:
             limits: {}
             requests: {}
         - name: mastodon-assets-precompile
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -145,35 +143,44 @@ spec:
           args:
             - /scripts/precompile-assets.sh
           securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+              - ALL
+            privileged: false
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
             runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
+            seLinuxOptions: {}
+            seccompProfile:
+              type: RuntimeDefault
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
+            - name: PUID
+              value: "0"
+            - name: PGID
+              value: "0"
             - name: MASTODON_S3_HOSTNAME
-              value: "mastodon-minio"
+              value: "{{ .Values.minio.host }}"
             - name: MASTODON_S3_PORT_NUMBER
-              value: "80"
+              value: "{{ .Values.minio.port }}"
+            {{- if .Values.storage.s3Enabled }}
             - name: MASTODON_AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-user"
+              value: "{{ .Values.minio.username }}"
             - name: MASTODON_AWS_SECRET_ACCESS_KEY
+              value: "{{ .Values.minio.password }}"
+            {{- end }}
+            # Redis authentication info (asset precompilation requires Redis)
+            - name: MASTODON_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-password"
+                  name: mastodon-redis
+                  key: "redis-password"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mastodon-redis
+                  key: "redis-password"
           envFrom:
             - configMapRef:
                 name: mastodon-default
@@ -181,10 +188,10 @@ spec:
                 name: mastodon-default
           volumeMounts:
             - name: empty-dir
-              mountPath: /opt/bitnami/mastodon/tmp
+              mountPath: /app/www/tmp
               subPath: app-tmp-dir
             - name: empty-dir
-              mountPath: /opt/bitnami/mastodon/public
+              mountPath: /app/www/public
               subPath: app-public-dir
             - name: empty-dir
               mountPath: /tmp

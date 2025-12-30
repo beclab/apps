@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: mastodon-web
@@ -13,7 +13,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: RollingUpdate
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: mastodon
@@ -42,13 +42,45 @@ spec:
                 topologyKey: kubernetes.io/hostname
               weight: 1
       securityContext:
-        fsGroup: 1001
-        fsGroupChangePolicy: Always
+        # LinuxServer.io image requires root permissions to write to certain directories
+        # fsGroup: 1001
+        # fsGroupChangePolicy: Always
         supplementalGroups: []
         sysctls: []
       initContainers:
+        # Wait for basic services to be ready first (parallel wait, not dependent on asset precompilation)
+        - name: wait-for-redis
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              mastodon-redis-master:6379
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        - name: wait-for-db
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        - name: wait-for-s3
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              {{ .Values.minio.host }}:{{ .Values.minio.port }}
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
         - name: prepare-tmp-dir
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
@@ -60,7 +92,7 @@ spec:
             runAsGroup: 1001
             runAsNonRoot: true
             runAsUser: 1001
-            seLinuxOptions: null
+            seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
           command:
@@ -84,248 +116,85 @@ spec:
           volumeMounts:
             - name: empty-dir
               mountPath: /tmp
-        # We need to wait for the PostgreSQL database to be ready in order to start with Mastodon.
-        # As it is a ReplicaSet, we need that all nodes are configured in order to start with
-        # the application or race conditions can occur
-        - name: wait-for-db
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-            privileged: false
-            readOnlyRootFilesystem: true
-            runAsGroup: 1001
-            runAsNonRoot: true
-            runAsUser: 1001
-            seLinuxOptions: null
-            seccompProfile:
-              type: RuntimeDefault
-          command:
-            - bash
-            - -ec
-            - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_postgresql_connection "postgresql://${MASTODON_DATABASE_USER}:${MASTODON_DATABASE_PASSWORD:-}@${MASTODON_DATABASE_HOST}:${MASTODON_DATABASE_PORT_NUMBER}/${MASTODON_DATABASE_NAME}"
-              info "Database is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_DATABASE_HOST
-              value: "mastodon-postgresql"
-            - name: MASTODON_DATABASE_PORT_NUMBER
-              value: "5432"
-            - name: MASTODON_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: password
-            - name: DB_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
-            - name: MASTODON_DATABASE_USER
-              value: bn_mastodon
-            - name: MASTODON_DATABASE_NAME
-              value: bitnami_mastodon
-        
-        # We need to wait for the Redis(TM) to be ready in order to start with Mastodon.
-        # As it is a ReplicaSet, we need that all nodes are configured in order to start with
-        # the application or race conditions can occur
-        - name: wait-for-redis
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-            privileged: false
-            readOnlyRootFilesystem: true
-            runAsGroup: 1001
-            runAsNonRoot: true
-            runAsUser: 1001
-            seLinuxOptions: null
-            seccompProfile:
-              type: RuntimeDefault
-          command:
-            - bash
-            - -ec
-            - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_redis_connection "redis://${MASTODON_REDIS_PASSWORD:-}@${MASTODON_REDIS_HOST}:${MASTODON_REDIS_PORT_NUMBER}"
-              info "Redis(TM) is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_REDIS_HOST
-              value: "mastodon-redis-master"
-            - name: MASTODON_REDIS_PORT_NUMBER
-              value: "6379"
-            - name: MASTODON_REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-redis
-                  key: redis-password
-            - name: REDIS_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-redis
-                  key: "redis-password"
+            # Wait for Elasticsearch (using smart health check, wait for cluster status to be yellow or green)
         - name: wait-for-elasticsearch
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
-            runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
+          image: "beclab/curlimages-curl:8.8.0"
           command:
-            - bash
-            - -ec
+            - /bin/sh
+            - -c
             - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_elasticsearch_connection "http://${MASTODON_ELASTICSEARCH_HOST}:${MASTODON_ELASTICSEARCH_PORT_NUMBER}"
-              info "Mastodon web is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_ELASTICSEARCH_HOST
-              value: "mastodon-elasticsearch"
-            - name: MASTODON_ELASTICSEARCH_PORT_NUMBER
-              value: "9200"
-          volumeMounts:
-            - name: empty-dir
-              mountPath: /tmp
-              subPath: tmp-dir
-        - name: wait-for-s3
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+              echo "Waiting for Elasticsearch to be ready..."
+              until curl -sf http://mastodon-elasticsearch:9200/_cluster/health?wait_for_status=yellow&timeout=30s > /dev/null 2>&1; do
+                echo "Elasticsearch not ready yet, waiting..."
+                sleep 2
+              done
+              echo "Elasticsearch is ready!"
+          resources:
+            limits:
+              cpu: 100m
+              memory: 64Mi
+            requests:
+              cpu: 50m
+              memory: 32Mi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
-          securityContext:
-            # allowPrivilegeEscalation: false
-            # capabilities:
-            #   drop:
-            #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
-            runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
-          command:
-            - bash
-            - -ec
-            - |
-              #!/bin/bash
-        
-              set -o errexit
-              set -o nounset
-              set -o pipefail
-        
-              . /opt/bitnami/scripts/liblog.sh
-              . /opt/bitnami/scripts/libvalidations.sh
-              . /opt/bitnami/scripts/libmastodon.sh
-              . /opt/bitnami/scripts/mastodon-env.sh
-        
-              mastodon_wait_for_s3_connection "$MASTODON_S3_HOSTNAME" "$MASTODON_S3_PORT_NUMBER"
-              info "S3 is ready"
-          env:
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: MASTODON_S3_HOSTNAME
-              value: "mastodon-minio"
-            - name: MASTODON_S3_PORT_NUMBER
-              value: "80"
-          volumeMounts:
-            - name: empty-dir
-              mountPath: /tmp
-              subPath: tmp-dir
       containers:
         - name: mastodon
-          image: docker.io/aboveos/bitnami-mastodon:4.2.8-debian-12-r6
+          image: "docker.io/beclab/linuxserver-mastodon:4.5.3"
           imagePullPolicy: IfNotPresent
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 2000m
+              memory: 2Gi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "3"
+              memory: 4Gi
           securityContext:
-            # allowPrivilegeEscalation: false
+            # LinuxServer.io image requires root permissions to write to /tmp, /root, /app/www and other directories
+            allowPrivilegeEscalation: true
             # capabilities:
             #   drop:
             #   - ALL
-            # privileged: false
-            # readOnlyRootFilesystem: true
-            # runAsGroup: 1001
-            # runAsNonRoot: true
+            privileged: false
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
             runAsUser: 0
-            # seLinuxOptions: null
-            # seccompProfile:
-            #   type: RuntimeDefault
+            seLinuxOptions: {}
+            seccompProfile:
+              type: RuntimeDefault
+          # LinuxServer.io image uses default /init entrypoint
+          # Image automatically handles asset precompilation and startup logic
+          # Only need to control startup mode via environment variable MASTODON_MODE=web
+          # Let image use default behavior, it will automatically handle asset precompilation
           command:
-            - /opt/bitnami/scripts/mastodon/run.sh
+            - /bin/bash
+            - -c
+            - |
+              # Copy initializer files
+              mkdir -p /app/www/config/initializers
+              cp /config/initializers/*.rb /app/www/config/initializers/ 2>/dev/null || true
+              # Use image's default startup method
+              exec /init
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
+            # LinuxServer.io image doesn't use BITNAMI_DEBUG, but keep it just in case
+            # - name: BITNAMI_DEBUG
+            #   value: "false"
+            # LinuxServer.io image controls running user via PUID/PGID, set to 0 to run as root
+            - name: PUID
+              value: "0"
+            - name: PGID
+              value: "0"
+            # LinuxServer.io image controls startup mode via environment variables
             - name: MASTODON_MODE
               value: "web"
             - name: MASTODON_WEB_PORT_NUMBER
               value: "3000"
             - name: MASTODON_DATABASE_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
             - name: DB_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-postgresql
-                  key: "password"
+              value: "{{ .Values.postgres.password }}"
             - name: MASTODON_REDIS_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -336,16 +205,99 @@ spec:
                 secretKeyRef:
                   name: mastodon-redis
                   key: "redis-password"
+            {{- if .Values.storage.s3Enabled }}
             - name: MASTODON_AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-user"
+              value: "{{ .Values.minio.username }}"
             - name: MASTODON_AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: mastodon-minio
-                  key: "root-password"
+              value: "{{ .Values.minio.password }}"
+            {{- end }}
+            # SMTP configuration - extracted to env for special scenario needs
+            {{- if .Values.olaresEnv.SMTP_SERVER }}
+            - name: SMTP_SERVER
+              value: "{{ .Values.olaresEnv.SMTP_SERVER }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PORT }}
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_LOGIN }}
+            - name: SMTP_LOGIN
+              value: "{{ .Values.olaresEnv.SMTP_LOGIN }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+            - name: SMTP_PASSWORD
+              value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_FROM_ADDRESS }}
+            - name: SMTP_FROM_ADDRESS
+              value: "{{ .Values.olaresEnv.SMTP_FROM_ADDRESS }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_DOMAIN }}
+            - name: SMTP_DOMAIN
+              value: "{{ .Values.olaresEnv.SMTP_DOMAIN }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_DELIVERY_METHOD }}
+            - name: SMTP_DELIVERY_METHOD
+              value: "{{ .Values.olaresEnv.SMTP_DELIVERY_METHOD }}"
+            {{- else }}
+            - name: SMTP_DELIVERY_METHOD
+              value: "smtp"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_AUTH_METHOD }}
+            - name: SMTP_AUTH_METHOD
+              value: "{{ .Values.olaresEnv.SMTP_AUTH_METHOD }}"
+            {{- else }}
+            - name: SMTP_AUTH_METHOD
+              value: "plain"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_CA_FILE }}
+            - name: SMTP_CA_FILE
+              value: "{{ .Values.olaresEnv.SMTP_CA_FILE }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}
+            - name: SMTP_OPENSSL_VERIFY_MODE
+              value: "{{ .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}"
+            {{- else }}
+            - name: SMTP_OPENSSL_VERIFY_MODE
+              value: "peer"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_SSL }}
+            - name: SMTP_SSL
+              value: "{{ .Values.olaresEnv.SMTP_SSL }}"
+            {{- else }}
+            - name: SMTP_SSL
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_TLS }}
+            - name: SMTP_TLS
+              value: "{{ .Values.olaresEnv.SMTP_TLS }}"
+            {{- else }}
+            - name: SMTP_TLS
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}
+            - name: SMTP_ENABLE_STARTTLS
+              value: "{{ .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}"
+            {{- else }}
+            - name: SMTP_ENABLE_STARTTLS
+              value: "false"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}
+            - name: SMTP_ENABLE_STARTTLS_AUTO
+              value: "{{ .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}"
+            {{- else }}
+            - name: SMTP_ENABLE_STARTTLS_AUTO
+              value: "false"
+            {{- end }}
+            # Disable Vite build system
+            - name: VITE_SKIP
+              value: "true"
+            - name: DISABLE_VITE
+              value: "true"
+            - name: VITE_RUBY_HOST
+              value: "localhost"
+            - name: VITE_RUBY_PORT
+              value: "3000"
           envFrom:
             - configMapRef:
                 name: mastodon-default
@@ -356,26 +308,54 @@ spec:
               containerPort: 3000
           livenessProbe:
             failureThreshold: 6
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: 120
+            periodSeconds: 30
             successThreshold: 1
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             httpGet:
               path: /health
               port: http
           readinessProbe:
             failureThreshold: 6
-            initialDelaySeconds: 10
+            initialDelaySeconds: 120
             periodSeconds: 10
             successThreshold: 1
-            timeoutSeconds: 5
+            timeoutSeconds: 10
             httpGet:
               path: /health
               port: http
+          # Add startup probe to ensure health check only after container is fully started
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 10
           volumeMounts:
             - name: empty-dir
               mountPath: /tmp
               subPath: tmp-dir
+            - name: initializers
+              mountPath: /config/initializers
+            - name: system-data
+              mountPath: /app/www/public/system
       volumes:
           - name: empty-dir
             emptyDir: {}
+          - name: initializers
+            configMap:
+              name: mastodon-initializers
+          - name: system-data
+            hostPath:
+              {{- if .Values.sysVersion }}
+                {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+              path: '{{ .Values.userspace.appData }}/mastodon/system'
+                {{- else }}
+              path: '{{ .Values.userspace.appData }}/mastodon/mastodon/system'
+                {{- end }}
+              {{- else }}
+              path: '{{ .Values.userspace.appData }}/mastodon/mastodon/system'
+              {{- end }}
+              type: DirectoryOrCreate
