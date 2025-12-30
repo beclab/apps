@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mastodon-redis-master
@@ -18,7 +18,7 @@ spec:
       app.kubernetes.io/component: master
   serviceName: mastodon-redis-headless
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   template:
     metadata:
       labels:
@@ -49,12 +49,28 @@ spec:
                 topologyKey: kubernetes.io/hostname
               weight: 1
       terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: volume-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1001:1001 /data
+              chmod -R 755 /data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
       containers:
         - name: redis
-          image: docker.io/aboveos/bitnami-redis:7.0.6-debian-11-r0
+          image: "docker.io/beclab/aboveos-bitnami-redis:7.0.6-debian-11-r0"
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsUser: 1001
+            runAsGroup: 1001
           command:
             - /bin/bash
           args:
@@ -138,16 +154,15 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
-  volumeClaimTemplates:
-    - metadata:
-        name: redis-data
-        labels:
-          app.kubernetes.io/name: redis
-          app.kubernetes.io/instance: mastodon
-          app.kubernetes.io/component: master
-      spec:
-        accessModes:
-          - "ReadWriteOnce"
-        resources:
-          requests:
-            storage: "8Gi"
+        - name: redis-data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}/redis'
+              {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/redis'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/redis'
+            {{- end }}
+            type: DirectoryOrCreate

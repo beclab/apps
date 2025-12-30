@@ -1,11 +1,12 @@
+---
 olaresManifest.version: '0.10.0'
 olaresManifest.type: app
 metadata:
   name: mastodon
   description: Your self-hosted, globally interconnected microblogging community
-  icon: https://file.bttcdn.com/appstore/mastodon/icon.png
+  icon: https://app.cdn.olares.com/appstore/mastodon/icon.png
   appid: mastodon
-  version: '1.0.1'
+  version: '1.0.11'
   title: Mastodon
   categories:
   - Fun
@@ -14,14 +15,14 @@ permission:
   appData: true
   appCache: true
 spec:
-  versionName: v4.2.3
-  featuredImage: https://file.bttcdn.com/appstore/mastodon/promote_image_1v2.webp
+  versionName: "4.5.3"
+  featuredImage: https://app.cdn.olares.com/appstore/mastodon/promote_image_1v2.webp
   promoteImage:
-  - https://file.bttcdn.com/appstore/mastodon/promote_image_1v2.webp
-  - https://file.bttcdn.com/appstore/mastodon/promote_image_2v2.webp
-  - https://file.bttcdn.com/appstore/mastodon/promote_image_3v2.webp
-  - https://file.bttcdn.com/appstore/mastodon/promote_image_4v2.webp
-  - https://file.bttcdn.com/appstore/mastodon/promote_image_5v2.webp
+  - https://app.cdn.olares.com/appstore/mastodon/promote_image_1v2.webp
+  - https://app.cdn.olares.com/appstore/mastodon/promote_image_2v2.webp
+  - https://app.cdn.olares.com/appstore/mastodon/promote_image_3v2.webp
+  - https://app.cdn.olares.com/appstore/mastodon/promote_image_4v2.webp
+  - https://app.cdn.olares.com/appstore/mastodon/promote_image_5v2.webp
   fullDescription: |
     Mastodon is a free, open-source social network server based on ActivityPub where users can follow friends and discover new ones.
 
@@ -44,14 +45,55 @@ spec:
     > Mastodon acts as an OAuth2 provider, so 3rd party apps can use the REST and Streaming APIs. This results in a rich app ecosystem with a lot of choices!
 
   upgradeDescription: |
-    This is a rerelease of the 4.2.2 bugfix release, as a dependency used by Mastodon 4.2.0 through 4.2.2 has been removed. If you are installing from a version earlier than 4.2.0, please check the 4.2.0 release notes as they contain important information on how to update.
-    https://github.com/mastodon/mastodon/releases/tag/v4.2.0
-
+    # Upgrade Overview
+    
+    Important: This release requires assets recompilation.
+    
+    If you are upgrading directly from an earlier release (before 4.5.2), please carefully read the upgrade notes for the skipped releases as well, as they often require extra steps such as database migrations. In particular, it is very important to read the 4.5.0 release notes.
+    
     # Changelog
-    * Fixed
-    1. Fix dependency on json-canonicalization version that has been made unavailable since last release
-
-    Check the full release note here: https://github.com/mastodon/mastodon/releases/tag/v4.2.3
+    
+    ## Security
+    * Fix inconsistent error handling leaking information on existence of private posts (GHSA-gwhw-gcjx-72v8)
+    
+    ## Fixed
+    * Fix Delete and Redraft on a non-quote being treated as a quote post in some cases
+    * Fix YouTube embeds by sending referer
+    * Fix streamed quoted polls not being hydrated correctly
+    * Fix creation of duplicate conversations
+    * Fix extraneous noreferrer in external links
+    * Fix edge case error handling in some database migrations
+    * Fix error handling when re-fetching already-known statuses
+    * Fix post navigation in single-column mode when Advanced UI is enabled
+    * Fix tootctl status remove removing quoted posts and remote quotes of local posts
+    * Fix known expensive S3 batch delete operation failing because of short timeouts
+    * Fix compose autosuggest always lowercasing input token
+    
+    # Upgrade Instructions
+    
+    ## Dependencies
+    External dependencies have not changed since v4.5.0:
+    * Ruby: 3.2 or newer
+    * PostgreSQL: 14 or newer
+    * Elasticsearch (recommended): 7.x (OpenSearch should also work)
+    * LibreTranslate (optional): 1.3.3 or newer
+    * Redis: 7.0 or newer
+    * Node: 20.19 or newer
+    * libvips (optional): 8.13 or newer
+    * ImageMagick (optional if using libvips): 6.9.7-7 or newer
+    
+    ## Update Steps (from 4.5.2)
+    
+    ### Non-Docker
+    1. Precompile the assets: RAILS_ENV=production bundle exec rails assets:precompile
+    2. Restart all Mastodon processes.
+    
+    ### Docker
+    1. Restart all Mastodon processes.
+    
+    Note: As always, make sure you have backups of the database before performing any upgrades.
+    
+    Check the full release notes here: https://github.com/mastodon/mastodon/releases/tag/v4.5.3
 
   developer: Mastodon gGmbH
   website: https://joinmastodon.org/
@@ -60,12 +102,12 @@ spec:
   locale:
   - en-US
   - zh-CN
-  requiredMemory: 2Gi
-  limitedMemory: 12Gi
+  requiredMemory: 6Gi
+  limitedMemory: 22Gi
   requiredDisk: 128Mi
-  limitedDisk: 256Mi
-  requiredCpu: 800m
-  limitedCpu: 8
+  limitedDisk: 20Gi
+  requiredCpu: 2000m
+  limitedCpu: 10
   doc: https://docs.joinmastodon.org/
   legal:
   - text: Trademark Policy
@@ -86,10 +128,17 @@ spec:
   - amd64
   - arm64
 options:
+  allowedOutboundPorts:
+    - 465
+    - 587
   dependencies:
   - name: olares
     type: system
-    version: '>=1.10.1-0'
+    version: '>=1.12.3-0'
+  - name: minio
+    type: middleware
+    version: '>=1.0.0-0'
+    mandatory: true
   policies:
     - uriRegex: ^/
       level: public
@@ -103,7 +152,103 @@ options:
 entrances:
 - name: mastodonapache
   port: 80
-  host: mastodon-apache
+  host: mastodon-nginx
   title: Mastodon
-  icon: https://file.bttcdn.com/appstore/mastodon/icon.png
+  icon: https://app.cdn.olares.com/appstore/mastodon/icon.png
   openMethod: window
+envs:
+  - envName: SMTP_SERVER
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_SERVER
+    applyOnChange: true      
+  - envName: SMTP_PORT
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_PORT
+    applyOnChange: true      
+  - envName: SMTP_LOGIN
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_USERNAME
+    applyOnChange: true      
+  - envName: SMTP_PASSWORD
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_PASSWORD
+    applyOnChange: true      
+  - envName: SMTP_FROM_ADDRESS
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_FROM_ADDRESS
+    applyOnChange: true  
+  - envName: SMTP_DOMAIN
+    required: false
+    type: domain
+    editable: true
+    applyOnChange: true
+  - envName: SMTP_DELIVERY_METHOD
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+    default: "smtp"
+  - envName: SMTP_AUTH_METHOD
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+  - envName: SMTP_CA_FILE
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+  - envName: SMTP_OPENSSL_VERIFY_MODE
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+  - envName: SMTP_ENABLE_STARTTLS_AUTO
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
+  - envName: SMTP_ENABLE_STARTTLS
+    type: string
+    editable: true
+    applyOnChange: true
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
+  - envName: SMTP_TLS
+    applyOnChange: true
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
+  - envName: SMTP_SSL  
+    applyOnChange: true
+    required: false
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_SSL
+  - envName: USER_EMAIL  
+    required: true
+    type: email
+    editable: false
+  - envName: USER_PASSWORD  
+    required: true
+    type: password
+    editable: false
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{6,}$'
+    description: "Password must be at least 6 characters"
+middleware:
+  postgres:
+    username: mastodon
+    databases:
+      - name: mastodon
+        distributed: true
+  minio:
+    username: mastodon
+    buckets:
+      - name: mastodon

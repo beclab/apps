@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mastodon-elasticsearch-coordinating
@@ -19,7 +19,7 @@ spec:
       app.kubernetes.io/instance: mastodon
       app.kubernetes.io/component: coordinating-only
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   serviceName: mastodon-elasticsearch-coordinating-hl
   podManagementPolicy: Parallel
   template:
@@ -36,68 +36,70 @@ spec:
     spec:
       serviceAccountName: default
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
       initContainers:
         ## Image that performs the sysctl operation to modify Kernel settings (needed sometimes to avoid boot errors)
         - name: sysctl
-          image: docker.io/aboveos/bitnami-bitnami-shell:11-debian-11-r59
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           imagePullPolicy: "IfNotPresent"
           command:
-            - /bin/bash
+            - /bin/sh
             - -ec
             - |
-              CURRENT=`sysctl -n vm.max_map_count`;
-              DESIRED="262144";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w vm.max_map_count=262144;
-              fi;
-              CURRENT=`sysctl -n fs.file-max`;
-              DESIRED="65536";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w fs.file-max=65536;
-              fi;
+              sysctl -w vm.max_map_count=262144 || true
+              sysctl -w fs.file-max=65536 || true
           securityContext:
             privileged: true
             runAsUser: 0
           resources:
             limits: {}
             requests: {}
+        ## Image that sets permissions for data directory
+        - name: volume-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /usr/share/elasticsearch/data
+              chmod -R 755 /usr/share/elasticsearch/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
       containers:
         - name: elasticsearch
-          image: docker.io/aboveos/bitnami-elasticsearch:8.5.3-debian-11-r0
+          image: "docker.io/beclab/elasticsearch:8.19.9"
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
             - name: MY_POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: BITNAMI_DEBUG
-              value: "false"
-            - name: ELASTICSEARCH_CLUSTER_NAME
+            - name: cluster.name
               value: "elastic"
-            - name: ELASTICSEARCH_IS_DEDICATED_NODE
-              value: "yes"
-            - name: ELASTICSEARCH_NODE_ROLES
-              value: ""
-            - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
-              value: "9300"
-            - name: ELASTICSEARCH_HTTP_PORT_NUMBER
-              value: "9200"
-            - name: ELASTICSEARCH_CLUSTER_HOSTS
-              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-ingest-hl.{{ .Release.Namespace }}.svc.cluster.local,"
-            - name: ELASTICSEARCH_TOTAL_NODES
-              value: "2"
-            - name: ELASTICSEARCH_CLUSTER_MASTER_HOSTS
-              value: mastodon-elasticsearch-master-0 
-            - name: ELASTICSEARCH_MINIMUM_MASTER_NODES
-              value: "1"
-            - name: ELASTICSEARCH_ADVERTISED_HOSTNAME
+            - name: node.name
+              value: "$(MY_POD_NAME)"
+            - name: discovery.seed_hosts
+              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local:9300"
+            - name: cluster.initial_master_nodes
+              value: "mastodon-elasticsearch-master-0"
+            - name: network.host
+              value: "0.0.0.0"
+            - name: network.publish_host
               value: "$(MY_POD_NAME).mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local"
-            - name: ELASTICSEARCH_HEAP_SIZE
-              value: "128m"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
           ports:
             - name: rest-api
               containerPort: 9200
@@ -109,31 +111,41 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           readinessProbe:
             failureThreshold: 5
             initialDelaySeconds: 90
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           resources:
             limits: 
-              cpu: 600m
-              memory: 1024Mi
+              cpu: 500m
+              memory: 1536Mi
             requests:
               cpu: 25m
-              memory: 256Mi
+              memory: 1024Mi
           volumeMounts:
             - name: data
-              mountPath: /bitnami/elasticsearch/data
+              mountPath: /usr/share/elasticsearch/data
       volumes:
-        - name: "data"
-          emptyDir: {}
+        - name: data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}/elasticsearch/coordinating'
+              {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/coordinating'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/coordinating'
+            {{- end }}
+            type: DirectoryOrCreate
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -158,7 +170,7 @@ spec:
       app.kubernetes.io/component: data
   serviceName: mastodon-elasticsearch-data-hl
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   template:
     metadata:
       labels:
@@ -173,68 +185,72 @@ spec:
     spec:
       serviceAccountName: default
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
       initContainers:
         ## Image that performs the sysctl operation to modify Kernel settings (needed sometimes to avoid boot errors)
         - name: sysctl
-          image: docker.io/aboveos/bitnami-bitnami-shell:11-debian-11-r59
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           imagePullPolicy: "IfNotPresent"
           command:
-            - /bin/bash
+            - /bin/sh
             - -ec
             - |
-              CURRENT=`sysctl -n vm.max_map_count`;
-              DESIRED="262144";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w vm.max_map_count=262144;
-              fi;
-              CURRENT=`sysctl -n fs.file-max`;
-              DESIRED="65536";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w fs.file-max=65536;
-              fi;
+              sysctl -w vm.max_map_count=262144 || true
+              sysctl -w fs.file-max=65536 || true
           securityContext:
             privileged: true
             runAsUser: 0
           resources:
             limits: {}
             requests: {}
+        ## Image that sets permissions for data directory
+        - name: volume-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /usr/share/elasticsearch/data
+              chmod -R 755 /usr/share/elasticsearch/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
       containers:
         - name: elasticsearch
-          image: docker.io/aboveos/bitnami-elasticsearch:8.5.3-debian-11-r0
+          image: "docker.io/beclab/elasticsearch:8.19.9"
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
             - name: MY_POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ELASTICSEARCH_IS_DEDICATED_NODE
-              value: "yes"
-            - name: ELASTICSEARCH_NODE_ROLES
-              value: "data"
-            - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
-              value: "9300"
-            - name: ELASTICSEARCH_HTTP_PORT_NUMBER
-              value: "9200"
-            - name: ELASTICSEARCH_CLUSTER_NAME
+            - name: cluster.name
               value: "elastic"
-            - name: ELASTICSEARCH_CLUSTER_HOSTS
-              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-ingest-hl.{{ .Release.Namespace }}.svc.cluster.local,"
-            - name: ELASTICSEARCH_TOTAL_NODES
-              value: "2"
-            - name: ELASTICSEARCH_CLUSTER_MASTER_HOSTS
-              value: mastodon-elasticsearch-master-0 
-            - name: ELASTICSEARCH_MINIMUM_MASTER_NODES
-              value: "1"
-            - name: ELASTICSEARCH_ADVERTISED_HOSTNAME
+            - name: node.name
+              value: "$(MY_POD_NAME)"
+            - name: node.roles
+              value: "data"
+            - name: discovery.seed_hosts
+              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local:9300"
+            - name: cluster.initial_master_nodes
+              value: "mastodon-elasticsearch-master-0"
+            - name: network.host
+              value: "0.0.0.0"
+            - name: network.publish_host
               value: "$(MY_POD_NAME).mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local"
-            - name: ELASTICSEARCH_HEAP_SIZE
-              value: "1024m"
+            - name: ES_JAVA_OPTS
+              value: "-Xms1536m -Xmx1536m"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
           ports:
             - name: rest-api
               containerPort: 9200
@@ -246,39 +262,41 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           readinessProbe:
             failureThreshold: 5
             initialDelaySeconds: 90
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           resources:
             limits: 
-              cpu: 600m
-              memory: 3072Mi
+              cpu: 500m
+              memory: 4096Mi
             requests:
               cpu: 25m
-              memory: 2048Mi
+              memory: 3072Mi
           volumeMounts:
             - name: data
-              mountPath: /bitnami/elasticsearch/data
+              mountPath: /usr/share/elasticsearch/data
       volumes:
-  volumeClaimTemplates:
-    - metadata:
-        name: "data"
-        annotations:
-      spec:
-        accessModes:
-          - "ReadWriteOnce"
-        resources:
-          requests:
-            storage: "8Gi"
+        - name: data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}/elasticsearch/data'
+              {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/data'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/data'
+            {{- end }}
+            type: DirectoryOrCreate
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -303,7 +321,7 @@ spec:
       app.kubernetes.io/component: ingest
   serviceName: mastodon-elasticsearch-ingest-hl
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   template:
     metadata:
       labels:
@@ -318,68 +336,72 @@ spec:
     spec:
       serviceAccountName: default
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
       initContainers:
         ## Image that performs the sysctl operation to modify Kernel settings (needed sometimes to avoid boot errors)
         - name: sysctl
-          image: docker.io/aboveos/bitnami-bitnami-shell:11-debian-11-r59
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           imagePullPolicy: "IfNotPresent"
           command:
-            - /bin/bash
+            - /bin/sh
             - -ec
             - |
-              CURRENT=`sysctl -n vm.max_map_count`;
-              DESIRED="262144";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w vm.max_map_count=262144;
-              fi;
-              CURRENT=`sysctl -n fs.file-max`;
-              DESIRED="65536";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w fs.file-max=65536;
-              fi;
+              sysctl -w vm.max_map_count=262144 || true
+              sysctl -w fs.file-max=65536 || true
           securityContext:
             privileged: true
             runAsUser: 0
           resources:
             limits: {}
             requests: {}
+        ## Image that sets permissions for data directory
+        - name: volume-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /usr/share/elasticsearch/data
+              chmod -R 755 /usr/share/elasticsearch/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
       containers:
         - name: elasticsearch
-          image: docker.io/aboveos/bitnami-elasticsearch:8.5.3-debian-11-r0
+          image: "docker.io/beclab/elasticsearch:8.19.9"
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
             - name: MY_POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ELASTICSEARCH_IS_DEDICATED_NODE
-              value: "yes"
-            - name: ELASTICSEARCH_NODE_ROLES
-              value: "ingest"
-            - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
-              value: "9300"
-            - name: ELASTICSEARCH_HTTP_PORT_NUMBER
-              value: "9200"
-            - name: ELASTICSEARCH_CLUSTER_NAME
+            - name: cluster.name
               value: "elastic"
-            - name: ELASTICSEARCH_CLUSTER_HOSTS
-              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-ingest-hl.{{ .Release.Namespace }}.svc.cluster.local,"
-            - name: ELASTICSEARCH_TOTAL_NODES
-              value: "2"
-            - name: ELASTICSEARCH_CLUSTER_MASTER_HOSTS
-              value: mastodon-elasticsearch-master-0 
-            - name: ELASTICSEARCH_MINIMUM_MASTER_NODES
-              value: "1"
-            - name: ELASTICSEARCH_ADVERTISED_HOSTNAME
+            - name: node.name
+              value: "$(MY_POD_NAME)"
+            - name: node.roles
+              value: "ingest"
+            - name: discovery.seed_hosts
+              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local:9300"
+            - name: cluster.initial_master_nodes
+              value: "mastodon-elasticsearch-master-0"
+            - name: network.host
+              value: "0.0.0.0"
+            - name: network.publish_host
               value: "$(MY_POD_NAME).mastodon-elasticsearch-ingest-hl.{{ .Release.Namespace }}.svc.cluster.local"
-            - name: ELASTICSEARCH_HEAP_SIZE
-              value: "128m"
+            - name: ES_JAVA_OPTS
+              value: "-Xms512m -Xmx512m"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
           ports:
             - name: rest-api
               containerPort: 9200
@@ -391,31 +413,41 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           readinessProbe:
             failureThreshold: 5
             initialDelaySeconds: 90
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           resources:
             limits:
-              cpu: 600m
-              memory: 1500Mi
+              cpu: 500m
+              memory: 1536Mi
             requests:
               cpu: 25m
-              memory: 256Mi
+              memory: 1024Mi
           volumeMounts:
             - name: data
-              mountPath: /bitnami/elasticsearch/data
+              mountPath: /usr/share/elasticsearch/data
       volumes:
-        - name: "data"
-          emptyDir: {}
+        - name: data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}/elasticsearch/ingest'
+              {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/ingest'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/ingest'
+            {{- end }}
+            type: DirectoryOrCreate
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -440,7 +472,7 @@ spec:
       app.kubernetes.io/component: master
   serviceName: mastodon-elasticsearch-master-hl
   updateStrategy:
-    type: RollingUpdate
+    type: OnDelete
   template:
     metadata:
       labels:
@@ -455,68 +487,72 @@ spec:
     spec:
       serviceAccountName: default
       securityContext:
-        fsGroup: 1001
+        fsGroup: 1000
       initContainers:
         ## Image that performs the sysctl operation to modify Kernel settings (needed sometimes to avoid boot errors)
         - name: sysctl
-          image: docker.io/aboveos/bitnami-bitnami-shell:11-debian-11-r59
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           imagePullPolicy: "IfNotPresent"
           command:
-            - /bin/bash
+            - /bin/sh
             - -ec
             - |
-              CURRENT=`sysctl -n vm.max_map_count`;
-              DESIRED="262144";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w vm.max_map_count=262144;
-              fi;
-              CURRENT=`sysctl -n fs.file-max`;
-              DESIRED="65536";
-              if [ "$DESIRED" -gt "$CURRENT" ]; then
-                  sysctl -w fs.file-max=65536;
-              fi;
+              sysctl -w vm.max_map_count=262144 || true
+              sysctl -w fs.file-max=65536 || true
           securityContext:
             privileged: true
             runAsUser: 0
           resources:
             limits: {}
             requests: {}
+        ## Image that sets permissions for data directory
+        - name: volume-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /usr/share/elasticsearch/data
+              chmod -R 755 /usr/share/elasticsearch/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/elasticsearch/data
       containers:
         - name: elasticsearch
-          image: docker.io/aboveos/bitnami-elasticsearch:8.5.3-debian-11-r0
+          image: "docker.io/beclab/elasticsearch:8.19.9"
           imagePullPolicy: "IfNotPresent"
           securityContext:
             runAsNonRoot: true
-            runAsUser: 1001
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
-            - name: BITNAMI_DEBUG
-              value: "false"
             - name: MY_POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: ELASTICSEARCH_IS_DEDICATED_NODE
-              value: "yes"
-            - name: ELASTICSEARCH_NODE_ROLES
-              value: "master"
-            - name: ELASTICSEARCH_TRANSPORT_PORT_NUMBER
-              value: "9300"
-            - name: ELASTICSEARCH_HTTP_PORT_NUMBER
-              value: "9200"
-            - name: ELASTICSEARCH_CLUSTER_NAME
+            - name: cluster.name
               value: "elastic"
-            - name: ELASTICSEARCH_CLUSTER_HOSTS
-              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local,mastodon-elasticsearch-ingest-hl.{{ .Release.Namespace }}.svc.cluster.local,"
-            - name: ELASTICSEARCH_TOTAL_NODES
-              value: "2"
-            - name: ELASTICSEARCH_CLUSTER_MASTER_HOSTS
-              value: mastodon-elasticsearch-master-0 
-            - name: ELASTICSEARCH_MINIMUM_MASTER_NODES
-              value: "1"
-            - name: ELASTICSEARCH_ADVERTISED_HOSTNAME
+            - name: node.name
+              value: "$(MY_POD_NAME)"
+            - name: node.roles
+              value: "master"
+            - name: discovery.seed_hosts
+              value: "mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local:9300,mastodon-elasticsearch-data-hl.{{ .Release.Namespace }}.svc.cluster.local:9300"
+            - name: cluster.initial_master_nodes
+              value: "mastodon-elasticsearch-master-0"
+            - name: network.host
+              value: "0.0.0.0"
+            - name: network.publish_host
               value: "$(MY_POD_NAME).mastodon-elasticsearch-master-hl.{{ .Release.Namespace }}.svc.cluster.local"
-            - name: ELASTICSEARCH_HEAP_SIZE
-              value: "128m"
+            - name: ES_JAVA_OPTS
+              value: "-Xms256m -Xmx256m"
+            - name: xpack.security.enabled
+              value: "false"
+            - name: xpack.security.transport.ssl.enabled
+              value: "false"
           ports:
             - name: rest-api
               containerPort: 9200
@@ -528,36 +564,38 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           readinessProbe:
             failureThreshold: 5
             initialDelaySeconds: 90
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 5
-            exec:
-              command:
-                - /opt/bitnami/scripts/elasticsearch/healthcheck.sh
+            httpGet:
+              path: /_cluster/health
+              port: 9200
           resources:
             limits: 
-              cpu: 600m
+              cpu: 500m
               memory: 1024Mi
             requests:
               cpu: 25m
-              memory: 256Mi
+              memory: 512Mi
           volumeMounts:
             - name: data
-              mountPath: /bitnami/elasticsearch/data
+              mountPath: /usr/share/elasticsearch/data
       volumes:
-  volumeClaimTemplates:
-    - metadata:
-        name: "data"
-        annotations:
-      spec:
-        accessModes:
-          - "ReadWriteOnce"
-        resources:
-          requests:
-            storage: "8Gi"
+        - name: data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}/elasticsearch/master'
+              {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/master'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mastodon/elasticsearch/master'
+            {{- end }}
+            type: DirectoryOrCreate

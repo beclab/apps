@@ -1,7 +1,8 @@
-{{- $mastodonDomainENV := split  ","  .Values.domain.mastodonapache -}}
-{{- $webDomain := index $mastodonDomainENV "_0" -}}
+{{- $mastodonDomainStr := toString (.Values.domain.mastodonapache | default "") -}}
+{{- $mastodonDomainENV := split "," $mastodonDomainStr -}}
+{{- $webDomain := index $mastodonDomainENV "_0" | default "localhost" -}}
 
-{{- $localDomain := $webDomain -}}
+{{- $localDomain := $webDomain | default "localhost" -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -18,48 +19,180 @@ data:
   OIDC_CLIENT_ID: "{{ .Values.oidc.client.id }}"
   OIDC_CLIENT_SECRET: "{{ .Values.oidc.client.secret }}"
   OIDC_DISCOVERY: 'true'
-  OIDC_DISPLAY_NAME: Authelia
+  OIDC_DISPLAY_NAME: "Authelia"
   OIDC_ENABLED: 'true'
   OIDC_ISSUER: "{{ .Values.oidc.issuer }}"
   OIDC_SCOPE: 'openid,profile,email'
   OIDC_SECURITY_ASSUME_EMAIL_IS_VERIFIED: 'true'
-  OIDC_UID_FIELD: preferred_username
-  MASTODON_ADMIN_USERNAME: "{{ .Values.adminUser }}"
-  MASTODON_ADMIN_EMAIL: "{{ .Values.adminEmail }}"
+  OIDC_UID_FIELD: "preferred_username"
+  MASTODON_ADMIN_USERNAME: "mastodon"
+  MASTODON_ADMIN_EMAIL: {{ if and .Values.olaresEnv .Values.olaresEnv.USER_EMAIL }}{{ .Values.olaresEnv.USER_EMAIL | quote }}{{ else }}"mastodon@olares.com"{{ end }}
+  AUTO_CREATE_ADMIN: "{{ .Values.autoCreateAdmin | default true }}"
   RAILS_ENV: "production"
   NODE_ENV: "production"
-  DB_HOST: "mastodon-postgresql"
-  MASTODON_DATABASE_HOST: "mastodon-postgresql"
-  DB_PORT: "5432"
-  MASTODON_DATABASE_PORT_NUMBER: "5432"
-  DB_NAME: "bitnami_mastodon"
-  MASTODON_DATABASE_NAME: "bitnami_mastodon"
-  DB_USER: "bn_mastodon"
-  MASTODON_DATABASE_USERNAME: "bn_mastodon"
+  # Let Rails serve static files (required for LinuxServer.io image)
+  RAILS_SERVE_STATIC_FILES: "true"
+  DB_HOST: "{{ .Values.postgres.host }}"
+  MASTODON_DATABASE_HOST: "{{ .Values.postgres.host }}"
+  DB_PORT: "{{ .Values.postgres.port }}"
+  MASTODON_DATABASE_PORT_NUMBER: "{{ .Values.postgres.port }}"
+  DB_NAME: "{{ .Values.postgres.databases.mastodon }}"
+  MASTODON_DATABASE_NAME: "{{ .Values.postgres.databases.mastodon }}"
+  DB_USER: "{{ .Values.postgres.username }}"
+  MASTODON_DATABASE_USERNAME: "{{ .Values.postgres.username }}"
   ES_ENABLED: "true"
-  ES_HOST: "mastodon-elasticsearch"
-  MASTODON_ELASTICSEARCH_HOST: "elasticsearch"
+  # Elasticsearch host configuration
+  # According to Mastodon official docs: https://docs.joinmastodon.org/admin/elasticsearch/#scaling
+  # Use coordinating node (recommended for client connections)
+  # Coordinating nodes automatically route requests to appropriate nodes
+  ES_HOST: "mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local"
+  MASTODON_ELASTICSEARCH_HOST: "mastodon-elasticsearch-coordinating-hl.{{ .Release.Namespace }}.svc.cluster.local"
   ES_PORT: "9200"
   MASTODON_ELASTICSEARCH_PORT_NUMBER: "9200"
+  # ES_PRESET: Configure cluster size for optimal shard and replica settings
+  # According to Mastodon official docs: https://docs.joinmastodon.org/admin/elasticsearch/#scaling
+  # Options:
+  #   - single_node_cluster: 1 node, no replicas
+  #   - small_cluster: less than 6 nodes, 1 replica (use this for multi-node setup)
+  #   - large_cluster: 6+ nodes, more shards/replicas
+  # Required for Mastodon to recognize multi-node cluster configuration
+  # Set to "small_cluster" for multi-node setup (coordinating, data, master, ingest nodes = 4 nodes)
+  ES_PRESET: "small_cluster"
   WEB_DOMAIN: "{{ $webDomain }}"
   LOCAL_DOMAIN: "{{ $localDomain }}"
   LOCAL_HTTPS: "true"
   AUTHORIZED_FETCH: "false"
-  STREAMING_API_BASE_URL: "wss://{{ $webDomain }}"
+  # Disable WebSocket streaming API (set to empty string to disable)
+  STREAMING_API_BASE_URL: ""
   REDIS_HOST: "mastodon-redis-master"
   REDIS_PORT: "6379"
-  S3_ENABLED: "true"
-  S3_BUCKET: "s3storage"
-  S3_ENDPOINT: "http://mastodon-minio"
-  S3_HOSTNAME: "mastodon-minio"
+  # S3 configuration (set to false to use local storage)
+  S3_ENABLED: "{{ .Values.storage.s3Enabled | default false }}"
+  {{- if .Values.storage.s3Enabled }}
+  S3_BUCKET: "{{ .Values.minio.buckets.mastodon }}"
+  S3_ENDPOINT: "http://{{ .Values.minio.host }}"
+  S3_HOSTNAME: "{{ .Values.minio.host }}"
   S3_REGION: "us-east-1"
   S3_ALIAS_HOST: "{{ $webDomain }}/s3storage"
   S3_PROTOCOL: "http"
-  SMTP_SERVER: ""
-  SMTP_PORT: ""
-  SMTP_PASSWORD: ""
-  SMTP_FROM_ADDRESS: ""
-  SMTP_DOMAIN: ""
-  SMTP_TLS: ""
-  SMTP_DELIVERY_METHOD: ""
-  SMTP_LOGIN: ""
+  {{- end }}
+  {{- $smtpServer := "" }}
+  {{- if .Values.olaresEnv.SMTP_SERVER }}
+    {{- $smtpServer = .Values.olaresEnv.SMTP_SERVER }}
+  {{- else if and .Values.smtp .Values.smtp.server }}
+    {{- $smtpServer = .Values.smtp.server }}
+  {{- end }}
+  {{- $smtpPort := "" }}
+  {{- if .Values.olaresEnv.SMTP_PORT }}
+    {{- $smtpPort = .Values.olaresEnv.SMTP_PORT }}
+  {{- else if and .Values.smtp .Values.smtp.port }}
+    {{- $smtpPort = .Values.smtp.port }}
+  {{- end }}
+  {{- $smtpLogin := "" }}
+  {{- if .Values.olaresEnv.SMTP_LOGIN }}
+    {{- $smtpLogin = .Values.olaresEnv.SMTP_LOGIN }}
+  {{- else if and .Values.smtp .Values.smtp.login }}
+    {{- $smtpLogin = .Values.smtp.login }}
+  {{- end }}
+  {{- $smtpPassword := "" }}
+  {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+    {{- $smtpPassword = .Values.olaresEnv.SMTP_PASSWORD }}
+  {{- else if and .Values.smtp .Values.smtp.password }}
+    {{- $smtpPassword = .Values.smtp.password }}
+  {{- end }}
+  {{- $smtpFromAddress := "" }}
+  {{- if .Values.olaresEnv.SMTP_FROM_ADDRESS }}
+    {{- $smtpFromAddress = .Values.olaresEnv.SMTP_FROM_ADDRESS }}
+  {{- else if and .Values.smtp .Values.smtp.fromAddress }}
+    {{- $smtpFromAddress = .Values.smtp.fromAddress }}
+  {{- end }}
+  {{- $smtpDomain := "" }}
+  {{- if .Values.olaresEnv.SMTP_DOMAIN }}
+    {{- $smtpDomain = .Values.olaresEnv.SMTP_DOMAIN }}
+  {{- else if and .Values.smtp .Values.smtp.domain }}
+    {{- $smtpDomain = .Values.smtp.domain }}
+  {{- end }}
+  {{- $smtpDeliveryMethod := "smtp" }}
+  {{- if .Values.olaresEnv.SMTP_DELIVERY_METHOD }}
+    {{- $smtpDeliveryMethod = .Values.olaresEnv.SMTP_DELIVERY_METHOD }}
+  {{- else if and .Values.smtp .Values.smtp.deliveryMethod }}
+    {{- $smtpDeliveryMethod = .Values.smtp.deliveryMethod }}
+  {{- end }}
+  {{- $smtpAuthMethod := "plain" }}
+  {{- if .Values.olaresEnv.SMTP_AUTH_METHOD }}
+    {{- $smtpAuthMethod = .Values.olaresEnv.SMTP_AUTH_METHOD }}
+  {{- else if and .Values.smtp .Values.smtp.authMethod }}
+    {{- $smtpAuthMethod = .Values.smtp.authMethod }}
+  {{- end }}
+  {{- $smtpCaFile := "" }}
+  {{- if .Values.olaresEnv.SMTP_CA_FILE }}
+    {{- $smtpCaFile = .Values.olaresEnv.SMTP_CA_FILE }}
+  {{- else if and .Values.smtp .Values.smtp.caFile }}
+    {{- $smtpCaFile = .Values.smtp.caFile }}
+  {{- end }}
+  {{- $smtpOpensslVerifyMode := "peer" }}
+  {{- if .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}
+    {{- $smtpOpensslVerifyMode = .Values.olaresEnv.SMTP_OPENSSL_VERIFY_MODE }}
+  {{- else if and .Values.smtp .Values.smtp.opensslVerifyMode }}
+    {{- $smtpOpensslVerifyMode = .Values.smtp.opensslVerifyMode }}
+  {{- end }}
+  {{- $smtpSsl := "false" }}
+  {{- if .Values.olaresEnv.SMTP_SSL }}
+    {{- $smtpSsl = .Values.olaresEnv.SMTP_SSL }}
+  {{- else if and .Values.smtp .Values.smtp.ssl }}
+    {{- $smtpSsl = .Values.smtp.ssl }}
+  {{- end }}
+  {{- $smtpTls := "false" }}
+  {{- if .Values.olaresEnv.SMTP_TLS }}
+    {{- $smtpTls = .Values.olaresEnv.SMTP_TLS }}
+  {{- else if and .Values.smtp .Values.smtp.tls }}
+    {{- $smtpTls = .Values.smtp.tls }}
+  {{- end }}
+  {{- $smtpEnableStarttls := "false" }}
+  {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}
+    {{- $smtpEnableStarttls = .Values.olaresEnv.SMTP_ENABLE_STARTTLS }}
+  {{- else if and .Values.smtp .Values.smtp.enableStarttls }}
+    {{- $smtpEnableStarttls = .Values.smtp.enableStarttls }}
+  {{- end }}
+  {{- $smtpEnableStarttlsAuto := "false" }}
+  {{- if .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}
+    {{- $smtpEnableStarttlsAuto = .Values.olaresEnv.SMTP_ENABLE_STARTTLS_AUTO }}
+  {{- else if and .Values.smtp .Values.smtp.enableStarttlsAuto }}
+    {{- $smtpEnableStarttlsAuto = .Values.smtp.enableStarttlsAuto }}
+  {{- end }}
+  {{- if $smtpServer }}
+  SMTP_SERVER: "{{ $smtpServer }}"
+  {{- end }}
+  {{- if $smtpPort }}
+  SMTP_PORT: "{{ $smtpPort }}"
+  {{- end }}
+  {{- if $smtpLogin }}
+  SMTP_LOGIN: "{{ $smtpLogin }}"
+  {{- end }}
+  {{- if $smtpPassword }}
+  SMTP_PASSWORD: "{{ $smtpPassword }}"
+  {{- end }}
+  {{- if $smtpFromAddress }}
+  SMTP_FROM_ADDRESS: "{{ $smtpFromAddress }}"
+  {{- end }}
+  {{- if $smtpDomain }}
+  SMTP_DOMAIN: "{{ $smtpDomain }}"
+  {{- end }}
+  SMTP_DELIVERY_METHOD: "{{ $smtpDeliveryMethod }}"
+  {{- if $smtpAuthMethod }}
+  SMTP_AUTH_METHOD: "{{ $smtpAuthMethod }}"
+  {{- end }}
+  {{- if $smtpCaFile }}
+  SMTP_CA_FILE: "{{ $smtpCaFile }}"
+  {{- end }}
+  SMTP_OPENSSL_VERIFY_MODE: "{{ $smtpOpensslVerifyMode }}"
+  SMTP_ENABLE_STARTTLS_AUTO: "{{ $smtpEnableStarttlsAuto }}"
+  SMTP_ENABLE_STARTTLS: "{{ $smtpEnableStarttls }}"
+  SMTP_TLS: "{{ $smtpTls }}"
+  SMTP_SSL: "{{ $smtpSsl }}"
+  # Registration policy configuration
+  # SINGLE_USER_MODE: Single user mode, set to false to allow multiple user registration
+  SINGLE_USER_MODE: "{{ .Values.registration.singleUserMode | default false }}"
+  # INVITE_ONLY: Invite-only mode, set to false to allow open registration
+  INVITE_ONLY: "{{ .Values.registration.inviteOnly | default false }}"
+  

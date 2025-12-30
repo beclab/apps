@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mastodon
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: nginx
+    helm.sh/chart: mastodon-0.1.2
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nginx
+      app.kubernetes.io/instance: mastodon
+  replicas: 1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nginx
+        helm.sh/chart: mastodon-0.1.2
+        app.kubernetes.io/instance: mastodon
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      priorityClassName: ""
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: nginx
+                    app.kubernetes.io/instance: mastodon
+                topologyKey: kubernetes.io/hostname
+              weight: 1
+      containers:
+        - name: nginx
+          image: "beclab/nginx:1.25-alpine"
+          imagePullPolicy: "IfNotPresent"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+              readOnly: true
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: mastodon-nginx-config
+

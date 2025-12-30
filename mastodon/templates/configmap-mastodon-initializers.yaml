@@ -1,0 +1,337 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mastodon-initializers
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app.kubernetes.io/name: mastodon
+    helm.sh/chart: mastodon-0.1.2
+    app.kubernetes.io/instance: mastodon
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: mastodon
+data:
+  static_files.rb: |-
+    # Ensure Rails serves static files in production
+    if Rails.env.production?
+      # Enable static file server
+      Rails.application.config.public_file_server.enabled = ENV['RAILS_SERVE_STATIC_FILES'].present? || true
+      # Set cache headers
+      Rails.application.config.public_file_server.headers = {
+        'Cache-Control' => 'public, max-age=31536000, immutable'
+      }
+      # Ensure ActionDispatch::Static middleware exists and is correctly configured
+      # Note: Rails.public_path returns Pathname, needs to be converted to string
+      public_path_str = Rails.public_path.to_s
+      Rails.application.config.middleware.use ActionDispatch::Static, public_path_str if Rails.env.production?
+    end
+
+  sidekiq_mail_retry.rb: |-
+    # Configure email retry behavior
+    # - All emails: no retry (send only once to avoid duplicate emails)
+    # - Password change emails: also no retry (handled via disable_password_change_email.rb for system init)
+    Rails.application.config.after_initialize do
+      # Configure ActionMailer::MailDeliveryJob to not retry (send only once)
+      if defined?(ActionMailer::MailDeliveryJob)
+        ActionMailer::MailDeliveryJob.sidekiq_options retry: 0
+      end
+      
+      # Use Sidekiq middleware to detect password change emails and disable retry
+      # This only affects password change emails, other emails work normally
+      if defined?(Sidekiq)
+        # Define middleware class for password change email detection
+        password_change_middleware = Class.new do
+          def call(worker_class, job, queue, redis_pool, &block)
+            # Only modify retry for password change emails, don't interfere with other emails
+            begin
+              # Check if this is an ActionMailer job
+              wrapped = job['wrapped'] || job[:wrapped]
+              worker_name = worker_class.to_s
+              
+              if wrapped == 'ActionMailer::MailDeliveryJob' || worker_name == 'ActionMailer::MailDeliveryJob'
+                # Extract arguments from job - handle different job formats
+                job_args = job['args']&.first || job[:args]&.first
+                
+                if job_args.is_a?(Hash)
+                  # Try to get arguments from different possible locations
+                  arguments = job_args['arguments'] || job_args[:arguments] || job_args['args'] || job_args[:args]
+                  
+                  if arguments.is_a?(Array) && arguments.length >= 2
+                    mailer_class = arguments[0].to_s
+                    mail_method = arguments[1].to_s
+                    
+                    # Only modify retry for password change notifications
+                    if mailer_class.include?('UserMailer') && 
+                       (mail_method.include?('password') || mail_method.include?('Password'))
+                      # Set retry to 0 for password change emails only
+                      job['retry'] = 0 if job.is_a?(Hash)
+                      job[:retry] = 0 if job.respond_to?(:[]=)
+                    end
+                  end
+                end
+              end
+            rescue => e
+              # Log error but don't fail - ensure other emails still work
+              Rails.logger.debug "Error checking password change email: #{e.class}: #{e.message}"
+            end
+            
+            # Always call next middleware - don't block other emails
+            block.call
+          end
+        end
+        
+        # Add middleware to client configuration
+        Sidekiq.configure_client do |config|
+          config.client_middleware do |chain|
+            chain.add password_change_middleware
+          end
+        end
+        
+        # Add middleware to server configuration  
+        Sidekiq.configure_server do |config|
+          config.client_middleware do |chain|
+            chain.add password_change_middleware
+          end
+        end
+      end
+    end
+
+  disable_password_change_email.rb: |-
+    # Control password change email notifications
+    # - System initialization: Uses update_columns (skips callbacks, no email)
+    # - User-initiated changes: Send email once, no retry (configured in sidekiq_mail_retry.rb)
+    Rails.application.config.after_initialize do
+      if defined?(User)
+        User.class_eval do
+          # Track if this is a system-initiated password change
+          attr_accessor :skip_password_change_notification
+          
+          # Override password change notification
+          def send_password_change_notification!
+            # Skip notification if explicitly disabled (system initialization)
+            return if skip_password_change_notification == true
+            
+            # Allow notification for user-initiated changes
+            # Email will be sent once without retry (configured via sidekiq retry: 0)
+            super
+          end
+          
+          # Method to skip password change notification (for system initialization)
+          def skip_password_change_notification!
+            self.skip_password_change_notification = true
+          end
+        end
+      end
+    end
+
+  ensure_admin_approved.rb: |-
+    # Ensure admin accounts are always approved and have Owner role
+    # This fixes cases where accounts might lose approval status or role
+    Rails.application.config.after_initialize do
+      Thread.new do
+        sleep 20  # Wait for database and initialization
+        
+        begin
+          if defined?(User) && defined?(UserRole)
+            # Find admin email from environment
+            admin_email = ENV['MASTODON_ADMIN_EMAIL'] || ENV['USER_EMAIL']
+            
+            if admin_email.present?
+              user = User.find_by(email: admin_email)
+              if user
+                owner_role = UserRole.find_by(name: 'Owner')
+                needs_update = false
+                
+                # Check if user needs approval
+                if user.respond_to?(:approved) && !user.approved
+                  Rails.logger.info "[Auto-fix] Admin account #{user.email} is not approved, fixing..."
+                  needs_update = true
+                end
+                
+                # Check if user doesn't have Owner role
+                if owner_role && user.role != owner_role
+                  Rails.logger.info "[Auto-fix] Admin account #{user.email} doesn't have Owner role, fixing..."
+                  needs_update = true
+                end
+                
+                # Check if user is not confirmed
+                if !user.confirmed_at.present?
+                  Rails.logger.info "[Auto-fix] Admin account #{user.email} is not confirmed, fixing..."
+                  needs_update = true
+                end
+                
+                if needs_update
+                  # Use tootctl to fix (most reliable)
+                  Rails.logger.info "[Auto-fix] Fixing admin account using tootctl..."
+                  system("bundle exec tootctl accounts modify #{user.account.username} --role Owner --approve")
+                  
+                  # Also update via Rails as backup
+                  user.reload
+                  user.update_columns(
+                    confirmed_at: user.confirmed_at || Time.now,
+                    agreement: true,
+                    approved: true
+                  ) rescue begin
+                    user.confirmed_at ||= Time.now
+                    user.approved = true if user.respond_to?(:approved)
+                    user.agreement = true
+                    user.role = owner_role if owner_role
+                    user.save(validate: false)
+                  end
+                  
+                  # Final verification
+                  user.reload
+                  if owner_role && user.role == owner_role && (user.approved == true || !user.respond_to?(:approved))
+                    Rails.logger.info "[Auto-fix] ✓ Admin account fixed successfully"
+                  else
+                    # Last resort: direct database update
+                    if owner_role
+                      user.update_column(:role_id, owner_role.id) if user.role_id != owner_role.id
+                    end
+                    if user.respond_to?(:approved) && !user.approved
+                      user.update_column(:approved, true) rescue nil
+                    end
+                    Rails.logger.info "[Auto-fix] ✓ Admin account fixed via direct update"
+                  end
+                end
+              end
+            end
+          end
+        rescue => e
+          Rails.logger.warn "[Auto-fix] Error ensuring admin approval: #{e.class}: #{e.message}"
+        end
+      end
+    end
+
+  fix_smtp_config.rb: |-
+    # Fix SMTP configuration to ensure SSL/TLS settings are correct
+    # When using SSL (port 465), disable STARTTLS to avoid conflicts
+    Rails.application.config.after_initialize do
+      begin
+        smtp_port = ENV['SMTP_PORT'].to_i
+        smtp_ssl = ENV['SMTP_SSL'].to_s.downcase == 'true'
+        smtp_tls = ENV['SMTP_TLS'].to_s.downcase == 'true'
+        smtp_enable_starttls = ENV['SMTP_ENABLE_STARTTLS'].to_s.downcase == 'true'
+        smtp_enable_starttls_auto = ENV['SMTP_ENABLE_STARTTLS_AUTO'].to_s.downcase == 'true'
+        
+        # If using SSL port (465), ensure STARTTLS is disabled
+        if smtp_port == 465 && smtp_ssl
+          if smtp_enable_starttls || smtp_enable_starttls_auto
+            Rails.logger.warn "[SMTP Config] Port 465 with SSL detected, but STARTTLS is enabled. This may cause connection issues."
+            Rails.logger.warn "[SMTP Config] Consider setting SMTP_ENABLE_STARTTLS=false and SMTP_ENABLE_STARTTLS_AUTO=false"
+          end
+        end
+        
+        # If using STARTTLS port (587), ensure SSL is disabled
+        if smtp_port == 587 && smtp_ssl
+          Rails.logger.warn "[SMTP Config] Port 587 detected, but SSL is enabled. Consider using STARTTLS instead."
+        end
+        
+        # Log SMTP configuration for debugging
+        if ENV['SMTP_SERVER'].present?
+          Rails.logger.info "[SMTP Config] Server: #{ENV['SMTP_SERVER']}, Port: #{smtp_port}, SSL: #{smtp_ssl}, TLS: #{smtp_tls}, STARTTLS: #{smtp_enable_starttls}"
+        end
+      rescue => e
+        Rails.logger.warn "[SMTP Config] Error checking SMTP configuration: #{e.message}"
+      end
+    end
+
+  auto_fix_rules_and_es.rb: |-
+    # Auto-fix server rules and Elasticsearch indexes on startup
+    # This ensures these issues are automatically resolved without manual intervention
+    # Runs after Rails initialization, in a background thread to avoid blocking startup
+    Rails.application.config.after_initialize do
+      # Use a background thread to avoid blocking application startup
+      Thread.new do
+        # Wait for database connection to be established
+        sleep 15
+        
+        begin
+          # 1. Fix server rules (create default rule if none exist)
+          if ActiveRecord::Base.connection.table_exists?('rules')
+            rule_count = Rule.count rescue 0
+            if rule_count == 0
+              Rails.logger.info "[Auto-fix] Creating default server rule..."
+              begin
+                rule = Rule.create!(
+                  priority: 0,
+                  text: 'Be respectful and follow community guidelines'
+                )
+                Rails.logger.info "[Auto-fix] ✓ Default server rule created: ID=#{rule.id}"
+              rescue => e
+                Rails.logger.warn "[Auto-fix] ✗ Failed to create server rule: #{e.class}: #{e.message}"
+              end
+            else
+              Rails.logger.debug "[Auto-fix] Server rules already exist (#{rule_count} rules)"
+            end
+          else
+            Rails.logger.debug "[Auto-fix] Rules table does not exist yet, skipping"
+          end
+        rescue => e
+          Rails.logger.warn "[Auto-fix] Error checking server rules: #{e.class}: #{e.message}"
+        end
+        
+        # 2. Fix Elasticsearch indexes (deploy if needed)
+        begin
+          if ENV['ES_ENABLED'] == 'true' || ENV['ES_ENABLED'] == '1'
+            require 'chewy'
+            
+            # Wait a bit more for Elasticsearch to be ready
+            sleep 5
+            
+            # Check if indexes need deployment by verifying they exist
+            indexes_need_deployment = false
+            missing_indexes = []
+            
+            ['InstancesIndex', 'AccountsIndex', 'TagsIndex', 'StatusesIndex', 'PublicStatusesIndex'].each do |name|
+              begin
+                index_class = name.constantize
+                index_name_str = index_class.index_name rescue nil
+                
+                if index_name_str
+                  exists = Chewy.client.indices.exists?(index: index_name_str) rescue false
+                  unless exists
+                    indexes_need_deployment = true
+                    missing_indexes << name
+                  end
+                else
+                  indexes_need_deployment = true
+                  missing_indexes << name
+                end
+              rescue => e
+                Rails.logger.debug "[Auto-fix] Could not check #{name}: #{e.message}"
+                indexes_need_deployment = true
+                missing_indexes << name
+              end
+            end
+            
+            # Always attempt to deploy indexes to ensure mappings are up to date
+            # This is especially important after ES version changes
+            # Use reset! to force update mappings (deletes and recreates index with latest mapping)
+            Rails.logger.info "[Auto-fix] Deploying/updating Elasticsearch indexes to ensure mappings are current..."
+            begin
+              Chewy.strategy(:bypass) do
+                ['InstancesIndex', 'AccountsIndex', 'TagsIndex', 'StatusesIndex', 'PublicStatusesIndex'].each do |name|
+                  begin
+                    index_class = name.constantize
+                    Rails.logger.info "[Auto-fix] Resetting #{name} to update mapping..."
+                    index_class.reset!
+                    Rails.logger.info "[Auto-fix] ✓ #{name} mapping force updated"
+                  rescue => e
+                    # Log error but continue with other indexes
+                    Rails.logger.warn "[Auto-fix] ✗ Failed to update #{name}: #{e.class}: #{e.message}"
+                  end
+                end
+              end
+              Rails.logger.info "[Auto-fix] ✓ Elasticsearch indexes deployment completed"
+            rescue => e
+              Rails.logger.warn "[Auto-fix] ✗ Error deploying Elasticsearch indexes: #{e.class}: #{e.message}"
+            end
+          else
+            Rails.logger.debug "[Auto-fix] Elasticsearch is disabled, skipping index deployment"
+          end
+        rescue => e
+          Rails.logger.warn "[Auto-fix] Error checking Elasticsearch: #{e.class}: #{e.message}"
+        end
+      end
+    end
+
