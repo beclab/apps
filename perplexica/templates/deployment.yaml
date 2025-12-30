@@ -1,4 +1,9 @@
-﻿apiVersion: v1
+﻿{{- $appDomainENV := split "," .Values.domain.pbe -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: app-config
@@ -27,13 +32,31 @@ data:
     MODEL_NAME = "{{ .Values.olaresEnv.CUSTOM_OPENAI_MODEL_NAME }}"
 
     [MODELS.OLLAMA]
-    API_URL = "http://ollama.ollama-{{ .Values.admin }}:11434" # Ollama API URL - http://host.docker.internal:11434
+    {{- if $isNewVersion }}
+    API_URL = "http://d54536a50.shared.{{ $topDomain }}" # Ollama API URL for system version >= 1.12.3
+    {{- else }}
+    API_URL = "http://ollama.ollama-{{ .Values.admin }}:11434" # Ollama API URL
+    {{- end }}
+    {{- if .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}
+    NAME = "{{ .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}" # Connection name for Ollama
+    {{- else }}
+    NAME = "Ollama" # Default connection name for Ollama
+    {{- end }}
+    {{- if .Values.olaresEnv.OLLAMA_API_KEY }}
+    API_KEY = "{{ .Values.olaresEnv.OLLAMA_API_KEY }}" # Ollama API key (if required)
+    {{- else }}
+    API_KEY = "" # Ollama typically doesn't require API key, leave empty
+    {{- end }}
 
     [MODELS.DEEPSEEK]
     API_KEY = ""
 
     [API_ENDPOINTS]
-    SEARXNG = "http://searxng.searxng-{{ .Values.admin }}:8080" # SearxNG API URL - http://localhost:32768
+    {{- if $isNewVersion }}
+    SEARXNG = "http://d1236e020.shared.{{ $topDomain }}" # SearxNG API URL for system version >= 1.12.3
+    {{- else }}
+    SEARXNG = "http://searxng.searxng-{{ .Values.admin }}:8080" # SearxNG API URL
+    {{- end }}
 
 ---
 apiVersion: apps/v1
@@ -66,19 +89,6 @@ spec:
         - mountPath: /home/perplexica-config/config.toml
           name: config
           subPath: config.toml
-      - name: seed-db
-        image: "docker.io/beclab/itzcrazykns1337-perplexica:v1.12.0"
-        command:
-          - sh
-          - -c
-          - |
-            if [ ! -s /mnt/data/db.sqlite ]; then
-              echo "Seeding db.sqlite into volume..."
-              cp /home/perplexica/data/db.sqlite /mnt/data/db.sqlite
-            fi
-        volumeMounts:
-          - name: appcache
-            mountPath: /mnt/data
       - name: init-chmod-data
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
@@ -86,7 +96,13 @@ spec:
           - '-c'
           - |
             chown -R 1000:1000 /app-cache-root
-        resources: {}
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
         volumeMounts:
           - name:  app-cache-root
             mountPath: /app-cache-root
@@ -100,9 +116,31 @@ spec:
         image: "docker.io/beclab/itzcrazykns1337-perplexica:v1.12.0"
         env:
         - name: SEARXNG_API_URL
+          {{- if $isNewVersion }}
+          value: "http://d1236e020.shared.{{ $topDomain }}"
+          {{- else }}
           value: "http://searxng.searxng-{{ .Values.admin }}:8080"
+          {{- end }}
         - name: OLLAMA_API_URL
+          {{- if $isNewVersion }}
+          value: "http://d54536a50.shared.{{ $topDomain }}"
+          {{- else }}
           value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+          {{- end }}
+        - name: LLM_PROVIDER
+          value: "ollama"
+        - name: OLLAMA_BASE_URL
+          {{- if $isNewVersion }}
+          value: "http://d54536a50.shared.{{ $topDomain }}"
+          {{- else }}
+          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+          {{- end }}
+        {{- if .Values.olaresEnv.OLLAMA_MODEL }}
+        - name: OLLAMA_MODEL
+          value: "{{ .Values.olaresEnv.OLLAMA_MODEL }}"
+        {{- end }}
+        - name: DATABASE_URL
+          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.perplexica }}"
         - name: HOSTNAME
           value: '0.0.0.0'
         ports:
@@ -124,51 +162,19 @@ spec:
           subPath: config.toml        
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/data'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/data'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/data'
-          {{- end }}
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/data{{ else }}{{ .Values.userspace.appCache }}/perplexica/data{{ end }}'
           type: DirectoryOrCreate
         name: appcache
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/uploads'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/uploads'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/uploads'
-          {{- end }}
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/uploads{{ else }}{{ .Values.userspace.appCache }}/perplexica/uploads{{ end }}'
           type: DirectoryOrCreate
         name: appuploads
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/config'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/config'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica/config'
-          {{- end }}
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/config{{ else }}{{ .Values.userspace.appCache }}/perplexica/config{{ end }}'
           type: DirectoryOrCreate
         name: appconfig
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/perplexica'
-          {{- end }}
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}{{ else }}{{ .Values.userspace.appCache }}/perplexica{{ end }}'
           type: DirectoryOrCreate
         name: app-cache-root
       - name: config
