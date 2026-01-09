@@ -1,38 +1,44 @@
-﻿apiVersion: apps/v1
+﻿{{- $appDomainENV := split "," .Values.domain.openwebui -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: openwebui
   name: openwebui
   namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: openwebui
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       io.kompose.service: openwebui
-  strategy:
-    type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/chrome-default: "true"
         io.kompose.service: openwebui
+        io.kompose.network/chrome-default: "true"
     spec:
+      restartPolicy: Always
       containers:
         - name: openwebui
-          image: docker.io/beclab/harveyff-openwebui:v0.0.2
+          image: 'docker.io/beclab/open-webui-open-webui:v0.6.43'
+
+          ports:
+            - containerPort: 8080
+
           livenessProbe:
-            httpGet:
-              path: /
+            tcpSocket:
               port: 8080
-              scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
-            successThreshold: 1
-            failureThreshold: 10
+            initialDelaySeconds: 60
+            timeoutSeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+
           startupProbe:
             tcpSocket:
               port: 8080
@@ -40,8 +46,7 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             failureThreshold: 30
-          ports:
-            - containerPort: 8080
+
           env:
             - name: PGID
               value: "1000"
@@ -51,52 +56,61 @@ spec:
               value: Etc/UTC
             - name: HF_HUB_OFFLINE
               value: "1"
+
             - name: OLLAMA_BASE_URL
+              {{- if $isNewVersion }}
+              value: "http://d54536a50.shared.{{ $topDomain }}"
+              {{- else }}
               value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+              {{- end }}
+
             - name: OPENAI_API_BASE_URLS
-              value: "http://xinference.xinference-{{ .Values.admin }}:9997/v1;"
+              {{- if $isNewVersion }}
+              value: "http://d1236e020.shared.{{ $topDomain }}"
+              {{- else }}
+              value: "http://searxng.searxng-{{ .Values.admin }}:8080"
+              {{- end }}
+
             - name: OPENAI_API_KEYS
               value: " ;"
+
           resources:
             limits:
-              cpu: "1"
-              memory: 1000Mi
+              cpu: "2"
+              memory: 2000Mi
             requests:
               cpu: 50m
               memory: 512Mi
+
           volumeMounts:
-            - mountPath: /app/backend/data
-              name: appcache
-      restartPolicy: Always
+            - name: appdata
+              mountPath: /app/backend/data
+
       volumes:
-        - name: appcache
+        - name: appdata
           hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}'
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appCache }}/data"
+              {{- else }}
+            path: "{{ .Values.userspace.appCache }}/openwebui/data"
+              {{- end }}
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/openwebui'
+            path: "{{ .Values.userspace.appCache }}/openwebui/data"
             {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/openwebui'
-          {{- end }}
-          type: DirectoryOrCreate
-status: {}
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: openwebui
   name: openwebui
   namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: openwebui
 spec:
-  ports:
-    - name: "8080"
-      port: 8080
-      targetPort: 8080
   selector:
     io.kompose.service: openwebui
-status:
-  loadBalancer: {}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
