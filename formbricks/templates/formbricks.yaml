@@ -1,0 +1,143 @@
+﻿{{- $formbricksDomainENV := split  ","  .Values.domain.formbricks -}}
+{{- $formbricksDomain := index $formbricksDomainENV "_0" -}}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: formbricks
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: formbricks
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: formbricks
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: formbricks
+    spec:
+      containers:
+        - name: formbricks
+          image: docker.io/beclab/formbricks-formbricks:4.4.3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          env:
+            - name: WEBAPP_URL
+              value: "https://{{ $formbricksDomain }}"
+            - name: NEXTAUTH_URL
+              value: "https://{{ $formbricksDomain }}"
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.formbricksdb }}?schema=public"
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: NEXTAUTH_SECRET
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: ENCRYPTION_KEY
+            - name: CRON_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: CRON_SECRET
+            - name: REDIS_URL
+              value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+            - name: LOG_LEVEL
+              value: info
+            - name: MAIL_FROM
+              value: "{{ .Values.olaresEnv.MAIL_FROM }}"
+            - name: MAIL_FROM_NAME
+              value: "{{ .Values.olaresEnv.MAIL_FROM_NAME }}"
+            - name: SMTP_HOST
+              value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            - name: SMTP_USER
+              value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            - name: SMTP_PASSWORD
+              value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+            - name: EMAIL_VERIFICATION_DISABLED
+              value: "1"
+            - name: PASSWORD_RESET_DISABLED
+              value: "1"
+            - name: SMTP_AUTHENTICATED
+              value: "1"
+            - name: SMTP_SECURE_ENABLED
+              value: "{{ ternary "1" "0" (eq (.Values.olaresEnv.SMTP_PORT | toString) "465") }}"
+            - name: SMTP_REJECT_UNAUTHORIZED_TLS
+              value: "1"
+          resources:
+            requests:
+              cpu: 1500m
+              memory: 512Mi
+            limits:
+              cpu: 3000m
+              memory: 2Gi
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - mountPath: /home/nextjs/apps/web/saml-connection
+              name: formbricks-data
+              subPath: formbricks
+
+      restartPolicy: Always
+      volumes:
+        - name: formbricks-data
+          hostPath:
+            type: DirectoryOrCreate
+                  {{- if .Values.sysVersion }}
+                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                    {{- else }}
+            path: '{{ .Values.userspace.appCache }}/formbricks'
+                    {{- end }}
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/formbricks'
+                  {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: formbricks
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: formbricks
+spec:
+  ports:
+    - name: "3000"
+      protocol: TCP
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: formbricks
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: formbricks-secrets
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  NEXTAUTH_SECRET: YzZiYmE4MDljZjU2YTc2OGUxMTRlZTZmYjRiY2FjZTViZDEzYzFmM2EzNWQ1MWQzZDZiOTNjZDViYTY1YjNiMQ==
+  ENCRYPTION_KEY: OWFiZDFkMGM1MDRiYzAyNzQxOWFmYmZjMzJiZmYwZjJlYTU3ODgwNmVlNGM2ZjY4NmZhZTUzOWI2NTk0MzNkZA==
+  CRON_SECRET: NGE3ZWRhY2M5MDBhYTgxZjNjYzA2NDgwNWFhMzIxMGVmYjA1NGRjYzVkYWY2MDBmZjVlYmU2ZmYwNmNlZGUxYg==
