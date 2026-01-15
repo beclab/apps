@@ -1,0 +1,169 @@
+﻿{{- $vllmDomainENV := split "," .Values.domain.vllmclient -}}
+{{- $vllmDomain := index $vllmDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: vllm
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: vllm
+    spec:
+      containers:
+        - name: vllm
+          image: "docker.io/beclab/vllm-vllm-openai:v0.13.0"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="/models/HY-MT1.5-1.8B/.HY-MT1.5-1.8B.done"
+              echo "[vllm-wait] Waiting for $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[vllm-wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[vllm-wait] Detected $DONE_FILE, starting vLLM server."
+              
+              echo "[vllm-start] Starting vLLM server..."
+              python3 -m vllm.entrypoints.openai.api_server \
+                --model "/models/HY-MT1.5-1.8B" \
+                --gpu-memory-utilization 0.9 \
+                --max-model-len 8000 \
+                --max-num-batched-tokens 8000 \
+                --tensor-parallel-size 1 \
+                --enable-chunked-prefill
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: VLLM_PORT
+              value: "8000"
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "10"
+              memory: 8Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /models/HY-MT1.5-1.8B
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader:v0.0.15"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: HF_TOKEN
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
+            - name: VLLM_PROXY_TARGET
+              value: http://localhost:8000
+            - name: MODEL_NAME
+              value: /models/HY-MT1.5-1.8B
+            - name: APP_URL
+              value: "https://{{ $vllmDomain }}"
+          args:
+            - "--repo"
+            - "tencent/HY-MT1.5-1.8B"
+            - "--ref"
+            - "main"
+            - "--outdir"
+            - "/data"
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/health"
+            - "--done-name"
+            - ".HY-MT1.5-1.8B.done"
+          ports:
+            - name: http
+              containerPort: 8090
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+            initialDelaySeconds: 5
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 500Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/HY-MT1.5-1.8B"
+            type: DirectoryOrCreate
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+spec:
+  selector:
+    io.kompose.service: vllm
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+spec:
+  selector:
+    io.kompose.service: vllm
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
