@@ -1,0 +1,152 @@
+{{- $appDomainENV := split "," .Values.domain.crm -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: twenty-worker
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: twenty-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: twenty-worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: twenty-worker
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: wait-for-twenty
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            twenty:3000
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /app-data-root
+            chown -R 1000:1000 /app-data-root || true
+            chmod -R 755 /app-data-root || true
+        resources: {}
+        volumeMounts:
+          - name: appcache
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: twenty-worker
+        image: "docker.io/beclab/twentycrm-twenty:v1.15.0"
+        command: ["yarn", "worker:prod"]
+        env:
+        - name: PG_DATABASE_URL
+          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.twenty }}"
+        - name: REDIS_URL
+          {{- if .Values.redis.password }}
+          value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+          {{- else }}
+          value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+          {{- end }}
+        - name: SERVER_URL
+          {{- if $appDomain }}
+          value: "https://{{ $appDomain }}"
+          {{- else }}
+          value: "http://twenty:3000"
+          {{- end }}
+        - name: APP_SECRET
+          value: "{{ .Values.appSecret }}"
+        - name: DISABLE_DB_MIGRATIONS
+          value: "true"
+        - name: DISABLE_CRON_JOBS_REGISTRATION
+          value: "true"
+        {{- if .Values.olaresEnv.MAIL_TYPE }}
+        - name: EMAIL_DRIVER
+          value: "{{ .Values.olaresEnv.MAIL_TYPE }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_SERVER }}
+        - name: EMAIL_SMTP_HOST
+          value: "{{ .Values.olaresEnv.SMTP_SERVER }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PORT }}
+        - name: EMAIL_SMTP_PORT
+          value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_USERNAME }}
+        - name: EMAIL_SMTP_USER
+          value: "{{ .Values.olaresEnv.SMTP_USERNAME }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+        - name: EMAIL_SMTP_PASSWORD
+          value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.MAIL_DEFAULT_SEND_FROM }}
+        - name: EMAIL_FROM_ADDRESS
+          value: "{{ .Values.olaresEnv.MAIL_DEFAULT_SEND_FROM }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_USE_TLS }}
+        - name: EMAIL_SMTP_USE_TLS
+          value: "{{ .Values.olaresEnv.SMTP_USE_TLS }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PORT }}
+        {{- if eq .Values.olaresEnv.SMTP_PORT "465" }}
+        - name: EMAIL_SMTP_SECURE
+          value: "true"
+        {{- end }}
+        {{- end }}
+        {{- if .Values.olaresEnv.EMAIL_FROM_NAME }}
+        - name: EMAIL_FROM_NAME
+          value: "{{ .Values.olaresEnv.EMAIL_FROM_NAME }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.EMAIL_SYSTEM_ADDRESS }}
+        - name: EMAIL_SYSTEM_ADDRESS
+          value: "{{ .Values.olaresEnv.EMAIL_SYSTEM_ADDRESS }}"
+        {{- end }}
+        resources:
+          limits:
+            cpu: "1"
+            memory: 3072Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /app/packages/twenty-server/.local-storage
+          name: appcache
+      volumes:
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appCache }}/data'
+            {{- else }}
+          path: '{{ .Values.userspace.appCache }}/twenty/data'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appCache }}/twenty/data'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: appcache
+
