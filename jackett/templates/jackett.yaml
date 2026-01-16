@@ -1,0 +1,82 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jackett
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jackett
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: jackett
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: jackett
+    spec:
+      containers:
+        - name: jackett
+          image: docker.io/beclab/linuxserver-jackett:0.24.766
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: AUTO_UPDATE
+              value: "false"
+            - name: RUN_OPTS
+              value: ""
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - containerPort: 9117
+          volumeMounts:
+            - mountPath: /config
+              name: jackett-data
+              subPath: config
+            - mountPath: /downloads
+              name: jackett-data
+              subPath: blackhole
+      restartPolicy: Always
+      volumes:
+        - name: jackett-data
+          hostPath:
+            type: DirectoryOrCreate
+                  {{- if .Values.sysVersion }}
+                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                    {{- else }}
+            path: '{{ .Values.userspace.appCache }}/jackett'
+                    {{- end }}
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/jackett'
+                  {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jackett
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jackett
+spec:
+  ports:
+    - name: "9117"
+      protocol: TCP
+      port: 9117
+      targetPort: 9117
+  selector:
+    io.kompose.service: jackett
+status:
+  loadBalancer: {}
