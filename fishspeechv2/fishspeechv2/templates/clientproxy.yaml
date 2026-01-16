@@ -1,0 +1,212 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    upstream app_backend {
+      server fishspeech.fishspeechv2server-shared:7860 max_fails=1 fail_timeout=2s;
+      server download-svc.fishspeechv2server-shared:8090 backup;
+    }
+
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      location /gradio_api/info {
+        proxy_pass http://fishspeech.fishspeechv2server-shared:7860;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Force HTTPS protocol
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Scheme https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+        proxy_pass_request_headers on;
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+
+      location /gradio_api/ {
+        proxy_pass http://fishspeech.fishspeechv2server-shared:7860;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        
+        # Pass through all original headers
+        proxy_pass_request_headers on;
+        # Force HTTPS protocol for Gradio to generate HTTPS URLs
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Scheme https;
+        
+        # Pass through authentication headers if present
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+
+        # Disable buffering for SSE/streaming
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_connect_timeout 600s;
+
+        # Support for Server-Sent Events
+        proxy_set_header Connection '';
+        chunked_transfer_encoding on;
+
+        # CORS headers
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin * always;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+          return 204;
+        }
+      }
+
+      location / {
+        proxy_pass http://app_backend;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+        proxy_connect_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 1800s;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Force HTTPS protocol for Gradio to generate HTTPS URLs
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Scheme https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+        proxy_pass_request_headers on;
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fishspeechclient
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: fishspeechclient
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: fishspeechclient
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+      containers:
+        - name: nginx
+          image: docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
+            initialDelaySeconds: 2
+            timeoutSeconds: 3
+            periodSeconds: 3
+            successThreshold: 1
+            failureThreshold: 60
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fishspeechclient
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: fishspeechclient
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080

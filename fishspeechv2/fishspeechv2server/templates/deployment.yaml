@@ -1,0 +1,223 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: fishspeech
+  name: fishspeech
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"  
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: fishspeech
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: fishspeech
+    spec:
+      initContainers:
+      - name: init-chmod-data
+        image: 'docker.io/beclab/aboveos-busybox:1.37.0'
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-checkpoints /app-references /app-data-root /tmp-gradio
+            chmod -R 755 /app-checkpoints /app-references /app-data-root /tmp-gradio
+        resources: {}
+        volumeMounts:
+          - name: checkpoints
+            mountPath: /app-checkpoints
+          - name: references
+            mountPath: /app-references
+          - name: data
+            mountPath: /app-data-root
+          - name: output
+            mountPath: /tmp-gradio
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: fishspeech
+        image: "docker.io/beclab/fishaudio-fish-speech:webui-cuda"
+        ports:
+          - containerPort: 7860
+            protocol: TCP
+        env:
+          - name: HF_ENDPOINT
+            value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+          - name: COMPILE
+            value: "0"
+        resources:
+          limits:
+            cpu: "5"
+            memory: 35Gi
+          requests:
+            cpu: "500m"
+            memory: 2Gi
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 7860
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        volumeMounts:
+        - mountPath: /root
+          name: data
+        - mountPath: /app/checkpoints
+          name: checkpoints
+        - mountPath: /app/references
+          name: references
+        - mountPath: /tmp/gradio
+          name: output
+        - name: shm
+          mountPath: /dev/shm
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/data'
+          type: DirectoryOrCreate
+        name: data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/checkpoints'
+          type: DirectoryOrCreate
+        name: checkpoints
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/references'
+          type: DirectoryOrCreate
+        name: references
+      - hostPath:
+          path: '{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}'
+          type: DirectoryOrCreate
+        name: output
+      - name: shm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "2Gi"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.2"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: HF_TOKEN
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
+          args:
+            - "--tasks"
+            - '{"tasks":[{"repo":"fishaudio/openaudio-s1-mini","file":"","ref":"main","outDir":"/data/models/openaudio-s1-mini","doneNameTpl":".openaudio-s1-mini.done"}]}'
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/gradio_api/info"
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: models
+              mountPath: /data/models
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/checkpoints"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: fishspeech
+  name: fishspeech
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "7860"
+    port: 7860
+    targetPort: 7860
+  selector:
+    io.kompose.service: fishspeech
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: fishspeech
+  name: sharedentrances-api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "sharedentrances-api"
+    port: 80
+    targetPort: 7860
+  selector:
+    io.kompose.service: fishspeech
+status:
+  loadBalancer: {}
+{{- end }}
+
