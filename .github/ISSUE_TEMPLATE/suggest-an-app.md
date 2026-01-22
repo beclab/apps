@@ -1,27 +1,28 @@
 ---
 name: Suggest an App
-about: Suggest adding an new app on Olares Market.
+about: Suggest a new app on Olares Market.
 title: "[Add App]"
 labels: ''
 assignees: ''
 
 ---
 
-## Please Provide the basic information of the app
-**App Name**(Required): 
+## Please provide the basic information of the app
+**App name**(Required)
  
-**Source Code URL**(Required):  
+**Project URL**(Required, Github preferred)
 
-**Container Image URL​**(Optional but helpful):  
+**Container image URL​**(Optional but helpful)
 
-**Reasons**(Optional):
+**Reasons**(Optional)
 [Explain why this app should be added. This will help the community to prioritize this request]
 
-**Additional context**:
+**Additional context**
 [Add any other context about the app here.]
 
-## Community Voting & Contribution
-**Voting Matters**:​
+## Community voting & Contribution
+**📊Voting matters**
 If you want this update, vote with 👍 (thumbs up) on the issue. We prioritize requests with higher community interest.
-**You Can Help!​**
+
+**🙌You can help!​**
 If you are willing and able to work on porting this app, please leave a comment stating so. You can request to be assigned to this issue.

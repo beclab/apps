@@ -8,9 +8,9 @@ assignees: ''
 ---
 
 ## Please Provide the basic information of the app
-**App Name**(Required):  
+**App name**(Required)
 
-**App URL in Market**(Required):  
+**App URL in Olares Market**(Required)
 https://market.olares.com/app/market.olares/example
 
 ## Describe the bug
