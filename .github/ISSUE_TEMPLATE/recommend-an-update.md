@@ -2,7 +2,7 @@
 name: Recommend an Update
 about: Suggest update an existing app on Olares Market.
 title: "[Update App]"
-labels: ''
+labels: awaiting triage
 assignees: ''
 
 ---
