@@ -2,7 +2,7 @@
 name: Suggest an App
 about: Suggest a new app on Olares Market.
 title: "[Add App]"
-labels: ''
+labels: awaiting triage
 assignees: ''
 
 ---
