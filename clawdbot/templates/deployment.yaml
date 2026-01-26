@@ -18,18 +18,32 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: clawdbot
     spec:
+      initContainers:
+      - name: init-config
+        image: "ghcr.io/clawdbot/clawdbot:main"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            echo '{"gateway":{"mode":"local","auth":{"mode":"token","token":"clawdbot"},"trustedProxies":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],"controlUi":{"allowInsecureAuth":true}}}' > /home/node/.clawdbot/clawdbot.json
+            echo "Created/updated config with trustedProxies and allowInsecureAuth"
+        volumeMounts:
+        - mountPath: /home/node/.clawdbot
+          name: app-data-config
       containers:
       - env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
+        - name: HOME
+          value: /home/node
+        - name: TERM
+          value: xterm-256color
         - name: TZ
           value: Asia/Shanghai
-        image: "ghcr.io/clawdbot/clawdbot:2026.1.24"
+        - name: CLAWDBOT_GATEWAY_TOKEN
+          value: clawdbot
+        image: "ghcr.io/clawdbot/clawdbot:main"
         name: clawdbot
+        command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
         ports:
-        - containerPort: 3000
+        - containerPort: 18789
         resources:
           limits:
             cpu: "2"
@@ -38,24 +52,12 @@ spec:
             cpu: 500m
             memory: 512Mi
         volumeMounts:
-        - mountPath: /app/workspace
-          name: app-data-workspace
-        - mountPath: /app/config
+        - mountPath: /home/node/.clawdbot
           name: app-data-config
+        - mountPath: /home/node/clawd
+          name: app-data-workspace
       restartPolicy: Always
       volumes:
-      - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appData }}/workspace'
-            {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
-          {{- end }}
-          type: DirectoryOrCreate
-        name: app-data-workspace
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
@@ -68,6 +70,18 @@ spec:
           {{- end }}
           type: DirectoryOrCreate
         name: app-data-config
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/workspace'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: app-data-workspace
 status: {}
 
 ---
@@ -80,8 +94,8 @@ metadata:
   namespace: '{{ .Release.Namespace }}'
 spec:
   ports:
-  - name: "3000"
-    port: 3000
-    targetPort: 3000
+  - name: "18789"
+    port: 18789
+    targetPort: 18789
   selector:
     io.kompose.service: clawdbot
