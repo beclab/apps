@@ -19,12 +19,36 @@ spec:
         io.kompose.service: clawdbot
     spec:
       initContainers:
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /home/node/.clawdbot
+            mkdir -p /home/node/clawd
+            chown -R 1000:1000 /home/node/.clawdbot || true
+            chown -R 1000:1000 /home/node/clawd || true
+            chmod -R 755 /home/node/.clawdbot || true
+            chmod -R 755 /home/node/clawd || true
+        resources: {}
+        volumeMounts:
+        - mountPath: /home/node/.clawdbot
+          name: app-data-config
+        - mountPath: /home/node/clawd
+          name: app-data-workspace
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: init-config
-        image: "ghcr.io/clawdbot/clawdbot:main"
+        image: "beclab/clawdbot-clawdbot:2026.1.24-1"
         command: ["/bin/sh", "-c"]
         args:
           - |
             echo '{"gateway":{"mode":"local","auth":{"mode":"token","token":"clawdbot"},"trustedProxies":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],"controlUi":{"allowInsecureAuth":true}}}' > /home/node/.clawdbot/clawdbot.json
+            chown -R 1000:1000 /home/node/.clawdbot || true
             echo "Created/updated config with trustedProxies and allowInsecureAuth"
         volumeMounts:
         - mountPath: /home/node/.clawdbot
@@ -39,7 +63,7 @@ spec:
           value: Asia/Shanghai
         - name: CLAWDBOT_GATEWAY_TOKEN
           value: clawdbot
-        image: "ghcr.io/clawdbot/clawdbot:main"
+        image: "beclab/clawdbot-clawdbot:2026.1.24-1"
         name: clawdbot
         command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
         ports:
