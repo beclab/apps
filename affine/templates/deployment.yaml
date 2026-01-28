@@ -1,4 +1,4 @@
-﻿{{- $affineDomainENV := split  ","  .Values.domain.affine -}}
+{{- $affineDomainENV := split  ","  .Values.domain.affine -}}
 {{- $affineDomain := index $affineDomainENV "_0" -}}
 
 ---
@@ -20,11 +20,33 @@ spec:
   template:
     metadata:
       creationTimestamp: null
+      annotations:
+        affine.version: "0.25.7"
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: affine
     spec:
       initContainers:
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: wait-for-redis
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            redis-svc:6379
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
       - name: init-chmod-data
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         imagePullPolicy: IfNotPresent
@@ -54,15 +76,19 @@ spec:
         - name: REDIS_SERVER_HOST
           value: "redis-svc"
         - name: DATABASE_URL
-          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
+          value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
         - name: NODE_ENV
           value: production
         - name: AFFINE_SERVER_HOST
           value: '{{$affineDomain}}'
         - name: AFFINE_SERVER_HTTPS
           value: 'false'
-        image: "docker.io/beclab/harveyff-affine-graphql:stable-e98f035"
-        command: ['sh', '-c', 'node ./scripts/self-host-predeploy && node ./dist/main.js']
+        - name: AFFINE_INDEXER_ENABLED
+          value: 'true'
+        - name: PORT
+          value: '3010'
+        image: "beclab/toeverything-affine:0.25.7"
+        imagePullPolicy: IfNotPresent
         name: affine
         ports:
         - name: proxy-affine
@@ -81,6 +107,22 @@ spec:
           name: blob
         - mountPath: /userdata
           name: userdata
+        readinessProbe:
+          tcpSocket:
+            port: 3010
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 3010
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
       restartPolicy: Always
       volumes:
       - hostPath:
