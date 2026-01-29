@@ -1,0 +1,127 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: litellm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: litellm
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: litellm
+    spec:
+      containers:
+      - command:
+          - /usr/bin/python3.13
+          - /usr/bin/litellm
+          - --port
+          - "4000"
+          - --config
+          - /app/proxy_config.yaml
+        name: litellm
+        image: "beclab/aby913-litellm:v1.81.4"
+        ports:
+          - containerPort: 4000
+            protocol: TCP
+        env:
+          {{- if and .Values.olaresEnv.LITELLM_MASTER_KEY (ne .Values.olaresEnv.LITELLM_MASTER_KEY "") }}
+          - name: LITELLM_MASTER_KEY
+            value: {{ .Values.olaresEnv.LITELLM_MASTER_KEY | quote }}
+          {{- end }}
+          - name: STORE_MODEL_IN_DB
+            value: "true"
+          - name: DATABASE_URL
+            value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:5432/{{ .Values.postgres.databases.litellm }}"
+          - name: SMTP_HOST
+            value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+          - name: SMTP_PORT
+            value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+          - name: SMTP_USERNAME
+            value: "{{ .Values.olaresEnv.SMTP_USERNAME }}"
+          - name: SMTP_PASSWORD
+            value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+          - name: SMTP_SENDER_EMAIL
+            value: "{{ .Values.olaresEnv.SMTP_SENDER_EMAIL }}"
+          - name: SMTP_TLS
+            value: "{{ .Values.olaresEnv.SMTP_TLS }}"
+        volumeMounts:
+          - mountPath: /data
+            name: data
+          - mountPath: /app/proxy_config.yaml
+            subPath: proxy_config.yaml
+            name: init-config
+        resources:
+          limits:
+            cpu: "4"
+            memory: 4Gi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: 4000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /health/liveliness
+            port: 4000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 5
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/litellm"
+        - name: init-config
+          configMap:
+            name: litellm-config
+            defaultMode: 0755
+            items:
+              - key: proxy_config.yaml
+                path: proxy_config.yaml
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm-svc
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: litellm
+spec:
+  ports:
+  - name: "litellm"
+    port: 80
+    targetPort: 4000
+  selector:
+    io.kompose.service: litellm
+
+
+
+
+
+
+
+
+
+
+
