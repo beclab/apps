@@ -1,0 +1,67 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: librechat-meilisearch
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    app: librechat
+    component: meilisearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: librechat
+      component: meilisearch
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: librechat
+        component: meilisearch
+    spec:
+      containers:
+      - name: meilisearch
+        image: beclab/getmeili-meilisearch:v1.29.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 7700
+          name: meilisearch
+        env:
+        - name: MEILI_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: librechat-meilisearch-secret
+              key: master-key
+        volumeMounts:
+        - name: meilisearch-data
+          mountPath: /meili_data
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 7700
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 7700
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: meilisearch-data
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/meilisearch'
+          type: DirectoryOrCreate
+      restartPolicy: Always
+

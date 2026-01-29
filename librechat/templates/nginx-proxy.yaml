@@ -1,0 +1,154 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: librechat-nginx-config
+  namespace: '{{ .Release.Namespace }}'
+data:
+  nginx.conf: |
+    upstream app_backend {
+      server librechat:3080 max_fails=1 fail_timeout=2s;
+    }
+
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      # Support large file uploads
+      client_max_body_size 100m;
+
+      proxy_connect_timeout 300s;
+      proxy_send_timeout 600s;
+      proxy_read_timeout 1800s;
+
+      proxy_set_header host $host;
+      proxy_set_header x-forwarded-host $http_host;
+      proxy_set_header x-real-ip $remote_addr;
+      proxy_set_header x-forwarded-for $proxy_add_x_forwarded_for;
+
+      # Force HTTPS protocol
+      proxy_set_header X-Forwarded-Proto https;
+      proxy_set_header X-Forwarded-Port 443;
+      proxy_set_header X-Forwarded-Scheme https;
+
+      proxy_http_version 1.1;
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
+      proxy_set_header Authorization $http_authorization;
+      proxy_set_header Cookie $http_cookie;
+      proxy_pass_request_headers on;
+
+      location / {
+        proxy_pass http://app_backend;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+        proxy_connect_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 1800s;
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: librechat-nginx-proxy
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    app: librechat
+    component: nginx-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: librechat
+      component: nginx-proxy
+  template:
+    metadata:
+      labels:
+        app: librechat
+        component: nginx-proxy
+    spec:
+      initContainers:
+      - name: wait-for-api
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - 'librechat:3080'
+        imagePullPolicy: IfNotPresent
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: librechat-nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+      containers:
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 104Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: librechat-nginx-proxy
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    app: librechat
+    component: nginx-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: librechat
+    component: nginx-proxy
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3080
+      targetPort: 8080
+
