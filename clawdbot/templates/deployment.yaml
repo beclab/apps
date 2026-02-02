@@ -1,112 +1,143 @@
+# openclaw.json lifecycle:
+# 1) First deploy: init-config creates openclaw.json from default (ConfigMap) on app-data-config volume.
+# 2) Runtime: app reads/writes openclaw.json on the same volume; changes persist across restarts.
+# 3) Helm upgrade: init-config runs but only copies default when file is missing; never overwrites.
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
     io.kompose.service: clawdbot
   name: clawdbot
-  namespace: '{{ .Release.Namespace }}'
+  namespace: "{{ .Release.Namespace }}"
 spec:
   replicas: 1
   selector:
     matchLabels:
       io.kompose.service: clawdbot
   strategy:
-    type: Recreate    
+    type: Recreate
   template:
     metadata:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: clawdbot
+        bytetrade.io/terminal: clawdbot
     spec:
       initContainers:
-      - name: init-chmod-data
-        image: "docker.io/beclab/aboveos-busybox:1.37.0"
-        command:
-          - sh
-          - '-c'
-          - |
-            mkdir -p /home/node/.clawdbot
-            mkdir -p /home/node/clawd
-            chown -R 1000:1000 /home/node/.clawdbot || true
-            chown -R 1000:1000 /home/node/clawd || true
-            chmod -R 755 /home/node/.clawdbot || true
-            chmod -R 755 /home/node/clawd || true
-        resources: {}
-        volumeMounts:
-        - mountPath: /home/node/.clawdbot
-          name: app-data-config
-        - mountPath: /home/node/clawd
-          name: app-data-workspace
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
-      - name: init-config
-        image: "beclab/clawdbot-clawdbot:2026.1.24-1"
-        command: ["/bin/sh", "-c"]
-        args:
-          - |
-            echo '{"gateway":{"mode":"local","auth":{"mode":"token","token":"clawdbot"},"trustedProxies":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],"controlUi":{"allowInsecureAuth":true}}}' > /home/node/.clawdbot/clawdbot.json
-            chown -R 1000:1000 /home/node/.clawdbot || true
-            echo "Created/updated config with trustedProxies and allowInsecureAuth"
-        volumeMounts:
-        - mountPath: /home/node/.clawdbot
-          name: app-data-config
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              if [ ! -d /home/node/.openclaw ]; then
+                mkdir -p /home/node/.openclaw
+                echo "Created directory: /home/node/.openclaw"
+              else
+                echo "Directory already exists: /home/node/.openclaw"
+              fi
+              if [ ! -d /home/node/openclaw ]; then
+                mkdir -p /home/node/openclaw
+                echo "Created directory: /home/node/openclaw"
+              else
+                echo "Directory already exists: /home/node/openclaw"
+              fi
+              
+              chown -R 0:0 /home/node/.openclaw || true
+              chown -R 0:0 /home/node/openclaw || true
+              chmod -R 755 /home/node/.openclaw || true
+              chmod -R 755 /home/node/openclaw || true
+              echo "Directory permissions set successfully"
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node/openclaw
+              name: app-data-workspace
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: init-config
+          image: "beclab/openclaw-openclaw:2026.1.29"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if [ ! -f /home/node/.openclaw/openclaw.json ]; then
+                cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
+                chown -R 0:0 /home/node/.openclaw || true
+                echo "Created openclaw.json from default config"
+              else
+                echo "openclaw.json already exists, skipping (upgrade-safe)"
+              fi
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /default-openclaw
+              name: default-openclaw
+              readOnly: true
+          securityContext:
+            runAsUser: 0
       containers:
-      - env:
-        - name: HOME
-          value: /home/node
-        - name: TERM
-          value: xterm-256color
-        - name: TZ
-          value: Asia/Shanghai
-        - name: CLAWDBOT_GATEWAY_TOKEN
-          value: clawdbot
-        image: "beclab/clawdbot-clawdbot:2026.1.24-1"
-        name: clawdbot
-        command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
-        ports:
-        - containerPort: 18789
-        resources:
-          limits:
-            cpu: "2"
-            memory: 2Gi
-          requests:
-            cpu: 500m
-            memory: 512Mi
-        volumeMounts:
-        - mountPath: /home/node/.clawdbot
-          name: app-data-config
-        - mountPath: /home/node/clawd
-          name: app-data-workspace
+        - env:
+            - name: HOME
+              value: /home/node
+            - name: TERM
+              value: xterm-256color
+            - name: TZ
+              value: Asia/Shanghai
+            - name: PATH
+              value: "/app/packages/clawdbot/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: CLAWDBOT_GATEWAY_TOKEN
+              value: clawdbot
+          image: "beclab/openclaw-openclaw:2026.1.29"
+          name: clawdbot
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            [
+              "node",
+              "dist/index.js",
+              "gateway",
+              "--bind",
+              "lan",
+              "--port",
+              "18789",
+              "--allow-unconfigured",
+            ]
+          ports:
+            - containerPort: 18789
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 1
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node/openclaw
+              name: app-data-workspace
       restartPolicy: Always
       volumes:
-      - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appData }}/config'
-            {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/config'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/config'
-          {{- end }}
-          type: DirectoryOrCreate
-        name: app-data-config
-      - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appData }}/workspace'
-            {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/workspace'
-          {{- end }}
-          type: DirectoryOrCreate
-        name: app-data-workspace
-status: {}
+        - hostPath:
+            path: "{{ .Values.userspace.appData }}/config"
+            type: DirectoryOrCreate
+          name: app-data-config
+        - hostPath:
+            path: "{{ .Values.userspace.appData }}/workspace"
+            type: DirectoryOrCreate
+          name: app-data-workspace
+        - name: default-openclaw
+          configMap:
+            name: clawdbot-default-openclaw
+            items:
+              - key: openclaw.json
+                path: openclaw.json
 
 ---
 apiVersion: v1
@@ -115,11 +146,11 @@ metadata:
   labels:
     io.kompose.service: clawdbot
   name: clawdbot
-  namespace: '{{ .Release.Namespace }}'
+  namespace: "{{ .Release.Namespace }}"
 spec:
   ports:
-  - name: "18789"
-    port: 18789
-    targetPort: 18789
+    - name: "18789"
+      port: 18789
+      targetPort: 18789
   selector:
     io.kompose.service: clawdbot

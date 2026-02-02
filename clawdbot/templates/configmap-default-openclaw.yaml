@@ -1,0 +1,60 @@
+
+# Default openclaw.json for first-time install only.
+# Used by init-config: copied to app-data-config only when the file does not exist.
+# Helm upgrades do not overwrite existing openclaw.json (init only copies when missing).
+# Get the top domain from the app domain
+{{- $appDomainENV := split "," .Values.domain.clawdbot -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clawdbot-default-openclaw
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: clawdbot
+data:
+  openclaw.json: |
+    {
+      "models": {
+        "mode": "merge",
+        "providers": {
+          "ollama": {
+            "baseUrl": "http://d54536a50.shared.{{ $topDomain }}/v1",
+            "apiKey": "ollama-local",
+            "auth": "api-key",
+            "api": "openai-responses",
+            "authHeader": false,
+            "models": []
+          }
+        }
+      },
+      "agents": {
+        "defaults": {
+          "workspace": "/home/node/.openclaw/workspace",          
+          "maxConcurrent": 4,
+          "subagents": {
+            "maxConcurrent": 8
+          }
+          
+        }
+      },
+      "messages": {
+        "ackReactionScope": "group-mentions"
+      },
+      "commands": {
+        "native": "auto",
+        "nativeSkills": "auto"
+      },
+      "gateway": {
+        "port": 18789,
+        "mode": "local",
+        "bind": "loopback",
+        "tailscale": {
+          "mode": "off",
+          "resetOnExit": false
+        }
+      }
+    }
+
