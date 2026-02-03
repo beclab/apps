@@ -1,4 +1,9 @@
-﻿---
+# windows config lifecycle (like macos):
+# 1) ConfigMap windows-env: first install from .Values; upgrade preserves existing (lookup).
+#    Migration: first upgrade uses legacy windows-config CDN_HOST so existing users unchanged.
+# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appData/windows/config/.env.
+# 3) Runtime: VERSION/CDN_HOST from /config/.env; RAM_SIZE/CPU_CORES/DISK_SIZE etc from env.
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -40,15 +45,60 @@ spec:
       labels:
         name: windows
     spec:
+      initContainers:
+        - name: sync-env-to-pvc
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: windows-env
+          command:
+            - sh
+            - -c
+            - |
+              # Priority: ConfigMap (non-empty) > PVC file > empty (like macos)
+              mkdir -p /config
+              TMP_FILE="/tmp/windows.env.tmp"
+              PVC_TMP="/tmp/pvc.env.tmp"
+              if [ -f /config/.env ]; then
+                grep -v '^#' /config/.env | grep -v '^$' > "$PVC_TMP" || touch "$PVC_TMP"
+              else
+                touch "$PVC_TMP"
+              fi
+              get_pvc_value() {
+                local r; r=$(grep "^${1}=" "$PVC_TMP" 2>/dev/null | cut -d'=' -f2- | head -n1); echo "${r:-}"
+              }
+              : > "$TMP_FILE"
+              for key in CDN_HOST VERSION; do
+                cm_val=$(printenv "$key" 2>/dev/null || echo "")
+                pvc_val=$(get_pvc_value "$key")
+                cm_val=$(echo "$cm_val" | sed 's/^["'\'']//;s/["'\'']$//' | xargs)
+                pvc_val=$(echo "$pvc_val" | sed 's/^["'\'']//;s/["'\'']$//' | xargs)
+                if [ -n "$cm_val" ]; then
+                  echo "${key}=${cm_val}" >> "$TMP_FILE"
+                elif [ -n "$pvc_val" ]; then
+                  echo "${key}=${pvc_val}" >> "$TMP_FILE"
+                else
+                  echo "${key}=" >> "$TMP_FILE"
+                fi
+              done
+              rm -f "$PVC_TMP"
+              mv "$TMP_FILE" /config/.env
+          volumeMounts:
+            - mountPath: /config
+              name: windows-config
       containers:
         - name: windows
           image: "beclab/dockurr-windows:igpu1"
-          envFrom:
-            - configMapRef:
-                name: windows-config
+          command:
+            - sh
+            - -c
+            - |
+              set -a
+              [ -f /config/.env ] && . /config/.env
+              set +a
+              exec tini -g -- /run/entry.sh
           env:
-            - name: VERSION
-              value: "$(CDN_HOST)/{{ .Values.olaresEnv.VERSION }}"
             - name: RAM_SIZE
               value: "{{ .Values.olaresEnv.RAM_SIZE }}"
             - name: CPU_CORES
@@ -80,6 +130,8 @@ spec:
           volumeMounts:
             - mountPath: /storage
               name: storage
+            - mountPath: /config
+              name: windows-config
             - mountPath: /dev/kvm
               name: dev-kvm
             - mountPath: /dev/net/tun
@@ -99,6 +151,10 @@ spec:
             path: '{{ .Values.userspace.appCache }}'
             type: DirectoryOrCreate
           name: storage
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/config'
+            type: DirectoryOrCreate
+          name: windows-config
         - hostPath:
             path: /dev/kvm
           name: dev-kvm

@@ -1,8 +1,30 @@
+# windows-env: CDN_HOST and VERSION persisted via lookup
+# First install: from .Values; upgrade: existing values preserved.
+# Migration: if windows-env does not exist, use legacy windows-config for CDN_HOST so
+#   existing users keep their CDN_HOST on first upgrade.
+# You can edit via: kubectl edit configmap windows-env
+{{- $existing := lookup "v1" "ConfigMap" .Release.Namespace "windows-env" }}
+{{- $legacy := lookup "v1" "ConfigMap" .Release.Namespace "windows-config" }}
+{{- $cdnBase := trimSuffix "/" ( .Values.olaresEnv.SYSTEM_CDN_SERVICE | default .Values.downloadCdnURL | default "https://cdn.olares.com" ) }}
+{{- $versionOption := .Values.olaresEnv.VERSION | default "" }}
+{{- $defaultVersion := "" }}
+{{- if and $cdnBase $versionOption }}
+{{- $defaultVersion = printf "%s/%s" $cdnBase $versionOption }}
+{{- end }}
+{{- /* Prefer existing windows-env; else migrate from legacy windows-config for CDN_HOST */}}
+{{- $cdnForNew := $cdnBase }}
+{{- if and (not $existing) $legacy $legacy.data }}
+  {{- $legacyCdn := index $legacy.data "CDN_HOST" }}
+  {{- if $legacyCdn }}
+    {{- $cdnForNew = $legacyCdn }}
+  {{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: windows-config
+  name: windows-env
   namespace: {{ .Release.Namespace }}
 data:
-  CDN_HOST: '{{ .Values.olaresEnv.SYSTEM_CDN_SERVICE | default (.Values.downloadCdnURL | default "https://cdn.olares.com") }}'
+  CDN_HOST: {{ if $existing }}{{ index $existing.data "CDN_HOST" | quote }}{{ else }}{{ $cdnForNew | quote }}{{ end }}
+  VERSION: {{ if $existing }}{{ index $existing.data "VERSION" | quote }}{{ else }}{{ $defaultVersion | quote }}{{ end }}
