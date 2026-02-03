@@ -1,0 +1,20 @@
+# macos-env: CDN_HOST and VERSION persisted via lookup (like librechat-api-keys).
+# First install: from .Values; upgrade: existing ConfigMap values preserved.
+# You can edit via: kubectl edit configmap macos-env
+{{- $existing := lookup "v1" "ConfigMap" .Release.Namespace "macos-env" }}
+{{- $cdnBase := trimSuffix "/" ( .Values.olaresEnv.SYSTEM_CDN_SERVICE | default .Values.downloadCdnURL | default "" ) }}
+{{- $versionOption := .Values.olaresEnv.VERSION | default "" }}
+{{- $defaultVersion := "" }}
+{{- if and $cdnBase $versionOption }}
+{{- $defaultVersion = printf "%s/%s" $cdnBase $versionOption }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: macos-env
+  namespace: {{ .Release.Namespace }}
+data:
+  # Preserve existing values on upgrade; first install uses .Values
+  CDN_HOST: {{ if $existing }}{{ index $existing.data "CDN_HOST" | quote }}{{ else }}{{ $cdnBase | quote }}{{ end }}
+  VERSION: {{ if $existing }}{{ index $existing.data "VERSION" | quote }}{{ else }}{{ $defaultVersion | quote }}{{ end }}
