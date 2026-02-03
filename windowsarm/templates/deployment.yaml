@@ -1,0 +1,166 @@
+# windowsarm config lifecycle:
+# 1) ConfigMap windows-env: first install from .Values; upgrade preserves existing (lookup).
+# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appData/windowsarm/config/.env.
+# 3) Runtime: VERSION/CDN_HOST from /config/.env; RAM_SIZE/CPU_CORES/DISK_SIZE etc from env.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: windows-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: tcp-8006
+      port: 8006
+      targetPort: 8006
+    - name: tcp-3389
+      port: 3389
+      targetPort: 3389
+    - name: udp-3389
+      port: 3389
+      targetPort: 3389
+      protocol: UDP
+  selector:
+    name: windows
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    name: windows
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: windows
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        name: windows
+    spec:
+      initContainers:
+        - name: sync-env-to-pvc
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: windows-env
+          command:
+            - sh
+            - -c
+            - |
+              # Priority: ConfigMap (non-empty) > PVC file > empty (like macos)
+              mkdir -p /config
+              TMP_FILE="/tmp/windows.env.tmp"
+              PVC_TMP="/tmp/pvc.env.tmp"
+              if [ -f /config/.env ]; then
+                grep -v '^#' /config/.env | grep -v '^$' > "$PVC_TMP" || touch "$PVC_TMP"
+              else
+                touch "$PVC_TMP"
+              fi
+              get_pvc_value() {
+                local r; r=$(grep "^${1}=" "$PVC_TMP" 2>/dev/null | cut -d'=' -f2- | head -n1); echo "${r:-}"
+              }
+              : > "$TMP_FILE"
+              for key in CDN_HOST VERSION; do
+                cm_val=$(printenv "$key" 2>/dev/null || echo "")
+                pvc_val=$(get_pvc_value "$key")
+                cm_val=$(echo "$cm_val" | sed 's/^["'\'']//;s/["'\'']$//' | xargs)
+                pvc_val=$(echo "$pvc_val" | sed 's/^["'\'']//;s/["'\'']$//' | xargs)
+                if [ -n "$cm_val" ]; then
+                  echo "${key}=${cm_val}" >> "$TMP_FILE"
+                elif [ -n "$pvc_val" ]; then
+                  echo "${key}=${pvc_val}" >> "$TMP_FILE"
+                else
+                  echo "${key}=" >> "$TMP_FILE"
+                fi
+              done
+              rm -f "$PVC_TMP"
+              mv "$TMP_FILE" /config/.env
+          volumeMounts:
+            - mountPath: /config
+              name: windows-config
+      containers:
+        - name: windows
+          image: "beclab/dockurr-windows-arm:5.14"
+          command:
+            - sh
+            - -c
+            - |
+              set -a
+              [ -f /config/.env ] && . /config/.env
+              set +a
+              exec tini -g -- /run/entry.sh
+          env:
+            - name: RAM_SIZE
+              value: "{{ .Values.olaresEnv.RAM_SIZE }}"
+            - name: CPU_CORES
+              value: "{{ .Values.olaresEnv.CPU_CORES }}"
+            - name: DISK_SIZE
+              value: "{{ .Values.olaresEnv.DISK_SIZE }}"
+            - name: USERNAME
+              value: "{{ .Values.olaresEnv.USERNAME }}"
+            - name: PASSWORD
+              value: "{{ .Values.olaresEnv.PASSWORD }}"
+        {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+            - name: GPU
+              value: "Y"
+            - name: VGA
+              value: 'vfio-pci,host=0000:00:02.1,multifunction=on,x-vga=on -vga virtio'
+            - name: RENDERNODE
+              value: /dev/dri/renderD129
+        {{- end }}
+          ports:
+            - containerPort: 8006
+            - containerPort: 3389
+            - containerPort: 3389
+              protocol: UDP
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+            privileged: true
+          volumeMounts:
+            - mountPath: /storage
+              name: storage
+            - mountPath: /config
+              name: windows-config
+            - mountPath: /dev/kvm
+              name: dev-kvm
+            - mountPath: /dev/net/tun
+              name: dev-tun
+            - mountPath: /dev/dri
+              name: dev-dri
+          resources:
+            requests:
+              cpu: 4000m
+              memory: 6Gi
+            limits:
+              cpu: 12000m
+              memory: 24Gi
+      terminationGracePeriodSeconds: 300
+      volumes:
+        - hostPath:
+            path: '{{ .Values.userspace.appCache }}'
+            type: DirectoryOrCreate
+          name: storage
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/config'
+            type: DirectoryOrCreate
+          name: windows-config
+        - hostPath:
+            path: /dev/kvm
+          name: dev-kvm
+        - hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+          name: dev-tun
+        - hostPath:
+            path: /dev/dri
+          name: dev-dri
