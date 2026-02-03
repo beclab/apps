@@ -1,4 +1,5 @@
-﻿{{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
 {{- $ollamaclientDomain := index $ollamaclientDomainENV "_0" -}}
 ---
 apiVersion: apps/v1
@@ -27,18 +28,38 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: "docker.io/beclab/ollama-ollama:0.13.5"
+          image: "docker.io/beclab/ollama-ollama:0.15.2"
+{{- with .Values.olaresEnv }}
+{{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
+          command:
+            - sh
+            - '-c'
+            - |
+              echo "Starting Ollama server..."
+              ollama serve &
+              SERVER_PID=$!
+              until ollama list > /dev/null 2>&1; do
+                sleep 1
+              done
+              echo "Ollama server is ready. Preloading model..."
+              START_TIME=$(date +%s)
+              ollama run ${MODEL_NAME} "Hello"
+              END_TIME=$(date +%s)
+              ELAPSED=$((END_TIME - START_TIME))
+              echo "Model preloading completed in ${ELAPSED} seconds"
+              wait $SERVER_PID
+{{- end }}
+{{- end }}
+          envFrom:
+            - configMapRef:
+                name: ollama-env
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: GGML_CUDA_DISABLE_GRAPHS
-              value: "1"
-            - name: OLLAMA_ORIGINS
-              value: "*"
+{{- with .Values.olaresEnv }}
+{{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+{{- end }}
+{{- end }}
           ports:
             - containerPort: 11434
           livenessProbe:
@@ -80,7 +101,10 @@ spec:
             - name: DISPLAY
               value: ":0"
             - name: OLLAMA_MODEL
-              value: "cogito:14b"
+              valueFrom:
+                configMapKeyRef:
+                  name: ollama-env
+                  key: MODEL_NAME
             - name: OLLAMA_URL
               value: "http://localhost:11434"
             - name: APP_URL
@@ -140,4 +164,5 @@ spec:
     io.kompose.service: ollama
 status:
   loadBalancer: {}
+{{- end }}
 
