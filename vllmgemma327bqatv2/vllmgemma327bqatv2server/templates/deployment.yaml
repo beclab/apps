@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: "docker.io/beclab/vllm-vllm-openai:v0.11.2"
+          image: "docker.io/beclab/vllm-vllm-openai:v0.15.1-cu130"
           command:
             - /bin/bash
             - -c
@@ -41,8 +41,13 @@ spec:
               echo "[vllm-start] Starting vLLM server..."
               python3 -m vllm.entrypoints.openai.api_server \
                 --model "/models/gemma-3-27b" \
+{{- with .Values.olaresEnv }}
+                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default "0.95" }} \
+                --max-model-len {{ .MAX_MODEL_LEN | default "8000" }} \
+{{- else }}
                 --gpu-memory-utilization 0.95 \
                 --max-model-len 8000 \
+{{- end }}
                 --tensor-parallel-size 1
           env:
             - name: PGID
@@ -68,7 +73,7 @@ spec:
             - name: data
               mountPath: /models/gemma-3-27b
         - name: download-model
-          image: "docker.io/beclab/harveyff-hf-downloader:v0.0.16"
+          image: "docker.io/beclab/harveyff-hf-downloader:v0.0.18"
           env:
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
