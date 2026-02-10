@@ -1,12 +1,12 @@
-﻿apiVersion: apps/v1
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: deerflow
   namespace: {{ .Release.Namespace }}
   labels:
     app: deerflow
-  annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
   selector:
@@ -19,11 +19,9 @@ spec:
       labels:
         app: deerflow
     spec:
-      securityContext:
-        runAsUser: 0
       initContainers:
         - name: copy-app-to-host
-          image: "docker.io/beclab/harveyff-deerflow:v1.0.15"
+          image: docker.io/beclab/harveyff-deerflow:v1.0.17
           command:
             - sh
             - -c
@@ -62,9 +60,11 @@ spec:
           volumeMounts:
             - name: app-volume
               mountPath: /mnt/app
+          securityContext:
+            runAsUser: 0
       containers:
         - name: deerflow
-          image: "docker.io/beclab/harveyff-deerflow:v1.0.15"
+          image: docker.io/beclab/harveyff-deerflow:v1.0.17
           ports:
             - containerPort: 8000
           env:
@@ -93,8 +93,6 @@ spec:
               mountPath: /app/exps/logs
             - name: app-volume
               mountPath: /app
-          securityContext:
-            runAsUser: 0
       volumes:
         - name: checkpoints
           hostPath:
@@ -106,27 +104,11 @@ spec:
             type: DirectoryOrCreate
         - name: logs
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: "{{ .Values.userspace.appData }}/logs"
-              {{- else }}
-            path: "{{ .Values.userspace.appData }}/deerflow/logs"
-              {{- end }}
-            {{- else }}
-            path: "{{ .Values.userspace.appData }}/deerflow/logs"
-            {{- end }}
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
             type: DirectoryOrCreate
         - name: app-volume
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: "{{ .Values.userspace.appData }}/app"
-              {{- else }}
-            path: "{{ .Values.userspace.appData }}/deerflow/app"
-              {{- end }}
-            {{- else }}
-            path: "{{ .Values.userspace.appData }}/deerflow/app"
-            {{- end }}
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/app{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/app{{ end }}'
             type: DirectoryOrCreate
 ---
 apiVersion: v1
