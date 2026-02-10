@@ -112,7 +112,7 @@ spec:
           - 'sh'
           - '-c'
           - >
-            cp local.json /etc/onlyoffice/documentserver/local.json
+            cp local.json /etc/onlyoffice/documentserver/local.json && chown -R ds:ds /var/lib/onlyoffice/
         volumeMounts:
           - name: config
             mountPath: /local.json
@@ -152,6 +152,8 @@ spec:
         image: beclab/onlyoffice-documentserver:9.2.0
         imagePullPolicy: IfNotPresent
         name: onlyofficeshare
+        securityContext:
+          runAsUser: 0
         ports:
         - containerPort: 80
         resources:
@@ -189,7 +191,13 @@ spec:
           items:
           - key: local.json
             path: local.json
-status: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
 
 ---
 apiVersion: v1
@@ -207,8 +215,6 @@ spec:
     targetPort: 80
   selector:
     io.kompose.service: onlyofficeshare
-status:
-  loadBalancer: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -234,7 +240,7 @@ spec:
     spec:
       containers:
       - name: jwt-geter
-        image: "docker.io/beclab/kldtks-jwt-geter:v9"
+        image: "docker.io/beclab/kldtks-jwt-geter:v10"
         imagePullPolicy: IfNotPresent
         ports:
           - containerPort: 3030
@@ -249,7 +255,6 @@ spec:
             cpu: 0.1
             memory: 0.1Gi
       restartPolicy: Always
-status: {}
 
 ---
 apiVersion: v1
@@ -267,6 +272,4 @@ spec:
     targetPort: 3030
   selector:
     io.kompose.service: jwtgeter
-status:
-  loadBalancer: {}
 {{- end }}
