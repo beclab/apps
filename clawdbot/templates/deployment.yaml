@@ -31,6 +31,8 @@ spec:
             - sh
             - "-c"
             - |
+              OPENCLAW_UID=1000
+              OPENCLAW_GID=1000
               if [ ! -d /home/node/.openclaw ]; then
                 mkdir -p /home/node/.openclaw
                 echo "Created directory: /home/node/.openclaw"
@@ -43,31 +45,36 @@ spec:
               else
                 echo "Directory already exists: /home/node/openclaw"
               fi
-              
-              chown -R 0:0 /home/node/.openclaw || true
-              chown -R 0:0 /home/node/openclaw || true
-              chmod -R 755 /home/node/.openclaw || true
-              chmod -R 755 /home/node/openclaw || true
-              echo "Directory permissions set successfully"
+              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
+              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/openclaw || true
+              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node || true
+              chmod -R 700 /home/node/.openclaw || true
+              chmod -R 700 /home/node/openclaw || true
+              chmod -R 700 /home/node || true
+              echo "Directory permissions set for UID ${OPENCLAW_UID} (upgrade-safe from root)"
           resources: {}
           volumeMounts:
             - mountPath: /home/node/.openclaw
               name: app-data-config
             - mountPath: /home/node/openclaw
               name: app-data-workspace
+            - mountPath: /home/node
+              name: app-data-node
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
         - name: init-config
-          image: "beclab/openclaw-openclaw:2026.2.6"
+          image: "beclab/openclaw-openclaw:2026.2.9"
           command: ["/bin/sh", "-c"]
           args:
             - |
+              OPENCLAW_UID=1000
+              OPENCLAW_GID=1000
               if [ ! -f /home/node/.openclaw/openclaw.json ]; then
                 cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
-                chown -R 0:0 /home/node/.openclaw || true
+                chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
                 echo "Created openclaw.json from default config"
               else
                 echo "openclaw.json already exists, skipping (upgrade-safe)"
@@ -81,11 +88,8 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
-        - image: "beclab/openclaw-openclaw:2026.2.6"
+        - image: "beclab/openclaw-openclaw:2026.2.9"
           name: clawdbot
-          securityContext:
-            runAsUser: 0
-            runAsGroup: 0
           command:
             [
               "node",
@@ -123,7 +127,14 @@ spec:
             - mountPath: /usr/local/bin/openclaw
               name: openclaw-bin
               subPath: openclaw
-              readOnly: true              
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
       restartPolicy: Always
       volumes:
         - hostPath:
