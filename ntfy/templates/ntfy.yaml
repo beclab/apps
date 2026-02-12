@@ -1,0 +1,96 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ntfy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ntfy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: ntfy
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: ntfy
+    spec:
+      containers:
+        - name: ntfy
+          image: docker.io/beclab/binwiederhier-ntfy:v2.16.0
+          args: [ "serve" ]
+          envFrom:
+            - configMapRef:
+                name: ntfy-env
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 900m
+              memory: 1Gi
+            requests:
+              cpu: 400m
+              memory: 128Mi
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: ntfy-data
+              mountPath: "/var/cache/ntfy"
+            - name: ntfy-config
+              mountPath: "/etc/ntfy"
+              readOnly: true
+      restartPolicy: Always
+      volumes:
+        - name: ntfy-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/ntfy'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/ntfy'
+                {{- end }}
+        - name: ntfy-config
+          configMap:
+            name: ntfy-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ntfy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ntfy
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: ntfy
+status:
+  loadBalancer: {}
