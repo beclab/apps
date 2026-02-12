@@ -1,0 +1,160 @@
+{{- $freshrssDomainENV := split  ","  .Values.domain.freshrss -}}
+{{- $freshrssDomain := index $freshrssDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freshrss
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: freshrss
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: freshrss
+    spec:
+      # Every start: merge config.custom.php (ConfigMap) into data/config.php so ConfigMap changes take effect.
+      initContainers:
+        - name: init-config
+          image: docker.io/beclab/freshrss-freshrss:1.28.0
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /data/config.php ]; then
+                echo "config.php not found, do-install will create it with config.custom.php"
+                exit 0
+              fi
+              php -r '
+              $configPath = "/data/config.php";
+              $customPath = "/data/config.custom.php";
+              $config = include $configPath;
+              $custom = include $customPath;
+              if (!is_array($config) || !is_array($custom)) { echo "Invalid config\n"; exit(1); }
+              foreach ($custom as $k => $v) {
+                if (is_array($v) && isset($config[$k]) && is_array($config[$k])) {
+                  $config[$k] = array_merge($config[$k], $v);
+                } else {
+                  $config[$k] = $v;
+                }
+              }
+              $out = "<?php\nreturn " . var_export($config, true) . ";\n";
+              if (file_put_contents($configPath, $out) === false) { echo "Write failed\n"; exit(1); }
+              echo "Merged config.custom.php into config.php\n";
+              '
+          volumeMounts:
+            - name: freshrss-data
+              mountPath: /data
+              subPath: data
+            - name: freshrss-config
+              mountPath: /data/config.custom.php
+              subPath: config.custom.php
+      containers:
+        - name: freshrss
+          image: docker.io/beclab/freshrss-freshrss:1.28.0
+          envFrom:
+            - configMapRef:
+                name: freshrss-env
+          readinessProbe:
+            exec:
+              command:
+                - cli/health.php
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - cli/health.php
+            initialDelaySeconds: 60
+            periodSeconds: 75
+            timeoutSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: 900m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - name: freshrss-data
+              mountPath: /var/www/FreshRSS/data
+              subPath: data
+            - name: freshrss-data
+              mountPath: /var/www/FreshRSS/extensions
+              subPath: extensions
+            - name: freshrss-config
+              mountPath: /var/www/FreshRSS/data/config.custom.php
+              subPath: config.custom.php
+      restartPolicy: Always
+      volumes:
+        - name: freshrss-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/freshrss'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/freshrss'
+                {{- end }}
+        - name: freshrss-config
+          configMap:
+            name: freshrss-config
+            items:
+              - key: config.custom.php
+                path: config.custom.php
+            defaultMode: 420
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: freshrss
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: freshrss
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-freshrss
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: 80
+      targetPort: {{ .Values.port | default 3000 }}
+  selector:
+    io.kompose.service: freshrss
+status:
+  loadBalancer: {}
