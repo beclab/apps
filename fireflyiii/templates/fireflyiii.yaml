@@ -1,0 +1,172 @@
+{{- $fireflyiiiDomainENV := split  ","  .Values.domain.fireflyiii -}}
+{{- $fireflyiiiDomain := index $fireflyiiiDomainENV "_0" -}}
+
+{{- $smtpServer := .Values.olaresEnv.MAIL_HOST | default "" }}
+{{- $defaultSmtpPort := "" }}
+{{- if (ne $smtpServer "") }}
+  {{- $defaultSmtpPort = "25" }}
+{{- end }}
+{{- $mailPort := .Values.olaresEnv.MAIL_PORT | default $defaultSmtpPort }}
+{{- $smtpSecure := "null" }}
+
+{{- $smtpUseSSL := .Values.olaresEnv.SMTP_SSL | default "" }}
+{{- $smtpUseTLS := .Values.olaresEnv.SMTP_TLS | default "" }}
+{{- $smtpSecurityProtocols := .Values.olaresEnv.SMTP_SECURITY_PROTOCOLS | default "" }}
+{{- $smtpSecurityLower := lower (toString $smtpSecurityProtocols) }}
+{{- if eq $smtpSecurityLower "tls" }}
+  {{- $smtpSecure = "tls" }}
+{{- else if eq $smtpSecurityLower "ssl" }}
+  {{- $smtpSecure = "ssl" }}
+{{- else if eq $smtpSecurityLower "none" }}
+  {{- $smtpSecure = "null" }}
+{{- else }}
+  {{- if or (eq (lower $smtpUseSSL) "true") (eq $smtpUseSSL "1") }}
+    {{- $smtpSecure = "ssl" }}
+  {{- else if or (eq (lower $smtpUseTLS) "true") (eq $smtpUseTLS "1") }}
+    {{- $smtpSecure = "tls" }}
+  {{- end }}
+{{- end }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fireflyiii
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fireflyiii
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: fireflyiii
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: fireflyiii
+    spec:
+      containers:
+        - name: fireflyiii
+          image: docker.io/beclab/fireflyiii-core:version-6.4.16
+          envFrom:
+            - configMapRef:
+                name: fireflyiii-env
+            - secretRef:
+                name: fireflyiii-secrets
+          env:
+            {{- if and (eq (toString .Values.olaresEnv.USE_SYSTEM_SMTP_SETTINGS) "true") (eq (toString .Values.olaresEnv.SMTP_ENABLED) "true") }}
+            - name: MAIL_MAILER
+              value: "smtp"
+            - name: MAIL_HOST
+              value: "{{ .Values.olaresEnv.MAIL_HOST }}"
+            - name: MAIL_PORT
+              value: "{{ .Values.olaresEnv.MAIL_PORT }}"
+            - name: MAIL_USERNAME
+              value: "{{ .Values.olaresEnv.MAIL_USERNAME }}"
+            - name: MAIL_PASSWORD
+              value: "{{ .Values.olaresEnv.MAIL_PASSWORD }}"
+            - name: MAIL_FROM
+              value: "{{ .Values.olaresEnv.MAIL_FROM }}"
+            - name: MAIL_ENCRYPTION
+              value: "{{ $smtpSecure }}"
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 1900m
+              memory: 1.75Gi
+            requests:
+              cpu: 500m
+              memory: 512Mi
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: fireflyiii-data
+              mountPath: /var/www/html/storage/upload
+              subPath: upload
+      restartPolicy: Always
+      volumes:
+        - name: fireflyiii-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/fireflyiii'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/fireflyiii'
+                {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fireflyiii
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fireflyiii
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: fireflyiii
+status:
+  loadBalancer: {}
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: fireflyiii-cron
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fireflyiii-cron
+spec:
+  schedule: "0 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: fireflyiii-cron
+        spec:
+          containers:
+            - name: cron
+              image: alpine
+              command: [
+                "sh",
+                "-c",
+                "wget -qO- http://fireflyiii:8080/api/v1/cron/$STATIC_CRON_TOKEN"
+              ]
+              env:
+                - name: STATIC_CRON_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: fireflyiii-secrets
+                      key: STATIC_CRON_TOKEN
+          restartPolicy: OnFailure
