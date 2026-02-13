@@ -1,0 +1,55 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: medusa-config
+  namespace: "{{ .Release.Namespace }}"
+data:
+  start.sh: |
+    #!/bin/sh
+
+    # Run migrations and start server
+    echo "Running database migrations..."
+    npx medusa db:migrate
+
+    npx medusa user -e {{ .Values.olaresEnv.ADMIN_EMAIL }} -p {{ .Values.olaresEnv.ADMIN_PASSWORD }} -i admin
+
+    echo "Seeding database..."
+    npx medusa exec ./src/scripts/seed.js
+
+    echo "Starting Medusa development server..."
+    npm start
+
+  init.sh: |
+    #!/bin/sh
+
+    TARGET_STRING="NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY=pk_test"
+
+    echo "Running Medusa Storefront"
+
+    if [ -f ".env.template" ]; then
+        cp .env.template .env
+        echo "Copy Template Succeed"
+    else
+        echo "Copy Template Error"
+        exit 1
+    fi
+
+    echo "Query Token"
+    TOKEN=$(psql -h ${PG_HOST} -U ${PG_USER} -d ${PG_DB} -t -A -c "select token from api_key where revoked_at is null and deleted_at is null order by created_at limit 1")
+
+    if [ -z "$TOKEN" ]; then
+      echo "Toke Invalid"
+      exit 1
+    fi
+
+    sed -i "s|$TARGET_STRING|NEXT_PUBLIC_MEDUSA_PUBLISHABLE_KEY=$TOKEN|g" .env
+
+    cat .env
+
+    echo "Init Medusa Storefront Succeed"
+
+    echo "Build Medusa Storefront"
+    yarn build
+
+    echo "Start Medusa Storefront"
+    yarn start
