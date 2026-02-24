@@ -18,11 +18,29 @@ spec:
       labels:
         app: anythingllm
     spec:
-      containers:
-        - name: anythingllm
-          image: "docker.io/beclab/mintplexlabs-anythingllm:1.9.0"
+      initContainers:
+        - name: init-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: Always
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /app/server/storage..."
+              mkdir -p /app/server/storage/comkey
+              chown -R 1000:1000 /app/server/storage
+              chmod -R 770 /app/server/storage
+          resources: {}
+          volumeMounts:
+            - name: anythingllm-storage
+              mountPath: /app/server/storage
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           securityContext:
             runAsUser: 0
+      containers:
+        - name: anythingllm
+          image: "docker.io/beclab/mintplexlabs-anythingllm:1.10"
           env:
             - name: PGID
               value: "1000"
