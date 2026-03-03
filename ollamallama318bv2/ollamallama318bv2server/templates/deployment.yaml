@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 {{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
 {{- $ollamaclientDomain := index $ollamaclientDomainENV "_0" -}}
 ---
@@ -28,7 +28,7 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: "docker.io/beclab/ollama-ollama:0.15.6"
+          image: "docker.io/beclab/ollama-ollama:0.17.5"
 {{- with .Values.olaresEnv }}
 {{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
           command:
@@ -54,6 +54,8 @@ spec:
             - configMapRef:
                 name: ollama-env
           env:
+            - name: OLLAMA_NOPRUNE
+              value: "1"
 {{- with .Values.olaresEnv }}
 {{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
             - name: OLLAMA_KEEP_ALIVE
@@ -82,44 +84,13 @@ spec:
           resources:
             limits:
               cpu: "4"
-              memory: 35Gi
+              memory: 40Gi
             requests:
               cpu: 50m
               memory: 4Gi
           volumeMounts:
             - mountPath: "/root/.ollama"
               name: data
-        - name: api
-          image: "docker.io/beclab/harveyff-olares-ollama:v0.1.2"
-          env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
-            - name: OLLAMA_MODEL
-              valueFrom:
-                configMapKeyRef:
-                  name: ollama-env
-                  key: MODEL_NAME
-            - name: OLLAMA_URL
-              value: "http://localhost:11434"
-            - name: APP_URL
-              value: "https://{{ $ollamaclientDomain }}"
-          resources:
-            requests:
-              cpu: 300m
-              memory: 200Mi
-            limits:
-              cpu: 1000m
-              memory: 2Gi
-          ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
       volumes:
         - name: data
           hostPath:
@@ -134,35 +105,17 @@ metadata:
   creationTimestamp: null
   labels:
     io.kompose.service: api
-  name: api
+  name: ollama
   namespace: "{{ .Release.Namespace }}"
 spec:
   ports:
-    - name: "api"
-      port: 8081
-      targetPort: 8080
+    - name: "ollama"
+      port: 11434
+      targetPort: 11434
   selector:
     io.kompose.service: ollama
 status:
   loadBalancer: {}
-  
----
-apiVersion: v1
-kind: Service
-metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: api
-  name: sharedentrances-api
-  namespace: "{{ .Release.Namespace }}"
-spec:
-  ports:
-    - name: "api"
-      port: 80
-      targetPort: 8080
-  selector:
-    io.kompose.service: ollama
-status:
-  loadBalancer: {}
+
 {{- end }}
 
