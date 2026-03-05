@@ -1,4 +1,4 @@
-﻿---
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,11 +18,20 @@ spec:
       labels:
         app: teable
     spec:
-      securityContext:
-        runAsUser: 0
+      initContainers:
+        - name: check-ready
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              teable-redis:6379
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
       containers:
         - name: teable
-          image: "docker.io/beclab/teableio-teable:e50cdc6dd1a8bf23d5236cf8f88436eb7c91bbcd"
+          image: "docker.io/beclab/teableio-teable:3077582aef94c87199dade566f2459ef264f26bb"
           imagePullPolicy: IfNotPresent
           env:
             - name: PGID
@@ -48,14 +57,30 @@ spec:
           resources:
             requests:
               cpu: 300m
-              memory: 300Mi
+              memory: 500Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 2000m
+              memory: 3Gi
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
           volumeMounts:
             - mountPath: /app/.assets
               name: teable-data
@@ -73,7 +98,6 @@ spec:
             {{- else }}
             path: '{{ .Values.userspace.appData }}/teable'
             {{- end }}
-
 ---
 apiVersion: batch/v1
 kind: Job
@@ -90,7 +114,7 @@ spec:
     spec:
       containers:
         - name: teable-db-migrate
-          image: "docker.io/beclab/teableio-teable-db-migrate:e50cdc6dd1a8bf23d5236cf8f88436eb7c91bbcd"
+          image: "docker.io/beclab/teableio-teable-db-migrate:3077582aef94c87199dade566f2459ef264f26bb"
           env:
             - name: PGID
               value: "1000"
@@ -112,8 +136,8 @@ spec:
               cpu: 300m
               memory: 200Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 500m
+              memory: 500Mi
       restartPolicy: Never
 
 ---
@@ -132,5 +156,3 @@ spec:
       protocol: TCP
   selector:
     app: teable
-status:
-  loadBalancer: {}
