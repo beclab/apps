@@ -1,14 +1,14 @@
 # openclaw.json lifecycle:
-# 1) First deploy: init-config creates openclaw.json from default (ConfigMap) on app-data-config volume.
-# 2) Runtime: app reads/writes openclaw.json on the same volume; changes persist across restarts.
-# 3) Helm upgrade: init-config runs but only copies default when file is missing; never overwrites.
+# 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
+# 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
+# 3) Helm upgrade: init only copies default when file is missing; never overwrites.
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
     io.kompose.service: clawdbot
-  name: clawdbot
+  name: "{{ .Release.Name }}"
   namespace: "{{ .Release.Namespace }}"
 spec:
   replicas: 1
@@ -26,7 +26,7 @@ spec:
     spec:
       initContainers:
         - name: init-chmod-data
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          image: "beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - "-c"
@@ -39,56 +39,39 @@ spec:
               else
                 echo "Directory already exists: /home/node/.openclaw"
               fi
-              if [ ! -d /home/node/openclaw ]; then
-                mkdir -p /home/node/openclaw
-                echo "Created directory: /home/node/openclaw"
+              if [ ! -d /home/node/.npm-global ]; then
+                mkdir -p /home/node/.npm-global/bin
+                echo "Created directory: /home/node/.npm-global"
               else
-                echo "Directory already exists: /home/node/openclaw"
+                echo "Directory already exists: /home/node/.npm-global"
+              fi
+              if [ ! -f /home/node/.openclaw/openclaw.json ]; then
+                cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
+                echo "Created openclaw.json from default config"
+              else
+                echo "openclaw.json already exists, skipping (upgrade-safe)"
               fi
               chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
-              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/openclaw || true
               chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node || true
               chmod -R 700 /home/node/.openclaw || true
-              chmod -R 700 /home/node/openclaw || true
               chmod -R 700 /home/node || true
               echo "Directory permissions set for UID ${OPENCLAW_UID} (upgrade-safe from root)"
           resources: {}
           volumeMounts:
             - mountPath: /home/node/.openclaw
               name: app-data-config
-            - mountPath: /home/node/openclaw
-              name: app-data-workspace
             - mountPath: /home/node
               name: app-data-node
+            - mountPath: /default-openclaw
+              name: default-openclaw
+              readOnly: true
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-        - name: init-config
-          image: "beclab/openclaw-openclaw:2026.2.9"
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              OPENCLAW_UID=1000
-              OPENCLAW_GID=1000
-              if [ ! -f /home/node/.openclaw/openclaw.json ]; then
-                cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
-                chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
-                echo "Created openclaw.json from default config"
-              else
-                echo "openclaw.json already exists, skipping (upgrade-safe)"
-              fi
-          volumeMounts:
-            - mountPath: /home/node/.openclaw
-              name: app-data-config
-            - mountPath: /default-openclaw
-              name: default-openclaw
-              readOnly: true
-          securityContext:
-            runAsUser: 0
       containers:
-        - image: "beclab/openclaw-openclaw:2026.2.9"
+        - image: "beclab/openclaw-openclaw:2026.3.1"
           name: clawdbot
           command:
             [
@@ -108,8 +91,10 @@ spec:
               value: /home/node
             - name: TERM
               value: xterm-256color
-            - name: OPENCLAW_GATEWAY_TOKEN
-              value: clawdbot
+            - name: NPM_CONFIG_PREFIX
+              value: /home/node/.npm-global
+            - name: PATH
+              value: "/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           resources:
             limits:
               cpu: "4"
@@ -120,14 +105,20 @@ spec:
           volumeMounts:
             - mountPath: /home/node/.openclaw
               name: app-data-config
-            - mountPath: /home/node/openclaw
-              name: app-data-workspace
             - mountPath: /home/node/
               name: app-data-node
             - mountPath: /usr/local/bin/openclaw
               name: openclaw-bin
               subPath: openclaw
               readOnly: true
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -142,10 +133,6 @@ spec:
             type: DirectoryOrCreate
           name: app-data-config
         - hostPath:
-            path: "{{ .Values.userspace.appData }}/workspace"
-            type: DirectoryOrCreate
-          name: app-data-workspace
-        - hostPath:
             path: "{{ .Values.userspace.appData }}/node"
             type: DirectoryOrCreate
           name: app-data-node          
@@ -159,6 +146,18 @@ spec:
           configMap:
             name: clawdbot-openclaw-bin
             defaultMode: 0755
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
 
 ---
 apiVersion: v1

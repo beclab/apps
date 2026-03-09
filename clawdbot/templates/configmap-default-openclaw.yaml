@@ -6,6 +6,7 @@
 {{- $appDomainENV := split "," .Values.domain.clawdbot -}}
 {{- $appDomain := index $appDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $gatewayToken := randAlphaNum 32 -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -17,6 +18,12 @@ metadata:
 data:
   openclaw.json: |
     {
+      "update": {
+        "checkOnStart": false,
+        "auto": {
+          "enabled": false
+        }
+      },    
       "models": {
         "mode": "merge",
         "providers": {
@@ -26,18 +33,44 @@ data:
             "auth": "api-key",
             "api": "openai-responses",
             "authHeader": false,
-            "models": []
+            "models": [
+              {
+                "id": "qwen3.5:27b",
+                "name": "Qwen3.5-27b",
+                "api": "openai-responses",
+                "reasoning": true,
+                "input": [
+                  "text",
+                  "image"
+                ],
+                "cost": {
+                  "input": 0,
+                  "output": 0,
+                  "cacheRead": 0,
+                  "cacheWrite": 0
+                },
+                "contextWindow": 130000,
+                "maxTokens": 8192
+              }
+            ]
           }
         }
       },
       "agents": {
         "defaults": {
+          "model": {
+              "primary": "ollama/qwen3.5:27b"
+          },
+          "models": {
+            "ollama/qwen3.5:27b": {
+              "alias": "Qwen3.5-27b"
+            }
+          },
           "workspace": "/home/node/.openclaw/workspace",          
           "maxConcurrent": 4,
           "subagents": {
             "maxConcurrent": 8
-          }
-          
+          } 
         }
       },
       "messages": {
@@ -51,6 +84,13 @@ data:
         "port": 18789,
         "mode": "local",
         "bind": "loopback",
+        "controlUi": {
+          "allowedOrigins": ["https://{{ $appDomain }}"]
+        },        
+        "auth": {
+          "mode": "token",
+          "token": "{{ $gatewayToken }}"
+        },
         "tailscale": {
           "mode": "off",
           "resetOnExit": false

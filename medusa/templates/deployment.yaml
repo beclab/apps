@@ -1,0 +1,235 @@
+apiVersion: v1
+data:
+  nginx.conf: |
+    server {
+
+      listen 8080;
+
+      absolute_redirect off;
+
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      proxy_connect_timeout 30s;
+      proxy_send_timeout 60s;
+      proxy_read_timeout 300s;
+      proxy_set_header host $host;
+      proxy_set_header x-forwarded-host $http_host;
+      proxy_http_version 1.1;
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
+
+      location = / {
+        return 302 /app/;
+      }
+
+      location / {
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
+
+        proxy_pass http://localhost:9000;
+      }
+    }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: "{{ .Release.Namespace }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: medusa
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: medusa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: medusa
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: medusa
+    spec:
+      containers:
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+        - image: "beclab/aby913-medusa:2.12.5"
+          name: medusa
+          command:
+            - sh
+            - "-c"
+            - cd /server/.medusa/server && ./start.sh
+          ports:
+            - containerPort: 9000
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1000Mi
+            limits:
+              cpu: 1000m
+              memory: 2000Mi
+          volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /server/.medusa/server/start.sh
+              subPath: start.sh
+              name: start-config-cmd
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: REDIS_URL
+              value: "redis://{{ .Values.redis.host }}:6379"
+            - name: DATABASE_URL
+              value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:5432/{{ .Values.postgres.databases.medusa }}"
+            - name: DB_NAME
+              value: "{{ .Values.postgres.databases.medusa }}"
+            - name: JWT_SECRET
+              value: "supersecret"
+            - name: COOKIE_SECRET
+              value: "supersecret"
+            - name: STORE_CORS
+              value: "http://localhost:8000,https://docs.medusajs.com"
+            - name: ADMIN_CORS
+              value: "http://localhost:5173,http://localhost:9000,https://docs.medusajs.com"
+            - name: AUTH_CORS
+              value: "http://localhost:5173,http://localhost:9000,https://docs.medusajs.com"
+        - image: "beclab/aby913-medusa-storefront:1.0.3"
+          name: medusa-storefront
+          command:
+            - sh
+            - -c
+            - /app/init.sh
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1000Mi
+            limits:
+              cpu: 1000m
+              memory: 2000Mi
+          volumeMounts:
+            - mountPath: /app/init.sh
+              subPath: init.sh
+              name: init-config-cmd
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: NEXT_PUBLIC_MEDUSA_BACKEND_URL
+              value: http://localhost:9000
+            - name: MEDUSA_BACKEND_URL
+              value: http://localhost:9000
+            - name: PG_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: PG_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: PGPASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: PG_DB
+              value: "{{ .Values.postgres.databases.medusa }}"
+          ports:
+            - containerPort: 8000
+      volumes:
+        - name: start-config-cmd
+          configMap:
+            name: medusa-config
+            defaultMode: 0755
+            items:
+              - key: start.sh
+                path: start.sh
+        - name: init-config-cmd
+          configMap:
+            name: medusa-config
+            defaultMode: 0755
+            items:
+              - key: init.sh
+                path: init.sh
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/medusa"
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: medusa-svc
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  type: ClusterIP
+  selector:
+    app: medusa
+  ports:
+    - name: medusa
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: medusa-storefront
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
