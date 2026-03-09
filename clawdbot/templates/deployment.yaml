@@ -1,7 +1,7 @@
 # openclaw.json lifecycle:
-# 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
-# 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
-# 3) Helm upgrade: init only copies default when file is missing; never overwrites.
+  # 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
+  # 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
+  # 3) Helm upgrade: init only copies default when file is missing; never overwrites.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -24,7 +24,34 @@ spec:
         io.kompose.service: clawdbot
         bytetrade.io/terminal: clawdbot
     spec:
+      # Recommended: make mounted volumes writable/readable for UID/GID 1000 more reliably
+      securityContext:
+        fsGroup: 1000
+
       initContainers:
+        - name: init-install-brew
+          image: "beclab/harveyff-openclaw-brew-base:2026.3.1"
+          securityContext:
+            runAsUser: 0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+                echo "[init-brew] brew already on volume, skip"
+              else
+                echo "[init-brew] copying pre-built brew to volume..."
+                cp -a /brew-staging/.linuxbrew /home/linuxbrew/.linuxbrew
+                echo "[init-brew] done"
+              fi
+              chown -R 1000:1000 /home/linuxbrew
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
         - name: init-chmod-data
           image: "beclab/aboveos-busybox:1.37.0"
           command:
@@ -70,6 +97,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+
       containers:
         - image: "beclab/openclaw-openclaw:2026.3.1"
           name: clawdbot
@@ -82,7 +110,6 @@ spec:
               "lan",
               "--port",
               "18789",
-              "--allow-unconfigured",
             ]
           ports:
             - containerPort: 18789
@@ -93,8 +120,14 @@ spec:
               value: xterm-256color
             - name: NPM_CONFIG_PREFIX
               value: /home/node/.npm-global
+
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
             - name: PATH
-              value: "/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
           resources:
             limits:
               cpu: "4"
@@ -111,6 +144,10 @@ spec:
               name: openclaw-bin
               subPath: openclaw
               readOnly: true
+
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
@@ -126,6 +163,7 @@ spec:
                 - ALL
               add:
                 - NET_BIND_SERVICE
+
       restartPolicy: Always
       volumes:
         - hostPath:
@@ -135,7 +173,12 @@ spec:
         - hostPath:
             path: "{{ .Values.userspace.appData }}/node"
             type: DirectoryOrCreate
-          name: app-data-node          
+          name: app-data-node
+        - name: brew-volume
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/brew"
+            type: DirectoryOrCreate
+
         - name: default-openclaw
           configMap:
             name: clawdbot-default-openclaw
@@ -146,6 +189,7 @@ spec:
           configMap:
             name: clawdbot-openclaw-bin
             defaultMode: 0755
+
         {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
         - name: olares-home-dir
           hostPath:
