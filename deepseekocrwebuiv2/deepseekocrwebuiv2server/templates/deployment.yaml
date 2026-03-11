@@ -1,4 +1,5 @@
 {{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+{{- $modelPath := "/app/models" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -23,7 +24,19 @@ spec:
     spec:
       containers:
         - name: deepseekocrwebuiv2
-          image: "docker.io/beclab/harveyff-deepseekocr-webui:v1.0.13"
+          image: "docker.io/beclab/harveyff-deepseekocr-webui:v2.0.3"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="{{ $modelPath }}/.DeepSeek-OCR-2.done"
+              echo "[ocr-wait] Waiting for model download: $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[ocr-wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[ocr-wait] Model ready, starting OCR service."
+              python web_service_unified.py
           ports:
             - containerPort: 8001
           env:
@@ -35,6 +48,10 @@ spec:
               value: "Etc/UTC"
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: LOCAL_MODEL_PATH
+              value: "{{ $modelPath }}"
+            - name: HF_HOME
+              value: "{{ $modelPath }}"
             - name: NVIDIA_VISIBLE_DEVICES
               value: "0"
             - name: CUDA_VISIBLE_DEVICES
@@ -51,12 +68,70 @@ spec:
               memory: 5Gi
             limits:
               cpu: "4"
-              memory: 32Gi
+              memory: 20Gi
           volumeMounts:
             - name: models
-              mountPath: /root/.cache/huggingface
+              mountPath: {{ $modelPath }}
             - name: logs
               mountPath: /app/log
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.6"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ if .Values.olaresEnv }}{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE | default "" }}{{ end }}"
+            - name: HF_TOKEN
+              value: "{{ if .Values.olaresEnv }}{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN | default "" }}{{ end }}"
+            - name: MODEL_NAME
+              value: "DeepSeek-OCR-2"
+          args:
+            - "--repo"
+            - "deepseek-ai/DeepSeek-OCR-2"
+            - "--ref"
+            - "main"
+            - "--outdir"
+            - "/data"
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/health"
+            - "--done-name"
+            - ".DeepSeek-OCR-2.done"
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+            initialDelaySeconds: 5
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: models
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
       volumes:
         - name: models
           hostPath:
@@ -66,6 +141,7 @@ spec:
           hostPath:
             path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
             type: DirectoryOrCreate
+      restartPolicy: Always
 
 ---
 apiVersion: v1
@@ -81,3 +157,19 @@ spec:
       port: 8001
       targetPort: 8001
   type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv2
+spec:
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  selector:
+    app: deepseekocrwebuiv2
