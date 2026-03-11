@@ -1,0 +1,375 @@
+﻿{{- $solidtimeDomainENV := split  ","  .Values.domain.solidtime -}}
+{{- $solidtimeDomain := index $solidtimeDomainENV "_0" -}}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: solidtime-keys-pvc
+  namespace: {{ .Release.Namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Mi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: solidtime
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: solidtime
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+          args:
+            - |
+              mkdir -p /var/www/html/storage/logs /var/www/html/storage/app
+              chown -R 1000:1000 /var/www/html/storage
+              chmod -R 755 /var/www/html/storage
+          resources: { }
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /var/www/html/storage
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+        - name: solidtime-init
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
+          command: ["sh", "-c"]
+          args:
+            - |-
+              set -e
+
+              echo "=== Running database migrations ==="
+              php /var/www/html/artisan migrate --force
+
+              echo "=== Creating admin user ==="
+              echo $ADMIN_PASSWORD | php /var/www/html/artisan admin:user:create "{{ .Values.olaresEnv.ADMIN_NAME }}" "{{ .Values.olaresEnv.ADMIN_EMAIL }}" --verify-email --ask-for-password || true
+
+              echo "=== Checking if keys already exist ==="
+              KEY_FILE="/etc/app-keys/.env"
+
+              if [ -f "$KEY_FILE" ]; then
+                echo "✓ Keys already exist in PVC, skipping generation..."
+                cat "$KEY_FILE"
+              else
+                echo "Generating new application keys..."
+                php /var/www/html/artisan self-host:generate-keys > "$KEY_FILE" 2>&1 || true
+
+                if [ ! -s "$KEY_FILE" ]; then
+                  echo "ERROR: Failed to generate keys file or file is empty!"
+                  exit 1
+                fi
+
+                echo "✓ Keys generated successfully:"
+                cat "$KEY_FILE"
+              fi
+          env:
+            - name: CONTAINER_MODE
+              value: scheduler
+            - name: ADMIN_PASSWORD
+              value: "{{ .Values.olaresEnv.ADMIN_PASSWORD }}"
+            - name: AUTO_DB_MIGRATE
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          volumeMounts:
+            - name: solidtime-keys
+              mountPath: /etc/app-keys
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+      containers:
+        - name: solidtime
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
+          env:
+            - name: CONTAINER_MODE
+              value: http
+            - name: AUTO_DB_MIGRATE
+              value: "true"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          readinessProbe:
+            httpGet:
+              path: /health-check/up
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health-check/up
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: solidtime-keys
+              mountPath: /var/www/html/.env
+              subPath: .env
+              readOnly: true
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+
+        - name: solidtime-scheduler
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
+          command:
+            - /bin/sh
+            - '-c'
+          args:
+            - |-
+              echo "Changing supervisor port for worker to 9002"
+              sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9002/" /etc/supervisord.conf
+
+              echo "New supervisor config:"
+              grep "port =" /etc/supervisord.conf
+
+              start-container
+          env:
+            - name: CONTAINER_MODE
+              value: scheduler
+            - name: SUPERVISOR_SERVER
+              value: "http://127.0.0.1:9002"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: solidtime-keys
+              mountPath: /var/www/html/.env
+              subPath: .env
+              readOnly: true
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+            - name: healthcheck-script
+              mountPath: /usr/local/bin/healthcheck
+              subPath: healthcheck
+          readinessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+
+        - name: solidtime-queue
+          image: docker.io/beclab/solidtime-solidtime:0.11.5
+          command:
+            - /bin/sh
+            - '-c'
+          args:
+            - |-
+              echo "Changing supervisor port for worker to 9003"
+              sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9003/" /etc/supervisord.conf
+
+              echo "New supervisor config:"
+              grep "port =" /etc/supervisord.conf
+
+              start-container
+          env:
+            - name: CONTAINER_MODE
+              value: worker
+            - name: WORKER_COMMAND
+              value: php /var/www/html/artisan queue:work
+            - name: SUPERVISOR_SERVER
+              value: "http://127.0.0.1:9003"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - name: solidtime-keys
+              mountPath: /var/www/html/.env
+              subPath: .env
+              readOnly: true
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/app
+              subPath: app-storage
+            - name: solidtime-data
+              mountPath: /var/www/html/storage/logs
+              subPath: logs
+            - name: healthcheck-script
+              mountPath: /usr/local/bin/healthcheck
+              subPath: healthcheck
+          readinessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command:
+                - healthcheck
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+
+        - name: gotenberg
+          image: docker.io/beclab/gotenberg-gotenberg:8
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+
+      restartPolicy: Always
+      volumes:
+        - name: solidtime-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/solidtime'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/solidtime'
+                {{- end }}
+        - name: healthcheck-script
+          configMap:
+            name: solidtime-healthcheck-script
+            defaultMode: 0755
+        - name: solidtime-keys
+          persistentVolumeClaim:
+            claimName: solidtime-keys-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: solidtime
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-solidtime
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: solidtime
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: 80
+      targetPort: {{ .Values.port | default 3000 }}
+  selector:
+    io.kompose.service: solidtime
+status:
+  loadBalancer: {}
