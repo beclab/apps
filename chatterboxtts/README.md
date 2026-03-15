@@ -7,6 +7,10 @@ This package deploys the published image:
 The app expects an NVIDIA-capable `amd64` Olares node and uses the configured
 public image directly.
 
+The chart is configured with `image.pullPolicy: Always`, so pods will always
+attempt to pull the current `latest` tag on start instead of reusing a cached
+node image.
+
 ## API
 
 Base service inside the cluster:
