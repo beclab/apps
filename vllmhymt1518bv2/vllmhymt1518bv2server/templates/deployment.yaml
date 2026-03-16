@@ -1,5 +1,7 @@
 ﻿{{- $vllmDomainENV := split "," .Values.domain.vllmclient -}}
 {{- $vllmDomain := index $vllmDomainENV "_0" -}}
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $isSparkDGX := $gpuInfo.isSparkDGX -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -9,7 +11,7 @@ metadata:
   labels:
     io.kompose.service: vllm
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "vllm"
 spec:
   replicas: 1
   selector:
@@ -25,7 +27,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: "docker.io/beclab/vllm-vllm-openai:v0.15.1-cu130"
+          image: "vllm/vllm-openai:v0.17.1-cu130"
           command:
             - /bin/bash
             - -c
@@ -41,16 +43,20 @@ spec:
               echo "[vllm-start] Starting vLLM server..."
               python3 -m vllm.entrypoints.openai.api_server \
                 --model "/models/HY-MT1.5-1.8B" \
+{{- $gpuMemUtil := "0.9" -}}
+{{- $maxModelLen := "auto" -}}
+{{- if eq $isSparkDGX "true" -}}
+{{- $gpuMemUtil = "0.85" -}}
+{{- $maxModelLen := "8192" -}}
+{{- end -}}
 {{- with .Values.olaresEnv }}
-                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default "0.9" }} \
-                --max-model-len {{ .MAX_MODEL_LEN | default "8000" }} \
+                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default $gpuMemUtil }} \
+                --max-model-len {{ .MAX_MODEL_LEN | default $maxModelLen }} \
 {{- else }}
-                --gpu-memory-utilization 0.9 \
-                --max-model-len 8000 \
+                --gpu-memory-utilization {{ $gpuMemUtil }} \
+                --max-model-len {{ $maxModelLen }} \
 {{- end }}
-                --max-num-batched-tokens 8000 \
-                --tensor-parallel-size 1 \
-                --enable-chunked-prefill
+                --tensor-parallel-size 1
           env:
             - name: PGID
               value: "1000"
@@ -70,7 +76,7 @@ spec:
               memory: 8Gi
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 4Gi
           volumeMounts:
             - name: data
               mountPath: /models/HY-MT1.5-1.8B
