@@ -1,4 +1,4 @@
-﻿apiVersion: v1
+apiVersion: v1
 data:
   nginx.conf: |
     stream {
@@ -45,7 +45,10 @@ data:
     grep -q "^WebUI\\\\HostHeaderValidation=" "$confFile" || echo "WebUI\\HostHeaderValidation=false" >> "$confFile"
     grep -q "^WebUI\\\\Authentication=" "$confFile" || echo "WebUI\\Authentication=false" >> "$confFile"
     grep -q "^WebUI\\\\LocalHostAuth=" "$confFile" || echo "WebUI\\LocalHostAuth=false" >> "$confFile"
-    echo "qBittorrent CSRF and HostHeaderValidation ensured"
+
+    grep -q "^Downloads\\\\SavePath=" "$confFile" || echo "Downloads\\SavePath=/downloads/home/Downloads/qBittorrent" >> "$confFile"
+
+    echo "qBittorrent config ensured"
 kind: ConfigMap
 metadata:
   name: init-config
@@ -69,9 +72,13 @@ spec:
         app: {{ .Release.Name }}
     spec:
       volumes:
-        - name: home
+        - name: external-downloads
           hostPath:
-            type: Directory
+            type: DirectoryOrCreate
+            path: "{{ .Values.sharedlib }}"
+        - name: home-downloads
+          hostPath:
+            type: DirectoryOrCreate
             path: {{ .Values.userspace.userData }}
         - name: appdata
           hostPath:
@@ -106,14 +113,17 @@ spec:
             - sh
             - '-c'
             - |
-              chown -R 1000:1000 /home; chown -R 1000:1000 /appdata
+              mkdir -p /home-data/Downloads/qBittorrent
+              chown -R 1000:1000 /home-data; chown -R 1000:1000 /appdata; chown -R 1000:1000 /external-data
           resources: {}
           imagePullPolicy: IfNotPresent
           volumeMounts:
-            - name: home
-              mountPath: /home
+            - name: home-downloads
+              mountPath: /home-data
             - name: appdata
               mountPath: /appdata
+            - name: external-downloads
+              mountPath: /external-data
           securityContext:
             runAsUser: 0
         - name: init-qbittorrent-config
@@ -128,7 +138,7 @@ spec:
           volumeMounts:
             - name: appdata
               mountPath: /appData
-            - name: init-config 
+            - name: init-config
               mountPath: /init.sh
               subPath: init.sh
           securityContext:
@@ -173,8 +183,10 @@ spec:
             - name: TZ
               value: UTC
           volumeMounts:
-            - name: home
-              mountPath: /home
+            - name: home-downloads
+              mountPath: /downloads/home
+            - name: external-downloads
+              mountPath: /downloads/external
             - name: appdata
               mountPath: /config/qBittorrent
           livenessProbe:
