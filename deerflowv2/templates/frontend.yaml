@@ -1,0 +1,70 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflowv2-frontend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deerflowv2-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deerflowv2-frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deerflowv2-frontend
+    spec:
+      initContainers:
+        - name: wait-for-gateway
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - 'deerflowv2-backend-svc:8001'
+          resources: {}
+        - name: wait-for-langgraph
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - 'deerflowv2-backend-svc:2024'
+          resources: {}
+      containers:
+        - name: deerflowv2-frontend
+          image: docker.io/beclab/harveyff-deerflow-frontend:v2.0.1
+          ports:
+            - containerPort: 3000
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: BETTER_AUTH_SECRET
+              value: "deerflowv2-olares-auth-secret"
+            - name: ENABLE_FOLLOWUP_SUGGESTIONS
+              value: "false"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: 256Mi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflowv2-frontend-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deerflowv2-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  type: ClusterIP
