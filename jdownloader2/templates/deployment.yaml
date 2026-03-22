@@ -1,0 +1,155 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: jdownloader2
+  name: jdownloader2
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: jdownloader2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: jdownloader2
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - |
+              mkdir -p /home-data/Downloads/jdownloader2
+              chown -R 1000:1000 /home-data /external-data /config-data
+          resources: {}
+          imagePullPolicy: IfNotPresent
+          volumeMounts:
+            - name: home-downloads
+              mountPath: /home-data
+            - name: external-downloads
+              mountPath: /external-data
+            - name: config
+              mountPath: /config-data
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: jdownloader2
+          image: "docker.io/jlesage/jdownloader-2:v26.03.1"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5800
+          env:
+            - name: USER_ID
+              value: "1000"
+            - name: GROUP_ID
+              value: "1000"
+            - name: KEEP_APP_RUNNING
+              value: "1"
+            - name: DARK_MODE
+              value: "1"
+            - name: WEB_AUDIO
+              value: "0"
+            - name: SECURE_CONNECTION
+              value: "0"
+            - name: ENABLE_CJK_FONT
+              value: "1"
+            - name: WEB_FILE_MANAGER_ALLOWED_PATHS
+              value: "/downloads/home,/downloads/external,/output"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 800Mi
+          volumeMounts:
+            - mountPath: /config
+              name: config
+            - name: home-downloads
+              mountPath: /downloads/home
+            - name: external-downloads
+              mountPath: /downloads/external
+            - name: home-downloads
+              mountPath: /output
+              subPath: Downloads/jdownloader2
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5800
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5800
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+      volumes:
+        - name: home-downloads
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}
+        - name: external-downloads
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.sharedlib }}"
+        - name: config
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+            {{- end }}
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jdownloader2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jdownloader2
+spec:
+  ports:
+    - name: http
+      port: 5800
+      targetPort: 5800
+  selector:
+    io.kompose.service: jdownloader2
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-jdownloader2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jdownloader2
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: 5800
+      targetPort: {{ .Values.port | default 3000 }}
+  selector:
+    io.kompose.service: jdownloader2
+status:
+  loadBalancer: {}

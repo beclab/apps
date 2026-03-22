@@ -1,5 +1,7 @@
 ﻿{{- $vllmDomainENV := split "," .Values.domain.vllmclient -}}
 {{- $vllmDomain := index $vllmDomainENV "_0" -}}
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $isSparkDGX := $gpuInfo.isSparkDGX -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -10,7 +12,7 @@ metadata:
   labels:
     io.kompose.service: vllm
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "vllm"
 spec:
   replicas: 1
   selector:
@@ -25,9 +27,45 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: vllm
     spec:
+      initContainers:
+        - name: download-tiktoken
+          image: beclab/alpine:3.18
+          envFrom:
+            - configMapRef:
+                name: vllm-config
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              : "${CDN_HOST:?CDN_HOST is required}"
+              echo "Using CDN_HOST=${CDN_HOST}"
+
+              mkdir -p /data/tiktoken
+
+              if [ ! -s /data/tiktoken/o200k_base.tiktoken ] || [ ! -s /data/tiktoken/cl100k_base.tiktoken ]; then
+                echo "Installing curl..."
+                apk add --no-cache curl
+              fi
+
+              if [ ! -s /data/tiktoken/o200k_base.tiktoken ]; then
+                echo "Downloading o200k_base.tiktoken"
+                curl -fL --retry 3 "${CDN_HOST}/o200k_base.tiktoken" -o /data/tiktoken/o200k_base.tiktoken
+              fi
+
+              if [ ! -s /data/tiktoken/cl100k_base.tiktoken ]; then
+                echo "Downloading cl100k_base.tiktoken"
+                curl -fL --retry 3 "${CDN_HOST}/cl100k_base.tiktoken" -o /data/tiktoken/cl100k_base.tiktoken
+              fi
+
+              ls -lh /data/tiktoken
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: vllm
-          image: "docker.io/beclab/vllm-vllm-openai:v0.15.1-cu130"
+          image: "docker.io/vllm/vllm-openai:v0.17.1-cu130"
           command:
             - /bin/bash
             - -c
@@ -43,12 +81,18 @@ spec:
               echo "[vllm-start] Starting vLLM server..."
               python3 -m vllm.entrypoints.openai.api_server \
                 --model "/models/gpt-oss-20b" \
+{{- $gpuMemUtil := "0.9" -}}
+{{- $maxModelLen := "auto" -}}
+{{- if eq $isSparkDGX "true" -}}
+{{- $gpuMemUtil = "0.88" -}}
+{{- $maxModelLen := "8192" -}}
+{{- end -}}
 {{- with .Values.olaresEnv }}
-                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default "0.95" }} \
-                --max-model-len {{ .MAX_MODEL_LEN | default "8000" }} \
+                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default $gpuMemUtil }} \
+                --max-model-len {{ .MAX_MODEL_LEN | default $maxModelLen }} \
 {{- else }}
-                --gpu-memory-utilization 0.95 \
-                --max-model-len 8000 \
+                --gpu-memory-utilization {{ $gpuMemUtil }} \
+                --max-model-len {{ $maxModelLen }} \
 {{- end }}
                 --tensor-parallel-size 1
           env:
@@ -62,6 +106,8 @@ spec:
               value: "1"
             - name: VLLM_PORT
               value: "8000"
+            - name: TIKTOKEN_ENCODINGS_BASE
+              value: /data/tiktoken
           ports:
             - containerPort: 8000
           resources:
@@ -70,10 +116,12 @@ spec:
               memory: 28Gi
             requests:
               cpu: 500m
-              memory: 24Gi
+              memory: 20Gi
           volumeMounts:
             - mountPath: /models/gpt-oss-20b
               name: data
+            - name: data
+              mountPath: /data
         - name: download-model
           image: "docker.io/beclab/harveyff-hf-downloader:v0.1.0"
           env:
