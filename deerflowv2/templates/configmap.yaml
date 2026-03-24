@@ -1,0 +1,156 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deerflowv2-env-config
+  namespace: {{ .Release.Namespace }}
+data:
+  # Search & Crawl tools
+  TAVILY_API_KEY: ""
+  JINA_API_KEY: ""
+  INFOQUEST_API_KEY: ""
+  # Model API keys (set the ones you use in config.yaml models section)
+  OPENAI_API_KEY: ""
+  DEEPSEEK_API_KEY: ""
+  ANTHROPIC_API_KEY: ""
+  GOOGLE_API_KEY: ""
+  VOLCENGINE_API_KEY: ""
+  NOVITA_API_KEY: ""
+  MINIMAX_API_KEY: ""
+  MOONSHOT_API_KEY: ""
+  # LangSmith tracing (set to "true" and fill LANGSMITH_API_KEY to enable)
+  LANGCHAIN_TRACING_V2: "false"
+  LANGSMITH_API_KEY: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deerflowv2-init-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.yaml: |
+    config_version: 2
+
+    # =============================================
+    # HOW TO ADD MODELS
+    # =============================================
+    # Edit this file at: appData/config/config.yaml
+    #
+    # Ollama example (use models you've pulled in Ollama):
+    #   - name: qwen3
+    #     display_name: Qwen3 (Ollama)
+    #     use: langchain_openai:ChatOpenAI
+    #     model: qwen3
+    #     api_key: ollama
+    #     base_url: $OLLAMA_OPENAI_BASE_URL
+    #     supports_thinking: true       # enables Pro/Ultra modes (Qwen3+ supports thinking)
+    #     supports_vision: true          # enables image input (only for vision models like Qwen2.5-VL)
+    #
+    # OpenAI example:
+    #   - name: gpt-4o
+    #     display_name: GPT-4o
+    #     use: langchain_openai:ChatOpenAI
+    #     model: gpt-4o
+    #     api_key: $OPENAI_API_KEY
+    #     supports_thinking: true
+    #     supports_vision: true
+    #
+    # Claude example:
+    #   - name: claude-sonnet
+    #     display_name: Claude 4 Sonnet
+    #     use: langchain_anthropic:ChatAnthropic
+    #     model: claude-sonnet-4-20250514
+    #     api_key: $ANTHROPIC_API_KEY
+    #     supports_thinking: true
+    #     supports_reasoning_effort: true  # enables reasoning effort slider
+    #     supports_vision: true
+    #
+    # Key model capabilities:
+    #   supports_thinking: true/false  - Pro/Ultra mode (thinking/planning before answering)
+    #   supports_reasoning_effort: true/false - reasoning effort slider (low/medium/high)
+    #   supports_vision: true/false    - image/vision input support
+    #
+    # After editing, restart the app to apply changes.
+    models: []
+
+    tool_groups:
+      - name: web
+      - name: file:read
+      - name: file:write
+      - name: bash
+
+    tools:
+      - name: web_search
+        group: web
+        use: deerflow.community.tavily.tools:web_search_tool
+        max_results: 5
+      - name: web_fetch
+        group: web
+        use: deerflow.community.jina_ai.tools:web_fetch_tool
+        timeout: 10
+      - name: image_search
+        group: web
+        use: deerflow.community.image_search.tools:image_search_tool
+        max_results: 5
+      - name: ls
+        group: file:read
+        use: deerflow.sandbox.tools:ls_tool
+      - name: read_file
+        group: file:read
+        use: deerflow.sandbox.tools:read_file_tool
+      - name: write_file
+        group: file:write
+        use: deerflow.sandbox.tools:write_file_tool
+      - name: str_replace
+        group: file:write
+        use: deerflow.sandbox.tools:str_replace_tool
+      - name: bash
+        group: bash
+        use: deerflow.sandbox.tools:bash_tool
+
+    tool_search:
+      enabled: false
+
+    sandbox:
+      use: deerflow.sandbox.local:LocalSandboxProvider
+
+    skills:
+      container_path: /mnt/skills
+
+    title:
+      enabled: true
+      max_words: 6
+      max_chars: 60
+      model_name: null
+
+    summarization:
+      enabled: true
+      model_name: null
+      trigger:
+        - type: tokens
+          value: 15564
+      keep:
+        type: messages
+        value: 10
+      trim_tokens_to_summarize: 15564
+      summary_prompt: null
+
+    memory:
+      enabled: true
+      storage_path: memory.json
+      debounce_seconds: 30
+      model_name: null
+      max_facts: 100
+      fact_confidence_threshold: 0.7
+      injection_enabled: true
+      max_injection_tokens: 2000
+
+    checkpointer:
+      type: sqlite
+      connection_string: checkpoints.db
+
+  extensions_config.json: |
+    {
+      "mcpServers": {},
+      "skills": {}
+    }
