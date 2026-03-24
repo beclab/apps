@@ -99,8 +99,66 @@ spec:
             runAsUser: 0
 
       containers:
-        - image: "beclab/openclaw-openclaw:2026.3.1"
+        # Workspace container: stable shell environment for terminal sessions.
+        # Gateway restarts do NOT affect this container or its exec sessions.
+        # Mirrors the openclaw-cli service from the official docker-compose.yml.
+        - image: "beclab/openclaw-openclaw:2026.3.23"
           name: clawdbot
+          command: ["sleep", "infinity"]
+          env:
+            - name: HOME
+              value: /home/node
+            - name: TERM
+              value: xterm-256color
+            - name: NPM_CONFIG_PREFIX
+              value: /home/node/.npm-global
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: PATH
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: CUSTOM_API_KEY
+              value: "YOUR_CUSTOM_API_KEY"
+            - name: OLLAMA_API_KEY
+              value: "YOUR_OLLAMA_API_KEY"
+          resources:
+            limits:
+              cpu: "1500m"
+              memory: 2Gi
+            requests:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node/
+              name: app-data-node
+            - mountPath: /usr/local/bin/openclaw
+              name: openclaw-bin
+              subPath: openclaw
+              readOnly: true
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+        # Gateway sidecar: runs the OpenClaw gateway process independently.
+        # Can restart without affecting the workspace container or terminal sessions.
+        # Mirrors the openclaw-gateway service from the official docker-compose.yml.
+        - image: "beclab/openclaw-openclaw:2026.3.23"
+          name: gateway
           command:
             [
               "node",
@@ -120,34 +178,44 @@ spec:
               value: xterm-256color
             - name: NPM_CONFIG_PREFIX
               value: /home/node/.npm-global
-
             - name: HOMEBREW_PREFIX
               value: /home/linuxbrew/.linuxbrew
             - name: HOMEBREW_NO_AUTO_UPDATE
               value: "1"
             - name: PATH
               value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
+            - name: CUSTOM_API_KEY
+              value: "YOUR_CUSTOM_API_KEY"
+            - name: OLLAMA_API_KEY
+              value: "YOUR_OLLAMA_API_KEY"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 18789
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18789
+            initialDelaySeconds: 15
+            periodSeconds: 180
+            timeoutSeconds: 10
+            failureThreshold: 3
           resources:
             limits:
-              cpu: "4"
-              memory: 8Gi
+              cpu: "2500m"
+              memory: 6Gi
             requests:
-              cpu: 1
-              memory: 1Gi
+              cpu: 700m
+              memory: 768Mi
           volumeMounts:
             - mountPath: /home/node/.openclaw
               name: app-data-config
             - mountPath: /home/node/
               name: app-data-node
-            - mountPath: /usr/local/bin/openclaw
-              name: openclaw-bin
-              subPath: openclaw
-              readOnly: true
-
             - mountPath: /home/linuxbrew
               name: brew-volume
-
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
