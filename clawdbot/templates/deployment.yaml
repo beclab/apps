@@ -1,0 +1,288 @@
+# openclaw.json lifecycle:
+  # 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
+  # 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
+  # 3) Helm upgrade: init only copies default when file is missing; never overwrites.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: clawdbot
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: clawdbot
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: clawdbot
+        bytetrade.io/terminal: clawdbot
+    spec:
+      # Recommended: make mounted volumes writable/readable for UID/GID 1000 more reliably
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        - name: init-install-brew
+          image: "beclab/harveyff-openclaw-brew-base:2026.3.1"
+          securityContext:
+            runAsUser: 0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+                echo "[init-brew] brew already on volume, skip"
+              else
+                echo "[init-brew] copying pre-built brew to volume..."
+                cp -a /brew-staging/.linuxbrew /home/linuxbrew/.linuxbrew
+                echo "[init-brew] done"
+              fi
+              chown -R 1000:1000 /home/linuxbrew
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+        - name: init-chmod-data
+          image: "beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              OPENCLAW_UID=1000
+              OPENCLAW_GID=1000
+              if [ ! -d /home/node/.openclaw ]; then
+                mkdir -p /home/node/.openclaw
+                echo "Created directory: /home/node/.openclaw"
+              else
+                echo "Directory already exists: /home/node/.openclaw"
+              fi
+              if [ ! -d /home/node/.npm-global ]; then
+                mkdir -p /home/node/.npm-global/bin
+                echo "Created directory: /home/node/.npm-global"
+              else
+                echo "Directory already exists: /home/node/.npm-global"
+              fi
+              if [ ! -f /home/node/.openclaw/openclaw.json ]; then
+                cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
+                echo "Created openclaw.json from default config"
+              else
+                echo "openclaw.json already exists, skipping (upgrade-safe)"
+              fi
+              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
+              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node || true
+              chmod -R 700 /home/node/.openclaw || true
+              chmod -R 700 /home/node || true
+              echo "Directory permissions set for UID ${OPENCLAW_UID} (upgrade-safe from root)"
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node
+              name: app-data-node
+            - mountPath: /default-openclaw
+              name: default-openclaw
+              readOnly: true
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
+      containers:
+        # Workspace container: stable shell environment for terminal sessions.
+        # Gateway restarts do NOT affect this container or its exec sessions.
+        # Mirrors the openclaw-cli service from the official docker-compose.yml.
+        - image: "beclab/openclaw-openclaw:2026.3.23"
+          name: clawdbot
+          command: ["sleep", "infinity"]
+          env:
+            - name: HOME
+              value: /home/node
+            - name: TERM
+              value: xterm-256color
+            - name: NPM_CONFIG_PREFIX
+              value: /home/node/.npm-global
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: PATH
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: CUSTOM_API_KEY
+              value: "YOUR_CUSTOM_API_KEY"
+            - name: OLLAMA_API_KEY
+              value: "YOUR_OLLAMA_API_KEY"
+          resources:
+            limits:
+              cpu: "1500m"
+              memory: 2Gi
+            requests:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node/
+              name: app-data-node
+            - mountPath: /usr/local/bin/openclaw
+              name: openclaw-bin
+              subPath: openclaw
+              readOnly: true
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+        # Gateway sidecar: runs the OpenClaw gateway process independently.
+        # Can restart without affecting the workspace container or terminal sessions.
+        # Mirrors the openclaw-gateway service from the official docker-compose.yml.
+        - image: "beclab/openclaw-openclaw:2026.3.23"
+          name: gateway
+          command:
+            [
+              "node",
+              "dist/index.js",
+              "gateway",
+              "--bind",
+              "lan",
+              "--port",
+              "18789",
+            ]
+          ports:
+            - containerPort: 18789
+          env:
+            - name: HOME
+              value: /home/node
+            - name: TERM
+              value: xterm-256color
+            - name: NPM_CONFIG_PREFIX
+              value: /home/node/.npm-global
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: PATH
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: CUSTOM_API_KEY
+              value: "YOUR_CUSTOM_API_KEY"
+            - name: OLLAMA_API_KEY
+              value: "YOUR_OLLAMA_API_KEY"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 18789
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 18789
+            initialDelaySeconds: 15
+            periodSeconds: 180
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            limits:
+              cpu: "2500m"
+              memory: 6Gi
+            requests:
+              cpu: 700m
+              memory: 768Mi
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node/
+              name: app-data-node
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+
+      restartPolicy: Always
+      volumes:
+        - hostPath:
+            path: "{{ .Values.userspace.appData }}/config"
+            type: DirectoryOrCreate
+          name: app-data-config
+        - hostPath:
+            path: "{{ .Values.userspace.appData }}/node"
+            type: DirectoryOrCreate
+          name: app-data-node
+        - name: brew-volume
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/brew"
+            type: DirectoryOrCreate
+
+        - name: default-openclaw
+          configMap:
+            name: clawdbot-default-openclaw
+            items:
+              - key: openclaw.json
+                path: openclaw.json
+        - name: openclaw-bin
+          configMap:
+            name: clawdbot-openclaw-bin
+            defaultMode: 0755
+
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: clawdbot
+  name: clawdbot
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "18789"
+      port: 18789
+      targetPort: 18789
+  selector:
+    io.kompose.service: clawdbot

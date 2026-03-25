@@ -1,4 +1,4 @@
-﻿---
+---
 {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 {{- $clsENV := split  ","  .Values.domain.comfyuilauncherweb -}}
 {{- $cls := index $clsENV "_0" -}}
@@ -10,13 +10,17 @@
 
 {{ $image := "" }}
 {{ if .Values.GPU }}
-  {{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
-    {{ $image = "beclab/comfyui:v0.5.1-fe-launcher0.2.21" }}
+  {{ if eq .Values.GPU.Type "nvidia-gb10" }}  
+    {{ $image = "beclab/comfyui_launcher-arm64:v0.17.2-feunknown-launcher0.2.35-arm64" }}
   {{ else }}
-    {{ $image = "docker.io/beclab/kldtks-comfyui:c124-0d3d51-1d26d6-launcher-b1" }}
+    {{ if ge (float64 .Values.GPU.Cuda) 12.8 }}
+      {{ $image = "beclab/comfyui:v0.17.2-fe1.43.2-launcher0.2.35" }}
+    {{ else }}
+      {{ $image = "docker.io/beclab/kldtks-comfyui:c124-0d3d51-1d26d6-launcher-b1" }}
+    {{ end }}
   {{ end }}
 {{ else }}
-    {{ $image = "beclab/comfyui:v0.5.1-fe-launcher0.2.21" }}
+    {{ $image = "beclab/comfyui:v0.17.2-fe1.43.2-launcher0.2.35" }}
 {{ end }}
 
 ---
@@ -255,8 +259,18 @@ spec:
               value: "0"
             - name: TZ
               value: Etc/UTC
+{{ if .Values.GPU }}
+  {{ if eq .Values.GPU.Type "nvidia-gb10" }}
             - name: CLI_ARGS
-              value: '--normalvram --disable-xformers --disable-smart-memory --disable-cuda-malloc --front-end-version Comfy-Org/ComfyUI_frontend@v1.36.3'
+              value: '--normalvram --disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.43.2'
+  {{ else }}
+            - name: CLI_ARGS
+              value: '--normalvram --disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.43.2'
+  {{ end }}
+{{ else }}
+            - name: CLI_ARGS
+              value: '--normalvram --disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.43.2'
+{{ end }}
             - name: HOME
               value: /root
             - name: PIP_CACHE_DIR
@@ -295,6 +309,13 @@ spec:
               value: '{{ .Values.downloadCdnURL }}'
             - name: DESKTOP_API_URL
               value: 'http://desktop.{{ $desktopApiDomain }}/server/intent/send'
+            - name: FORCE_LOG_LANGUAGE
+              value: en
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
           securityContext:
             runAsUser: 0
           image: {{ $image }}
@@ -313,11 +334,11 @@ spec:
             - containerPort: 3000
           resources: 
             requests:
-              cpu: 250m
-              memory: 2Gi
+              cpu: 4
+              memory: 20Gi
             limits:
               cpu: "4"
-              memory: 50Gi
+              memory: 70Gi
           # livenessProbe:
           #   httpGet:
           #     path: /

@@ -1,0 +1,420 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyterhub-config
+  namespace: "{{ .Release.Namespace }}"
+data:
+  jupyterhub_config.py: |
+    from kubespawner import KubeSpawner
+
+    c.JupyterHub.spawner_class = KubeSpawner
+    c.JupyterHub.bind_url = 'http://:8000/'
+    c.JupyterHub.base_url = '/'
+
+    # Hub API configuration
+    # In JupyterHub 5.4.3, Hub API is automatically started on a random port
+    # ConfigProxy (running in the same process) automatically discovers it
+    # We don't need to explicitly configure hub_ip and hub_port
+    # This prevents port binding conflicts
+    c.JupyterHub.hub_ip = '0.0.0.0'
+    c.JupyterHub.hub_port = 8081
+    c.JupyterHub.hub_connect_timeout = 60
+
+    # Increase timeouts to prevent premature failures
+    c.JupyterHub.tornado_settings = {
+        'slow_spawn_timeout': 600,
+        'slow_stop_timeout': 600,
+    }
+
+    # Use Native Authenticator with simple configuration
+    c.JupyterHub.authenticator_class = 'native'
+    c.NativeAuthenticator.check_common_password = True
+    c.NativeAuthenticator.minimum_password_length = 6
+
+    # Set initial admin user
+    c.Authenticator.admin_users = {'{{ .Values.olaresEnv.JUPYTERHUB_ADMIN_USERNAME }}'}
+    c.Authenticator.allowed_users = {'{{ .Values.olaresEnv.JUPYTERHUB_ADMIN_USERNAME }}'}
+    # c.JupyterHub.admin_users = {'{{ .Values.olaresEnv.JUPYTERHUB_ADMIN_USERNAME }}'}
+    # c.NativeAuthenticator.admin_users = {'{{ .Values.olaresEnv.JUPYTERHUB_ADMIN_USERNAME }}'}
+
+    # PostgreSQL database configuration
+    import os
+    db_host = os.environ.get('POSTGRES_HOST', '{{ .Values.postgres.host }}')
+    db_port = os.environ.get('POSTGRES_PORT', '{{ .Values.postgres.port }}')
+    db_name = os.environ.get('POSTGRES_DB', '{{ .Values.postgres.databases.jupyterhub }}')
+    db_user = os.environ.get('POSTGRES_USER', '{{ .Values.postgres.username }}')
+    db_password = os.environ.get('POSTGRES_PASSWORD', '{{ .Values.postgres.password }}')
+
+    c.JupyterHub.db_url = f'postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
+
+    # Enable signup with approval workflow
+    # Users can register, but need admin approval to log in
+    c.NativeAuthenticator.enable_signup = True
+    c.NativeAuthenticator.open_signup = True  # Require approval
+
+    # Load existing users from database and add to allowed_users
+    # This ensures admin and existing users can log in
+    # Use a timeout to prevent hanging during startup
+    existing_users = set()
+    try:
+        import psycopg2
+        import time
+        max_retries = 2  # Reduce retries to fail faster
+        retry_delay = 1   # Reduce delay
+        for attempt in range(max_retries):
+            try:
+                conn = psycopg2.connect(
+                    host=db_host,
+                    port=int(db_port),
+                    database=db_name,
+                    user=db_user,
+                    password=db_password,
+                    connect_timeout=3  # Reduce timeout
+                )
+                c_db = conn.cursor()
+                # Check if users table exists
+                c_db.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'users'
+                    )
+                """)
+                table_exists = c_db.fetchone()[0]
+                if table_exists:
+                    c_db.execute("SELECT name FROM users")
+                    users = c_db.fetchall()
+                    if users:
+                        existing_users = {row[0] for row in users}
+                        print(f"Loaded {len(existing_users)} existing user(s) from database: {existing_users}")
+                conn.close()
+                break
+            except psycopg2.OperationalError as e:
+                if attempt < max_retries - 1:
+                    print(f"Database connection attempt {attempt + 1} failed: {e}, retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"Warning: Could not connect to database after {max_retries} attempts: {e}")
+                    raise
+    except Exception as e:
+        print(f"Warning: Could not load users from database: {e}")
+        print("Will start with admin user only. Admin can add users via API.")
+
+    # Set allowed_users to existing users + admin users
+    # Admin users are always allowed, but we add them explicitly to be safe
+    admin_users = {'{{ .Values.olaresEnv.JUPYTERHUB_ADMIN_USERNAME }}'}
+    # c.NativeAuthenticator.allowed_users = existing_users | admin_users
+    print(f"Allowed users set to: {c.NativeAuthenticator.allowed_users}")
+
+    c.JupyterHub.allow_named_servers = False
+    c.JupyterHub.shutdown_on_logout = False
+
+    # Keep user servers running when Hub restarts
+    # This ensures user work is not lost when Hub is restarted
+    c.JupyterHub.cleanup_servers = False
+    c.JupyterHub.stop_servers_on_shutdown = False
+
+    c.JupyterHub.trust_user_provided_tokens = True
+
+    c.JupyterHub.internal_ssl = False
+    c.JupyterHub.internal_certs_location = ''
+
+    c.JupyterHub.services = []
+
+    c.JupyterHub.subdomain_host = ''
+
+    c.JupyterHub.authenticate_prometheus = False
+
+
+    # Default image (used if user doesn't select a profile)
+    # Can be overridden by profile_list or user-specific configuration
+    c.KubeSpawner.image = 'docker.io/beclab/jupyter-base-notebook:notebook-7.0.6'
+    c.KubeSpawner.image_pull_policy = 'IfNotPresent'
+
+    # Optional: Force specific users to use specific images
+    # Uncomment and modify to assign images to specific users
+    # def get_user_image(spawner):
+    #     username = spawner.user.name
+    #     user_image_map = {
+    #         'pengpeng': 'jupyter/scipy-notebook:latest',
+    #         'olares': 'jupyter/datascience-notebook:latest',
+    #     }
+    #     return user_image_map.get(username, 'jupyter/base-notebook:latest')
+    # c.KubeSpawner.image = get_user_image
+
+    c.KubeSpawner.services_enabled = True
+
+
+    c.KubeSpawner.start_timeout = 600
+    c.KubeSpawner.http_timeout = 300
+
+
+    # Disable PVC creation, use hostPath instead
+    c.KubeSpawner.storage_pvc_ensure = False
+
+    # Configure hostPath volume for user data storage
+    # Each user gets their own directory under the base path
+    import os
+    appdata_base = os.environ.get('USERSPACE_APPDATA', '')
+    if appdata_base:
+        def setup_user_storage(spawner):
+            """Set up hostPath volume for user data storage with proper permissions"""
+            username = spawner.user.name
+            user_data_path = f'{appdata_base}/{username}'
+
+            # Initialize volumes list if not exists
+            if not hasattr(spawner, 'volumes') or spawner.volumes is None:
+                spawner.volumes = []
+
+            # Add user data volume
+            user_volume = {
+                'name': 'user-data',
+                'hostPath': {
+                    'path': user_data_path,
+                    'type': 'DirectoryOrCreate'
+                }
+            }
+
+            # Check if volume already exists
+            volume_names = [v.get('name') for v in spawner.volumes if isinstance(v, dict)]
+            if 'user-data' not in volume_names:
+                spawner.volumes.append(user_volume)
+
+            # Initialize volume_mounts list if not exists
+            if not hasattr(spawner, 'volume_mounts') or spawner.volume_mounts is None:
+                spawner.volume_mounts = []
+
+            # Add user data volume mount
+            user_volume_mount = {
+                'name': 'user-data',
+                'mountPath': '/home/jovyan'
+            }
+
+            # Check if volume mount already exists
+            mount_names = [vm.get('name') for vm in spawner.volume_mounts if isinstance(vm, dict)]
+            if 'user-data' not in mount_names:
+                spawner.volume_mounts.append(user_volume_mount)
+
+            # Add initContainer to fix permissions
+            # Jupyter notebook containers run as:
+            # - UID 1000 (jovyan user) - this is standard
+            # - GID: Can be either 100 (users group) or 1000 (jovyan group)
+            #   - Official Jupyter Docker Stacks use GID 100 (users group)
+            #   - Some custom images may use GID 1000
+            # We set both to ensure compatibility: 1000:1000 first, then 1000:100
+            # This ensures the directory is owned by UID 1000 regardless of GID
+            if not hasattr(spawner, 'init_containers') or spawner.init_containers is None:
+                spawner.init_containers = []
+            
+            init_container = {
+                'name': 'fix-permissions',
+                'image': 'busybox:latest',
+                'command': ['sh', '-c'],
+                'args': [
+                    # Create necessary directories
+                    'mkdir -p /home/jovyan/.local/share/jupyter/runtime /home/jovyan/.jupyter && '
+                    # Set ownership to 1000:1000 (most common for modern systems)
+                    # If that fails, try 1000:100 (Jupyter Docker Stacks standard)
+                    # The chown will succeed with whichever GID the container actually uses
+                    'chown -R 1000:1000 /home/jovyan 2>/dev/null || chown -R 1000:100 /home/jovyan && '
+                    'chmod -R 755 /home/jovyan'
+                ],
+                'securityContext': {
+                    'runAsUser': 0,  # Run as root to fix permissions
+                },
+                'volumeMounts': [
+                    {
+                        'name': 'user-data',
+                        'mountPath': '/home/jovyan'
+                    }
+                ]
+            }
+
+            # Check if init container already exists
+            init_names = [ic.get('name') for ic in spawner.init_containers if isinstance(ic, dict)]
+            if 'fix-permissions' not in init_names:
+                spawner.init_containers.append(init_container)
+
+        c.KubeSpawner.pre_spawn_hook = setup_user_storage
+
+
+    c.KubeSpawner.cpu_guarantee = 0.05
+    c.KubeSpawner.mem_guarantee = '256M'
+    c.KubeSpawner.cpu_limit = 4
+    c.KubeSpawner.mem_limit = '8G'
+
+
+    import os
+    # namespace = os.environ.get('POD_NAMESPACE', 'default')
+    namespace = '{{ .Release.Namespace }}'
+    # c.KubeSpawner.namespace = namespace
+    c.KubeSpawner.namespace = '{{ .Release.Namespace }}'
+    c.KubeSpawner.hub_connect_url = 'http://jupyterhub-svc.{{ .Release.Namespace }}:8081'
+    c.KubeSpawner.hub_connect_ip = 'jupyterhub-svc'
+
+    c.KubeSpawner.extra_labels = {
+        'component': 'singleuser-server',
+    }
+
+
+    c.KubeSpawner.environment = {
+        'JUPYTER_ENABLE_LAB': 'no',
+        'JUPYTERHUB_SINGLEUSER_APP': 'jupyter_server.serverapp.ServerApp',
+        # Ensure Jupyter Server can create runtime files
+        'JUPYTER_RUNTIME_DIR': '/home/jovyan/.local/share/jupyter/runtime',
+        'JUPYTER_CONFIG_DIR': '/home/jovyan/.jupyter',
+        'JUPYTER_DATA_DIR': '/home/jovyan/.local/share/jupyter',
+    }
+
+    c.KubeSpawner.services_enabled = True
+
+    # c.KubeSpawner.cmd = ['/bin/bash', '-c']
+    # c.KubeSpawner.args = [
+    #     'pip install --no-cache-dir --quiet jupyterhub==5.4.3 && exec start-notebook.sh '
+    #     '--ServerApp.ip="0.0.0.0" '
+    #     '--ServerApp.allow_origin="*" '
+    #     '--ServerApp.disable_check_xsrf=True '
+    #     '--ServerApp.trust_xheaders=True '
+    #     '--ServerApp.allow_remote_access=True '
+    #     '--ServerApp.token="" '
+    #     '--ServerApp.base_url={base_url} '
+    # ]
+    c.KubeSpawner.cmd = ['/bin/bash', '-c']
+
+    c.KubeSpawner.args = [
+        'pip install --no-cache-dir --quiet jupyterhub==5.4.3 && '
+        'exec start-notebook.sh '
+        '--ServerApp.allow_origin="*" '
+        '--ServerApp.disable_check_xsrf=True '
+        '--ServerApp.trust_xheaders=True '
+        '--ServerApp.allow_remote_access=True '
+    ]
+
+
+    # Profile List - Allow users to choose different notebook images
+    c.KubeSpawner.profile_list = [
+        {
+            'display_name': 'Base Environment',
+            'slug': 'base',
+            'description': 'Minimal Jupyter environment (Python only, ~500MB)',
+            'default': True,
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-base-notebook:notebook-7.0.6',
+                'cpu_guarantee': 0.1,
+                'mem_guarantee': '1G',
+                'cpu_limit': 1,
+                'mem_limit': '1G',
+            }
+        },
+        {
+            'display_name': 'Minimal Environment',
+            'slug': 'minimal',
+            'description': 'Base + command-line tools and TeX Live (~1GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-minimal-notebook:notebook-7.0.6',
+                'cpu_guarantee': 0.2,
+                'mem_guarantee': '1G',
+                'cpu_limit': 1,
+                'mem_limit': '1G',
+            }
+        },
+        {
+            'display_name': 'Scientific Computing',
+            'slug': 'scipy',
+            'description': 'NumPy, Pandas, SciPy, Matplotlib, Scikit-learn (Recommended, ~2.5GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-scipy-notebook:notebook-7.0.6',
+                'cpu_guarantee': 0.5,
+                'mem_guarantee': '1G',
+                'cpu_limit': 1,
+                'mem_limit': '2G',
+            }
+        },
+        {
+            'display_name': 'Data Science (Python + R)',
+            'slug': 'datascience',
+            'description': 'Python + R environment with data science tools (~4GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-datascience-notebook:notebook-7.0.6',
+                'cpu_guarantee': 1,
+                'mem_guarantee': '2G',
+                'cpu_limit': 1,
+                'mem_limit': '2G',
+            }
+        },
+        {
+            'display_name': 'Deep Learning (TensorFlow)',
+            'slug': 'tensorflow',
+            'description': 'TensorFlow and Keras for deep learning (~5GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-tensorflow-notebook:notebook-7.0.6',
+                'cpu_guarantee': 2,
+                'mem_guarantee': '2G',
+                'cpu_limit': 4,
+                'mem_limit': '4G',
+            }
+        },
+        {
+            'display_name': 'Big Data (PySpark)',
+            'slug': 'pyspark',
+            'description': 'Apache Spark for big data processing (~4GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-pyspark-notebook:notebook-7.0.6',
+                'cpu_guarantee': 2,
+                'mem_guarantee': '4G',
+                'cpu_limit': 4,
+                'mem_limit': '8G',
+            }
+        },
+        {
+            'display_name': 'All Spark (Complete)',
+            'slug': 'all-spark',
+            'description': 'Complete big data stack with Spark, Hadoop, etc. (~6GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-all-spark-notebook:notebook-7.0.6',
+                'cpu_guarantee': 2,
+                'mem_guarantee': '4G',
+                'cpu_limit': 4,
+                'mem_limit': '8G',
+            }
+        },
+        {
+            'display_name': 'R Environment',
+            'slug': 'r',
+            'description': 'R language environment with R kernel (~3GB)',
+            'kubespawner_override': {
+                'image': 'docker.io/beclab/jupyter-r-notebook:notebook-7.0.6',
+                'cpu_guarantee': 1,
+                'mem_guarantee': '2G',
+                'cpu_limit': 2,
+                'mem_limit': '4G',
+            }
+        }
+    ]
+
+    c.KubeSpawner.pod_name_template = 'jupyter-{username}'
+    c.KubeSpawner.service_account = 'jupyterhub-service-account'
+
+    c.KubeSpawner.port = 8888
+
+    c.Spawner.default_url = '/tree'
+
+    c.Spawner.args = []
+
+    # Tornado settings are already configured above
+    c.JupyterHub.tornado_settings = {
+        'headers': {
+            'Access-Control-Allow-Origin': '*',
+        },
+        'allow_origin': '*',
+        'disable_check_xsrf': True,
+    }
+
+    c.JupyterHub.log_level = 'DEBUG'
+    c.Application.log_level = 'DEBUG'
+
+    import logging
+    logging.getLogger('tornado.access').setLevel(logging.DEBUG)
+    logging.getLogger('jupyterhub').setLevel(logging.DEBUG)
+
+    print("JupyterHub configuration - stable version")

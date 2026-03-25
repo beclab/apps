@@ -1,0 +1,81 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $is50Series := $gpuInfo.is50Series -}}
+{{- $paddleocrImage := "" -}}
+{{- $enableASR := false -}}
+{{- $PUOptions := .Values.olaresEnv.DEVICE_TYPE -}}
+{{- if eq $PUOptions "gpu" -}}
+  {{- if eq $is50Series "true" -}}
+    {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-nividia-gpu-sm120-offline:0.0.1" -}}
+  {{- else -}}
+    {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-nividia-gpu-offline:0.0.1" -}}
+  {{- end -}}
+{{- else -}}
+  {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-cpu-offline:0.0.1" -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paddleocr
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paddleocr
+  annotations:
+    {{- if eq $PUOptions "gpu" }}
+    applications.app.bytetrade.io/gpu-inject: "true"
+    {{- end }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: paddleocr
+  template:
+    metadata:
+      labels:
+        io.kompose.service: paddleocr
+    spec:
+      containers:
+        - name: paddleocr
+          image: {{ $paddleocrImage }}
+          command:
+            - /usr/local/bin/paddlex
+            - --serve
+            - --pipeline
+            - /home/paddleocr/pipeline_config_fastdeploy.yaml
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,graphics,utility,video,display"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: pipeline-config
+              mountPath: /home/paddleocr/pipeline_config_fastdeploy.yaml
+              subPath: pipeline_config_fastdeploy.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+              {{- if eq $PUOptions "gpu" }}
+              nvidia.com/gpu: 1
+              nvidia.com/gpumem: 6000
+              {{- end }}
+            limits:
+              cpu: "2000m"
+              memory: 9Gi
+              {{- if eq $PUOptions "gpu" }}
+              nvidia.com/gpu: 1
+              nvidia.com/gpumem: 6000
+              {{- end }}
+      volumes:
+        - name: pipeline-config
+          configMap:
+            name: pipeline-config
+            defaultMode: 0444
+      restartPolicy: Always
+{{- end }}

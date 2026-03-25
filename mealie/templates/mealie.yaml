@@ -1,0 +1,110 @@
+﻿{{- $mealieDomainENV := split  ","  .Values.domain.mealie -}}
+{{- $mealieDomain := index $mealieDomainENV "_0" -}}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mealie
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mealie
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: mealie
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: mealie
+    spec:
+      containers:
+        - name: mealie
+          image: docker.io/beclab/mealie-recipes-mealie:v3.9.2
+          env:
+            - name: BASE_URL
+              value: 'https://{{ $mealieDomain }}'
+            - name: ALLOW_SIGNUP
+              value: "false"
+            - name: DEFAULT_GROUP
+              value: "Home"
+            - name: DEFAULT_HOUSEHOLD
+              value: "Family"
+            - name: LOG_LEVEL
+              value: "DEBUG"
+            - name: DB_ENGINE
+              value: "postgres"
+            - name: POSTGRES_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: POSTGRES_SERVER
+              value: "{{ .Values.postgres.host }}"
+            - name: POSTGRES_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.databases.mealiedb }}"
+            - name: SMTP_HOST
+              value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            - name: SMTP_FROM_NAME
+              value: "{{ .Values.olaresEnv.SMTP_FROM_NAME }}"
+            - name: SMTP_AUTH_STRATEGY
+              value: "{{ .Values.olaresEnv.SMTP_AUTH_STRATEGY }}"
+            - name: SMTP_FROM_EMAIL
+              value: "{{ .Values.olaresEnv.SMTP_FROM_EMAIL }}"
+            - name: SMTP_USER
+              value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            - name: SMTP_PASSWORD
+              value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: mealie-data
+              mountPath: /app/data/
+
+      restartPolicy: Always
+      volumes:
+        - name: mealie-data
+          hostPath:
+            type: DirectoryOrCreate
+                  {{- if .Values.sysVersion }}
+                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                    {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mealie'
+                    {{- end }}
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/mealie'
+                  {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mealie
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mealie
+spec:
+  ports:
+    - name: "9091"
+      protocol: TCP
+      port: 9091
+      targetPort: 9000
+  selector:
+    io.kompose.service: mealie
+status:
+  loadBalancer: {}

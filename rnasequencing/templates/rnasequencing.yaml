@@ -1,0 +1,128 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rnasequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rnasequencing
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: rnasequencing
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: rnasequencing
+    spec:
+      containers:
+        - name: rnasequencing
+          image: docker.io/beclab/lovehunter9-rna-sequencing:v0.0.5
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: PARENT_DIR
+              value: "/home/rapids/notebooks/playbook"
+          readinessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 1900m
+              memory: 40Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 1000m
+              memory: 20Gi
+              nvidia.com/gpu: 1
+          securityContext:
+            privileged: true
+            capabilities:
+              add: [ "SYS_ADMIN" ]
+            runAsUser: 0
+            runAsGroup: 0
+          ports:
+            - containerPort: 8888 # Jupyter Notebook
+            - containerPort: 8787 # Dask Dashboard
+            - containerPort: 8786 # Dask Scheduler
+            - containerPort: 8501 # Streamlit
+            - containerPort: 8050 # Plotly Dash
+          volumeMounts:
+            - name: rnasequencing-data
+              mountPath: /home/rapids/notebooks
+              subPath: notebooks
+            - name: rnasequencing-data
+              mountPath: /dev/shm
+              subPath: dshm
+      restartPolicy: Always
+      volumes:
+        - name: rnasequencing-data
+          hostPath:
+            type: DirectoryOrCreate
+                {{- if .Values.sysVersion }}
+                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appCache }}'
+                  {{- else }}
+            path: '{{ .Values.userspace.appCache }}/rnasequencing'
+                  {{- end }}
+                {{- else }}
+            path: '{{ .Values.userspace.appCache }}/rnasequencing'
+                {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rnasequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rnasequencing
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+
+    - name: dask-dashboard
+      protocol: TCP
+      port: 8787
+      targetPort: 8787
+
+    - name: dask-scheduler
+      protocol: TCP
+      port: 8786
+      targetPort: 8786
+
+    - name: streamlit
+      protocol: TCP
+      port: 8501
+      targetPort: 8501
+
+    - name: plotly-dash
+      protocol: TCP
+      port: 8050
+      targetPort: 8050
+  selector:
+    io.kompose.service: rnasequencing
+status:
+  loadBalancer: {}

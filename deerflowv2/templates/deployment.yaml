@@ -1,0 +1,201 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflowv2-backend
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deerflowv2-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deerflowv2-backend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deerflowv2-backend
+    spec:
+      initContainers:
+        - name: init-config
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              echo "Initializing DeerFlow 2.0 config..."
+
+              if [ ! -f /config/config.yaml ]; then
+                echo "Copying initial config.yaml..."
+                cp /init-config/config.yaml /config/config.yaml
+              else
+                echo "config.yaml already exists, skipping."
+              fi
+
+              if [ ! -f /config/extensions_config.json ]; then
+                echo "Copying initial extensions_config.json..."
+                cp /init-config/extensions_config.json /config/extensions_config.json
+              else
+                echo "extensions_config.json already exists, skipping."
+              fi
+
+              mkdir -p /data/deer-flow
+              mkdir -p /skills/public /skills/custom
+
+              echo "Init complete."
+          volumeMounts:
+            - name: init-config-vol
+              mountPath: /init-config
+            - name: config-volume
+              mountPath: /config
+            - name: data-volume
+              mountPath: /data/deer-flow
+            - name: skills-volume
+              mountPath: /skills
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: gateway
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.0
+          command:
+            - sh
+            - -c
+            - "cd /app/backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
+          ports:
+            - containerPort: 8001
+              name: gateway
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 5
+          env:
+            - name: CI
+              value: "true"
+            - name: DEER_FLOW_HOME
+              value: "/data/deer-flow"
+            - name: DEER_FLOW_CONFIG_PATH
+              value: "/config/config.yaml"
+            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
+              value: "/config/extensions_config.json"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          envFrom:
+            - configMapRef:
+                name: deerflowv2-env-config
+          resources:
+            requests:
+              cpu: "50m"
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            - name: data-volume
+              mountPath: /data/deer-flow
+            - name: skills-volume
+              mountPath: /app/skills
+        - name: langgraph
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.0
+          command:
+            - sh
+            - -c
+            - "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
+          ports:
+            - containerPort: 2024
+              name: langgraph
+          livenessProbe:
+            tcpSocket:
+              port: 2024
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 5
+          env:
+            - name: CI
+              value: "true"
+            - name: DEER_FLOW_HOME
+              value: "/data/deer-flow"
+            - name: DEER_FLOW_CONFIG_PATH
+              value: "/config/config.yaml"
+            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
+              value: "/config/extensions_config.json"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          envFrom:
+            - configMapRef:
+                name: deerflowv2-env-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            - name: data-volume
+              mountPath: /data/deer-flow
+            - name: skills-volume
+              mountPath: /app/skills
+            - name: langgraph-api-volume
+              mountPath: /app/backend/.langgraph_api
+      volumes:
+        - name: init-config-vol
+          configMap:
+            name: deerflowv2-init-config
+        - name: config-volume
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/config'
+            type: DirectoryOrCreate
+        - name: data-volume
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/deer-flow'
+            type: DirectoryOrCreate
+        - name: skills-volume
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/skills'
+            type: DirectoryOrCreate
+        - name: langgraph-api-volume
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/langgraph_api'
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflowv2-backend-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deerflowv2-backend
+  ports:
+    - name: gateway
+      port: 8001
+      targetPort: 8001
+    - name: langgraph
+      port: 2024
+      targetPort: 2024
+  type: ClusterIP

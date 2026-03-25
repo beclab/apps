@@ -1,0 +1,99 @@
+﻿
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: agentzero
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: agentzero
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: agentzero
+    spec:
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        fsGroup: 0
+      containers:
+        - name: agentzero
+          image: docker.io/beclab/agent0ai-agent-zero:v0.9.8.2
+          resources:
+            limits:
+              cpu: 4
+              memory: 4Gi
+            requests:
+              cpu: 2
+              memory: 2Gi
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          volumeMounts:
+            - name: agentzero-data
+              mountPath: /a0/usr
+              subPath: usr
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+
+      restartPolicy: Always
+      volumes:
+        - name: agentzero-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: agentzero
+spec:
+  ports:
+    - name: az-port
+      port: 80
+      targetPort: 80
+  selector:
+    io.kompose.service: agentzero
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-agentzero
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: agentzero
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 80
+  selector:
+    io.kompose.service: agentzero
+status:
+  loadBalancer: {}

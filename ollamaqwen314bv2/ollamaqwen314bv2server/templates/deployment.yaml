@@ -1,4 +1,5 @@
-﻿{{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
 {{- $ollamaclientDomain := index $ollamaclientDomainENV "_0" -}}
 ---
 apiVersion: apps/v1
@@ -27,18 +28,40 @@ spec:
     spec:
       containers:
         - name: ollama
-          image: "docker.io/beclab/ollama-ollama:0.13.5"
+          image: "docker.io/beclab/ollama-ollama:0.17.5"
+{{- with .Values.olaresEnv }}
+{{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
+          command:
+            - sh
+            - '-c'
+            - |
+              echo "Starting Ollama server..."
+              ollama serve &
+              SERVER_PID=$!
+              until ollama list > /dev/null 2>&1; do
+                sleep 1
+              done
+              echo "Ollama server is ready. Preloading model..."
+              START_TIME=$(date +%s)
+              ollama run ${MODEL_NAME} "Hello"
+              END_TIME=$(date +%s)
+              ELAPSED=$((END_TIME - START_TIME))
+              echo "Model preloading completed in ${ELAPSED} seconds"
+              wait $SERVER_PID
+{{- end }}
+{{- end }}
+          envFrom:
+            - configMapRef:
+                name: ollama-env
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: GGML_CUDA_DISABLE_GRAPHS
+            - name: OLLAMA_NOPRUNE
               value: "1"
-            - name: OLLAMA_ORIGINS
-              value: "*"
+{{- with .Values.olaresEnv }}
+{{- if and .KEEP_ALIVE (eq (lower (toString .KEEP_ALIVE)) "true") }}
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
+{{- end }}
+{{- end }}
           ports:
             - containerPort: 11434
           livenessProbe:
@@ -61,41 +84,13 @@ spec:
           resources:
             limits:
               cpu: "4"
-              memory: 35Gi
+              memory: 38Gi
             requests:
               cpu: 50m
               memory: 4Gi
           volumeMounts:
             - mountPath: "/root/.ollama"
               name: data
-        - name: api
-          image: "docker.io/beclab/harveyff-olares-ollama:v0.1.0"
-          env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
-            - name: OLLAMA_MODEL
-              value: "qwen3:14b"
-            - name: OLLAMA_URL
-              value: "http://localhost:11434"
-            - name: APP_URL
-              value: "https://{{ $ollamaclientDomain }}"
-          resources:
-            requests:
-              cpu: 300m
-              memory: 200Mi
-            limits:
-              cpu: 1000m
-              memory: 2Gi
-          ports:
-            - name: http
-              containerPort: 8080
-              protocol: TCP
       volumes:
         - name: data
           hostPath:
@@ -110,34 +105,16 @@ metadata:
   creationTimestamp: null
   labels:
     io.kompose.service: api
-  name: api
+  name: ollama
   namespace: "{{ .Release.Namespace }}"
 spec:
   ports:
-    - name: "api"
-      port: 8081
-      targetPort: 8080
-  selector:
-    io.kompose.service: ollama
-status:
-  loadBalancer: {}
-  
----
-apiVersion: v1
-kind: Service
-metadata:
-  creationTimestamp: null
-  labels:
-    io.kompose.service: api
-  name: sharedentrances-api
-  namespace: "{{ .Release.Namespace }}"
-spec:
-  ports:
-    - name: "api"
-      port: 80
-      targetPort: 8080
+    - name: "ollama"
+      port: 11434
+      targetPort: 11434
   selector:
     io.kompose.service: ollama
 status:
   loadBalancer: {}
 
+{{- end }}

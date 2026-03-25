@@ -1,0 +1,100 @@
+{{- $freshrssDomainENV := split  ","  .Values.domain.freshrss -}}
+{{- $freshrssDomain := index $freshrssDomainENV "_0" -}}
+
+{{- $smtpServer := .Values.olaresEnv.SMTP_SERVER | default "" }}
+{{- $defaultSmtpPort := "" }}
+{{- if (ne $smtpServer "") }}
+  {{- $defaultSmtpPort = "25" }}
+{{- end }}
+{{- $smtpPort := .Values.olaresEnv.SMTP_PORT | default $defaultSmtpPort }}
+{{- $smtpSecure := "" }}
+
+{{- $smtpUseSSL := .Values.olaresEnv.SMTP_SSL | default "" }}
+{{- $smtpUseTLS := .Values.olaresEnv.SMTP_TLS | default "" }}
+{{- if or (eq (lower $smtpUseSSL) "true") (eq $smtpUseSSL "1") (eq $smtpPort "465") }}
+  {{- $smtpSecure = "ssl" }}
+  {{- $smtpPort = "465" }}
+{{- else if or (eq (lower $smtpUseTLS) "true") (eq $smtpUseTLS "1") (eq $smtpPort "587") }}
+  {{- $smtpSecure = "tls" }}
+  {{- $smtpPort = "587" }}
+{{- end }}
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: freshrss-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+data:
+  config.custom.php: |
+    <?php
+    return [
+      'mailer' => 'smtp', // 'mail' or 'smtp'
+      'smtp' => [
+        'hostname' => '{{ $freshrssDomain }}', // the domain used in the Message-ID header
+        'host' => '{{ .Values.olaresEnv.SMTP_SERVER }}', // the SMTP server address
+        'port' => '{{ $smtpPort }}',
+        'auth' => true,
+        'auth_type' => '', // 'CRAM-MD5', 'LOGIN', 'PLAIN', 'XOAUTH2' or ''
+        'username' => '{{ .Values.olaresEnv.SMTP_USERNAME }}',
+        'password' => '{{ .Values.olaresEnv.SMTP_PASSWORD }}',
+        'secure' => '{{ $smtpSecure }}', // '', 'ssl' or 'tls'
+        'from' => '{{ .Values.olaresEnv.SMTP_FROM_ADDRESS }}',
+      ]
+    ];
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: freshrss-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freshrss
+data:
+  TZ: '{{ .Values.olaresEnv.OLARES_USER_TIMEZONE | default "UTC" }}'
+  CRON_MIN: "2,32"
+  DATA_PATH: ""
+  FRESHRSS_ENV: "production"
+  COPY_LOG_TO_SYSLOG: "On"
+  COPY_SYSLOG_TO_STDERR: "On"
+  LISTEN: "0.0.0.0:80"
+  TRUSTED_PROXY: "172.16.0.1/12 192.168.0.1/16"
+  OIDC_ENABLED: "0"
+  ADMIN_NAME: "{{ .Values.olaresEnv.ADMIN_NAME }}"
+  ADMIN_EMAIL: "{{ .Values.olaresEnv.ADMIN_EMAIL }}"
+  ADMIN_PASSWORD: "{{ .Values.olaresEnv.ADMIN_PASSWORD }}"
+  ADMIN_API_PASSWORD: "{{ .Values.olaresEnv.ADMIN_API_PASSWORD }}"
+  BASE_URL: 'https://{{ $freshrssDomain }}'
+  SERVER_DNS: "{{ $freshrssDomain }}"
+  PUBLISHED_PORT: "8080"
+  DB_HOST: "{{ .Values.postgres.host }}"
+  DB_BASE: "{{ .Values.postgres.databases.freshrssdb }}"
+  DB_USER: "{{ .Values.postgres.username }}"
+  DB_PASSWORD: "{{ .Values.postgres.password }}"
+  FRESHRSS_INSTALL: |-
+    --default-user={{ .Values.olaresEnv.ADMIN_NAME }}
+    --auth-type=form
+    --environment=production
+    --base-url=https://{{ $freshrssDomain }}
+    --language=en
+    --title=FreshRSS
+    --api-enabled
+    --db-type=pgsql
+    --db-host={{ .Values.postgres.host }}
+    --db-user={{ .Values.postgres.username }}
+    --db-password={{ .Values.postgres.password }}
+    --db-base={{ .Values.postgres.databases.freshrssdb }}
+    --db-prefix=
+  FRESHRSS_USER: |-
+    --user={{ .Values.olaresEnv.ADMIN_NAME }}
+    --password={{ .Values.olaresEnv.ADMIN_PASSWORD }}
+    --api-password={{ .Values.olaresEnv.ADMIN_API_PASSWORD }}
+    --language=en
+    --email={{ .Values.olaresEnv.ADMIN_EMAIL }}
+    --purge-after-months=3
+    --feed-min-articles-default=50
+    --feed-ttl-default=3600
+    --max-posts-per-rss=200

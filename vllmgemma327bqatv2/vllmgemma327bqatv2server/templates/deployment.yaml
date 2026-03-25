@@ -1,5 +1,7 @@
 ﻿{{- $vllmDomainENV := split "," .Values.domain.vllmclient -}}
 {{- $vllmDomain := index $vllmDomainENV "_0" -}}
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $isSparkDGX := $gpuInfo.isSparkDGX -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -9,7 +11,7 @@ metadata:
   labels:
     io.kompose.service: vllm
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "vllm"
 spec:
   replicas: 1
   selector:
@@ -25,7 +27,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: "docker.io/beclab/vllm-vllm-openai:v0.11.2"
+          image: "docker.io/vllm/vllm-openai:v0.17.1-cu130"
           command:
             - /bin/bash
             - -c
@@ -41,8 +43,19 @@ spec:
               echo "[vllm-start] Starting vLLM server..."
               python3 -m vllm.entrypoints.openai.api_server \
                 --model "/models/gemma-3-27b" \
-                --gpu-memory-utilization 0.95 \
-                --max-model-len 8000 \
+{{- $gpuMemUtil := "0.9" -}}
+{{- $maxModelLen := "auto" -}}
+{{- if eq $isSparkDGX "true" -}}
+{{- $gpuMemUtil = "0.88" -}}
+{{- $maxModelLen := "8192" -}}
+{{- end -}}
+{{- with .Values.olaresEnv }}
+                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default $gpuMemUtil }} \
+                --max-model-len {{ .MAX_MODEL_LEN | default $maxModelLen }} \
+{{- else }}
+                --gpu-memory-utilization {{ $gpuMemUtil }} \
+                --max-model-len {{ $maxModelLen }} \
+{{- end }}
                 --tensor-parallel-size 1
           env:
             - name: PGID
@@ -63,12 +76,12 @@ spec:
               memory: 28Gi
             requests:
               cpu: 500m
-              memory: 24Gi
+              memory: 20Gi
           volumeMounts:
             - name: data
               mountPath: /models/gemma-3-27b
         - name: download-model
-          image: "docker.io/beclab/harveyff-hf-downloader:v0.0.16"
+          image: "docker.io/beclab/harveyff-hf-downloader:v0.1.0"
           env:
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"

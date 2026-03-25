@@ -1,4 +1,4 @@
-﻿apiVersion: v1
+apiVersion: v1
 data:
   config.json: |
     {
@@ -57,19 +57,6 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
-        - name: immich-redis
-          image: "docker.io/beclab/aboveos-redis:7"
-          resources:
-            limits:
-              cpu: "1"
-              memory: 2Gi
-            requests:
-              cpu: 100m
-              memory: 1Gi
-          volumeMounts:
-            - mountPath: /data
-              name: redis
-          imagePullPolicy: IfNotPresent
         - name: immich
           env:
             - name: PGID
@@ -78,12 +65,10 @@ spec:
               value: "1000"
             - name: TZ
               value: Etc/UTC
-            # - name: REDIS_HOSTNAME
-            #   value: {{ .Values.redis.host }}
-            # - name: REDIS_PASSWORD
-            #   value: {{ .Values.redis.password }}
             - name: REDIS_HOSTNAME
-              value: "localhost"
+              value: redis-svc
+            - name: REDIS_PASSWORD
+              value: ""
             - name: DB_HOSTNAME
               value: {{ .Values.postgres.host }}
             - name: DB_USERNAME
@@ -94,6 +79,8 @@ spec:
               value: {{ .Values.postgres.databases.immich }}
             - name: IMMICH_PORT
               value: "3001"
+            - name: IMMICH_MACHINE_LEARNING_URL
+              value: "http://immich-machine-learning:3003"
             - name: OAUTH_ENABLED
               value: "true"
             - name: OAUTH_CLIENT_ID
@@ -104,14 +91,36 @@ spec:
               value: "{{ .Values.oidc.issuer }}"
             - name: OAUTH_SCOPE
               value: "openid,profile,email"
-            - name: IMMICH_CONFIG_FILE
-              value: "/config.json"
-          image: "beclab/immich-app-immich-server:v2.4.1"
+          image: "beclab/immich-app-immich-server:v2.6.2"
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3001
               name: http
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /api/server/ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/server/ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             limits:
               cpu: 2000m
@@ -144,18 +153,6 @@ spec:
               {{- end }}
             {{- else }}
             path: '{{ .Values.userspace.appData }}/immich/data/upload'
-            {{- end }}
-            type: DirectoryOrCreate
-        - name: redis
-          hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: '{{ .Values.userspace.appData }}/redis'
-              {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/redis'
-              {{- end }}
-            {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/redis'
             {{- end }}
             type: DirectoryOrCreate
         - name: learningcache

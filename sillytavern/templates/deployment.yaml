@@ -1,0 +1,99 @@
+﻿{{- $appDomainENV := splitList "," .Values.domain.sillytavern -}}
+{{- $appDomain := index $appDomainENV 0 -}}
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sillytavern
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: sillytavern
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: sillytavern
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: sillytavern
+    spec:
+      containers:
+      - name: sillytavern
+        image: "docker.io/beclab/sillytavern-sillytavern:1.15.0"
+        env:
+        - name: NODE_ENV
+          value: 'production'
+        - name: FORCE_COLOR
+          value: '1'
+        - name: SILLYTAVERN_WHITELIST
+          value: '["0.0.0.0/0", "::/0"]'
+        - name: SILLYTAVERN_LOGGING_ENABLEACCESSLOG
+          value: 'false'
+        - name: SILLYTAVERN_LOGGING_MINLOGLEVEL
+          value: '2'
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2048Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        volumeMounts:
+        - mountPath: /home/node/app/config
+          name: appconfig
+        - mountPath: /home/node/app/config/config.yaml
+          name: config-yaml
+          subPath: config.yaml
+        - mountPath: /home/node/app/data
+          name: appdata
+        - mountPath: /home/node/app/plugins
+          name: appplugins
+        - mountPath: /home/node/app/public/scripts/extensions/third-party
+          name: appextensions
+      volumes:
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/config{{ else }}{{ .Values.userspace.appData }}/sillytavern/config{{ end }}'
+          type: DirectoryOrCreate
+        name: appconfig
+      - name: config-yaml
+        configMap:
+          name: sillytavern-config
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/data{{ else }}{{ .Values.userspace.appData }}/sillytavern/data{{ end }}'
+          type: DirectoryOrCreate
+        name: appdata
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/plugins{{ else }}{{ .Values.userspace.appData }}/sillytavern/plugins{{ end }}'
+          type: DirectoryOrCreate
+        name: appplugins
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/extensions{{ else }}{{ .Values.userspace.appData }}/sillytavern/extensions{{ end }}'
+          type: DirectoryOrCreate
+        name: appextensions
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: sillytavern
+  name: sillytavern
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "http"
+    port: 8000
+    targetPort: 8000
+  selector:
+    io.kompose.service: sillytavern
+status:
+  loadBalancer: {}
+
+
+

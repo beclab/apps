@@ -1,3 +1,5 @@
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+{{- $modelPath := "/app/models" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -7,7 +9,7 @@ metadata:
   labels:
     app: deepseekocrwebuiv2
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "deepseekocrwebuiv2"
 spec:
   replicas: 1
   selector:
@@ -22,7 +24,19 @@ spec:
     spec:
       containers:
         - name: deepseekocrwebuiv2
-          image: "docker.io/beclab/harveyff-deepseekocr-webui:v1.0.8"
+          image: "docker.io/beclab/harveyff-deepseekocr-webui:v2.0.3"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="{{ $modelPath }}/.DeepSeek-OCR-2.done"
+              echo "[ocr-wait] Waiting for model download: $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[ocr-wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[ocr-wait] Model ready, starting OCR service."
+              python web_service_unified.py
           ports:
             - containerPort: 8001
           env:
@@ -34,6 +48,10 @@ spec:
               value: "Etc/UTC"
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: LOCAL_MODEL_PATH
+              value: "{{ $modelPath }}"
+            - name: HF_HOME
+              value: "{{ $modelPath }}"
             - name: NVIDIA_VISIBLE_DEVICES
               value: "0"
             - name: CUDA_VISIBLE_DEVICES
@@ -50,10 +68,10 @@ spec:
               memory: 5Gi
             limits:
               cpu: "4"
-              memory: 32Gi
+              memory: 20Gi
           volumeMounts:
             - name: models
-              mountPath: /root/.cache/huggingface
+              mountPath: {{ $modelPath }}
             - name: logs
               mountPath: /app/log
       volumes:
@@ -63,8 +81,9 @@ spec:
             type: DirectoryOrCreate
         - name: logs
           hostPath:
-            path: "{{ .Values.userspace.userData }}/logs"
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
             type: DirectoryOrCreate
+      restartPolicy: Always
 
 ---
 apiVersion: v1

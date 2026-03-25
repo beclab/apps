@@ -1,0 +1,413 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: acestepv2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: multi-port
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-port
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: multi-port
+    spec:
+      containers:
+        - name: acestep
+          image: "docker.io/harveyff/acestep15:v1.0.9"
+          ports:
+            - containerPort: 7860
+          command:
+            - /bin/bash
+            - '-c'
+            - >
+              set -e
+
+
+              echo "[init] ========================================"
+
+              echo "[init] ACE-Step V1.5 Container Startup (PyTorch Backend)"
+
+              echo "[init] ========================================"
+
+              echo "[init] Timestamp: $(date)"
+
+              echo "[init] Container ID: $(hostname)"
+
+              echo "[init] User: $(whoami)"
+
+              echo "[init] Working directory: $(pwd)"
+
+              echo "[init] Python version: $(python3 --version 2>&1)"
+
+              echo "[init] Python path: $(which python3)"
+
+
+              # Check disk space
+
+              echo "[init] Disk space:"
+
+              df -h /app /app/checkpoints 2>/dev/null || df -h /app || true
+
+
+              # Check GPU availability
+
+              echo "[init] GPU check:"
+
+              python3 -c "import torch; print(f'  CUDA available:
+              {torch.cuda.is_available()}'); print(f'  CUDA devices:
+              {torch.cuda.device_count() if torch.cuda.is_available() else 0}')"
+              2>&1 || echo "  GPU check failed"
+
+
+              # Environment variables
+
+              echo "[init] Environment variables:"
+
+              env | grep -E "ACESTEP_|CUDA_|GPU_|PYTHON" | sort || true
+
+
+              # Check checkpoint directory
+
+              echo "[init] Checkpoint directory status:"
+
+              ls -la /app/checkpoints/ 2>/dev/null | head -20 || echo " 
+              Checkpoint directory not accessible"
+
+
+              # Fix diffusers logger bug before Python imports
+
+              echo "[patch] ========================================"
+
+              echo "[patch] Checking and fixing diffusers logger bug..."
+
+              TORCHAO_FILE=""
+
+              for path in "/app/.venv/lib/python3.11/site-packages" \
+                          "/usr/local/lib/python3.11/site-packages" \
+                          "$(python3 -c 'import site; print(site.getsitepackages()[0] if site.getsitepackages() else \"\")' 2>/dev/null)" \
+                          "$(python3 -c 'import sysconfig; print(sysconfig.get_path(\"purelib\"))' 2>/dev/null)"; do
+                if [ -n "$path" ] && [ -d "$path" ]; then
+                  candidate="$path/diffusers/quantizers/torchao/torchao_quantizer.py"
+                  if [ -f "$candidate" ]; then
+                    TORCHAO_FILE="$candidate"
+                    break
+                  fi
+                fi
+              done
+
+
+              if [ -n "$TORCHAO_FILE" ] && [ -f "$TORCHAO_FILE" ]; then
+                if ! grep -q "logger = logging.getLogger" "$TORCHAO_FILE" 2>/dev/null; then
+                  if grep -q "logger\." "$TORCHAO_FILE" 2>/dev/null; then
+                    echo "[patch] Found diffusers logger bug, fixing..."
+                    if grep -q "^import logging" "$TORCHAO_FILE" 2>/dev/null; then
+                      sed -i '/^import logging$/a logger = logging.getLogger(__name__)' "$TORCHAO_FILE" 2>/dev/null && \
+                        echo "[patch] ✅ Fixed: Added logger definition after import logging" || \
+                        echo "[patch] ⚠️  Warning: Could not fix file (may need manual fix)"
+                    elif grep -q "^from.*import.*logging" "$TORCHAO_FILE" 2>/dev/null; then
+                      sed -i '/^from.*import.*logging/a logger = logging.getLogger(__name__)' "$TORCHAO_FILE" 2>/dev/null && \
+                        echo "[patch] ✅ Fixed: Added logger definition after logging import" || \
+                        echo "[patch] ⚠️  Warning: Could not fix file (may need manual fix)"
+                    else
+                      FIRST_IMPORT=$(grep -n "^import \|^from " "$TORCHAO_FILE" | head -1 | cut -d: -f1)
+                      if [ -n "$FIRST_IMPORT" ]; then
+                        sed -i "${FIRST_IMPORT}a import logging\nlogger = logging.getLogger(__name__)" "$TORCHAO_FILE" 2>/dev/null && \
+                          echo "[patch] ✅ Fixed: Added logging import and logger definition" || \
+                          echo "[patch] ⚠️  Warning: Could not fix file (may need manual fix)"
+                      else
+                        echo "[patch] ⚠️  Warning: Could not find import section to patch"
+                      fi
+                    fi
+                  else
+                    echo "[patch] ✅ No logger bug detected (logger not used or already defined)"
+                  fi
+                else
+                  echo "[patch] ✅ Logger already defined, no fix needed"
+                fi
+              else
+                echo "[patch] ⚠️  Warning: Could not find torchao_quantizer.py (diffusers may not be installed or path differs)"
+              fi
+
+              echo "[patch] ========================================"
+
+
+              # Wait for models
+
+              DONE_FILE="/app/checkpoints/.Ace-Step1.5.done"
+
+              DONE_FILE_4B="/app/checkpoints/acestep-5Hz-lm-4B/.acestep-5Hz-lm-4B.done"
+
+
+              echo "[wait] ========================================"
+
+              echo "[wait] Waiting for model downloads..."
+
+              echo "[wait] Main model done file: $DONE_FILE"
+
+
+              WAIT_COUNT=0
+
+              while [ ! -f "$DONE_FILE" ]; do
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+                echo "[wait] [$WAIT_COUNT] Main model not ready, checking in 10s..."
+                sleep 10
+              done
+
+
+              echo "[wait] ✅ Main model ready (waited ${WAIT_COUNT}0 seconds)"
+
+
+              # Check if 4B model is needed
+
+              if [ "$ACESTEP_LM_MODEL_PATH" = "acestep-5Hz-lm-4B" ]; then
+                echo "[wait] 4B LM model required, waiting..."
+                echo "[wait] 4B model done file: $DONE_FILE_4B"
+                WAIT_COUNT_4B=0
+                while [ ! -f "$DONE_FILE_4B" ]; do
+                  WAIT_COUNT_4B=$((WAIT_COUNT_4B + 1))
+                  echo "[wait] [$WAIT_COUNT_4B] 4B LM model not ready, checking in 10s..."
+                  sleep 10
+                done
+                echo "[wait] ✅ 4B LM model ready (waited ${WAIT_COUNT_4B}0 seconds)"
+              else
+                echo "[wait] 4B LM model not required (ACESTEP_LM_MODEL_PATH=$ACESTEP_LM_MODEL_PATH)"
+              fi
+
+
+              echo "[wait] ✅ All required models ready"
+
+              echo "[wait] ========================================"
+
+
+              # Build command arguments - STABLE VERSION: Force PyTorch backend
+
+              CMD_ARGS="--server-name 0.0.0.0 --port 7860"
+
+
+              # Add --init_service if ACESTEP_INIT_LLM is set to true
+
+              if [ "${ACESTEP_INIT_LLM:-false}" = "true" ]; then
+                CMD_ARGS="$CMD_ARGS --init_service true"
+                echo "[start] Auto-initialization enabled (ACESTEP_INIT_LLM=true)"
+              fi
+
+
+              # Add optional parameters from environment variables
+
+              # Language: use env var if set, otherwise default to 'en'
+              (English)
+
+              if [ -n "${ACESTEP_UI_LANGUAGE:-}" ]; then
+                CMD_ARGS="$CMD_ARGS --language ${ACESTEP_UI_LANGUAGE}"
+                echo "[start] UI Language: ${ACESTEP_UI_LANGUAGE} (from ACESTEP_UI_LANGUAGE)"
+              else
+                CMD_ARGS="$CMD_ARGS --language en"
+                echo "[start] UI Language: en (default, English)"
+              fi
+
+              [ -n "${ACESTEP_CONFIG_PATH:-}" ] && CMD_ARGS="$CMD_ARGS
+              --config_path ${ACESTEP_CONFIG_PATH}"
+
+
+              # Handle LM model path
+
+              LM_MODEL_PATH="${ACESTEP_LM_MODEL_PATH:-}"
+
+              # STABLE VERSION: Force PyTorch backend (override any env var)
+
+              LM_BACKEND="pt"
+
+              echo "[start] Using PyTorch backend for stability (forced)"
+
+
+              [ -n "$LM_MODEL_PATH" ] && CMD_ARGS="$CMD_ARGS --lm_model_path
+              $LM_MODEL_PATH"
+
+              CMD_ARGS="$CMD_ARGS --backend $LM_BACKEND"
+
+              [ -n "${ACESTEP_DEVICE:-}" ] && CMD_ARGS="$CMD_ARGS --device
+              ${ACESTEP_DEVICE}"
+
+
+              # Start server
+
+              echo "[start] ========================================"
+
+              echo "[start] Starting ACE-Step server..."
+
+              echo "[start] UI Language: ${ACESTEP_UI_LANGUAGE:-en}"
+
+              echo "[start] Server address: 0.0.0.0:7860"
+
+              echo "[start] Backend: PyTorch (stable)"
+
+              echo "[start] Command: python3 acestep/acestep_v15_pipeline.py
+              $CMD_ARGS"
+
+              echo "[start] ========================================"
+
+
+              # Run with error handling
+
+              python3 acestep/acestep_v15_pipeline.py $CMD_ARGS || {
+                EXIT_CODE=$?
+                echo "[start] ❌ Server exited with code $EXIT_CODE" >&2
+                echo "[start] Error occurred at: $(date)" >&2
+                echo "[start] ========================================" >&2
+                exit $EXIT_CODE
+              }
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: ACESTEP_CONFIG_PATH
+              value: "acestep-v15-turbo"
+            - name: ACESTEP_INIT_LLM
+              value: "true"
+            - name: ACESTEP_LM_MODEL_PATH
+              value: "acestep-5Hz-lm-4B"
+            - name: ACESTEP_LM_BACKEND
+              value: "pt"
+            - name: ACESTEP_DOWNLOAD_SOURCE
+              value: "auto"
+            - name: ACESTEP_USE_FLASH_ATTENTION
+              value: "true"
+            - name: ACESTEP_OFFLOAD_TO_CPU
+              value: "false"
+            - name: ACESTEP_LM_OFFLOAD_TO_CPU
+              value: "false"
+            - name: ACESTEP_DEVICE
+              value: "auto"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: ACESTEP_UI_LANGUAGE
+              value: "en"
+          envFrom:
+            - configMapRef:
+                name: acestep-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 12Gi
+            limits:
+              cpu: "5"
+              memory: 29Gi
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/checkpoints
+            - name: outputs
+              mountPath: /app/gradio_outputs
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: checkpoints
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/acestep15v2"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/acestep15v2"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/logs"
+            type: DirectoryOrCreate
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.6"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: HF_TOKEN
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
+          args:
+            - "--tasks"
+            - '{"tasks":[{"repo":"ACE-Step/Ace-Step1.5","file":"","ref":"main","outDir":"/app/checkpoints","doneNameTpl":".Ace-Step1.5.done"},{"repo":"ACE-Step/acestep-5Hz-lm-4B","file":"","ref":"main","outDir":"/app/checkpoints/acestep-5Hz-lm-4B","doneNameTpl":".acestep-5Hz-lm-4B.done"}]}'
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/gradio_api/info"
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/checkpoints
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: checkpoints
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/acestep15v2"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: acestep-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: multi-port
+  ports:
+    - name: main-api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP

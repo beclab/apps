@@ -1,0 +1,259 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: librechat
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    app: librechat
+    component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: librechat
+      component: api
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: librechat
+        component: api
+    spec:
+      initContainers:
+      - name: wait-for-mongodb
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - 'librechat-mongodb:27017'
+        imagePullPolicy: IfNotPresent
+      - name: wait-for-meilisearch
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - 'librechat-meilisearch:7700'
+        imagePullPolicy: IfNotPresent
+      - name: sync-api-keys-to-pvc
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        envFrom:
+        - configMapRef:
+            name: librechat-api-keys
+        command:
+          - sh
+          - '-c'
+          - |
+            # Priority: ConfigMap (non-empty) > PVC file > empty
+            # Only non-empty ConfigMap values override PVC
+            mkdir -p /app-config
+            
+            # List of all API keys
+            API_KEYS="OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_KEY GEMINI_API_KEY ANYSCALE_API_KEY COHERE_API_KEY DEEPSEEK_API_KEY FIREWORKS_API_KEY GROQ_API_KEY HUGGINGFACE_TOKEN MISTRAL_API_KEY OPENROUTER_KEY PERPLEXITY_API_KEY TOGETHERAI_API_KEY XAI_API_KEY BEDROCK_AWS_DEFAULT_REGION BEDROCK_AWS_ACCESS_KEY_ID BEDROCK_AWS_SECRET_ACCESS_KEY PROXY OPENWEATHER_API_KEY"
+            
+            # Temporary files
+            TMP_FILE="/tmp/api-keys.env.tmp"
+            PVC_TMP="/tmp/pvc-values.tmp"
+            
+            # Load PVC values into temp file (key=value format, skip comments)
+            if [ -f /app-config/api-keys.env ]; then
+              echo "Loading existing API keys from PVC..."
+              grep -v '^#' /app-config/api-keys.env | grep -v '^$' > "$PVC_TMP" || touch "$PVC_TMP"
+            else
+              touch "$PVC_TMP"
+            fi
+            
+            # Function to get PVC value for a key
+            get_pvc_value() {
+              local result
+              result=$(grep "^${1}=" "$PVC_TMP" 2>/dev/null | cut -d'=' -f2- | head -n1)
+              # Return empty string if not found or if result is just whitespace
+              if [ -n "$result" ]; then
+                echo "$result"
+              else
+                echo ""
+              fi
+            }
+            
+            # Create header
+            cat > "$TMP_FILE" << 'EOF'
+            # User-configured API Keys
+            # Priority: ConfigMap (non-empty) > PVC file > empty
+            # Edit via: kubectl edit configmap librechat-api-keys (non-empty values only)
+            # Or directly edit this file on PVC
+            EOF
+            
+            # Process each key: ConfigMap (non-empty) > PVC > empty
+            for key in $API_KEYS; do
+              # Get value from ConfigMap (from envFrom)
+              # Use printenv to safely get environment variable value
+              cm_value=$(printenv "$key" 2>/dev/null || echo "")
+              
+              # Get value from PVC (if exists)
+              pvc_value=$(get_pvc_value "$key")
+              
+              # Remove leading/trailing whitespace and quotes
+              cm_value=$(echo "$cm_value" | sed 's/^["'\'']//' | sed 's/["'\'']$//' | xargs)
+              pvc_value=$(echo "$pvc_value" | sed 's/^["'\'']//' | sed 's/["'\'']$//' | xargs)
+              
+              # Special handling: if value equals key name, treat as empty (invalid state)
+              # This prevents key=KEY_NAME from being written
+              if [ "$cm_value" = "$key" ]; then
+                cm_value=""
+              fi
+              if [ "$pvc_value" = "$key" ]; then
+                pvc_value=""
+              fi
+              
+              # Priority: non-empty ConfigMap > PVC > empty
+              if [ -n "$cm_value" ] && [ "$cm_value" != '""' ] && [ "$cm_value" != "''" ]; then
+                # ConfigMap has non-empty value, use it (overrides PVC)
+                # Escape special characters in value
+                escaped_value=$(echo "$cm_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+                echo "${key}=${escaped_value}" >> "$TMP_FILE"
+              elif [ -n "$pvc_value" ] && [ "$pvc_value" != '""' ] && [ "$pvc_value" != "''" ]; then
+                # PVC has value, use it
+                escaped_value=$(echo "$pvc_value" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+                echo "${key}=${escaped_value}" >> "$TMP_FILE"
+              else
+                # Both empty, write empty value (not key=key)
+                echo "${key}=" >> "$TMP_FILE"
+              fi
+            done
+            
+            # Cleanup and replace the original file
+            rm -f "$PVC_TMP"
+            mv "$TMP_FILE" /app-config/api-keys.env
+        volumeMounts:
+          - name: api-keys-config
+            mountPath: /app-config
+        imagePullPolicy: IfNotPresent
+      containers:
+      - name: librechat-api
+        image: beclab/danny-avila-librechat:chart-1.9.6
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 3080
+          name: http
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: librechat-env
+        - configMapRef:
+            name: librechat-api-keys
+        env:
+        # MongoDB connection URI (from ConfigMap)
+        # AI Provider API Keys (from PVC file, fallback to ConfigMap)
+        # MeiliSearch master key (from Secret)
+        # JWT secrets (from Secret)
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: librechat-secrets
+              key: jwt-secret
+        - name: JWT_REFRESH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: librechat-secrets
+              key: jwt-refresh-secret
+        command:
+        - sh
+        - '-c'
+        - |
+          # Load API keys: Priority PVC file > ConfigMap
+          # PVC file values override ConfigMap values
+          if [ -f /app-config/api-keys.env ]; then
+            echo "Loading API keys from PVC file (overrides ConfigMap)..."
+            set -a
+            # Load PVC file line by line, ensuring proper key=value format
+            while IFS= read -r line || [ -n "$line" ]; do
+              # Skip comments and empty lines
+              case "$line" in
+                \#*|"") continue ;;
+              esac
+              # Only process lines with = sign (key=value format)
+              if echo "$line" | grep -q '='; then
+                # Extract key and value
+                key=$(echo "$line" | cut -d'=' -f1 | xargs)
+                value=$(echo "$line" | cut -d'=' -f2- | xargs)
+                # Only export if key is not empty and is a valid identifier
+                if [ -n "$key" ] && echo "$key" | grep -qE '^[a-zA-Z_][a-zA-Z0-9_]*$'; then
+                  # Special handling for PROXY: if value equals key name, treat as empty
+                  if [ "$key" = "PROXY" ] && [ "$value" = "PROXY" ]; then
+                    unset PROXY
+                  # Export the variable, handling empty values correctly
+                  elif [ -n "$value" ]; then
+                    export "${key}=${value}"
+                  else
+                    # Explicitly unset empty values (especially for PROXY)
+                    if [ "$key" = "PROXY" ]; then
+                      unset PROXY
+                    else
+                      export "${key}="
+                    fi
+                  fi
+                fi
+              fi
+            done < /app-config/api-keys.env
+            set +a
+          else
+            echo "PVC file not found, using ConfigMap values..."
+          fi
+          # Validate PROXY: must be unset or a valid URL
+          if [ -n "$PROXY" ]; then
+            # Check if PROXY looks like a valid URL
+            if ! echo "$PROXY" | grep -qE '^https?://'; then
+              echo "Warning: PROXY value '$PROXY' is not a valid URL, unsetting..."
+              unset PROXY
+            fi
+          fi
+          # Ensure PROXY is unset if it equals the key name (invalid state)
+          if [ "$PROXY" = "PROXY" ]; then
+            unset PROXY
+          fi
+          # Start the application
+          exec node /app/api/server/index.js
+        volumeMounts:
+        - name: librechat-data
+          mountPath: /app/data
+        - name: librechat-config
+          mountPath: /app/librechat.yaml
+          subPath: librechat.yaml
+          readOnly: true
+        - name: api-keys-config
+          mountPath: /app-config
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3080
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 300m
+            memory: 512Mi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+      volumes:
+      - name: librechat-data
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+      - name: librechat-config
+        configMap:
+          name: librechat-config
+      - name: api-keys-config
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/api-keys-config'
+          type: DirectoryOrCreate
+      restartPolicy: Always

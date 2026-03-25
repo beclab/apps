@@ -152,6 +152,8 @@ spec:
         image: beclab/onlyoffice-documentserver:9.2.0
         imagePullPolicy: IfNotPresent
         name: onlyofficeshare
+        securityContext:
+          runAsUser: 0
         ports:
         - containerPort: 80
         resources:
@@ -161,27 +163,8 @@ spec:
           requests:
             cpu: 1
             memory: 1.5Gi
-        volumeMounts:
-        - mountPath: /var/log/onlyoffice
-          name: logs
-        - mountPath: /var/www/onlyoffice/Data
-          name: data
-        - mountPath: /var/lib/onlyoffice
-          name: lib
       restartPolicy: Always
       volumes:
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/onlyoffice/logs'
-          type: DirectoryOrCreate
-        name: logs
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/onlyoffice/data'
-          type: DirectoryOrCreate
-        name: data
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}/onlyoffice/lib'
-          type: DirectoryOrCreate
-        name: lib
       - name: config
         configMap:
           name: config2
@@ -189,7 +172,13 @@ spec:
           items:
           - key: local.json
             path: local.json
-status: {}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
 
 ---
 apiVersion: v1
@@ -207,8 +196,6 @@ spec:
     targetPort: 80
   selector:
     io.kompose.service: onlyofficeshare
-status:
-  loadBalancer: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -234,7 +221,7 @@ spec:
     spec:
       containers:
       - name: jwt-geter
-        image: "docker.io/beclab/kldtks-jwt-geter:v9"
+        image: "docker.io/beclab/kldtks-jwt-geter:v10"
         imagePullPolicy: IfNotPresent
         ports:
           - containerPort: 3030
@@ -249,7 +236,6 @@ spec:
             cpu: 0.1
             memory: 0.1Gi
       restartPolicy: Always
-status: {}
 
 ---
 apiVersion: v1
@@ -267,6 +253,4 @@ spec:
     targetPort: 3030
   selector:
     io.kompose.service: jwtgeter
-status:
-  loadBalancer: {}
 {{- end }}
