@@ -1,7 +1,11 @@
-﻿
+
 
 {{- $gitlabDomainENV := split  ","  .Values.domain.gitlab -}}
 {{- $gitlabDomain := index $gitlabDomainENV "_0" -}}
+{{- $olaresEnvMap := default dict (index .Values "olaresEnv") -}}
+{{- $gitlabInitialRootPassword := index $olaresEnvMap "GITLAB_INITIAL_ROOT_PASSWORD" -}}
+{{- /* Empty olaresEnv during chart verification: use random password so helm template succeeds; installs supply GITLAB_INITIAL_ROOT_PASSWORD via OlaresManifest envs. */ -}}
+{{- $gitlabInitialRootPasswordEffective := default (randAlphaNum 64) $gitlabInitialRootPassword -}}
 
 {{- $minioDomainENV := split  ","  .Values.domain.minio -}}
 {{- $minioDomain := index $minioDomainENV "_0" -}}
@@ -39,25 +43,26 @@ type: kubernetes.io/basic-auth
 stringData:
   password: {{ .Values.redis.password }}
 ---
-# Source: gitlab/charts/certmanager/templates/startupapicheck-serviceaccount.yaml
+# GitLab reads this file during first DB seed (default admin username is always "root").
+# Value comes from olaresEnv at render time. pre-install hook only (not pre-upgrade) so upgrades do not
+# rewrite the secret while the DB still holds the password from the first install.
 apiVersion: v1
-kind: ServiceAccount
-automountServiceAccountToken: true
+kind: Secret
 metadata:
-  name: gitlab-certmanager-startupapicheck
+  name: gitlab-gitlab-initial-root-password
   namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "-5"
   labels:
-    app: startupapicheck
-    app.kubernetes.io/name: startupapicheck
-    app.kubernetes.io/instance: gitlab
-    app.kubernetes.io/component: "startupapicheck"
-    app.kubernetes.io/version: "v1.12.6"
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: certmanager-v1.12.6
+    app: gitlab
+    chart: gitlab-7.6.0
+    release: gitlab
+    heritage: Helm
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": before-hook-creation
+type: Opaque
+stringData:
+  password: {{ $gitlabInitialRootPasswordEffective | quote }}
 ---
 # Source: gitlab/templates/shared-secrets/rbac-config.yaml
 apiVersion: v1
@@ -161,9 +166,7 @@ data:
       label_secret $secret_name
     }
     
-    # Initial root password
-    generate_secret_if_needed "gitlab-gitlab-initial-root-password" --from-literal="password"=$(gen_random 'a-zA-Z0-9' 64)
-    
+    # gitlab-gitlab-initial-root-password is rendered by Helm (stringData), not created here.
     
     # Redis password
     generate_secret_if_needed "gitlab-redis-secret" --from-literal="secret"=$(gen_random 'a-zA-Z0-9' 64)
@@ -384,30 +387,6 @@ data:
       exit 1
     fi
 ---
-# Source: gitlab/charts/certmanager/templates/startupapicheck-rbac.yaml
-# create certificate role
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: gitlab-certmanager-startupapicheck:create-cert
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: startupapicheck
-    app.kubernetes.io/name: startupapicheck
-    app.kubernetes.io/instance: gitlab
-    app.kubernetes.io/component: "startupapicheck"
-    app.kubernetes.io/version: "v1.12.6"
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: certmanager-v1.12.6
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "-5"
-rules:
-  - apiGroups: ["cert-manager.io"]
-    resources: ["certificates"]
-    verbs: ["create"]
----
 # Source: gitlab/templates/shared-secrets/rbac-config.yaml
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
@@ -428,33 +407,6 @@ rules:
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["get", "list", "create", "patch"]
----
-# Source: gitlab/charts/certmanager/templates/startupapicheck-rbac.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: gitlab-certmanager-startupapicheck:create-cert
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: startupapicheck
-    app.kubernetes.io/name: startupapicheck
-    app.kubernetes.io/instance: gitlab
-    app.kubernetes.io/component: "startupapicheck"
-    app.kubernetes.io/version: "v1.12.6"
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: certmanager-v1.12.6
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "-5"
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: gitlab-certmanager-startupapicheck:create-cert
-subjects:
-  - kind: ServiceAccount
-    name: gitlab-certmanager-startupapicheck
-    namespace: {{ .Release.Namespace }}
 ---
 # Source: gitlab/templates/shared-secrets/rbac-config.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -519,60 +471,6 @@ spec:
         - key: "password"
           path: initial_root_password
   restartPolicy: Never
----
-# Source: gitlab/charts/certmanager/templates/startupapicheck-job.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: gitlab-certmanager-startupapicheck
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: startupapicheck
-    app.kubernetes.io/name: startupapicheck
-    app.kubernetes.io/instance: gitlab
-    app.kubernetes.io/component: "startupapicheck"
-    app.kubernetes.io/version: "v1.12.6"
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: certmanager-v1.12.6
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-    helm.sh/hook-weight: "1"
-spec:
-  ttlSecondsAfterFinished: 100
-  backoffLimit: 4
-  template:
-    metadata:
-      labels:
-        app: startupapicheck
-        app.kubernetes.io/name: startupapicheck
-        app.kubernetes.io/instance: gitlab
-        app.kubernetes.io/component: "startupapicheck"
-        app.kubernetes.io/version: "v1.12.6"
-        app.kubernetes.io/managed-by: Helm
-        helm.sh/chart: certmanager-v1.12.6
-    spec:
-      restartPolicy: OnFailure
-      serviceAccountName: gitlab-certmanager-startupapicheck
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: certmanager-startupapicheck
-          image: "docker.io/beclab/aboveos-jetstack-cert-manager-ctl:v1.12.6"
-          imagePullPolicy: IfNotPresent
-          args:
-          - check
-          - api
-          - --wait=1m
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-      nodeSelector:
-        kubernetes.io/os: linux
 ---
 # Source: gitlab/templates/shared-secrets/job.yaml
 apiVersion: batch/v1
