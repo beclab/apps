@@ -10,6 +10,10 @@ metadata:
   namespace: "{{ .Release.Namespace }}"
   labels:
     io.kompose.service: openwebui
+{{- if .Values.GPU }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+{{- end }}
 spec:
   replicas: 1
   strategy:
@@ -24,23 +28,68 @@ spec:
         io.kompose.network/chrome-default: "true"
     spec:
       restartPolicy: Always
+      initContainers:
+        - name: migrate-data
+          image: 'docker.io/beclab/busybox:1.37'
+          command: ['sh', '-c']
+          args:
+            - |
+              VERSION="{{ .Chart.Version }}"
+              MARKER="/new-data/.migration_done_${VERSION}"
+
+              if [ -f "$MARKER" ]; then
+                echo "Migration already completed for v${VERSION}, skipping."
+                exit 0
+              fi
+
+              if [ -f /new-data/webui.db ]; then
+                echo "Data already exists in appData, no migration needed."
+                echo "Skipped - data already present at $(date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -d /old-data ] && [ -f /old-data/webui.db ]; then
+                echo "Found old data in appCache, migrating to appData..."
+                cp -a /old-data/. /new-data/
+                if [ $? -eq 0 ]; then
+                  echo "Migrated from appCache at $(date)" > "$MARKER"
+                  echo "Migration completed successfully."
+                else
+                  echo "ERROR: Copy failed, will retry on next restart."
+                  exit 1
+                fi
+              else
+                echo "No old data found, fresh install."
+                echo "Fresh install at $(date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: old-appdata
+              mountPath: /old-data
+              readOnly: true
+            - name: appdata
+              mountPath: /new-data
       containers:
         - name: openwebui
-          image: 'docker.io/beclab/open-webui-open-webui:v0.8.10'
-
+{{- if .Values.GPU }}
+          image: 'docker.io/beclab/openwebui-open-webui:0.8.12-cuda'
+{{- else }}
+          image: 'docker.io/beclab/openwebui-open-webui:0.8.12'
+{{- end }}
           ports:
             - containerPort: 8080
 
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /ready
               port: 8080
             initialDelaySeconds: 60
-            timeoutSeconds: 30
+            timeoutSeconds: 10
             periodSeconds: 30
             failureThreshold: 5
 
           startupProbe:
-            tcpSocket:
+            httpGet:
+              path: /ready
               port: 8080
             timeoutSeconds: 10
             periodSeconds: 10
@@ -54,7 +103,7 @@ spec:
               value: "1000"
             - name: TZ
               value: Etc/UTC
-{{- if and .Values.olaresEnv .Values.olaresEnv.HF_HUB_OFFLINE (eq (lower (toString .Values.olaresEnv.HF_HUB_OFFLINE)) "false") }}
+{{- if and .Values.olaresEnv (eq (lower (toString .Values.olaresEnv.HF_HUB_OFFLINE)) "false") }}
             - name: HF_HUB_OFFLINE
               value: "0"
             - name: HF_ENDPOINT
@@ -74,14 +123,20 @@ spec:
             - name: CORS_ALLOW_ORIGIN
               value: "*"
             - name: USER_AGENT
-              value: "OpenWebUI/0.8.10"
+              value: "OpenWebUI/0.8.12"
             - name: WEBSOCKET_EVENT_CALLER_TIMEOUT
               value: "600"
+            - name: RAG_EMBEDDING_ENGINE
+              value: "ollama"
 
           resources:
             limits:
               cpu: "2"
-              memory: 3072Mi
+{{- if and .Values.olaresEnv (eq (lower (toString .Values.olaresEnv.HF_HUB_OFFLINE)) "false") }}
+              memory: 8Gi
+{{- else }}
+              memory: 3Gi
+{{- end }}
             requests:
               cpu: 50m
               memory: 512Mi
@@ -89,19 +144,21 @@ spec:
           volumeMounts:
             - name: appdata
               mountPath: /app/backend/data
+            - name: hf-cache
+              mountPath: /app/backend/data/cache
 
       volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
         - name: appdata
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+        - name: old-appdata
+          hostPath:
             path: "{{ .Values.userspace.appCache }}/data"
-              {{- else }}
-            path: "{{ .Values.userspace.appCache }}/openwebui/data"
-              {{- end }}
-            {{- else }}
-            path: "{{ .Values.userspace.appCache }}/openwebui/data"
-            {{- end }}
             type: DirectoryOrCreate
 ---
 apiVersion: v1
