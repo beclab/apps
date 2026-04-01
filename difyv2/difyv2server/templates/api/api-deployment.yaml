@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 
 ---
 # Redis extension ConfigMap
@@ -171,7 +171,7 @@ spec:
     spec:
       initContainers:
         - name: init-chmod-data
-          image: docker.io/beclab/aboveos-busybox:1.37.0
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           # busybox runs as root by default so can chown
           command:
             - sh
@@ -189,20 +189,53 @@ spec:
             runAsUser: 0
       containers:
         - name: api
-          image: "docker.io/beclab/langgenius-dify-api:1.11.1"
+          image: "docker.io/beclab/dify-api:1.13.3"
           envFrom:
             - configMapRef:
                 name: dify-api-env
+          env:
+            - name: MODE
+              value: "api"
+            - name: DB_EXTRAS
+              value: "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3"
+            - name: SQLALCHEMY_POOL_SIZE
+              value: "5"
+            - name: SQLALCHEMY_MAX_OVERFLOW
+              value: "3"
           ports:
             - containerPort: 5001
               name: http
+          startupProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+            successThreshold: 1
+          livenessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
           resources:
             requests:
-              cpu: 500m
-              memory: 1Gi
-            limits:
-              cpu: "1"
+              cpu: 1000m
               memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
           volumeMounts:
             - mountPath: /app/api/storage
               name: api-vol
