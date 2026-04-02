@@ -1,3 +1,6 @@
+{{- $opencodeDomainENV := split  ","  .Values.domain.opencode -}}
+{{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,13 +24,264 @@ spec:
         io.kompose.service: opencode
     spec:
       initContainers:
-        - name: init-chmod-data
+        - name: init-setup
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - "-c"
             - |
-              mkdir -p /home/opencode/workspace /home/opencode/.opencode /home/opencode/.config/opencode
+              OC_DOMAIN="{{ $opencodeDomain }}"
+              mkdir -p /home/opencode/workspace \
+                       /home/opencode/.opencode \
+                       /home/opencode/.config/opencode \
+                       /home/opencode/.config/opencode/skills/web-preview \
+                       /home/opencode/.config/opencode/skills/system-admin \
+                       /home/opencode/.pkg-queue
+              SKILL="/home/opencode/.config/opencode/skills/web-preview/SKILL.md"
+              printf '%s\n' \
+                '---' \
+                'name: web-preview' \
+                'description: "MUST load before running ANY server, creating ANY web page, building ANY project, or showing ANY preview URL. Covers Vite, React, Next.js, Vue, Flask, FastAPI, Go, Rust, static sites. Also load when user says run, start, serve, preview, demo, test, open, launch, deploy, build, create site, create app, create page, show me, make a website."' \
+                '---' \
+                '' \
+                '## How to preview' \
+                '' \
+                'This environment has a built-in reverse-proxy.' \
+                'Dev servers inside the container are reachable at `/__preview/<port>/` on the same domain the user is already on.' \
+                '' \
+                '## Starting dev servers — MANDATORY pattern' \
+                '' \
+                'EVERY dev server or web service MUST be started with `nohup ... &` so it keeps running after the command returns.' \
+                'EVERY dev server MUST bind to `0.0.0.0` (not localhost, not 127.0.0.1).' \
+                'EVERY dev server MUST set its base/public path to `/__preview/<port>/`.' \
+                '' \
+                'General pattern:' \
+                '' \
+                '```' \
+                'nohup <command> --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/dev-server.log 2>&1 &' \
+                '```' \
+                '' \
+                'After starting, ALWAYS verify the server is running:' \
+                '' \
+                '```' \
+                'sleep 2 && ss -tlnp | grep <PORT>' \
+                '```' \
+                '' \
+                '## Choosing a port' \
+                '' \
+                'BEFORE starting any server, check if the port is free:' \
+                '```' \
+                'ss -tlnp | grep <PORT>' \
+                '```' \
+                'If the port is in use, pick a different one (e.g. 4000, 4001, 8080, 8081, 9000...).' \
+                'NEVER blindly reuse a hardcoded port from examples below — always pick a free port.' \
+                '' \
+                '## Vite (React / Vue / Svelte / vanilla)' \
+                '' \
+                '```' \
+                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
+                '```' \
+                '' \
+                'If the project uses npm scripts:' \
+                '' \
+                '```' \
+                'nohup npm run dev -- --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
+                '```' \
+                '' \
+                'When scaffolding a NEW Vite project, also set base in vite.config:' \
+                '' \
+                '```js' \
+                'export default defineConfig({ base: "/__preview/<PORT>/" })' \
+                '```' \
+                '' \
+                '## Next.js' \
+                '' \
+                'Set basePath in next.config.js BEFORE starting:' \
+                '' \
+                '```js' \
+                'module.exports = { basePath: "/__preview/<PORT>" }' \
+                '```' \
+                '' \
+                'Then:' \
+                '' \
+                '```' \
+                'nohup npx next dev -H 0.0.0.0 -p <PORT> > /tmp/next.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Python (Flask / FastAPI / http.server)' \
+                '' \
+                '```' \
+                'nohup python3 -m http.server <PORT> --bind 0.0.0.0 > /tmp/pyserver.log 2>&1 &' \
+                '```' \
+                '' \
+                'For Flask:' \
+                '' \
+                '```' \
+                'nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Static HTML (no bundler)' \
+                '' \
+                'Use Vite to serve:' \
+                '' \
+                '```' \
+                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Go / Rust / Other custom servers' \
+                '' \
+                'Make sure the server listens on 0.0.0.0:<PORT>, then:' \
+                '' \
+                '```' \
+                'nohup ./myserver --addr 0.0.0.0:<PORT> > /tmp/server.log 2>&1 &' \
+                '```' \
+                '' \
+                '## Stopping a dev server' \
+                '' \
+                '```' \
+                'kill $(lsof -t -i:<PORT>)   # or: pkill -f "vite"' \
+                '```' \
+                '' \
+                '## Preview URL' \
+                '' \
+                'NEVER use localhost or 127.0.0.1 in any URL you show to the user.' \
+                'The domain for this OpenCode instance is: '"$OC_DOMAIN" \
+                '' \
+                'Tell the user:' \
+                '`https://'"$OC_DOMAIN"'/__preview/<port>/`' \
+                '' \
+                'Example (if your dev server runs on port 4000):' \
+                '`https://'"$OC_DOMAIN"'/__preview/4000/`' \
+                '' \
+                '## CRITICAL rules (MUST follow every time)' \
+                '' \
+                '1. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
+                '2. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
+                '3. ALWAYS set `--base /__preview/<port>/` (Vite) or `basePath` (Next.js) — without this, assets 404' \
+                '4. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
+                '5. NEVER output `http://localhost` in any URL — the user accesses remotely' \
+                '6. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
+                '7. If a port is busy, pick another port and adjust `--base` accordingly' \
+                '8. When the user asks to "create a web page", "build a website", or "start a project":' \
+                '   automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
+                > "$SKILL"
+              ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
+              printf '%s\n' \
+                '---' \
+                'name: system-admin' \
+                'description: "MUST load before installing ANY system package. Provides pkg-install for Java, Python, Go, Rust, FFmpeg, databases, compilers, and all Alpine packages."' \
+                '---' \
+                '' \
+                '## pkg-install — system package manager' \
+                '' \
+                'This environment is Alpine Linux. Use `pkg-install` to manage system packages.' \
+                '`sudo` and `apk` are NOT available directly — always use `pkg-install`.' \
+                '' \
+                '### Install' \
+                '' \
+                '```' \
+                'pkg-install <package> [package2 ...]' \
+                '```' \
+                '' \
+                'Examples:' \
+                '' \
+                '```' \
+                'pkg-install openjdk17-jdk          # install Java 17' \
+                'pkg-install make cmake gcc          # install multiple packages' \
+                'pkg-install nodejs=20.15.1-r0       # install a specific version' \
+                '```' \
+                '' \
+                '### Remove' \
+                '' \
+                '```' \
+                'pkg-install --remove <package> [...]' \
+                '```' \
+                '' \
+                '### Search, Info, List' \
+                '' \
+                '```' \
+                'pkg-install --search <keyword>      # search available packages' \
+                'pkg-install --info <package>         # show details and available versions' \
+                'pkg-install --list                   # list all installed packages' \
+                'pkg-install --help                   # show full help' \
+                '```' \
+                '' \
+                '### Version pinning' \
+                '' \
+                'To install a specific version, append `=<version>`:' \
+                '' \
+                '```' \
+                'pkg-install nodejs=20.15.1-r0' \
+                '```' \
+                '' \
+                'Use `pkg-install --info <package>` first to see available versions.' \
+                '' \
+                '## Common package names (Alpine)' \
+                '' \
+                '| Need                | Package name        |' \
+                '|---------------------|---------------------|' \
+                '| Java 17             | openjdk17-jdk       |' \
+                '| Java 21             | openjdk21-jdk       |' \
+                '| GCC / G++ / Make    | build-base          |' \
+                '| CMake               | cmake               |' \
+                '| SQLite              | sqlite              |' \
+                '| PostgreSQL client   | postgresql-client   |' \
+                '| MySQL / MariaDB cli | mariadb-client      |' \
+                '| Redis cli           | redis               |' \
+                '| FFmpeg              | ffmpeg              |' \
+                '| ImageMagick         | imagemagick         |' \
+                '| PHP                 | php83               |' \
+                '| Ruby                | ruby                |' \
+                '| Perl                | perl                |' \
+                '| Lua                 | lua5.4              |' \
+                '| .NET SDK            | dotnet8-sdk         |' \
+                '| Nginx               | nginx               |' \
+                '| Docker CLI          | docker-cli          |' \
+                '| tmux                | tmux                |' \
+                '| vim / neovim        | vim / neovim        |' \
+                '| jq / yq            | jq / yq             |' \
+                '' \
+                '## Pre-installed tools' \
+                '' \
+                'The following are already available (no install needed):' \
+                '' \
+                '- **Languages**: python3, pip, node, npm, go, rustc, cargo' \
+                '- **VCS**: git' \
+                '- **Network**: curl, wget, ssh, ss' \
+                '- **Shell**: bash' \
+                '- **Compression**: zip, unzip, gzip, bzip2, xz, tar, zstd' \
+                '' \
+                '## Language-specific package managers' \
+                '' \
+                'For language ecosystem packages, use the native tool directly (no pkg-install needed):' \
+                '' \
+                '```' \
+                'pip install <pkg>           # Python' \
+                'npm install <pkg>           # Node.js' \
+                'go install <pkg>@latest     # Go' \
+                'cargo install <pkg>         # Rust' \
+                '```' \
+                '' \
+                '## Rules' \
+                '' \
+                '- ALWAYS use `pkg-install` for system packages' \
+                '- NEVER use `sudo`, `apk`, or download binaries manually' \
+                '- NEVER tell the user that system packages cannot be installed — they CAN via pkg-install' \
+                '- NEVER modify ~/.profile or ~/.bashrc for PATH — packages install to standard paths' \
+                '- When unsure about the package name, use `pkg-install --search <keyword>` first' \
+                > "$ADMIN"
+              printf '%s\n' \
+                '{' \
+                '  "instructions": [' \
+                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. ALWAYS run /skill load system-admin BEFORE installing ANY system package.",' \
+                '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
+                '    "NEVER show localhost URLs. The domain is '"$OC_DOMAIN"'. Dev server preview URL format: https://'"$OC_DOMAIN"'/__preview/<port>/"' \
+                '  ]' \
+                '}' > /home/opencode/workspace/opencode.json
+              chown 1000:1000 /home/opencode /home/opencode/workspace
+              find /home/opencode -mindepth 1 -maxdepth 1 ! -name '.pkg-root' \
+                -exec chown -R 1000:1000 {} +
+              chown -R 1000:1000 /home/opencode/.pkg-root/usr/local 2>/dev/null || true
           resources: {}
           volumeMounts:
             - name: opencode-home
@@ -39,56 +293,317 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-        - name: init-glibc
-          image: "docker.io/beclab/alpine:3.20"
+
+        - name: init-packages
+          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
           command:
             - sh
             - "-c"
             - |
-              ARCH=$(uname -m)
-              if [ "$ARCH" != "x86_64" ]; then
-                echo "=== Arch $ARCH: glibc fix not available, skipping ==="
-                exit 0
-              fi
-
-              CACHE="/home/opencode/.glibc-cache"
-              GLIBC_VER="2.35-r1"
+              PKG="/home/opencode/.pkg-root"
               OC_VER="1.2.27"
-              MARKER="$CACHE/done-${OC_VER}-${GLIBC_VER}-x86_64"
+              GLIBC_VER="2.35-r1"
+              BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
+              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
+              PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
+              MARKER="$PKG/.installed-${PKG_HASH}"
 
-              if [ -f "$MARKER" ]; then
-                echo "=== glibc cache hit, skipping downloads ==="
+              verify_cache() {
+                [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
+                for b in \
+                  bin/bash bin/tar bin/gzip \
+                  usr/bin/python3 usr/bin/pip3 usr/bin/git usr/bin/curl usr/bin/wget \
+                  usr/bin/ssh usr/bin/node usr/bin/npm usr/bin/go usr/bin/rustc usr/bin/cargo \
+                  usr/bin/zip usr/bin/unzip usr/bin/bzip2 usr/bin/xz usr/bin/zstd \
+                  sbin/ss \
+                  usr/local/bin/opencode usr/local/bin/pkg-install; do
+                  if [ ! -s "$PKG/$b" ] && [ ! -L "$PKG/$b" ]; then
+                    echo "=== Cache invalid: $b missing or empty ==="
+                    return 1
+                  fi
+                done
+                return 0
+              }
+
+              restore_user_packages() {
+                UPKGS="/home/opencode/.user-packages"
+                [ ! -s "$UPKGS" ] && return 0
+                RESTORE=$(cat "$UPKGS" | tr '\n' ' ')
+                echo "=== Restoring user packages: $RESTORE ==="
+                apk info -q 2>/dev/null | sort > /tmp/.pkgs-before
+                FAILED=""
+                for p in $RESTORE; do
+                  if ! apk add --no-cache "$p" 2>&1; then
+                    echo "=== Warning: failed to restore $p ==="
+                    FAILED="$FAILED $p"
+                  fi
+                done
+                apk info -q 2>/dev/null | sort > /tmp/.pkgs-after
+                NEW_PKGS=$(comm -13 /tmp/.pkgs-before /tmp/.pkgs-after)
+                if [ -z "$NEW_PKGS" ]; then
+                  echo "=== No new packages to snapshot ==="
+                  rm -f /tmp/.pkgs-before /tmp/.pkgs-after
+                  return 0
+                fi
+                echo "=== Snapshotting new packages: $NEW_PKGS ==="
+                for pkg in $NEW_PKGS; do
+                  apk info -qL "$pkg" 2>/dev/null | while IFS= read -r f; do
+                    [ -f "/$f" ] || [ -L "/$f" ] || continue
+                    d=$(dirname "$f")
+                    mkdir -p "$PKG/$d"
+                    cp -a "/$f" "$PKG/$f" 2>/dev/null || true
+                  done
+                done
+                if [ -n "$FAILED" ]; then
+                  echo "=== Failed packages (will retry next restart):$FAILED ==="
+                fi
+                rm -f /tmp/.pkgs-before /tmp/.pkgs-after
+                echo "=== Restore complete ==="
+              }
+
+              if [ -f "$MARKER" ] && verify_cache; then
+                echo "=== Package snapshot cached (${PKG_HASH}) ==="
+                restore_user_packages
                 exit 0
               fi
+              rm -f "$MARKER"
 
-              echo "=== Downloading glibc and opencode glibc binary (x86_64) ==="
-              mkdir -p "$CACHE"
-              apk add --no-cache curl
+              echo "=== Installing system packages ==="
+              if ! apk add --no-cache $BASE_PKGS; then
+                echo "=== FATAL: base package installation failed, exiting ==="
+                exit 1
+              fi
 
-              curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
-                -o "$CACHE/sgerrand.rsa.pub"
+              echo "=== Configuring user opencode (uid 1000) ==="
+              addgroup -g 1000 opencode 2>/dev/null || true
+              adduser -D -u 1000 -G opencode -h /home/opencode -s /bin/bash opencode 2>/dev/null || true
 
-              curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
-                -o "$CACHE/glibc.apk"
+              ARCH=$(uname -m)
+              if [ "$ARCH" = "x86_64" ]; then
+                echo "=== Installing glibc (x86_64) ==="
+                curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
+                  -o /etc/apk/keys/sgerrand.rsa.pub
+                curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
+                  -o /tmp/glibc.apk
+                apk del libc6-compat gcompat 2>/dev/null || true
+                if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
+                  mkdir -p /lib64
+                  ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
+                  echo "=== Replacing opencode binary with glibc build ==="
+                  cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
+                  if curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
+                    -o /tmp/opencode-glibc.tar.gz && \
+                    tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
+                    chmod +x /usr/local/bin/opencode
+                  else
+                    echo "=== WARNING: glibc binary download failed, restoring musl binary ==="
+                    cp /tmp/opencode.musl.bak /usr/local/bin/opencode 2>/dev/null || true
+                    chmod +x /usr/local/bin/opencode
+                  fi
+                  rm -f /tmp/opencode-glibc.tar.gz /tmp/opencode.musl.bak
+                else
+                  echo "=== WARNING: glibc installation failed, using musl binary ==="
+                fi
+              else
+                echo "=== Arch $ARCH: using original musl binary ==="
+              fi
 
-              curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
-                -o "$CACHE/opencode.tar.gz"
+              echo "=== Creating pkg-install wrapper ==="
+              cat > /usr/local/bin/pkg-install << 'EOFWRAPPER'
+              #!/bin/sh
+              Q="/home/opencode/.pkg-queue"
+              _LOCKED=0
+              _lock() {
+                _lc=0
+                while true; do
+                  if mkdir "$Q/.lock" 2>/dev/null; then
+                    echo $$ > "$Q/.lock/pid"
+                    _LOCKED=1
+                    return 0
+                  fi
+                  _op=$(cat "$Q/.lock/pid" 2>/dev/null)
+                  if [ -z "$_op" ] || ! kill -0 "$_op" 2>/dev/null; then
+                    rm -rf "$Q/.lock"
+                    continue
+                  fi
+                  _lc=$((_lc + 1))
+                  if [ $_lc -ge 20 ]; then
+                    echo ">> ERROR: Another pkg-install is running (pid $_op). Try again later."
+                    return 1
+                  fi
+                  sleep 0.5
+                done
+              }
+              _unlock() {
+                if [ "$_LOCKED" = "1" ]; then
+                  rm -rf "$Q/.lock" 2>/dev/null || true
+                  _LOCKED=0
+                fi
+              }
+              trap '_unlock; exit 130' INT TERM
+              _send() {
+                if [ ! -d "$Q" ]; then
+                  echo ">> ERROR: pkg-manager queue not found. Is the sidecar running?"
+                  return 1
+                fi
+                _lock || return 1
+                rm -f "$Q/result" "$Q/log"
+                echo "$1" > "$Q/request"
+                _c=0
+                while [ ! -f "$Q/result" ]; do
+                  sleep 0.5
+                  _c=$((_c + 1))
+                  if [ $_c -ge 600 ]; then
+                    echo ">> ERROR: pkg-manager did not respond within 300s"
+                    echo ">> The pkg-manager sidecar may be down or busy."
+                    _unlock
+                    return 1
+                  fi
+                done
+                cat "$Q/log" 2>/dev/null
+                EXIT=$(cat "$Q/result")
+                rm -f "$Q/result" "$Q/log"
+                _unlock
+                case "$EXIT" in ''|*[!0-9]*) EXIT=1 ;; esac
+                return "$EXIT"
+              }
+              _query() {
+                if [ ! -d "$Q" ]; then
+                  echo ">> ERROR: pkg-manager queue not found. Is the sidecar running?"
+                  return 1
+                fi
+                _lock || return 1
+                rm -f "$Q/search-result"
+                echo "$1" > "$Q/request"
+                _c=0
+                while [ ! -f "$Q/search-result" ]; do
+                  sleep 0.5
+                  _c=$((_c + 1))
+                  if [ $_c -ge 120 ]; then
+                    echo ">> ERROR: pkg-manager did not respond within 60s"
+                    _unlock
+                    return 1
+                  fi
+                done
+                cat "$Q/search-result"
+                rm -f "$Q/search-result"
+                _unlock
+              }
+              _help() {
+                cat << 'EOFHELP'
+              pkg-install - Alpine package manager for OpenCode
+
+              USAGE
+                pkg-install <package> [package2 ...]    Install packages
+                pkg-install --remove  <package> [...]   Remove packages
+                pkg-install --search  <keyword>         Search available packages
+                pkg-install --info    <package>          Show package details and available versions
+                pkg-install --list                       List all installed packages
+                pkg-install --help                       Show this help message
+
+              INSTALL WITH SPECIFIC VERSION
+                pkg-install <package>=<version>
+                Example:  pkg-install nodejs=20.15.1-r0
+                Tip:      use --info <package> to see available versions first
+
+              EXAMPLES
+                pkg-install openjdk17-jdk               Install Java 17
+                pkg-install make cmake gcc               Install multiple packages
+                pkg-install nodejs=20.15.1-r0            Install a specific version
+                pkg-install --remove openjdk17-jdk       Remove Java 17
+                pkg-install --search postgres            Search for PostgreSQL-related packages
+                pkg-install --info nodejs                 Show nodejs details and versions
+
+              NOTES
+                - Packages are from Alpine Linux repositories (apk).
+                - Installed packages are immediately available in PATH.
+                - For Python packages, use: pip install <pkg>
+                - For Node packages, use:   npm install <pkg>
+                - For Go modules, use:      go install <pkg>
+                - For Rust crates, use:     cargo install <pkg>
+              EOFHELP
+              }
+              case "$1" in
+                --help|-h|"")
+                  _help
+                  exit 0
+                  ;;
+                --search)
+                  shift
+                  [ -z "$1" ] && echo "Usage: pkg-install --search <keyword>" && exit 1
+                  _query "SEARCH $*"
+                  ;;
+                --info)
+                  shift
+                  [ -z "$1" ] && echo "Usage: pkg-install --info <package>" && exit 1
+                  _query "INFO $*"
+                  ;;
+                --remove)
+                  shift
+                  [ -z "$1" ] && echo "Usage: pkg-install --remove <package> [...]" && exit 1
+                  echo ">> Removing: $*"
+                  _send "REMOVE $*"
+                  S=$?; [ $S -eq 0 ] && echo ">> Removed successfully." || echo ">> Removal failed."
+                  exit $S
+                  ;;
+                --list)
+                  _query "LIST"
+                  ;;
+                -*)
+                  echo "Unknown option: $1"
+                  _help
+                  exit 1
+                  ;;
+                *)
+                  echo ">> Installing: $*"
+                  _send "INSTALL $*"
+                  S=$?; [ $S -eq 0 ] && echo ">> Installed successfully." || echo ">> Installation failed."
+                  exit $S
+                  ;;
+              esac
+              EOFWRAPPER
+              chmod +x /usr/local/bin/pkg-install
+
+              echo "=== Snapshotting filesystem to $PKG ==="
+              rm -rf "$PKG"
+              mkdir -p "$PKG" "$PKG/etc" "$PKG/tmp"
+
+              SNAP_OK=true
+              cp -a /bin "$PKG/bin"       || SNAP_OK=false
+              ln -sf /usr/bin/bash "$PKG/bin/bash"
+              cp -a /sbin "$PKG/sbin"     || SNAP_OK=false
+              cp -a /usr "$PKG/usr"       || SNAP_OK=false
+              cp -a /lib "$PKG/lib"       || SNAP_OK=false
+              cp /etc/passwd "$PKG/etc/passwd"  || SNAP_OK=false
+              cp /etc/group "$PKG/etc/group"    || SNAP_OK=false
+              cp -a /etc/apk "$PKG/etc/apk"    || SNAP_OK=false
+              cp -a /etc/ssl "$PKG/etc/ssl"     || SNAP_OK=false
+              mkdir -p "$PKG/lib64"
+              [ -d /lib64 ] && cp -a /lib64/* "$PKG/lib64/" 2>/dev/null || true
+
+              if [ "$SNAP_OK" != "true" ]; then
+                echo "=== FATAL: snapshot copy failed (disk full?), cleaning up ==="
+                rm -rf "$PKG"
+                exit 1
+              fi
 
               touch "$MARKER"
-              echo "=== Downloads complete ==="
-              ls -la "$CACHE/"
+              echo "=== Snapshot complete ($(du -sh "$PKG" | cut -f1)) ==="
+
+              restore_user_packages
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
           resources:
             requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
+              cpu: 100m
               memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
           securityContext:
             runAsUser: 0
+
       containers:
         - name: opencode
           image: "docker.io/beclab/anomalyco-opencode:1.2.27"
@@ -96,31 +611,11 @@ spec:
             - sh
             - "-c"
             - |
-              CACHE="/home/opencode/.glibc-cache"
-              ARCH=$(uname -m)
-
-              if [ "$ARCH" = "x86_64" ] && [ -f "$CACHE/glibc.apk" ] && [ -f "$CACHE/opencode.tar.gz" ]; then
-                echo "=== Installing glibc (x86_64) ==="
-                cp "$CACHE/sgerrand.rsa.pub" /etc/apk/keys/sgerrand.rsa.pub
-                apk del libc6-compat gcompat 2>/dev/null || true
-                apk add --no-cache --force-overwrite "$CACHE/glibc.apk" libstdc++ 2>/dev/null
-
-                echo "=== Replacing opencode binary with glibc build ==="
-                tar -xzf "$CACHE/opencode.tar.gz" -C /usr/local/bin
-                chmod +x /usr/local/bin/opencode
-
-                echo "=== Setting up glibc loader ==="
-                mkdir -p /lib64
-                ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2 2>/dev/null
-              else
-                echo "=== Arch $ARCH: using original binary (terminal may not be available) ==="
-              fi
-
-              echo "=== Starting opencode ==="
               exec opencode web --hostname 0.0.0.0 --port 3000
           workingDir: /home/opencode/workspace
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
             - name: HOME
               value: /home/opencode
@@ -143,6 +638,20 @@ spec:
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
+            - name: pkg-bin
+              mountPath: /bin
+            - name: pkg-sbin
+              mountPath: /sbin
+            - name: pkg-usr
+              mountPath: /usr
+            - name: pkg-etc-passwd
+              mountPath: /etc/passwd
+            - name: pkg-etc-group
+              mountPath: /etc/group
+            - name: pkg-lib
+              mountPath: /lib
+            - name: pkg-lib64
+              mountPath: /lib64
           livenessProbe:
             tcpSocket:
               port: 3000
@@ -155,6 +664,178 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+        - name: pkg-manager
+          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - "-c"
+            - |
+              QUEUE="/home/opencode/.pkg-queue"
+              UPKGS="/home/opencode/.user-packages"
+              mkdir -p "$QUEUE"
+              rm -f "$QUEUE/request" "$QUEUE/result" "$QUEUE/log" "$QUEUE/search-result"
+              rm -rf "$QUEUE/.lock"
+              touch "$UPKGS"
+
+              rm -f /lib/apk/db/lock 2>/dev/null || true
+
+              echo "=== APK DB check ==="
+              echo "installed: $(wc -l < /lib/apk/db/installed 2>/dev/null || echo 'NOT FOUND')"
+              echo "arch: $(cat /etc/apk/arch 2>/dev/null || echo 'NOT FOUND')"
+              echo "repos: $(cat /etc/apk/repositories 2>/dev/null || echo 'NOT FOUND')"
+              ls -la /lib/apk/db/ 2>&1 || echo "/lib/apk/db/ missing"
+              echo "apk info count: $(apk info 2>/dev/null | wc -l)"
+              echo "=== end DB check ==="
+
+              apk update 2>&1 || true
+
+              _add_pkgs() {
+                for p in $@; do
+                  p_base=$(echo "$p" | sed 's/=.*//')
+                  grep -qx "$p_base" "$UPKGS" || echo "$p_base" >> "$UPKGS"
+                done
+              }
+              _del_pkgs() {
+                for p in $@; do
+                  sed -i "/^${p}$/d" "$UPKGS"
+                done
+              }
+
+              trap 'echo "=== Package manager shutting down ==="; exit 143' TERM INT
+              echo "=== Package manager ready ==="
+              while true; do
+                if [ -f "$QUEUE/request" ]; then
+                  REQ=$(cat "$QUEUE/request")
+                  rm -f "$QUEUE/request"
+
+                  TMP="$QUEUE/.result.tmp"
+                  case "$REQ" in
+                    SEARCH\ *)
+                      KEYWORD="${REQ#SEARCH }"
+                      apk update >/dev/null 2>&1
+                      apk search "$KEYWORD" > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
+                      ;;
+                    LIST)
+                      apk info > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
+                      ;;
+                    INFO\ *)
+                      TARGET="${REQ#INFO }"
+                      apk update >/dev/null 2>&1
+                      { apk policy "$TARGET" 2>/dev/null
+                        echo ""
+                        apk info -d -s "$TARGET" 2>/dev/null; } > "$TMP" 2>&1
+                      mv "$TMP" "$QUEUE/search-result"
+                      ;;
+                    REMOVE\ *)
+                      PKGS="${REQ#REMOVE }"
+                      echo "=== Removing: $PKGS ==="
+                      apk del $PKGS > "$QUEUE/log" 2>&1
+                      RC=$?
+                      [ $RC -eq 0 ] && _del_pkgs $PKGS
+                      echo $RC > "$QUEUE/result"
+                      ;;
+                    INSTALL\ *)
+                      PKGS="${REQ#INSTALL }"
+                      echo "=== Installing: $PKGS ==="
+                      apk add --no-cache $PKGS > "$QUEUE/log" 2>&1
+                      RC=$?
+                      [ $RC -eq 0 ] && _add_pkgs $PKGS
+                      echo $RC > "$QUEUE/result"
+                      ;;
+                    *)
+                      echo "=== Installing (legacy): $REQ ==="
+                      apk add --no-cache $REQ > "$QUEUE/log" 2>&1
+                      RC=$?
+                      [ $RC -eq 0 ] && _add_pkgs $REQ
+                      echo $RC > "$QUEUE/result"
+                      ;;
+                  esac
+                fi
+                sleep 1
+              done
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: pkg-bin
+              mountPath: /bin
+            - name: pkg-sbin
+              mountPath: /sbin
+            - name: pkg-usr
+              mountPath: /usr
+            - name: pkg-lib
+              mountPath: /lib
+            - name: pkg-lib64
+              mountPath: /lib64
+            - name: pkg-etc-apk
+              mountPath: /etc/apk
+            - name: pkg-etc-ssl
+              mountPath: /etc/ssl
+            - name: pkg-etc-passwd
+              mountPath: /etc/passwd
+            - name: pkg-etc-group
+              mountPath: /etc/group
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["test", "-d", "/home/opencode/.pkg-queue"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      terminationGracePeriodSeconds: 10
       restartPolicy: Always
       volumes:
         - name: opencode-home
@@ -164,6 +845,49 @@ spec:
         - name: opencode-workspace
           hostPath:
             path: "{{ .Values.userspace.userData }}/Code"
+            type: DirectoryOrCreate
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: pkg-bin
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/bin"
+            type: DirectoryOrCreate
+        - name: pkg-sbin
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/sbin"
+            type: DirectoryOrCreate
+        - name: pkg-usr
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/usr"
+            type: DirectoryOrCreate
+        - name: pkg-lib
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/lib"
+            type: DirectoryOrCreate
+        - name: pkg-lib64
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/lib64"
+            type: DirectoryOrCreate
+        - name: pkg-etc-passwd
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/etc/passwd"
+            type: FileOrCreate
+        - name: pkg-etc-group
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/etc/group"
+            type: FileOrCreate
+        - name: pkg-etc-apk
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/etc/apk"
+            type: DirectoryOrCreate
+        - name: pkg-etc-ssl
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-root/etc/ssl"
             type: DirectoryOrCreate
 
 ---
