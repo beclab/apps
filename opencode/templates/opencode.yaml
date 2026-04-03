@@ -311,14 +311,18 @@ spec:
               verify_cache() {
                 [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
                 for b in \
-                  bin/bash bin/tar bin/gzip \
+                  bin/tar bin/gzip \
                   usr/bin/python3 usr/bin/pip3 usr/bin/git usr/bin/curl usr/bin/wget \
                   usr/bin/ssh usr/bin/node usr/bin/npm usr/bin/go usr/bin/rustc usr/bin/cargo \
                   usr/bin/zip usr/bin/unzip usr/bin/bzip2 usr/bin/xz usr/bin/zstd \
                   sbin/ss \
                   usr/local/bin/opencode usr/local/bin/pkg-install; do
-                  if [ ! -s "$PKG/$b" ] && [ ! -L "$PKG/$b" ]; then
-                    echo "=== Cache invalid: $b missing or empty ==="
+                  if [ ! -e "$PKG/$b" ] && [ ! -L "$PKG/$b" ]; then
+                    echo "=== Cache invalid: $b missing ==="
+                    return 1
+                  fi
+                  if [ -f "$PKG/$b" ] && [ ! -s "$PKG/$b" ]; then
+                    echo "=== Cache invalid: $b is empty ==="
                     return 1
                   fi
                 done
@@ -361,6 +365,20 @@ spec:
                 echo "=== Restore complete ==="
               }
 
+              echo "=== Setting up home directory (runs every start) ==="
+              mkdir -p /home/opencode/.npm-global/bin /home/opencode/.npm-global/lib
+              chown -R 1000:1000 /home/opencode/.npm-global
+
+              cat > /home/opencode/.profile << 'EOFPROFILE'
+              export VIRTUAL_ENV="/home/opencode/.venv"
+              export NPM_CONFIG_PREFIX="/home/opencode/.npm-global"
+              export GOPATH="/home/opencode/go"
+              export CARGO_HOME="/home/opencode/.cargo"
+              export PATH="/home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              EOFPROFILE
+              cp /home/opencode/.profile /home/opencode/.bashrc
+              chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
+
               if [ -f "$MARKER" ] && verify_cache; then
                 echo "=== Package snapshot cached (${PKG_HASH}) ==="
                 restore_user_packages
@@ -374,6 +392,16 @@ spec:
                 exit 1
               fi
 
+              echo "=== Removing PEP 668 EXTERNALLY-MANAGED marker ==="
+              rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+
+              echo "=== Creating persistent Python venv ==="
+              VENV="/home/opencode/.venv"
+              if [ ! -f "$VENV/bin/activate" ]; then
+                python3 -m venv "$VENV"
+                chown -R 1000:1000 "$VENV"
+              fi
+
               echo "=== Configuring user opencode (uid 1000) ==="
               addgroup -g 1000 opencode 2>/dev/null || true
               adduser -D -u 1000 -G opencode -h /home/opencode -s /bin/bash opencode 2>/dev/null || true
@@ -385,7 +413,8 @@ spec:
                   -o /etc/apk/keys/sgerrand.rsa.pub
                 curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
                   -o /tmp/glibc.apk
-                apk del libc6-compat gcompat 2>/dev/null || true
+                echo "=== Removing libc6-compat/gcompat before glibc install ==="
+                apk del libc6-compat gcompat 2>&1 || true
                 if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
                   mkdir -p /lib64
                   ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
@@ -407,6 +436,10 @@ spec:
               else
                 echo "=== Arch $ARCH: using original musl binary ==="
               fi
+
+              echo "=== Force-reinstalling bash (fix glibc cascade removal) ==="
+              apk del bash 2>/dev/null || true
+              apk add --no-cache bash 2>&1 || echo "=== WARNING: bash reinstall failed in init, pkg-manager will fix ==="
 
               echo "=== Creating pkg-install wrapper ==="
               cat > /usr/local/bin/pkg-install << 'EOFWRAPPER'
@@ -516,11 +549,12 @@ spec:
 
               NOTES
                 - Packages are from Alpine Linux repositories (apk).
-                - Installed packages are immediately available in PATH.
-                - For Python packages, use: pip install <pkg>
-                - For Node packages, use:   npm install <pkg>
-                - For Go modules, use:      go install <pkg>
-                - For Rust crates, use:     cargo install <pkg>
+                - Installed packages persist across restarts and upgrades.
+                - For language ecosystem packages (persist across restarts AND upgrades):
+                    pip install <pkg>            Python (uses ~/.venv, auto-activated)
+                    npm install -g <pkg>         Node.js global
+                    go install <pkg>@latest      Go (installs to ~/go/bin/)
+                    cargo install <pkg>          Rust (installs to ~/.cargo/bin/)
               EOFHELP
               }
               case "$1" in
@@ -570,7 +604,7 @@ spec:
 
               SNAP_OK=true
               cp -a /bin "$PKG/bin"       || SNAP_OK=false
-              ln -sf /usr/bin/bash "$PKG/bin/bash"
+              ln -sf ../usr/bin/bash "$PKG/bin/bash"
               cp -a /sbin "$PKG/sbin"     || SNAP_OK=false
               cp -a /usr "$PKG/usr"       || SNAP_OK=false
               cp -a /lib "$PKG/lib"       || SNAP_OK=false
@@ -611,6 +645,12 @@ spec:
             - sh
             - "-c"
             - |
+              echo "=== Runtime check ==="
+              [ -x /usr/bin/bash ] && echo "bash OK" || echo "bash: waiting for pkg-manager fix"
+              if [ ! -f "$HOME/.venv/bin/activate" ]; then
+                echo "Creating Python venv..."
+                python3 -m venv "$HOME/.venv"
+              fi
               exec opencode web --hostname 0.0.0.0 --port 3000
           workingDir: /home/opencode/workspace
           securityContext:
@@ -621,6 +661,18 @@ spec:
               value: /home/opencode
             - name: TERM
               value: xterm-256color
+            - name: PATH
+              value: /home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: VIRTUAL_ENV
+              value: /home/opencode/.venv
+            - name: NPM_CONFIG_PREFIX
+              value: /home/opencode/.npm-global
+            - name: GOPATH
+              value: /home/opencode/go
+            - name: CARGO_HOME
+              value: /home/opencode/.cargo
+            - name: ENV
+              value: /home/opencode/.profile
             - name: LD_LIBRARY_PATH
               value: /usr/glibc-compat/lib
           resources:
@@ -735,6 +787,14 @@ spec:
               echo "=== end DB check ==="
 
               apk update 2>&1 || true
+
+              echo "=== Force-reinstalling bash (every start) ==="
+              apk del bash 2>/dev/null || true
+              if apk add --no-cache bash 2>&1; then
+                echo "=== bash reinstalled OK ==="
+              else
+                echo "=== WARNING: bash reinstall failed ==="
+              fi
 
               _add_pkgs() {
                 for p in $@; do
