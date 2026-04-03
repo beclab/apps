@@ -1,12 +1,9 @@
-﻿{{- $vllmDomainENV := split "," .Values.domain.vllmclient -}}
-{{- $vllmDomain := index $vllmDomainENV "_0" -}}
 {{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
 {{- $isSparkDGX := $gpuInfo.isSparkDGX -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
   name: vllm
   namespace: "{{ .Release.Namespace }}"
   labels:
@@ -22,7 +19,6 @@ spec:
     type: Recreate
   template:
     metadata:
-      creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: vllm
@@ -65,7 +61,7 @@ spec:
               mountPath: /data
       containers:
         - name: vllm
-          image: "docker.io/vllm/vllm-openai:v0.17.1-cu130"
+          image: "docker.io/vllm/vllm-openai:v0.18.0-cu130"
           command:
             - /bin/bash
             - -c
@@ -79,13 +75,20 @@ spec:
               echo "[vllm-wait] Detected $DONE_FILE, starting vLLM server."
               
               echo "[vllm-start] Starting vLLM server..."
+              _MEM_UTILS="/usr/local/lib/python3.12/dist-packages/vllm/utils/mem_utils.py"
+              if [ -f "$_MEM_UTILS" ]; then
+                sed -i 's/shared_sysmem_device_mem_sms = .*$/shared_sysmem_device_mem_sms = ()/' "$_MEM_UTILS"
+                echo "[vllm-start] Patched vLLM mem_utils.py (shared_sysmem_device_mem_sms)"
+              else
+                echo "[vllm-start] WARN: $_MEM_UTILS missing, mem_utils patch skipped"
+              fi
               python3 -m vllm.entrypoints.openai.api_server \
                 --model "/models/gpt-oss-20b" \
 {{- $gpuMemUtil := "0.9" -}}
 {{- $maxModelLen := "auto" -}}
 {{- if eq $isSparkDGX "true" -}}
 {{- $gpuMemUtil = "0.88" -}}
-{{- $maxModelLen := "8192" -}}
+{{- $maxModelLen = "8192" -}}
 {{- end -}}
 {{- with .Values.olaresEnv }}
                 --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default $gpuMemUtil }} \
@@ -94,7 +97,10 @@ spec:
                 --gpu-memory-utilization {{ $gpuMemUtil }} \
                 --max-model-len {{ $maxModelLen }} \
 {{- end }}
-                --tensor-parallel-size 1
+                --tensor-parallel-size 1 {{- if eq $isSparkDGX "true" }} \
+                --enforce-eager \
+                --max-num-seqs 8 \
+                --no-enable-prefix-caching{{- end }}
           env:
             - name: PGID
               value: "1000"
@@ -108,123 +114,43 @@ spec:
               value: "8000"
             - name: TIKTOKEN_ENCODINGS_BASE
               value: /data/tiktoken
+            {{- if eq $isSparkDGX "true" }}
+            - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+              value: "1"
+            {{- end }}
           ports:
             - containerPort: 8000
           resources:
             limits:
               cpu: "18"
-              memory: 28Gi
+              memory: 32Gi
             requests:
               cpu: 500m
-              memory: 20Gi
+              memory: 18Gi
           volumeMounts:
             - mountPath: /models/gpt-oss-20b
               name: data
             - name: data
               mountPath: /data
-        - name: download-model
-          image: "docker.io/beclab/harveyff-hf-downloader:v0.1.0"
-          env:
-            - name: HF_ENDPOINT
-              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
-            - name: HF_TOKEN
-              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
-            - name: VLLM_PROXY_TARGET
-              value: http://localhost:8000
-            - name: MODEL_NAME
-              value: /models/gpt-oss-20b
-            - name: APP_URL
-              value: "https://{{ $vllmDomain }}"
-          args:
-            - "--repo"
-            - "openai/gpt-oss-20b"
-            - "--ref"
-            - "main"
-            - "--outdir"
-            - "/data"
-            - "--static"
-            - "/app/static"
-            - "--port"
-            - "8090"
-            - "--probe-url"
-            - "/health"
-            - "--done-name"
-            - ".gpt-oss-20b.done"
-          startupProbe:
-            httpGet:
-              path: /ping
-              port: 8090
-            initialDelaySeconds: 5
-            timeoutSeconds: 10
-            periodSeconds: 10
-            failureThreshold: 10
-          livenessProbe:
-            httpGet:
-              path: /ping
-              port: 8090
-              scheme: HTTP
-            initialDelaySeconds: 10
-            timeoutSeconds: 60
-            periodSeconds: 60
-            successThreshold: 1
-            failureThreshold: 10
-          ports:
-            - containerPort: 8090
-              name: http
-          volumeMounts:
-            - name: data
-              mountPath: /data
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "500Mi"
-            limits:
-              cpu: "1"
-              memory: 1Gi
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
       volumes:
         - name: data
           hostPath:
             path: "{{ .Values.userspace.userData }}/Huggingface/openaigptoss20b"
             type: DirectoryOrCreate
       restartPolicy: Always
-status: {}
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
-  name: download-svc
+  name: vllm-svc
   namespace: "{{ .Release.Namespace }}"
   labels:
     io.kompose.service: vllm
 spec:
   ports:
     - name: http
-      port: 8090
-      targetPort: 8090
+      port: 8000
+      targetPort: 8000
   selector:
     io.kompose.service: vllm
-status:
-  loadBalancer: {}
----
-apiVersion: v1
-kind: Service
-metadata:
-  creationTimestamp: null
-  name: sharedentrances-api
-  namespace: "{{ .Release.Namespace }}"
-  labels:
-    io.kompose.service: vllm
-spec:
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8090
-  selector:
-    io.kompose.service: vllm
-status:
-  loadBalancer: {}
