@@ -97,12 +97,19 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
+          resources: {}
+          volumeMounts:
+            - mountPath: /docker-cli
+              name: docker-cli-bin
 
       containers:
         # Workspace container: stable shell environment for terminal sessions.
         # Gateway restarts do NOT affect this container or its exec sessions.
         # Mirrors the openclaw-cli service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.3.23"
+        - image: "beclab/openclaw-openclaw:2026.4.1"
           name: clawdbot
           command: ["sleep", "infinity"]
           env:
@@ -116,6 +123,10 @@ spec:
               value: /home/linuxbrew/.linuxbrew
             - name: HOMEBREW_NO_AUTO_UPDATE
               value: "1"
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=3072"
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
             - name: PATH
               value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: CUSTOM_API_KEY
@@ -124,8 +135,8 @@ spec:
               value: "YOUR_OLLAMA_API_KEY"
           resources:
             limits:
-              cpu: "1500m"
-              memory: 2Gi
+              cpu: "2"
+              memory: 4Gi
             requests:
               cpu: 300m
               memory: 256Mi
@@ -157,7 +168,7 @@ spec:
         # Gateway sidecar: runs the OpenClaw gateway process independently.
         # Can restart without affecting the workspace container or terminal sessions.
         # Mirrors the openclaw-gateway service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.3.23"
+        - image: "beclab/openclaw-openclaw:2026.4.1"
           name: gateway
           command:
             [
@@ -182,6 +193,10 @@ spec:
               value: /home/linuxbrew/.linuxbrew
             - name: HOMEBREW_NO_AUTO_UPDATE
               value: "1"
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=5120"
             - name: PATH
               value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: CUSTOM_API_KEY
@@ -204,7 +219,7 @@ spec:
             failureThreshold: 3
           resources:
             limits:
-              cpu: "2500m"
+              cpu: "3"
               memory: 6Gi
             requests:
               cpu: 700m
@@ -216,6 +231,10 @@ spec:
               name: app-data-node
             - mountPath: /home/linuxbrew
               name: brew-volume
+            - mountPath: /usr/local/bin/docker
+              name: docker-cli-bin
+              subPath: docker
+              readOnly: true
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
@@ -232,6 +251,38 @@ spec:
               add:
                 - NET_BIND_SERVICE
 
+        # Docker-in-Docker sidecar: provides a Docker daemon for OpenClaw sandbox.
+        # Gateway connects via DOCKER_HOST=tcp://localhost:2375 (shared network namespace).
+        - image: "docker.io/beclab/docker:29.3.0-dind"
+          name: docker-dind
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - sh
+            - -c
+            - |
+              dockerd --host tcp://0.0.0.0:2375 --host unix:///var/run/docker.sock &
+              DOCKERD_PID=$!
+              until docker info >/dev/null 2>&1; do sleep 1; done
+              echo "[dind] dockerd ready, pre-pulling sandbox image..."
+              docker pull harveyff/openclaw-sandbox-common:2026.3.27 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
+              wait $DOCKERD_PID
+          ports:
+            - containerPort: 2375
+          resources:
+            limits:
+              cpu: "1500m"
+              memory: 3Gi
+            requests:
+              cpu: 300m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /var/lib/docker
+              name: dind-storage
+
       restartPolicy: Always
       volumes:
         - hostPath:
@@ -245,6 +296,13 @@ spec:
         - name: brew-volume
           hostPath:
             path: "{{ .Values.userspace.appData }}/brew"
+            type: DirectoryOrCreate
+
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
             type: DirectoryOrCreate
 
         - name: default-openclaw
