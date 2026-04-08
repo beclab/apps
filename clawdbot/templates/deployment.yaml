@@ -109,7 +109,7 @@ spec:
         # Workspace container: stable shell environment for terminal sessions.
         # Gateway restarts do NOT affect this container or its exec sessions.
         # Mirrors the openclaw-cli service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.4.1"
+        - image: "beclab/openclaw-openclaw:2026.4.5"
           name: clawdbot
           command: ["sleep", "infinity"]
           env:
@@ -149,6 +149,10 @@ spec:
               name: openclaw-bin
               subPath: openclaw
               readOnly: true
+            - mountPath: /usr/local/bin/docker
+              name: docker-cli-bin
+              subPath: docker
+              readOnly: true              
             - mountPath: /home/linuxbrew
               name: brew-volume
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -168,7 +172,7 @@ spec:
         # Gateway sidecar: runs the OpenClaw gateway process independently.
         # Can restart without affecting the workspace container or terminal sessions.
         # Mirrors the openclaw-gateway service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.4.1"
+        - image: "beclab/openclaw-openclaw:2026.4.5"
           name: gateway
           command:
             [
@@ -268,7 +272,7 @@ spec:
               DOCKERD_PID=$!
               until docker info >/dev/null 2>&1; do sleep 1; done
               echo "[dind] dockerd ready, pre-pulling sandbox image..."
-              docker pull harveyff/openclaw-sandbox-common:2026.3.27 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
+              docker pull beclab/harveyff-openclaw-sandbox-common:2026.4.7 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
               wait $DOCKERD_PID
           ports:
             - containerPort: 2375
@@ -282,7 +286,18 @@ spec:
           volumeMounts:
             - mountPath: /var/lib/docker
               name: dind-storage
-
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+            - mountPath: /home/node
+              name: app-data-node
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}              
       restartPolicy: Always
       volumes:
         - hostPath:
@@ -297,7 +312,6 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/brew"
             type: DirectoryOrCreate
-
         - name: docker-cli-bin
           emptyDir: {}
         - name: dind-storage
@@ -315,7 +329,6 @@ spec:
           configMap:
             name: clawdbot-openclaw-bin
             defaultMode: 0755
-
         {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
         - name: olares-home-dir
           hostPath:
@@ -328,7 +341,7 @@ spec:
             path: "{{ .Values.sharedlib }}"
             type: DirectoryOrCreate
         {{- end }}
-
+        
 ---
 apiVersion: v1
 kind: Service
