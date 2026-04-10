@@ -1,0 +1,101 @@
+# Source: otmoic-relay/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoicrelaysvc-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: relay
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: relay-api
+      port: 9102
+      targetPort: 9102
+---
+# Source: otmoic-relay/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otmoicrelaysvc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: relay
+  template:
+    metadata:
+      labels:
+        app: relay
+    spec:
+      initContainers:
+      - name: wait-postgresql
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z otmoic-relay-db-postgresql-postgresql-ha-pgpool 5432; do echo waiting for postgresql; sleep 3; done']
+      - name: wait-redis
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z otmoic-relay-db-redis-master 6379; do echo waiting for redis; sleep 3; done']
+      - name: wait-mongodb
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z otmoic-relay-mongo-service 27017; do echo waiting for mongodb; sleep 3; done']
+      containers:
+      - name: relay
+        image: otmoic/relay:V2.5.4
+        ports:
+          - containerPort: 9102
+        resources:
+          requests:
+            cpu: 1m
+            memory: 256Mi
+          limits:
+            cpu: 300m
+            memory: 512Mi
+        env:
+          - name: POSTGRESQL_HOST
+            value: "otmoic-relay-db-postgresql-postgresql-ha-pgpool"
+          - name: POSTGRESQL_PORT
+            value: "5432"
+          - name: POSTGRESQL_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-postgresql-postgresql-ha-postgresql
+                key: password
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-redis
+                key: redis-password
+          - name: REDIS_HOST
+            value: 'otmoic-relay-db-redis-master'
+          - name: REDIS_PORT
+            value: '6379'
+          - name: CHAIN_SERVICE_9006
+            value: "http://otmoic-chain-client-evm-bsc-server-9006:9100"
+          - name: CHAIN_SERVICE_501
+            value: "http://otmoic-chain-client-solana-solana-server-501:9100"
+          - name: CHAIN_SERVICE_614
+            value: "http://otmoic-chain-client-evm-opt-server-614:9100"
+          - name: CHAIN_SERVICE_60
+            value: "http://otmoic-chain-client-evm-eth-server-60:9100"
+          - name: MONGODB_HOST
+            value: "otmoic-relay-mongo-service"
+          - name: MONGODB_PORT
+            value: "27017"
+          - name: MONGODB_USER
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: username
+          - name: MONGODB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: password
+          - name: MONGODB_DBNAME_RELAY_STORE
+            value: "admin"
+          - name: MONGODB_DBNAME_RELAY_STORE_AUTH
+            value: "admin"

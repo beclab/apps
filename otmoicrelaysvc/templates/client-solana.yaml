@@ -1,0 +1,455 @@
+# Service configuration
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-chain-client-solana-solana-server-501
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: otmoic-chain-client-solana-solana-501
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: nginx-proxy-port
+      port: 9100
+      targetPort: 80
+---
+# Multi-container deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otmoic-chain-client-solana-solana-501
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: otmoic-chain-client-solana-solana-501
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoic-chain-client-solana-solana-501
+  template:
+    metadata:
+      labels:
+        app: otmoic-chain-client-solana-solana-501
+    spec:
+      containers:
+        # Message Producer Container
+        - name: message-producer
+          image: otmoic/chainclient:v2.5.26
+          command:
+            - node
+          args:
+            - dist/message-producer
+          ports:
+            - containerPort: 3001
+              protocol: TCP
+          env:
+            - name: REDIS_HOST
+              value: "otmoic-relay-db-redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-redis
+                  key: redis-password
+            - name: STATUS_KEY
+              value: "chain-client-status-report-solana"
+            - name: CHAIN_ID
+              value: "501"
+            - name: MESSAGE_PRODUCER_PORT
+              value: "3001"
+            - name: MONGODB_HOST
+              value: otmoic-relay-mongo-service
+            - name: MONGODB_ACCOUNT
+              value: admin
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-mongo
+                  key: password
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: admin
+            - name: MONGODB_AUTH_SOURCE
+              value: admin
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 500Mi
+
+        # Monitor Container
+        - name: monitor
+          image: otmoic/chainclient:v2.5.26
+          command:
+            - node
+          args:
+            - dist/monitor
+          ports:
+            - containerPort: 3002
+              protocol: TCP
+          env:
+            - name: REDIS_HOST
+              value: "otmoic-relay-db-redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-redis
+                  key: redis-password
+            - name: STATUS_KEY
+              value: "chain-client-status-report-solana"
+            - name: CHAIN_ID
+              value: "501"
+            - name: SYSTEM_CHAIN_ID
+              value: "501"
+            - name: MONITOR_NAME
+              value: chain-client-solana-solana-501-monitor
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: RPC_URL
+              value: "https://api.mainnet-beta.solana.com"
+            - name: START_TOP_HEIGHT
+              value: "true"
+            - name: OBRIDGE_CONTRACT
+              value: "FAqaHQHgBFFX8fJB6fQUqNdc8zABV5pGVRdCt7fLLYVo"
+            - name: OBRIDGE_CONTRACT_START_BLOCK
+              value: "295040480"
+            - name: OBRIDGE_SWAP_CONTRACT
+              value: "DnSgZFH2hMgZ7bXmJUdcL8bgB1MgDpVtddNhwzZACTKQ"
+            - name: OBRIDGE_SWAP_CONTRACT_START_BLOCK 
+              value: "323210414"
+            - name: FEE_RECEPIENT
+              value: "Gexuvyazbb48d5U6voRna5ef1SLPRUNLiwavqEx8otgy"
+            - name: RPC_TIMEOUT
+              value: "30000"
+            - name: BLOCK_MARGIN
+              value: "3"
+            - name: BLOCK_MODE_SWITCH_THRESHOLD
+              value: "5"
+            - name: BLOCK_INTERVAL
+              value: "30000"
+            - name: BATCH_SIZE
+              value: "1000000"
+            - name: N8N_WEBHOOK_URL
+              value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: MONGODB_HOST
+              value: otmoic-relay-mongo-service
+            - name: MONGODB_ACCOUNT
+              value: admin
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-mongo
+                  key: password
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: admin
+            - name: MONGODB_AUTH_SOURCE
+              value: admin
+            - name: RPCS
+              value: "https://rpc.ankr.com/solana/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+            - name: START_BLOCK
+              value: "277639413"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 800Mi
+
+        # Public Service Container
+        - name: public-service
+          image: otmoic/chainclient:v2.5.26
+          command:
+            - node
+          args:
+            - dist/public-service
+          ports:
+            - containerPort: 3003
+              protocol: TCP
+          ports:
+            - containerPort: 3003
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-redis
+                  key: redis-password
+            - name: REDIS_HOST
+              value: "otmoic-relay-db-redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "otmoic-chain-client-status-report-solana"
+            - name: MONGODB_HOST
+              value: otmoic-relay-mongo-service
+            - name: MONGODB_ACCOUNT
+              value: admin
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-mongo
+                  key: password
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: admin
+            - name: MONGODB_AUTH_SOURCE
+              value: admin
+            - name: MONITOR_NAME
+              value: chain-client-solana-solana-501-monitor
+            - name: PUBLIC_SERVICE_PORT
+              value: "3003"
+            - name: CHAIN_ID
+              value: "501"
+            - name: SYSTEM_CHAIN_ID
+              value: "501"
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: OBRIDGE_CONTRACT
+              value: "FAqaHQHgBFFX8fJB6fQUqNdc8zABV5pGVRdCt7fLLYVo"
+            - name: OBRIDGE_SWAP_CONTRACT
+              value: "DnSgZFH2hMgZ7bXmJUdcL8bgB1MgDpVtddNhwzZACTKQ"
+            - name: N8N_WEBHOOK_URL
+              value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: RPCS
+              value: "https://rpc.ankr.com/solana/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+            - name: RPC_TIMEOUT
+              value: "30000"
+            - name: RELAY_WALLET
+              value: "true"
+            - name: RELAY_WALLET_ADDRESS
+              value: "HtDBYmGhoJG1RyDgVZYteVazH3V25GzvuBmHKVpiZpWx"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 800Mi
+
+        # Sender Container
+        - name: sender
+          image: otmoic/chainclient:v2.5.26
+          command:
+            - node
+          args:
+            - dist/sender
+          ports:
+            - containerPort: 3004
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-redis
+                  key: redis-password
+            - name: REDIS_HOST
+              value: "otmoic-relay-db-redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_DB_NUMBER 
+              value: "0"
+            - name: STATUS_KEY
+              value: "chain-client-status-report-solana"
+            - name: ADMIN_SERVICE_URL
+              value: "http://lpnode-admin-server:18006"
+            - name: ADMIN_SERVICE_POLLING_INTERVAL
+              value: "15000"
+            - name: CHAIN_ID
+              value: "501"
+            - name: MONITOR_NAME
+              value: chain-client-solana-solana-501-monitor
+            - name: SENDER_RPC_URL
+              value: "https://rpc.ankr.com/solana/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+            - name: MONGODB_HOST
+              value: otmoic-relay-mongo-service
+            - name: MONGODB_ACCOUNT
+              value: admin
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-mongo
+                  key: password
+            - name: MONGODB_PORT
+              value: "27017"
+            - name: MONGODB_DBNAME_LP_STORE
+              value: admin
+            - name: MONGODB_AUTH_SOURCE
+              value: admin
+            - name: SENDER_SERVICE_PORT
+              value: "3004"
+            - name: SYSTEM_CHAIN_ID
+              value: "501"
+            - name: RELAY_WALLET
+              value: "true"
+            - name: TX_TIMEOUT
+              value: "30000"
+            - name: N8N_WEBHOOK_URL
+              value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+            - name: LOGGER_LEVEL
+              value: "debug"
+            - name: OBRIDGE_CONTRACT
+              value: "FAqaHQHgBFFX8fJB6fQUqNdc8zABV5pGVRdCt7fLLYVo"
+            - name: OBRIDGE_SWAP_CONTRACT
+              value: "DnSgZFH2hMgZ7bXmJUdcL8bgB1MgDpVtddNhwzZACTKQ"
+            - name: FEE_RECEPIENT
+              value: "Gexuvyazbb48d5U6voRna5ef1SLPRUNLiwavqEx8otgy"
+            - name: RELAY_WALLET_ADDRESS
+              value: "HtDBYmGhoJG1RyDgVZYteVazH3V25GzvuBmHKVpiZpWx"
+            - name: RELAY_SIGNING_SERVICE_URL
+              value: "http://10.203.16.3:19004"
+          resources:
+            requests:
+              cpu: 1m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 800Mi
+
+        # Nginx proxy container
+        - name: nginx-proxy
+          image: nginx:1.25.3
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          resources:
+            requests:
+              cpu: 100m
+              memory: 56Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: otmoic-chain-client-solana-solana-server-501-nginx-conf
+---
+# Inline ConfigMap definition
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otmoic-chain-client-solana-solana-server-501-nginx-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  1;
+
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                         '$status $body_bytes_sent "$http_referer" '
+                         '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        server {
+            listen 80;
+
+            # Message Producer endpoints
+            location ~ ^/producer/getNextEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/producer/getLatestEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Public Service endpoints
+            location ~ ^/solana-client-[0-9]+/lpnode/get_wallets {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/solana-client-[0-9]+/lpnode/get_wallet_balances {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender endpoints
+            location = /submitTokenTransfer {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ "/queryJobStatus/[a-f0-9]+" {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender lpnode endpoints
+            location ~ ^/solana-client-[0-9]+/lpnode/(transfer_in|confirm|refund|sign_message) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Sender relay endpoints
+            location ~ ^/solana-client-[0-9]+/relay/(get_hashlock|get_system_fee|get_signer_from_eip712|is_valid_signature) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Single swap relay endpoints
+            location ~ ^/solana-client-[0-9]+/relay/single_swap/is_valid_signature {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Sender relay behalf endpoints
+            location ~ ^/solana-client-[0-9]+/relay/behalf/(confirm_out|confirm_in|refund_out|refund_in) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Default fallback route
+            location / {
+                return 404;
+            }
+        }
+    }
