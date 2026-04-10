@@ -1,0 +1,103 @@
+# First create a secret for MongoDB credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: otmoic-relay-mongo
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+type: Opaque
+data:
+  username: {{ "admin" | b64enc }}
+  password: {{ "Terminus1234" | b64enc }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-relay-mongo-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: otmoicrelay
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - port: 27017
+    targetPort: 27017
+  selector:
+    app: otmoic-relay-mongo
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: otmoic-relay-mongo-v2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: otmoicrelay
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  serviceName: "otmoic-relay-mongo-service"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoic-relay-mongo
+  template:
+    metadata:
+      labels:
+        app: otmoic-relay-mongo
+    spec:
+      containers:
+      - name: otmoic-relay-mongo
+        image: mongo:6.0
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        ports:
+        - containerPort: 27017
+        env:
+        - name: MONGO_INITDB_ROOT_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: otmoic-relay-mongo
+              key: username
+        - name: MONGO_INITDB_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: otmoic-relay-mongo
+              key: password
+        volumeMounts:
+        - name: otmoic-relay-mongo-data-v2
+          mountPath: /data/db
+        livenessProbe:
+          tcpSocket:
+            port: 27017
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 27017
+          initialDelaySeconds: 20
+          periodSeconds: 10
+  volumeClaimTemplates:
+  - metadata:
+      name: otmoic-relay-mongo-data-v2
+      labels:
+        app.kubernetes.io/managed-by: Helm
+      annotations:
+        meta.helm.sh/release-name: otmoicrelay
+        meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi

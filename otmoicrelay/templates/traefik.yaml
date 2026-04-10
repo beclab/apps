@@ -203,21 +203,19 @@ spec:
           containerPort: 8080
           protocol: "TCP"
         - name: "web"
-          containerPort: 80
+          containerPort: 8000
           protocol: "TCP"
         - name: "websecure"
-          containerPort: 443
+          containerPort: 8443
           protocol: "TCP"
         securityContext:
           capabilities:
-            add:
-            - NET_BIND_SERVICE
             drop:
             - ALL
           readOnlyRootFilesystem: true
-          runAsGroup: 0
-          runAsNonRoot: false
-          runAsUser: 0
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
         volumeMounts:
           - name: data
             mountPath: /data
@@ -228,8 +226,8 @@ spec:
           - "--global.sendanonymoususage"
           - "--entrypoints.metrics.address=:9100/tcp"
           - "--entrypoints.traefik.address=:8080/tcp"
-          - "--entrypoints.web.address=:80/tcp"
-          - "--entrypoints.websecure.address=:443/tcp"
+          - "--entrypoints.web.address=:8000/tcp"
+          - "--entrypoints.websecure.address=:8443/tcp"
           - "--api.dashboard=true"
           - "--ping=true"
           - "--metrics.prometheus=true"
@@ -300,11 +298,11 @@ spec:
     accessControlMaxAge: 100
     addVaryHeader: true
 ---
-# Source: obridge-relay/templates/ingress.yaml
+# Source: otmoic-relay/templates/ingress.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: ingress-obridge-relay
+  name: ingress-otmoic-relay
   namespace: {{ .Release.Namespace }}
   annotations:
       app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
@@ -313,17 +311,19 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/relay/`)"
+    - match: "PathPrefix(`/relay/`)"
       kind: Rule
+      middlewares:
+        - name: cors-header
       services:
         - name: otmoicrelay-server
           port: 9102
 ---
-# Source: obridge-relay-adminpanel/templates/ingress.yaml
+# Source: otmoic-relay-adminpanel/templates/ingress.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: ingress-obridge-relay-admin-panel
+  name: ingress-otmoic-relay-admin-panel
   namespace: {{ .Release.Namespace }}
   annotations:
       app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
@@ -332,7 +332,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/relay-admin-panel/`)"
+    - match: "PathPrefix(`/relay-admin-panel/`)"
       kind: Rule
       middlewares:
         - name: cors-header
@@ -341,11 +341,11 @@ spec:
           port: 9101
 
 ---
-# Source: obridge-relay-fep-websocket/templates/ingress.yaml
+# Source: otmoic-relay-fep-websocket/templates/ingress.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: ingress-obridge-relay-fep-websocket
+  name: ingress-otmoic-relay-fep-websocket
   namespace: {{ .Release.Namespace }}
   annotations:
       app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
@@ -354,18 +354,18 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/socket.io/`)"
+    - match: "PathPrefix(`/socket.io/`)"
       kind: Rule
       services:
         - name: relay-fep-ws-loadbalance-server
           kind: TraefikService
           passHostHeader: true
 ---
-# Source: obridge-relay-fep-websocket/templates/ingress_redirect.yaml
+# Source: otmoic-relay-fep-websocket/templates/ingress_redirect.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: ingress-obridge-relay-fep-websocket-redirect
+  name: ingress-otmoic-relay-fep-websocket-redirect
   namespace: {{ .Release.Namespace }}
   annotations:
       app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
@@ -374,14 +374,14 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/connect`)"
+    - match: "PathPrefix(`/connect`)"
       kind: Rule
       services:
         - name: relay-fep-ws-loadbalance-server-redirect
           kind: TraefikService
           passHostHeader: true
 ---
-# Source: obridge-relay-fep-websocket/templates/service_lb.yaml
+# Source: otmoic-relay-fep-websocket/templates/service_lb.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: TraefikService
 metadata:
@@ -410,7 +410,7 @@ spec:
         sameSite: none
         secure: true
 ---
-# Source: obridge-relay-fep-websocket/templates/service_lb_redirect.yaml
+# Source: otmoic-relay-fep-websocket/templates/service_lb_redirect.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: TraefikService
 metadata:
@@ -439,11 +439,11 @@ spec:
     prefixes:
       - /app
 ---
-# Source: obridge-web-app/templates/ingress.yaml
+# Source: otmoic-web-app/templates/ingress.yaml
 apiVersion: traefik.containo.us/v1alpha1
 kind: IngressRoute
 metadata:
-  name: ingress-obridge-web-app
+  name: ingress-otmoic-web-app
   namespace: {{ .Release.Namespace }}
   annotations:
       app.kubernetes.io/ingress.class: traefik-{{ .Release.Namespace }}
@@ -452,7 +452,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/app`)"
+    - match: "PathPrefix(`/app`)"
       kind: Rule
       # middlewares:
       #   - name: app-stripprefix
@@ -485,7 +485,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`)"
+    - match: "PathPrefix(`/`)"
       kind: Rule
       services:
         - name: relay-dashboard-server
@@ -515,7 +515,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/hasura`)"
+    - match: "PathPrefix(`/hasura`)"
       kind: Rule
       middlewares:
         - name: hasura-stripprefix
@@ -535,7 +535,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && PathPrefix(`/upload`)"
+    - match: "PathPrefix(`/upload`)"
       kind: Rule
       middlewares:
         - name: cors-header
@@ -555,7 +555,7 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && (PathPrefix(`/get_application_schema/Otmoic Kyc`) ||  PathPrefix(`/get_presentation_definition/Otmoic Kyc`))"
+    - match: "(PathPrefix(`/get_application_schema/Otmoic Kyc`) ||  PathPrefix(`/get_presentation_definition/Otmoic Kyc`))"
       kind: Rule
       middlewares:
         - name: cors-header
@@ -587,11 +587,11 @@ spec:
     - web
     - websecure
   routes:
-    - match: "Host(`{{ $webDomain }}`) && (PathPrefix(`/reputation/`))"
+    - match: "(PathPrefix(`/reputation/`))"
       kind: Rule
       middlewares:
         - name: cors-header
         - name: reputation-stripprefix
       services:
-        - name: point-service
+        - name: points-service
           port: 1235
