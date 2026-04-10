@@ -1,6 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
-{{- $llamaDomainENV := split "," .Values.domain.llamaclient -}}
-{{- $llamaDomain := index $llamaDomainENV "_0" -}}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +25,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: llama
-          image: "docker.io/beclab/ggml-org-llama.cpp:server-cuda-b7224"
+          image: "docker.io/beclab/ggml-org-llama.cpp:server-cuda-b8643"
           command:
             - /bin/sh
             - -c
@@ -92,78 +90,17 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /models
-        - name: download-model
-          image: "docker.io/beclab/harveyff-hf-downloader:v0.1.0"
-          env:
-            - name: HF_ENDPOINT
-              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
-            - name: HF_TOKEN
-              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
-            - name: VLLM_PROXY_TARGET
-              value: http://localhost:8080
-            - name: MODEL_NAME
-              value: gpt-oss-120b
-            - name: APP_URL
-              value: "https://{{ $llamaDomain }}"
-          args:
-            - "--repo"
-            - "ggml-org/gpt-oss-120b-GGUF"
-            - "--ref"
-            - "main"
-            - "--outdir"
-            - "/data"
-            - "--static"
-            - "/app/static"
-            - "--port"
-            - "8090"
-            - "--probe-url"
-            - "/health"
-            - "--done-name"
-            - ".gpt-oss-120b-GGUF.done"
-          ports:
-            - name: http
-              containerPort: 8090
-          startupProbe:
-            httpGet:
-              path: /ping
-              port: 8090
-            initialDelaySeconds: 10
-            timeoutSeconds: 10
-            periodSeconds: 10
-            failureThreshold: 10
-          livenessProbe:
-            httpGet:
-              path: /ping
-              port: 8090
-              scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
-            successThreshold: 1
-            failureThreshold: 10
-          volumeMounts:
-            - name: data
-              mountPath: /data
-          resources:
-            requests:
-              cpu: 100m
-              memory: 500Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-          imagePullPolicy: IfNotPresent
       volumes:
         - name: data
           hostPath:
             path: "{{ .Values.userspace.userData }}/Huggingface/gptoss120bgguf"
             type: DirectoryOrCreate
+
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: download-svc
+  name: llama-svc
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: llama
@@ -172,25 +109,7 @@ spec:
     io.kompose.service: llama
   ports:
     - name: http
-      port: 8090
-      targetPort: 8090
+      port: 8080
+      targetPort: 8080
   type: ClusterIP
-  
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: sharedentrances-api
-  namespace: {{ .Release.Namespace }}
-  labels:
-    io.kompose.service: llama
-spec:
-  selector:
-    io.kompose.service: llama
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8090
-  type: ClusterIP
-  
 {{- end }}

@@ -1,4 +1,5 @@
-﻿---
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -11,7 +12,7 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: audiobookshelf
-  strategy: 
+  strategy:
     type: Recreate
   template:
     metadata:
@@ -20,53 +21,168 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: audiobookshelf
     spec:
+      {{- if $isNewVersion }}
+      initContainers:
+        - name: migrate-appdata
+          image: beclab/alpine:3.18
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+
+              ROOT="/app-data-root"
+              DONE_FILE="${ROOT}/.audiobookshelf-layout-migration-v2.done"
+
+              OLD_BASE="${ROOT}/audiobookshelf"
+              OLD_METADATA="${OLD_BASE}/metadata"
+              OLD_CONFIG="${OLD_BASE}/config"
+
+              NEW_METADATA="${ROOT}/metadata"
+              NEW_CONFIG="${ROOT}/config"
+
+              log_dir() {
+                DIR="$1"
+                LABEL="$2"
+                echo "[migrate] ===== ${LABEL}: ${DIR} ====="
+                if [ -e "${DIR}" ]; then
+                  ls -lah "${DIR}" || true
+                  find "${DIR}" -maxdepth 3 -print 2>/dev/null || true
+                else
+                  echo "[migrate] path not found: ${DIR}"
+                fi
+                echo "[migrate] ================================"
+              }
+
+              dir_has_content() {
+                [ -d "$1" ] && [ -n "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]
+              }
+
+              if [ -f "${DONE_FILE}" ]; then
+                echo "[migrate] migration already completed, skip"
+                echo "[migrate] done file: ${DONE_FILE}"
+                exit 0
+              fi
+
+              echo "[migrate] ROOT=${ROOT}"
+              echo "[migrate] OLD_BASE=${OLD_BASE}"
+              echo "[migrate] OLD_METADATA=${OLD_METADATA}"
+              echo "[migrate] OLD_CONFIG=${OLD_CONFIG}"
+              echo "[migrate] NEW_METADATA=${NEW_METADATA}"
+              echo "[migrate] NEW_CONFIG=${NEW_CONFIG}"
+              echo "[migrate] DONE_FILE=${DONE_FILE}"
+
+              mkdir -p "${NEW_METADATA}" "${NEW_CONFIG}"
+
+              log_dir "${ROOT}" "root before migration"
+              log_dir "${OLD_METADATA}" "old metadata before migration"
+              log_dir "${OLD_CONFIG}" "old config before migration"
+              log_dir "${NEW_METADATA}" "new metadata before migration"
+              log_dir "${NEW_CONFIG}" "new config before migration"
+
+              if dir_has_content "${OLD_METADATA}"; then
+                echo "[migrate] copying metadata with overwrite..."
+                cp -afv "${OLD_METADATA}/." "${NEW_METADATA}/"
+                echo "[migrate] metadata copy finished"
+              else
+                echo "[migrate] old metadata directory empty or not found: ${OLD_METADATA}"
+              fi
+
+              if [ -f "${OLD_CONFIG}/absdatabase.sqlite" ]; then
+                echo "[migrate] old db:"
+                ls -lh "${OLD_CONFIG}/absdatabase.sqlite"
+              else
+                echo "[migrate] old db not found: ${OLD_CONFIG}/absdatabase.sqlite"
+              fi
+
+              if [ -f "${NEW_CONFIG}/absdatabase.sqlite" ]; then
+                echo "[migrate] new db before copy:"
+                ls -lh "${NEW_CONFIG}/absdatabase.sqlite"
+              else
+                echo "[migrate] new db before copy not found: ${NEW_CONFIG}/absdatabase.sqlite"
+              fi
+
+              if dir_has_content "${OLD_CONFIG}"; then
+                echo "[migrate] copying config with overwrite..."
+                cp -afv "${OLD_CONFIG}/." "${NEW_CONFIG}/"
+                echo "[migrate] config copy finished"
+              else
+                echo "[migrate] old config directory empty or not found: ${OLD_CONFIG}"
+              fi
+
+              if [ -f "${NEW_CONFIG}/absdatabase.sqlite" ]; then
+                echo "[migrate] new db after copy:"
+                ls -lh "${NEW_CONFIG}/absdatabase.sqlite"
+              else
+                echo "[migrate] new db after copy not found: ${NEW_CONFIG}/absdatabase.sqlite"
+              fi
+
+              log_dir "${NEW_METADATA}" "new metadata after migration"
+              log_dir "${NEW_CONFIG}" "new config after migration"
+
+              echo "completed" > "${DONE_FILE}"
+              echo "[migrate] migration completed"
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+      {{- end }}
+
       containers:
-      - name: audiobookshelf
-        image: "docker.io/beclab/aboveos-advplyr-audiobookshelf:2.25.1"
-        ports:
-        - containerPort: 80
-        env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
-        - name: TZ
-          value: Etc/UTC
-        resources:
-          limits:
-            cpu: 500m
-            memory: 2048Mi
-          requests:
-            cpu: 200m
-            memory: 256Mi
-        volumeMounts:
-        - name: home
-          mountPath: /home
-        - name: external
-          mountPath: /external
-        - name: app-data-metadata
-          mountPath: /metadata
-        - name: app-data-config
-          mountPath: /config
+        - name: audiobookshelf
+          image: "docker.io/beclab/advplyr-audiobookshelf:2.32.1"
+          ports:
+            - containerPort: 80
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            limits:
+              cpu: 1000m
+              memory: 2048Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: home
+              mountPath: /home
+            - name: external
+              mountPath: /external
+            - name: app-data-metadata
+              mountPath: /metadata
+            - name: app-data-config
+              mountPath: /config
+
       restartPolicy: Always
       volumes:
-      - name: home
-        hostPath:
-          type: Directory
-          path: '{{ .Values.userspace.userData }}'
-      - name: external
-        hostPath:
-          type: DirectoryOrCreate
-          path: '{{ .Values.sharedlib }}'
-      - name: app-data-metadata
-        hostPath:
-          type: DirectoryOrCreate
-          path: '{{ .Values.userspace.appData }}/audiobookshelf/metadata'
-      - name: app-data-config
-        hostPath:
-          type: DirectoryOrCreate
-          path: '{{ .Values.userspace.appData }}/audiobookshelf/config'
+        - name: home
+          hostPath:
+            type: Directory
+            path: '{{ .Values.userspace.userData }}'
 
+        - name: external
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.sharedlib }}'
+
+        {{- if $isNewVersion }}
+        - name: app-data-root
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        {{- end }}
+
+        - name: app-data-metadata
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/metadata{{ else }}{{ .Values.userspace.appData }}/audiobookshelf/metadata{{ end }}'
+
+        - name: app-data-config
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/config{{ else }}{{ .Values.userspace.appData }}/audiobookshelf/config{{ end }}'
 ---
 apiVersion: v1
 kind: Service
@@ -77,8 +193,8 @@ metadata:
     io.kompose.service: audiobookshelf
 spec:
   ports:
-  - name: "80"
-    port: 80
-    targetPort: 80
+    - name: "80"
+      port: 80
+      targetPort: 80
   selector:
     io.kompose.service: audiobookshelf

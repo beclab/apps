@@ -1,0 +1,206 @@
+{{- $appDomainENV := split "," .Values.domain.vane -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.toml: |
+    [GENERAL]
+    SIMILARITY_MEASURE = "cosine" # "cosine" or "dot"
+    KEEP_ALIVE = "30m" # How long to keep Ollama models loaded into memory. Increased from 5m to reduce model reload overhead. (Instead of using -1 use "-1m")
+
+    [MODELS.OPENAI]
+    API_KEY = "{{ .Values.olaresEnv.OPENAI_APIKEY }}"
+
+    [MODELS.GROQ]
+    API_KEY = "{{ .Values.olaresEnv.GROQ_APIKEY }}"
+
+    [MODELS.ANTHROPIC]
+    API_KEY = "{{ .Values.olaresEnv.ANTHROPIC_APIKEY }}"
+
+    [MODELS.GEMINI]
+    API_KEY = "{{ .Values.olaresEnv.GEMINI_APIKEY }}"
+
+    [MODELS.CUSTOM_OPENAI]
+    API_KEY = "{{ .Values.olaresEnv.CUSTOM_OPENAI_APIKEY }}"
+    API_URL = "{{ .Values.olaresEnv.CUSTOM_OPENAI_URL }}"
+    MODEL_NAME = "{{ .Values.olaresEnv.CUSTOM_OPENAI_MODEL_NAME }}"
+
+    [MODELS.OLLAMA]
+    {{- if $isNewVersion }}
+    API_URL = "http://d54536a50.shared.{{ $topDomain }}" # Ollama API URL for system version >= 1.12.3
+    {{- else }}
+    API_URL = "http://ollama.ollama-{{ .Values.admin }}:11434" # Ollama API URL
+    {{- end }}
+    {{- if .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}
+    NAME = "{{ .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}" # Connection name for Ollama
+    {{- else }}
+    NAME = "Ollama" # Default connection name for Ollama
+    {{- end }}
+    {{- if .Values.olaresEnv.OLLAMA_API_KEY }}
+    API_KEY = "{{ .Values.olaresEnv.OLLAMA_API_KEY }}" # Ollama API key (if required)
+    {{- else }}
+    API_KEY = "" # Ollama typically doesn't require API key, leave empty
+    {{- end }}
+
+    [MODELS.DEEPSEEK]
+    API_KEY = ""
+
+    [API_ENDPOINTS]
+    {{- if $isNewVersion }}
+    SEARXNG = "http://d1236e020.shared.{{ $topDomain }}" # SearxNG API URL for system version >= 1.12.3
+    {{- else }}
+    SEARXNG = "http://searxng.searxng-{{ .Values.admin }}:8080" # SearxNG API URL
+    {{- end }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vane
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: vane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: vane
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: vane
+    spec:
+      initContainers:
+      - name: getconfigfile
+        image: "docker.io/itzcrazykns1337/vane:main"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c", "if [ ! -f '/home/vane/config.toml' ]; then cp '/home/vane-config/config.toml' '/home/vane/config.toml'; fi"]
+        volumeMounts:
+        - mountPath: /home/vane
+          name: appconfig
+        - mountPath: /home/vane-config/config.toml
+          name: config
+          subPath: config.toml
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-cache-root
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        volumeMounts:
+          - name:  app-cache-root
+            mountPath: /app-cache-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: vane
+        image: "docker.io/itzcrazykns1337/vane:main"
+        env:
+        - name: SEARXNG_API_URL
+          {{- if $isNewVersion }}
+          value: "http://d1236e020.shared.{{ $topDomain }}"
+          {{- else }}
+          value: "http://searxng.searxng-{{ .Values.admin }}:8080"
+          {{- end }}
+        - name: OLLAMA_API_URL
+          {{- if $isNewVersion }}
+          value: "http://d54536a50.shared.{{ $topDomain }}"
+          {{- else }}
+          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+          {{- end }}
+        - name: LLM_PROVIDER
+          value: "ollama"
+        - name: OLLAMA_BASE_URL
+          {{- if $isNewVersion }}
+          value: "http://d54536a50.shared.{{ $topDomain }}"
+          {{- else }}
+          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
+          {{- end }}
+        {{- if .Values.olaresEnv.OLLAMA_MODEL }}
+        - name: OLLAMA_MODEL
+          value: "{{ .Values.olaresEnv.OLLAMA_MODEL }}"
+        {{- end }}
+        - name: DATABASE_URL
+          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.vane }}"
+        - name: HOME
+          value: "/home/vane"
+        - name: HF_HOME
+          value: "/home/vane/data/huggingface"
+        - name: TRANSFORMERS_CACHE
+          value: "/home/vane/data/huggingface/transformers"
+        - name: HOSTNAME
+          value: '0.0.0.0'
+        ports:
+        - containerPort: 3000
+        resources:
+          limits:
+            cpu: "2"
+            memory: 3500Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        volumeMounts:
+        - mountPath: /home/vane/data
+          name: appcache
+        - mountPath: /home/vane/uploads
+          name: appuploads
+        - mountPath: /home/vane/config.toml
+          name: appconfig
+          subPath: config.toml        
+      volumes:
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/data{{ else }}{{ .Values.userspace.appCache }}/vane/data{{ end }}'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/uploads{{ else }}{{ .Values.userspace.appCache }}/vane/uploads{{ end }}'
+          type: DirectoryOrCreate
+        name: appuploads
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/config{{ else }}{{ .Values.userspace.appCache }}/vane/config{{ end }}'
+          type: DirectoryOrCreate
+        name: appconfig
+      - hostPath:
+          path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}{{ else }}{{ .Values.userspace.appCache }}/vane{{ end }}'
+          type: DirectoryOrCreate
+        name: app-cache-root
+      - name: config
+        configMap:
+          name: app-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: vane
+  name: vane
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: vane
+status:
+  loadBalancer: {}

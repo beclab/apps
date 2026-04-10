@@ -1,4 +1,4 @@
-﻿apiVersion: apps/v1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: coder
@@ -19,13 +19,13 @@ spec:
     spec:
       containers:
         - name: docker-dind
-          image: "docker.io/beclab/docker:dind"
+          image: "docker.io/beclab/docker:29.3.0-dind"
           securityContext:
             privileged: true
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
-          command: ["dockerd", "--host", "tcp://0.0.0.0:2375"]
+          command: ["dockerd", "--host", "tcp://0.0.0.0:2375", "--host", "unix:///var/run/docker.sock"]
           ports:
             - containerPort: 2375
           volumeMounts:
@@ -39,7 +39,7 @@ spec:
               cpu: 1000m
               memory: 1Gi
         - name: coder
-          image: "docker.io/beclab/coder-coder:v2.19.0"
+          image: "docker.io/beclab/coder-coder:v2.31.5"
           env:
             - name: DOCKER_HOST
               value: "tcp://localhost:2375"
@@ -47,6 +47,8 @@ spec:
               value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password | urlquery }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.coder }}?sslmode=disable"
             - name: CODER_HTTP_ADDRESS
               value: "0.0.0.0:7080"
+            - name: CODER_ACCESS_URL
+              value: "http://coder.{{ .Release.Namespace }}.svc.cluster.local:7080"
           ports:
             - containerPort: 7080
               protocol: TCP
@@ -58,8 +60,8 @@ spec:
               cpu: 500m
               memory: 512Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 2000m
+              memory: 2Gi
           livenessProbe:
             httpGet:
               path: /
@@ -97,7 +99,6 @@ spec:
           emptyDir: {}
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,0 +1,118 @@
+{{- $solidtimeDomainENV := split  ","  .Values.domain.solidtime -}}
+{{- $solidtimeDomain := index $solidtimeDomainENV "_0" -}}
+
+{{- $smtpServer := .Values.olaresEnv.SMTP_SERVER | default "" }}
+{{- $defaultSmtpPort := "" }}
+{{- $enableRegistration := "false" }}
+{{- if (ne $smtpServer "") }}
+  {{- $defaultSmtpPort = "25" }}
+  {{- $enableRegistration = "true" }}
+{{- end }}
+{{- $smtpPort := .Values.olaresEnv.SMTP_PORT | default $defaultSmtpPort }}
+{{- $smtpSecure := "null" }}
+
+{{- $smtpUseSSL := .Values.olaresEnv.SMTP_SSL | default "" }}
+{{- $smtpUseTLS := .Values.olaresEnv.SMTP_TLS | default "" }}
+{{- if or (eq (lower $smtpUseSSL) "true") (eq $smtpUseSSL "1") (eq $smtpPort "465") }}
+  {{- $smtpSecure = "ssl" }}
+  {{- $smtpPort = "465" }}
+{{- else if or (eq (lower $smtpUseTLS) "true") (eq $smtpUseTLS "1") (eq $smtpPort "587") }}
+  {{- $smtpSecure = "tls" }}
+  {{- $smtpPort = "587" }}
+{{- end }}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solidtime-env
+  namespace: {{ .Release.Namespace }}
+data:
+  APP_NAME: "solidtime"
+  VITE_APP_NAME: "solidtime"
+  APP_ENV: "production"
+  APP_DEBUG: "false"
+  APP_URL: "https://{{ $solidtimeDomain }}"
+  APP_FORCE_HTTPS: "true"
+  APP_ENABLE_REGISTRATION: "{{ $enableRegistration }}"
+  TRUSTED_PROXIES: "0.0.0.0/0,2000:0:0:0:0:0:0:0/3"
+  APP_DOMAIN: "{{ $solidtimeDomain }}"
+
+  SUPER_ADMINS: "{{ .Values.olaresEnv.ADMIN_EMAIL }}"
+
+  LOG_CHANNEL: "stderr_daily"
+  LOG_LEVEL: "debug"
+
+  DB_CONNECTION: "pgsql"
+  DB_HOST: "{{ .Values.postgres.host }}"
+  DB_PORT: "{{ .Values.postgres.port }}"
+  DB_SSLMODE: "require"
+  DB_DATABASE: "{{ .Values.postgres.databases.solidtimedb }}"
+  DB_USERNAME: "{{ .Values.postgres.username }}"
+  DB_PASSWORD: "{{ .Values.postgres.password }}"
+
+  GOTENBERG_URL: "http://127.0.0.1:3000"
+
+  MAIL_MAILER: "smtp"
+  MAIL_HOST: "{{ $smtpServer }}"
+  MAIL_PORT: "{{ $smtpPort }}"
+  MAIL_ENCRYPTION: "{{ $smtpSecure }}"
+  MAIL_FROM_ADDRESS: "{{ .Values.olaresEnv.SMTP_FROM_ADDRESS }}"
+  MAIL_FROM_NAME: "{{ .Values.olaresEnv.SMTP_FROM_NAME }}"
+  MAIL_USERNAME: "{{ .Values.olaresEnv.SMTP_LOGIN }}"
+  MAIL_PASSWORD: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+
+  QUEUE_CONNECTION: "database"
+
+  FILESYSTEM_DISK: "local"
+  PUBLIC_FILESYSTEM_DISK: "public"
+  # S3_REGION: "fr-par" # fr-par, nl-ams, pl-waw
+  # S3_BUCKET: "your-bucket-name"
+  # S3_ENDPOINT: "https://s3.fr-par.scw.cloud" # Replace fr-par with your region
+  # S3_ACCESS_KEY_ID: "***"
+  # S3_SECRET_ACCESS_KEY: "***"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solidtime-healthcheck-script
+  namespace: {{ .Release.Namespace }}
+data:
+  healthcheck: |
+    #!/usr/bin/env sh
+    set -e
+
+    container_mode=${CONTAINER_MODE:-"http"}
+
+    SUPERVISOR_SERVER=${SUPERVISOR_SERVER:-"http://127.0.0.1:9001"}
+
+    if [ "${container_mode}" = "http" ]; then
+        php "${ROOT}/artisan" octane:status
+    elif [ "${container_mode}" = "horizon" ]; then
+        php "${ROOT}/artisan" horizon:status
+    elif [ "${container_mode}" = "scheduler" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status scheduler:scheduler_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    elif [ "${container_mode}" = "reverb" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status reverb:reverb_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    elif [ "${container_mode}" = "worker" ]; then
+        if [ "$(supervisorctl -s $SUPERVISOR_SERVER status worker:worker_0 | awk '{print tolower($2)}')" = "running" ]; then
+            exit 0
+        else
+            echo "Healthcheck failed."
+            exit 1
+        fi
+    else
+        echo "Container mode mismatched."
+        exit 1
+    fi

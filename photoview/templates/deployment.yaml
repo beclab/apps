@@ -17,6 +17,23 @@ spec:
       labels:
         app: photoview
     spec:
+      initContainers:
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - "-c"
+          - |
+            chown -R 1000:1000 /cache
+        resources: {}
+        volumeMounts:
+        - name: cache
+          mountPath: /cache
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       containers:
       - name: photoview
         image: "docker.io/beclab/aboveos-viktorstrate-photoview:2"
@@ -26,7 +43,7 @@ spec:
             memory: 128Mi
           limits:
             cpu: 500m
-            memory: 256Mi
+            memory: 2048Mi
         ports:
         - containerPort: 8080
         env:
@@ -37,25 +54,28 @@ spec:
         - name: PHOTOVIEW_LISTEN_PORT
           value: "8080"
         - name: PHOTOVIEW_MEDIA_CACHE
-          value: /app/cache
+          value: /cache
         - name: PHOTOVIEW_MYSQL_URL
           value: '{{ .Values.mariadb.username}}:{{ .Values.mariadb.password}}@tcp({{ .Values.mariadb.host }}:3306)/{{ .Values.mariadb.databases.photoview }}'
         volumeMounts:
         - name: cache
-          mountPath: /app/cache
+          mountPath: /cache
         - name: photos
           mountPath: /photos
           readOnly: true
         - name: user-data
           mountPath: /data
-       
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       volumes:
       - name: cache
         hostPath:
           type: DirectoryOrCreate
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: {{ .Values.userspace.appData}}
+          path: {{ .Values.userspace.appData}}/cache
             {{- else }}
           path: {{ .Values.userspace.appData}}/photoview
             {{- end }}
