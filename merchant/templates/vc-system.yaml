@@ -1,104 +1,6 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: {{ .Release.Name }}-vc-gate-config
-  namespace: {{ .Release.Namespace }}
-data:
-  config.json: |
-    {
-        "issuer_id": "did:key:z6MktdEpjYpYocHibuZqMsjXmaVusyUHckMnkzM3xUCxpfa4",
-        "didName": "magicCow",
-        "issuer_privatekey": ""
-    }
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ .Release.Name }}-vc-gate-state-pvc
-  namespace: {{ .Release.Namespace }}
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Mi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: {{ .Release.Name }}-vc-gate
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: vc-gate
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: vc-gate
-  template:
-    metadata:
-      labels:
-        app: vc-gate
-    spec:
-      containers:
-      - name: vc-gate
-        image: aboveos/vc-gate:v3.4.16-arm64.3
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 300m
-            memory: 256Mi      
-        ports:
-        - containerPort: 6004
-          protocol: TCP
-        env:
-        - name: SSI_SERVICE_URL
-          value: "http://merchant-ssi-svc:6003"
-        - name: SERVER_DID_GATE
-          value: '{{ .Values.olaresEnv.REMOTE_SERVICE | default "https://api.olares.com" }}/did'
-        - name: ENVIRONMENT
-          value: "pro"
-        - name: NODE_ENV
-          value: "production"
-        - name: "NAME_BLACK_LIST"
-          value: "olares"
-        - name: "OLARES_DOMAIN"
-          value: '{{ .Values.olaresEnv.REMOTE_SERVICE | default "https://api.olares.com" | trimPrefix "https://api." }}'
-        volumeMounts:
-        - name: vc-gate-config
-          mountPath: /app/dist/config.json
-          subPath: config.json
-          readOnly: true
-        - name: vc-gate-state
-          mountPath: /app/state
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-      volumes:
-      - name: vc-gate-config
-        configMap:
-          name: {{ .Release.Name }}-vc-gate-config
-      - name: vc-gate-state
-        persistentVolumeClaim:
-          claimName: {{ .Release.Name }}-vc-gate-state-pvc
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ .Release.Name }}-vc-gate-svc
-  namespace: {{ .Release.Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: vc-gate
-  ports:
-    - name: vc-gate-port
-      port: 6004            
-      targetPort: 4001       
-      protocol: TCP
----
+# ============================================================
+# SSI service
+# ============================================================
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -156,14 +58,8 @@ data:
     [services.did]
     name = "did"
     methods = ["key", "web"]
-    #local_resolution_methods = ["key", "web", "pkh", "peer"]
-    local_resolution_methods = []
+    local_resolution_methods = ["key"]
     batch_create_max_items = 100
-    #universal_resolver_url = "https://dev.uniresolver.io/"
-    #universal_resolver_methods = ["ion"]
-    universal_resolver_url = "https://api.olares.com/did"
-    universal_resolver_methods = ["key"]
-    
     
     [services.schema]
     name = "schema"
@@ -184,7 +80,6 @@ data:
     [services.webhook]
     name = "webhook"
     webhook_timeout = "10s"
-
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -205,14 +100,14 @@ spec:
     spec:
       containers:
       - name: merchant-ssi
-        image: aboveos/ssi-service:v3.4.16-arm64.3
+        image: aboveos/ssi-service:v4.1.3
         resources:
           requests:
             cpu: 100m
             memory: 128Mi
           limits:
             cpu: 200m
-            memory: 256Mi      
+            memory: 256Mi
         ports:
         - containerPort: 6003
           protocol: TCP
@@ -230,7 +125,6 @@ spec:
       - name: ssi-config
         configMap:
           name: {{ .Release.Name }}-ssi-config
-
 ---
 apiVersion: v1
 kind: Service
@@ -243,104 +137,180 @@ spec:
     app: merchant-ssi
   ports:
     - name: ssi-port
-      port: 6003            
-      targetPort: 6003       
+      port: 6003
+      targetPort: 6003
       protocol: TCP
+
+# ============================================================
+# VC — merged from vc-gate + vc-gate-admin, single instance
+# ============================================================
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ .Release.Name }}-vc-gate-admin-config
+  name: {{ .Release.Name }}-vc-risk-config
   namespace: {{ .Release.Namespace }}
 data:
-  config.json: |
+  risk.config.json: |
     {
-        "issuer_id": "did:key:z6MktdEpjYpYocHibuZqMsjXmaVusyUHckMnkzM3xUCxpfa4",
-        "didName": "magicCow",
-        "issuer_privatekey": ""
+        "dryRun": true,
+        "forceVerification": false,
+        "whitelist": {
+            "ips": [
+                "127.0.0.1"
+            ]
+        },
+        "rateLimit": {
+            "low": {
+                "hourly": 2,
+                "daily": 5
+            },
+            "mid": {
+                "hourly": 5,
+                "daily": 30
+            },
+            "high": {
+                "hourly": 20,
+                "daily": 100
+            }
+        },
+        "channels": {
+            "reg_web": {
+                "captcha": {
+                    "type": "recaptcha-v3",
+                    "secretKey": "RECAPTCHA_V3_SECRET_KEY",
+                    "verifyUrl": "https://www.google.com/recaptcha/api/siteverify",
+                    "fallbackScore": 0.7,
+                    "thresholds": {
+                        "reject": 0.2,
+                        "low": 0.5,
+                        "mid": 0.8
+                    }
+                }
+            },
+            "reg_ios_v1": {
+                "captcha": {
+                    "type": "recaptcha-v3-ios-sdk",
+                    "projectId": "RECAPTCHA_PROJECT_ID",
+                    "apiKey": "RECAPTCHA_API_KEY",
+                    "siteKey": "RECAPTCHA_IOS_SITE_KEY",
+                    "verifyUrl": "https://recaptchaenterprise.googleapis.com",
+                    "fallbackScore": 0.7,
+                    "thresholds": {
+                        "reject": 0.2,
+                        "low": 0.5,
+                        "mid": 0.8
+                    }
+                }
+            },
+            "reg_android_v1": {
+                "captcha": {
+                    "type": "recaptcha-v3-android-sdk",
+                    "projectId": "RECAPTCHA_PROJECT_ID",
+                    "apiKey": "RECAPTCHA_API_KEY",
+                    "siteKey": "RECAPTCHA_ANDROID_SITE_KEY",
+                    "verifyUrl": "https://recaptchaenterprise.googleapis.com",
+                    "fallbackScore": 0.7,
+                    "thresholds": {
+                        "reject": 0.2,
+                        "low": 0.5,
+                        "mid": 0.8
+                    }
+                }
+            }
+        }
     }
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ .Release.Name }}-vc-gate-admin
+  name: {{ .Release.Name }}-vc
   namespace: {{ .Release.Namespace }}
   labels:
-    app: vc-gate-admin
+    app: merchant-vc
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: vc-gate-admin
+      app: merchant-vc
   template:
     metadata:
       labels:
-        app: vc-gate-admin
+        app: merchant-vc
     spec:
       containers:
-      - name: vc-gate-admin
-        image: aboveos/vc-gate-admin:v3.4.16-arm64.3
+      - name: vc
+        image: aboveos/vc:v4.1.3
         resources:
           requests:
             cpu: 100m
             memory: 128Mi
           limits:
             cpu: 300m
-            memory: 256Mi      
+            memory: 256Mi
         ports:
-        - containerPort: 6006
+        - containerPort: 4001
           protocol: TCP
         env:
-        - name: SSI_SERVICE_URL
-          value: "http://merchant-ssi-svc:6003"
-        - name: SERVER_DID_GATE
-          value: '{{ .Values.olaresEnv.REMOTE_SERVICE | default "https://api.olares.com" }}/did'
-        - name: ENVIRONMENT
-          value: "pro"
+        # ---- runtime ----
         - name: NODE_ENV
-          value: "production"
-        - name: "NAME_BLACK_LIST"
-          value: "olares"
-        - name: "INIT_SCHEMA"
-          value: "true"
-        - name: PG_HOST
-          value: "{{ .Values.postgres.host }}"
-        - name: PG_PORT
-          value: "{{ .Values.postgres.port }}"
-        - name: PG_USER
-          value: "{{ .Values.postgres.username }}"
-        - name: PG_PASSWORD
-          value: "{{ .Values.postgres.password }}"
-        - name: PG_DB
-          value: "{{ .Values.postgres.databases.merchant }}"
+          value: "prod"
+        - name: PORT
+          value: "4001"
+        - name: LOG_LEVEL
+          value: "debug"
+        - name: APP_MODE
+          value: "vc"
+        - name: SERVICE_NAME
+          value: "vc-service"
+        - name: SERVICE_VERSION
+          value: "0.1.0"
+        # ---- database ----
+        - name: DATABASE_URL
+          value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.merchant }}"
+        - name: DB_POOL_SIZE
+          value: "10"
+        - name: DB_LOGGING
+          value: "false"
+        - name: DB_SSL
+          value: "false"
+        # ---- redis ----
+        - name: REDIS_URL
+          value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+        # ---- internal services ----
+        - name: SSI_SERVICE_URL
+          value: "http://{{ .Release.Name }}-ssi-svc:6003"
         volumeMounts:
-        - name: vc-gate-admin-config
-          mountPath: /app/dist/config.json
-          subPath: config.json
+        - name: vc-risk-config
+          mountPath: /app/risk.config.json
+          subPath: risk.config.json
           readOnly: true
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
       volumes:
-      - name: vc-gate-admin-config
+      - name: vc-risk-config
         configMap:
-          name: {{ .Release.Name }}-vc-gate-admin-config
+          name: {{ .Release.Name }}-vc-risk-config
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-vc-gate-admin-svc
+  name: {{ .Release.Name }}-vc-svc
   namespace: {{ .Release.Namespace }}
 spec:
   type: ClusterIP
   selector:
-    app: vc-gate-admin
+    app: merchant-vc
   ports:
-    - name: vc-gate-admin-port
-      port: 6006
-      targetPort: 4002
+    - name: vc-port
+      port: 4001
+      targetPort: 4001
       protocol: TCP
 
+# ============================================================
+# PG Client
+# ============================================================
 ---
 apiVersion: apps/v1
 kind: Deployment
