@@ -1,31 +1,128 @@
-﻿apiVersion: v1
+apiVersion: v1
 kind: ConfigMap
 metadata:
   name: nginx-config
   namespace: {{ .Release.Namespace }}
 data:
   nginx.conf: |
+    lua_shared_dict healthcheck 1m;
+    resolver coredns.kube-system.svc.cluster.local valid=10s;
+
+    init_worker_by_lua_block {
+      if ngx.worker.id() ~= 0 then return end
+
+      local function check_backends(premature)
+        if premature then return end
+        local hc = ngx.shared.healthcheck
+
+        if not hc:get("main_ready") then
+          local sock = ngx.socket.tcp()
+          sock:settimeout(2000)
+          local ok = sock:connect("sdwebuiforgeneov2.sdwebuiforgeneov2server-shared.svc.cluster.local", 7860)
+          if ok then
+            sock:close()
+            hc:set("main_ready", true)
+          end
+        end
+
+        if not hc:get("main_ready") then
+          local sock2 = ngx.socket.tcp()
+          sock2:settimeout(2000)
+          local ok2 = sock2:connect("download-svc.sdwebuiforgeneov2server-shared.svc.cluster.local", 8090)
+          if ok2 then
+            sock2:close()
+            hc:set("download_ready", true)
+          else
+            hc:set("download_ready", false)
+          end
+        end
+
+        ngx.timer.at(3, check_backends)
+      end
+      ngx.timer.at(1, check_backends)
+    }
+
     server {
         listen 8080;
         access_log /opt/bitnami/openresty/nginx/logs/access.log;
         error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
-        proxy_connect_timeout 30s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 300s;
-        proxy_set_header host $host;
-        proxy_set_header x-forwarded-host $http_host;
+        set $main_backend "sdwebuiforgeneov2.sdwebuiforgeneov2server-shared.svc.cluster.local:7860";
+        set $download_backend "download-svc.sdwebuiforgeneov2server-shared.svc.cluster.local:8090";
 
-        proxy_http_version 1.1;
-        proxy_set_header upgrade $http_upgrade;
-        proxy_set_header connection "upgrade";
+        location /progress {
+            set $backend "";
+            access_by_lua_block {
+              if ngx.shared.healthcheck:get("download_ready") then
+                ngx.var.backend = ngx.var.download_backend
+              else
+                ngx.header["Content-Type"] = "application/json"
+                ngx.say('{"status":"waiting"}')
+                return ngx.exit(200)
+              end
+            }
+            proxy_pass http://$backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $http_host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            add_header Access-Control-Allow-Origin *;
+            if ($request_method = 'OPTIONS') { return 204; }
+        }
+
+        location = /sdapi/v1/options {
+            proxy_connect_timeout 2s;
+            proxy_read_timeout 5s;
+            proxy_pass http://$main_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_intercept_errors on;
+            error_page 502 504 = @probe_not_ready;
+            log_by_lua_block {
+              if ngx.status == 200 then
+                ngx.shared.healthcheck:set("main_ready", true)
+              end
+            }
+        }
+
+        location @probe_not_ready {
+            default_type application/json;
+            return 503 '{"error":"service not ready"}';
+        }
 
         location / {
-            resolver coredns.kube-system.svc.cluster.local valid=10s;
+            set $backend "";
+            access_by_lua_block {
+              if ngx.shared.healthcheck:get("main_ready") then
+                ngx.var.backend = ngx.var.main_backend
+              elseif ngx.shared.healthcheck:get("download_ready") then
+                ngx.var.backend = ngx.var.download_backend
+              else
+                ngx.header["Content-Type"] = "text/html; charset=utf-8"
+                ngx.say([[<!DOCTYPE html>
+    <html><head><meta charset="utf-8"><title>SD WebUI Forge Neo</title>
+    <style>body{display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif}
+    .c{text-align:center}.spinner{width:48px;height:48px;border:4px solid #333;border-top-color:#7c3aed;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 24px}
+    @keyframes spin{to{transform:rotate(360deg)}}h1{font-size:1.5rem;margin-bottom:8px}p{color:#888;font-size:0.95rem}</style></head>
+    <body><div class="c"><div class="spinner"></div><h1>Initializing...</h1><p>Waiting for services to start. This page will refresh automatically.</p></div>
+    <script>setTimeout(function(){location.reload()},5000)</script></body></html>]])
+                return ngx.exit(200)
+              end
+            }
+
+            proxy_pass http://$backend;
+            proxy_connect_timeout 10s;
+            proxy_send_timeout 300s;
+            proxy_read_timeout 1800s;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Host $http_host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
-            proxy_next_upstream_tries 3;
-            proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7860;
+            add_header Access-Control-Allow-Origin *;
+            if ($request_method = 'OPTIONS') { return 204; }
         }
     }
 
@@ -47,7 +144,7 @@ data:
         location / {
             resolver coredns.kube-system.svc.cluster.local valid=10s;
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
             proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7861;
         }
@@ -71,7 +168,7 @@ data:
         location / {
             resolver coredns.kube-system.svc.cluster.local valid=10s;
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
             proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7862;
         }
@@ -95,7 +192,7 @@ data:
         location / {
             resolver coredns.kube-system.svc.cluster.local valid=10s;
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
             proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7863;
         }
@@ -119,7 +216,7 @@ data:
         location / {
             resolver coredns.kube-system.svc.cluster.local valid=10s;
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
             proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7864;
         }
@@ -143,7 +240,7 @@ data:
         location / {
             resolver coredns.kube-system.svc.cluster.local valid=10s;
             add_header X-Frame-Options "";
-            proxy_next_upstream error timeout http_502 http_503 http_504 http_403;
+            proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
             proxy_next_upstream_tries 3;
             proxy_pass http://sdwebuiforgeneov2.sdwebuiforgeneov2server-shared:7865;
         }
@@ -189,23 +286,19 @@ spec:
           env:
             - name: OPENRESTY_CONF_FILE
               value: /etc/nginx/nginx.conf
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8080
-              scheme: HTTP
-            initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
+            initialDelaySeconds: 2
+            timeoutSeconds: 3
+            periodSeconds: 3
             successThreshold: 1
-            failureThreshold: 10
-          startupProbe:
-            tcpSocket:
-              port: 8080
-            timeoutSeconds: 5
-            periodSeconds: 10
-            successThreshold: 1
-            failureThreshold: 30
+            failureThreshold: 60
           resources:
             limits:
               cpu: 100m
