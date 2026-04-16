@@ -1,5 +1,7 @@
 {{- $opencodeDomainENV := split  ","  .Values.domain.opencode -}}
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
 
 ---
 apiVersion: apps/v1
@@ -22,15 +24,30 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: opencode
+        bytetrade.io/terminal: opencode
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
           command:
             - sh
             - "-c"
             - |
+              set -e
+              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+              _wpid=$!
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+              _gpid=$!
+              if ! wait "$_wpid" 2>/dev/null; then
+                echo "=== init-setup: Alpine CDN unreachable or too slow, switching to China mirrors ==="
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
+              kill "$_gpid" 2>/dev/null || true
+              wait "$_gpid" 2>/dev/null || true
+              apk add --no-cache python3
               OC_DOMAIN="{{ $opencodeDomain }}"
+              export OLARES_OC_DOMAIN="$OC_DOMAIN"
+              export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -270,14 +287,239 @@ spec:
                 '- NEVER modify ~/.profile or ~/.bashrc for PATH — packages install to standard paths' \
                 '- When unsure about the package name, use `pkg-install --search <keyword>` first' \
                 > "$ADMIN"
+              echo "=== Olares global baseline / plugin + workspace legacy instructions cleanup (python) ==="
+              OLARES_PY=/tmp/olares-init-opencode-cfg.py
               printf '%s\n' \
-                '{' \
-                '  "instructions": [' \
-                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. ALWAYS run /skill load system-admin BEFORE installing ANY system package.",' \
-                '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
-                '    "NEVER show localhost URLs. The domain is '"$OC_DOMAIN"'. Dev server preview URL format: https://'"$OC_DOMAIN"'/__preview/<port>/"' \
-                '  ]' \
-                '}' > /home/opencode/workspace/opencode.json
+                'import json' \
+                'import os' \
+                'from pathlib import Path' \
+                '' \
+                'DOMAIN = os.environ.get("OLARES_OC_DOMAIN", "")' \
+                'ENABLE_OMO = os.environ.get("OLARES_ENABLE_OMO", "0") == "1"' \
+                'BASELINE_MD = Path("/home/opencode/.config/opencode/olares-baseline-instructions.md")' \
+                'GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")' \
+                'WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")' \
+                'OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"' \
+                'PLUGIN_NPM = "oh-my-openagent"' \
+                'STALE_PLUGIN_NPM = "oh-my-opencode"' \
+                '' \
+                'LEGACY_S1 = (' \
+                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving "' \
+                '    "web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, "' \
+                '    "website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. "' \
+                '    "ALWAYS run /skill load system-admin BEFORE installing ANY system package."' \
+                ')' \
+                'LEGACY_S2 = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                'LEGACY_S3 = (' \
+                '    f"NEVER show localhost URLs. The domain is {DOMAIN}. "' \
+                '    f"Dev server preview URL format: https://{DOMAIN}/__preview/<port>/"' \
+                ')' \
+                'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3}' \
+                '' \
+                'BASELINE_MD.parent.mkdir(parents=True, exist_ok=True)' \
+                'md = (' \
+                '    "<!-- olares-managed: baseline-instructions v1 (rewritten each pod start) -->\\n\\n"' \
+                '    "# Olares environment baseline\\n\\n"' \
+                '    "## Web preview and dev servers\\n\\n"' \
+                '    + LEGACY_S1' \
+                '    + "\\n\\n## System packages\\n\\n"' \
+                '    + LEGACY_S2' \
+                '    + "\\n\\n## URLs and domain\\n\\n"' \
+                '    + LEGACY_S3' \
+                '    + "\\n"' \
+                ')' \
+                'BASELINE_MD.write_text(md, encoding="utf-8")' \
+                '' \
+                'cfg = {}' \
+                'if GLOBAL_JSON.is_file():' \
+                '    try:' \
+                '        cfg = json.loads(GLOBAL_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        cfg = {}' \
+                'instr = cfg.get("instructions")' \
+                'if not isinstance(instr, list):' \
+                '    instr = []' \
+                'if OLARES_REF not in instr:' \
+                '    instr = list(instr) + [OLARES_REF]' \
+                'cfg["instructions"] = instr' \
+                'cfg.setdefault("$schema", "https://opencode.ai/config.json")' \
+                'plugins = cfg.get("plugin")' \
+                'if not isinstance(plugins, list):' \
+                '    plugins = []' \
+                'plugins = [p for p in plugins if isinstance(p, str)]' \
+                'plugins = [p for p in plugins if p != STALE_PLUGIN_NPM]' \
+                'if ENABLE_OMO:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
+                '    plugins.append(PLUGIN_NPM)' \
+                'else:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
+                'if plugins:' \
+                '    cfg["plugin"] = plugins' \
+                'else:' \
+                '    cfg.pop("plugin", None)' \
+                'GLOBAL_JSON.parent.mkdir(parents=True, exist_ok=True)' \
+                'GLOBAL_JSON.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '' \
+                '' \
+                'if WORKSPACE_JSON.is_file():' \
+                '    try:' \
+                '        wcfg = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        wcfg = None' \
+                '    if wcfg is not None:' \
+                '        winst = wcfg.get("instructions")' \
+                '        legacy_changed = False' \
+                '        if isinstance(winst, list):' \
+                '            new_inst = [x for x in winst if x not in LEGACY]' \
+                '            if new_inst != winst:' \
+                '                legacy_changed = True' \
+                '                if new_inst:' \
+                '                    wcfg["instructions"] = new_inst' \
+                '                else:' \
+                '                    wcfg.pop("instructions", None)' \
+                '        only_schema = isinstance(wcfg, dict) and set(wcfg.keys()) == {"$schema"}' \
+                '        if legacy_changed:' \
+                '            if not wcfg or only_schema:' \
+                '                WORKSPACE_JSON.unlink(missing_ok=True)' \
+                '            else:' \
+                '                WORKSPACE_JSON.write_text(json.dumps(wcfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '        elif only_schema:' \
+                '            WORKSPACE_JSON.unlink(missing_ok=True)' \
+                > "$OLARES_PY"
+              python3 "$OLARES_PY"
+              rm -f "$OLARES_PY"
+              OMO_AGENT_CFG="/home/opencode/.config/opencode/oh-my-openagent.json"
+              if [ ! -f "$OMO_AGENT_CFG" ]; then
+                echo "=== Writing default oh-my-openagent.json ==="
+                printf '%s\n' \
+                  '{' \
+                  '  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",' \
+                  '  "runtime_fallback": { "enabled": true, "max_fallback_attempts": 7 },' \
+                  '  "agents": {' \
+                  '    "sisyphus": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "hephaestus": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "oracle": { "model": "openai/gpt-5.4", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "explore": { "model": "anthropic/claude-haiku-4-5", "fallback_models": [' \
+                  '      { "model": "github-copilot/grok-code-fast-1" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "multimodal-looker": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "openai/gpt-5-nano" },' \
+                  '      { "model": "github-copilot/gpt-5-nano" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "prometheus": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "metis": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "momus": { "model": "openai/gpt-5.4", "variant": "xhigh", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "xhigh" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "atlas": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "sisyphus-junior": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] }' \
+                  '  },' \
+                  '  "categories": {' \
+                  '    "visual-engineering": { "model": "google/gemini-3.1-pro-preview", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "ultrabrain": { "model": "openai/gpt-5.4", "variant": "xhigh", "fallback_models": [' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "deep": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "artistry": { "model": "google/gemini-3.1-pro-preview", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4" },' \
+                  '      { "model": "github-copilot/gpt-5.4" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "quick": { "model": "openai/gpt-5.4-mini", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4-mini" },' \
+                  '      { "model": "anthropic/claude-haiku-4-5" },' \
+                  '      { "model": "github-copilot/claude-haiku-4.5" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "unspecified-low": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.3-codex", "variant": "medium" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "unspecified-high": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.3-codex", "variant": "medium" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "writing": { "model": "google/gemini-3-flash-preview", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "anthropic/claude-sonnet-4-6" },' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] }' \
+                  '  }' \
+                  '}' \
+                  > "$OMO_AGENT_CFG"
+              fi
               chown 1000:1000 /home/opencode /home/opencode/workspace
               find /home/opencode -mindepth 1 -maxdepth 1 ! -name '.pkg-root' \
                 -exec chown -R 1000:1000 {} +
@@ -295,18 +537,52 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.2.27"
+              OC_VER="1.4.4"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
               FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
+
+              setup_mirrors() {
+                USE_CN_MIRROR=false
+                wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+                _wpid=$!
+                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+                _gpid=$!
+                if wait "$_wpid" 2>/dev/null; then
+                  echo "=== Network: Alpine CDN reachable ==="
+                else
+                  echo "=== Network: Alpine CDN unreachable or too slow, switching to China mirrors ==="
+                  USE_CN_MIRROR=true
+                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+                fi
+                kill "$_gpid" 2>/dev/null || true
+                wait "$_gpid" 2>/dev/null || true
+              }
+
+              github_download() {
+                local url="$1" output="$2"
+                if [ "$USE_CN_MIRROR" = "true" ]; then
+                  for proxy in https://ghproxy.net https://gh-proxy.com https://ghproxy.homeboyc.cn https://ghfast.top; do
+                    echo "=== Trying proxy $proxy for: $url ==="
+                    if curl -fsSL --connect-timeout 15 --speed-limit 10000 --speed-time 30 \
+                         "${proxy}/$url" -o "$output"; then
+                      return 0
+                    fi
+                    rm -f "$output"
+                    echo "=== Proxy $proxy failed ==="
+                  done
+                  echo "=== All proxies failed, falling back to direct ==="
+                fi
+                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --speed-limit 10000 --speed-time 30 "$url" -o "$output"
+              }
 
               verify_cache() {
                 [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
@@ -326,6 +602,12 @@ spec:
                     return 1
                   fi
                 done
+                if [ "$(uname -m)" = "x86_64" ]; then
+                  if [ ! -e "$PKG/lib64/ld-linux-x86-64.so.2" ] && [ ! -L "$PKG/lib64/ld-linux-x86-64.so.2" ]; then
+                    echo "=== Cache invalid: glibc linker (ld-linux-x86-64.so.2) missing ==="
+                    return 1
+                  fi
+                fi
                 return 0
               }
 
@@ -379,9 +661,45 @@ spec:
               cp /home/opencode/.profile /home/opencode/.bashrc
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
+              olares_run_omo() {
+                if ! command -v npm >/dev/null 2>&1; then
+                  if [ -x "$PKG/usr/bin/npm" ] && [ -x "$PKG/usr/bin/node" ]; then
+                    echo "=== OMO: using npm/node from snapshot ==="
+                    export PATH="$PKG/usr/bin:$PKG/usr/local/bin:$PKG/bin:$PATH"
+                    export LD_LIBRARY_PATH="$PKG/usr/lib:$PKG/lib:${LD_LIBRARY_PATH:-}"
+                  else
+                    echo "=== OMO: npm not available, installing nodejs+npm ==="
+                    apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
+                  fi
+                fi
+                if [ "$USE_CN_MIRROR" = "true" ]; then
+                  npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+                fi
+                OMO_FOUND=false
+                for d in /usr/lib/node_modules/oh-my-opencode \
+                         /usr/local/lib/node_modules/oh-my-opencode \
+                         "$PKG/usr/lib/node_modules/oh-my-opencode" \
+                         "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
+                  if [ -d "$d" ] && [ -f "$d/package.json" ]; then
+                    OMO_FOUND=true
+                    break
+                  fi
+                done
+                if [ "$OMO_FOUND" = "true" ]; then
+                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
+                else
+                  echo "=== Installing oh-my-opencode npm package ==="
+                  npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                fi
+                chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
+              }
+
+              setup_mirrors
+
               if [ -f "$MARKER" ] && verify_cache; then
                 echo "=== Package snapshot cached (${PKG_HASH}) ==="
                 restore_user_packages
+                olares_run_omo
                 exit 0
               fi
               rm -f "$MARKER"
@@ -409,10 +727,9 @@ spec:
               ARCH=$(uname -m)
               if [ "$ARCH" = "x86_64" ]; then
                 echo "=== Installing glibc (x86_64) ==="
-                curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
-                  -o /etc/apk/keys/sgerrand.rsa.pub
-                curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
-                  -o /tmp/glibc.apk
+                echo "=== Embedding sgerrand RSA public key ==="
+                echo "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFwWjJ1MUtKS1V1L2ZXNEEyNXk5bQp5NzBBR0VhL0ozV2k1aWJOVkdObjFnVDFyMFZmZ2VXZDBwVXliUzRVbWNIZGlOenhKUGdvV1FoVjJTU1cxSll1CnRPcUtaRjVRU042WDkzN1BUVXBOQmpVdkx0VFExdmUxZnAzOXVmL2xFWFBwRnBPUEw4OExLbkRCZ2JoN3drQ3AKbTJLekxWR0NoZjgzTVMwU2hMNkc5RVFJQVV4TG05OVZwZ1Jqd3FUUS9LZnpHdHBrZTF3cXdzNGF1MEFiNHFQWQpLWHZNTFNQTFVwN2NmdWxXdmhtWlNlZ3I1QWRoTnc1S05pelBxQ0pUOFpyR3ZnSHlwWHlpRnZ2QUg1WVJ0U3NjClp2bzlHSTJlMk1hWnlvOS9sdmIrTGJMRUpaS0VRY2txUmo0UDI2Z21BU3JaRVBTdHdjK3lxeTFTaEhMQTBqNm0KMVFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==" | base64 -d > /etc/apk/keys/sgerrand.rsa.pub
+                github_download "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" /tmp/glibc.apk
                 echo "=== Removing libc6-compat/gcompat before glibc install ==="
                 apk del libc6-compat gcompat 2>&1 || true
                 if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
@@ -420,8 +737,7 @@ spec:
                   ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
                   echo "=== Replacing opencode binary with glibc build ==="
                   cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
-                  if curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
-                    -o /tmp/opencode-glibc.tar.gz && \
+                  if github_download "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" /tmp/opencode-glibc.tar.gz && \
                     tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
                     chmod +x /usr/local/bin/opencode
                   else
@@ -598,6 +914,8 @@ spec:
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
 
+              olares_run_omo
+
               echo "=== Snapshotting filesystem to $PKG ==="
               rm -rf "$PKG"
               mkdir -p "$PKG" "$PKG/etc" "$PKG/tmp"
@@ -613,7 +931,9 @@ spec:
               cp -a /etc/apk "$PKG/etc/apk"    || SNAP_OK=false
               cp -a /etc/ssl "$PKG/etc/ssl"     || SNAP_OK=false
               mkdir -p "$PKG/lib64"
-              [ -d /lib64 ] && cp -a /lib64/* "$PKG/lib64/" 2>/dev/null || true
+              if [ -d /lib64 ]; then
+                cp -a /lib64/* "$PKG/lib64/" || echo "=== WARNING: lib64 snapshot copy failed ==="
+              fi
 
               if [ "$SNAP_OK" != "true" ]; then
                 echo "=== FATAL: snapshot copy failed (disk full?), cleaning up ==="
@@ -628,6 +948,8 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
           resources:
             requests:
               cpu: 100m
@@ -640,7 +962,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
           command:
             - sh
             - "-c"
@@ -677,11 +999,11 @@ spec:
               value: /usr/glibc-compat/lib
           resources:
             limits:
-              cpu: "2"
-              memory: 2Gi
+              cpu: "4"
+              memory: 4Gi
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: 200m
+              memory: 1Gi
           ports:
             - containerPort: 3000
               protocol: TCP
@@ -720,6 +1042,8 @@ spec:
           image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
           ports:
             - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
               protocol: TCP
           env:
             - name: OPENRESTY_CONF_FILE
@@ -762,7 +1086,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
           securityContext:
             runAsUser: 0
           command:
@@ -777,6 +1101,17 @@ spec:
               touch "$UPKGS"
 
               rm -f /lib/apk/db/lock 2>/dev/null || true
+
+              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+              _wpid=$!
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+              _gpid=$!
+              if ! wait "$_wpid" 2>/dev/null; then
+                echo "=== pkg-manager: switching to China mirrors ==="
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
+              kill "$_gpid" 2>/dev/null || true
+              wait "$_gpid" 2>/dev/null || true
 
               echo "=== APK DB check ==="
               echo "installed: $(wc -l < /lib/apk/db/installed 2>/dev/null || echo 'NOT FOUND')"
