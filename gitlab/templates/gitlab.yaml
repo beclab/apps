@@ -3825,7 +3825,9 @@ spec:
         livenessProbe:
           exec:
             command: ["/bin/bash", "/configmaps/check-live", "3"]
-          initialDelaySeconds: 60
+          # Faster cold-start: avoid a fixed 60s "dead air" before probes begin.
+          # Tradeoff: slightly higher chance of transient probe failures during startup.
+          initialDelaySeconds: 15
           timeoutSeconds: 4
           periodSeconds: 60
           successThreshold: 1
@@ -3833,27 +3835,27 @@ spec:
         readinessProbe:
           exec:
             command: ["/usr/bin/pgrep","gitlab.*runner"]
-          initialDelaySeconds: 60
+          initialDelaySeconds: 5
           timeoutSeconds: 4
-          periodSeconds: 60
+          periodSeconds: 10
           successThreshold: 1
-          failureThreshold: 3
+          failureThreshold: 6
         ports:
-        - name: "metrics"
-          containerPort: 9252
+          - name: "metrics"
+            containerPort: 9252
         volumeMounts:
-        - name: projected-secrets
-          mountPath: /secrets
-        - name: etc-gitlab-runner
-          mountPath: /home/gitlab-runner/.gitlab-runner
-        - name: configmaps
-          mountPath: /configmaps
+          - name: projected-secrets
+            mountPath: /secrets
+          - name: etc-gitlab-runner
+            mountPath: /home/gitlab-runner/.gitlab-runner
+          - name: configmaps
+            mountPath: /configmaps
         resources:
           requests:
-            cpu: 10m
+            cpu: 50m
             memory: 50Mi
           limits:
-            cpu: 100m
+            cpu: 200m
             memory: 256Mi
       volumes:
       - name: runner-secrets
@@ -4712,7 +4714,7 @@ spec:
             readOnly: false
           resources:
             requests:
-              cpu: 50m
+              cpu: 100m
         - name: dependencies
           image: "beclab/gitlab-org-build-cng-gitlab-sidekiq-ce:v18.10.1"                    
           securityContext:
@@ -4730,7 +4732,8 @@ spec:
             - name: CONFIG_DIRECTORY
               value: '/srv/gitlab/config'
             - name: SIDEKIQ_CONCURRENCY
-              value: "20"
+              # Lower cold-start cost during install; increase later if you need higher throughput.
+              value: "10"
             - name: SIDEKIQ_TIMEOUT
               value: "25"
             - name: ENABLE_BOOTSNAP
@@ -4761,7 +4764,8 @@ spec:
             readOnly: true
           resources:
             requests:
-              cpu: 50m      
+              # wait-for-deps can execute non-trivial checks; give it more CPU than the default 50m/100m.
+              cpu: 500m      
       containers:
         
         - name: sidekiq
@@ -4781,7 +4785,8 @@ spec:
             - name: CONFIG_DIRECTORY
               value: '/srv/gitlab/config'
             - name: SIDEKIQ_CONCURRENCY
-              value: "20"
+              # Lower cold-start cost during install; increase later if you need higher throughput.
+              value: "10"
             - name: GITLAB_SIDEKIQ_MAX_REPLICAS
               value: "10"
             - name: SIDEKIQ_TIMEOUT
@@ -4864,7 +4869,8 @@ spec:
                 command: ["/bin/bash", "-c", "pkill -f 'sidekiq'"]
           resources:
             requests:
-              cpu: 50m
+              # Ruby cold-start benefits from a higher guaranteed CPU slice during install/boot.
+              cpu: 250m
               memory: 1000Mi
             limits:
               cpu: 500m
@@ -5467,7 +5473,7 @@ spec:
             readOnly: false
           resources:
             requests:
-              cpu: 50m
+              cpu: 100m
         - name: dependencies
           image: beclab/gitlab-org-build-cng-gitlab-webservice-ce:v18.10.1                    
           securityContext:
@@ -5512,7 +5518,8 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: 50m      
+              # wait-for-deps can execute non-trivial checks; give it more CPU than the default 50m/100m.
+              cpu: 500m      
       containers:
         
         - name: webservice
@@ -5546,15 +5553,16 @@ spec:
             - name: ENABLE_BOOTSNAP
               value: "1"
             - name: WORKER_PROCESSES
-              value: "2"
+              # Faster first boot / lower memory during cold start; scale up after install if needed.
+              value: "1"
             - name: WORKER_TIMEOUT
               value: "60"
             - name: INTERNAL_PORT
               value: "8080"
             - name: PUMA_THREADS_MIN
-              value: "4"
+              value: "2"
             - name: PUMA_THREADS_MAX
-              value: "4"
+              value: "2"
             - name: PUMA_WORKER_MAX_MEMORY
               value: ""
             - name: DISABLE_PUMA_WORKER_KILLER
@@ -5629,10 +5637,10 @@ spec:
                 command: ["/bin/bash", "-c", "pkill -SIGINT -o ruby"]
           resources:
             requests:
-              cpu: 300m
+              cpu: 500m
               memory: 2.5G
             limits:
-              cpu: 1000m
+              cpu: 2000m
               memory: 5G
         - name: gitlab-workhorse
           image: "beclab/gitlab-org-build-cng-gitlab-workhorse-ce:v18.10.1"          
@@ -6762,11 +6770,12 @@ spec:
                   exec pg_isready -U "gitlab" -d "dbname=gitlabhq_production" -h 127.0.0.1 -p 5432
           resources:
             limits:
-              cpu: 500m
-              memory: 512Mi
+              # Faster DDL during first boot (db-migrate) by reducing CPU throttling on Postgres.
+              cpu: 2000m
+              memory: 3Gi
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 750m
+              memory: 1Gi
           volumeMounts:
             - name: custom-init-scripts
               mountPath: /docker-entrypoint-initdb.d/
@@ -7261,8 +7270,12 @@ spec:
               readOnly: true
           resources:
             requests:
-              cpu: 250m
-              memory: 200Mi
+              # Speed up first-time schema initialization (db-migrate) which often gates webservice/sidekiq wait-for-deps.
+              cpu: "1"
+              memory: 1536Mi
+            limits:
+              cpu: "2"
+              memory: 3Gi
       volumes:
       
       
