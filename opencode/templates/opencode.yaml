@@ -28,7 +28,7 @@ spec:
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
@@ -58,129 +58,83 @@ spec:
               printf '%s\n' \
                 '---' \
                 'name: web-preview' \
-                'description: "MUST load before running ANY server, creating ANY web page, building ANY project, or showing ANY preview URL. Covers Vite, React, Next.js, Vue, Flask, FastAPI, Go, Rust, static sites. Also load when user says run, start, serve, preview, demo, test, open, launch, deploy, build, create site, create app, create page, show me, make a website."' \
+                'description: "Framework-specific dev-server configs (Vite / Next.js / FastAPI / Flask / static / Go / Express), HMR setup, and a troubleshooting table for previewing web pages in Olares. The baseline 5-step launch flow is authoritative; this skill only fills in per-framework details."' \
                 '---' \
                 '' \
-                '## How to preview' \
+                '## Scope' \
                 '' \
-                'This environment has a built-in reverse-proxy.' \
-                'Dev servers inside the container are reachable at `/__preview/<port>/` on the same domain the user is already on.' \
+                'The mandatory 5-step launch flow is in the system baseline (always in your context).' \
+                'This skill provides framework config snippets, optional HMR setup, and a troubleshooting table.' \
+                'Do NOT re-derive the launch flow here; follow the baseline and use this document for details only.' \
                 '' \
-                '## Starting dev servers — MANDATORY pattern' \
+                '## Framework configs' \
                 '' \
-                'EVERY dev server or web service MUST be started with `nohup ... &` so it keeps running after the command returns.' \
-                'EVERY dev server MUST bind to `0.0.0.0` (not localhost, not 127.0.0.1).' \
-                'EVERY dev server MUST set its base/public path to `/__preview/<port>/`.' \
-                '' \
-                'General pattern:' \
-                '' \
-                '```' \
-                'nohup <command> --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/dev-server.log 2>&1 &' \
-                '```' \
-                '' \
-                'After starting, ALWAYS verify the server is running:' \
-                '' \
-                '```' \
-                'sleep 2 && ss -tlnp | grep <PORT>' \
-                '```' \
-                '' \
-                '## Choosing a port' \
-                '' \
-                'BEFORE starting any server, check if the port is free:' \
-                '```' \
-                'ss -tlnp | grep <PORT>' \
-                '```' \
-                'If the port is in use, pick a different one (e.g. 4000, 4001, 8080, 8081, 9000...).' \
-                'NEVER blindly reuse a hardcoded port from examples below — always pick a free port.' \
-                '' \
-                '## Vite (React / Vue / Svelte / vanilla)' \
-                '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'If the project uses npm scripts:' \
-                '' \
-                '```' \
-                'nohup npm run dev -- --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'When scaffolding a NEW Vite project, also set base in vite.config:' \
+                '### Vite (vite.config.js / vite.config.ts)' \
                 '' \
                 '```js' \
-                'export default defineConfig({ base: "/__preview/<PORT>/" })' \
+                'export default defineConfig({' \
+                '  base: "/__preview/<PORT>/",' \
+                '  server: {' \
+                '    host: "0.0.0.0",' \
+                '    port: <PORT>,' \
+                '    // Optional: HMR over the TLS reverse proxy' \
+                '    hmr: { protocol: "wss", clientPort: 443 },' \
+                '  },' \
+                '})' \
                 '```' \
                 '' \
-                '## Next.js' \
-                '' \
-                'Set basePath in next.config.js BEFORE starting:' \
+                '### Next.js (next.config.js / next.config.mjs)' \
                 '' \
                 '```js' \
-                'module.exports = { basePath: "/__preview/<PORT>" }' \
+                'module.exports = {' \
+                '  basePath: "/__preview/<PORT>",' \
+                '  assetPrefix: "/__preview/<PORT>",' \
+                '}' \
                 '```' \
                 '' \
-                'Then:' \
+                'Launch: `setsid nohup npx next dev -H 0.0.0.0 -p <PORT> >/tmp/preview-<PORT>.log 2>&1 </dev/null &`' \
+                '' \
+                '### FastAPI / uvicorn' \
                 '' \
                 '```' \
-                'nohup npx next dev -H 0.0.0.0 -p <PORT> > /tmp/next.log 2>&1 &' \
+                'setsid nohup uvicorn app:app --host 0.0.0.0 --port <PORT> --root-path /__preview/<PORT> >/tmp/preview-<PORT>.log 2>&1 </dev/null &' \
                 '```' \
                 '' \
-                '## Python (Flask / FastAPI / http.server)' \
+                '### Flask' \
+                '' \
+                'Flask does not accept a base-path flag. Use a WSGI prefix middleware (werkzeug DispatcherMiddleware) or set APPLICATION_ROOT in config. Bind `--host 0.0.0.0 --port <PORT>` and launch with the same `setsid nohup` template.' \
+                '' \
+                '### Static HTML (no bundler)' \
+                '' \
+                'Vite is pre-installed globally; no project setup or config file needed.' \
                 '' \
                 '```' \
-                'nohup python3 -m http.server <PORT> --bind 0.0.0.0 > /tmp/pyserver.log 2>&1 &' \
+                'setsid nohup vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ >/tmp/preview-<PORT>.log 2>&1 </dev/null &' \
                 '```' \
                 '' \
-                'For Flask:' \
+                '### Go / Express / custom servers' \
+                '' \
+                'Bind to `0.0.0.0:<PORT>` and route everything under `/__preview/<PORT>/`. Examples:' \
+                '- Express: `app.use("/__preview/<PORT>", router)`' \
+                '- Go: `http.Handle("/__preview/<PORT>/", http.StripPrefix("/__preview/<PORT>", handler))`' \
+                '' \
+                '## Troubleshooting' \
+                '' \
+                '| Symptom | Likely cause | Fix |' \
+                '|---|---|---|' \
+                '| White page; console 404 on /src/main.js or /assets/* | base path not configured | Set `base` (Vite) / `basePath` (Next) to `/__preview/<PORT>/` |' \
+                '| HMR / WebSocket errors in browser console | dev-server WS unaware of the TLS proxy | Vite: add `server.hmr: { protocol: "wss", clientPort: 443 }` |' \
+                '| EADDRINUSE at launch | port chosen per baseline is still in use | `fuser -k <PORT>/tcp 2>/dev/null` then re-launch (follow baseline step 1 to decide whether to reuse or pick another port) |' \
+                '| Server dies immediately after launch | shell hangup; missing `setsid` or stdio not closed | Use the exact launch template from the baseline |' \
+                '| 502 / connection refused via the preview URL | server bound to 127.0.0.1 only | Add `--host 0.0.0.0` (or framework equivalent) |' \
+                '' \
+                '## Verifying a running server' \
                 '' \
                 '```' \
-                'nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                'tail -f /tmp/preview-<PORT>.log          # startup output' \
+                'ss -tlnp | grep ":<PORT>\b"              # confirm the listener' \
+                'curl -sI http://127.0.0.1:<PORT>/        # local-side sanity check' \
                 '```' \
-                '' \
-                '## Static HTML (no bundler)' \
-                '' \
-                'Use Vite to serve:' \
-                '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                '## Go / Rust / Other custom servers' \
-                '' \
-                'Make sure the server listens on 0.0.0.0:<PORT>, then:' \
-                '' \
-                '```' \
-                'nohup ./myserver --addr 0.0.0.0:<PORT> > /tmp/server.log 2>&1 &' \
-                '```' \
-                '' \
-                '## Stopping a dev server' \
-                '' \
-                '```' \
-                'kill $(lsof -t -i:<PORT>)   # or: pkill -f "vite"' \
-                '```' \
-                '' \
-                '## Preview URL' \
-                '' \
-                'NEVER use localhost or 127.0.0.1 in any URL you show to the user.' \
-                'The domain for this OpenCode instance is: '"$OC_DOMAIN" \
-                '' \
-                'Tell the user:' \
-                '`https://'"$OC_DOMAIN"'/__preview/<port>/`' \
-                '' \
-                'Example (if your dev server runs on port 4000):' \
-                '`https://'"$OC_DOMAIN"'/__preview/4000/`' \
-                '' \
-                '## CRITICAL rules (MUST follow every time)' \
-                '' \
-                '1. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
-                '2. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
-                '3. ALWAYS set `--base /__preview/<port>/` (Vite) or `basePath` (Next.js) — without this, assets 404' \
-                '4. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
-                '5. NEVER output `http://localhost` in any URL — the user accesses remotely' \
-                '6. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
-                '7. If a port is busy, pick another port and adjust `--base` accordingly' \
-                '8. When the user asks to "create a web page", "build a website", or "start a project":' \
-                '   automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
                 > "$SKILL"
               ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
               printf '%s\n' \
@@ -316,17 +270,36 @@ spec:
                 ')' \
                 'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3}' \
                 '' \
+                '# --- BASELINE content (free to edit; independent from LEGACY cleanup below) ---' \
+                'BASELINE_WEB = (' \
+                '    f"URL pattern: https://{DOMAIN}/__preview/<PORT>/\n"' \
+                '    "Never show localhost or pod IPs; always use the URL above.\n\n"' \
+                '    "When the user asks to preview a running web page, follow EXACTLY:\n\n"' \
+                '    "1. Pick <PORT>:\n"' \
+                '    "     - If the user specified a port, use it exactly; free it first: fuser -k <PORT>/tcp 2>/dev/null || true\n"' \
+                '    "     - Else if you already started a preview in this session for the same project, reuse that port; free it with the same fuser -k command.\n"' \
+                '    "     - Else pick the first free port starting from 5173 (Vite) or 3000 (others).\n"' \
+                '    "2. Ensure deps: [ -d node_modules ] || npm install --silent\n"' \
+                '    "3. Configure the framework for base path /__preview/<PORT>/:\n"' \
+                '    "     Vite (vite.config.*): base: \"/__preview/<PORT>/\"\n"' \
+                '    "     Next.js (next.config.*): basePath: \"/__preview/<PORT>\"; start with -H 0.0.0.0 -p <PORT>\n"' \
+                '    "4. Launch exactly:\n"' \
+                '    "     setsid nohup <START_CMD> >/tmp/preview-<PORT>.log 2>&1 </dev/null &   # verify: tail -f /tmp/preview-<PORT>.log\n\n"' \
+                '    "NEVER use a plain HTTP server (python3 -m http.server, npx serve, npx http-server, busybox httpd, etc.) - they cannot serve files under /__preview/<PORT>/.\n"' \
+                '    "For plain HTML (no framework), use vite as the server (pre-installed, no vite.config.js needed):\n"' \
+                '    "     setsid nohup vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ >/tmp/preview-<PORT>.log 2>&1 </dev/null &"' \
+                ')' \
+                'BASELINE_PKG = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                '' \
                 'BASELINE_MD.parent.mkdir(parents=True, exist_ok=True)' \
                 'md = (' \
-                '    "<!-- olares-managed: baseline-instructions v1 (rewritten each pod start) -->\\n\\n"' \
-                '    "# Olares environment baseline\\n\\n"' \
-                '    "## Web preview and dev servers\\n\\n"' \
-                '    + LEGACY_S1' \
-                '    + "\\n\\n## System packages\\n\\n"' \
-                '    + LEGACY_S2' \
-                '    + "\\n\\n## URLs and domain\\n\\n"' \
-                '    + LEGACY_S3' \
-                '    + "\\n"' \
+                '    "<!-- olares-managed: baseline-instructions v2 (rewritten each pod start) -->\n\n"' \
+                '    "# Olares environment baseline\n\n"' \
+                '    "## Web preview and dev servers\n\n"' \
+                '    + BASELINE_WEB' \
+                '    + "\n\n## System packages\n\n"' \
+                '    + BASELINE_PKG' \
+                '    + "\n"' \
                 ')' \
                 'BASELINE_MD.write_text(md, encoding="utf-8")' \
                 '' \
@@ -537,18 +510,27 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.4.4"
+              OC_VER="1.14.19"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
-              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
+              GLOBAL_NPM_TOOLS="vite"
+              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS} npm=${GLOBAL_NPM_TOOLS}"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
+
+              OMO_VER="{{ index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}"
+              case "$OMO_VER" in
+                ""|latest|next|beta|*[!0-9.]*)
+                  echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 3.17.4 ==="
+                  OMO_VER="3.17.4"
+                  ;;
+              esac
 
               setup_mirrors() {
                 USE_CN_MIRROR=false
@@ -602,6 +584,18 @@ spec:
                     return 1
                   fi
                 done
+                # vite may land in /usr/bin or /usr/local/bin depending on npm's default prefix
+                VITE_FOUND=false
+                for p in usr/bin/vite usr/local/bin/vite; do
+                  if [ -e "$PKG/$p" ] || [ -L "$PKG/$p" ]; then
+                    VITE_FOUND=true
+                    break
+                  fi
+                done
+                if [ "$VITE_FOUND" != "true" ]; then
+                  echo "=== Cache invalid: vite missing (checked usr/bin and usr/local/bin) ==="
+                  return 1
+                fi
                 if [ "$(uname -m)" = "x86_64" ]; then
                   if [ ! -e "$PKG/lib64/ld-linux-x86-64.so.2" ] && [ ! -L "$PKG/lib64/ld-linux-x86-64.so.2" ]; then
                     echo "=== Cache invalid: glibc linker (ld-linux-x86-64.so.2) missing ==="
@@ -662,34 +656,40 @@ spec:
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
               olares_run_omo() {
-                if ! command -v npm >/dev/null 2>&1; then
-                  if [ -x "$PKG/usr/bin/npm" ] && [ -x "$PKG/usr/bin/node" ]; then
-                    echo "=== OMO: using npm/node from snapshot ==="
-                    export PATH="$PKG/usr/bin:$PKG/usr/local/bin:$PKG/bin:$PATH"
-                    export LD_LIBRARY_PATH="$PKG/usr/lib:$PKG/lib:${LD_LIBRARY_PATH:-}"
-                  else
-                    echo "=== OMO: npm not available, installing nodejs+npm ==="
-                    apk add --no-cache nodejs npm 2>&1 || echo "=== WARNING: apk add nodejs npm failed ==="
-                  fi
-                fi
-                if [ "$USE_CN_MIRROR" = "true" ]; then
-                  npm config set registry https://registry.npmmirror.com 2>/dev/null || true
-                fi
                 OMO_FOUND=false
                 for d in /usr/lib/node_modules/oh-my-opencode \
                          /usr/local/lib/node_modules/oh-my-opencode \
                          "$PKG/usr/lib/node_modules/oh-my-opencode" \
                          "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
-                  if [ -d "$d" ] && [ -f "$d/package.json" ]; then
+                  [ -d "$d" ] && [ -f "$d/package.json" ] || continue
+                  INST_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
+                  if [ "$INST_VER" = "$OMO_VER" ]; then
                     OMO_FOUND=true
                     break
+                  else
+                    echo "=== OMO: $d at '${INST_VER:-unknown}', want '$OMO_VER', will reinstall ==="
                   fi
                 done
                 if [ "$OMO_FOUND" = "true" ]; then
-                  echo "=== OMO: oh-my-opencode already installed, skipping ==="
+                  echo "=== OMO: oh-my-opencode@${OMO_VER} already installed, skipping ==="
                 else
-                  echo "=== Installing oh-my-opencode npm package ==="
-                  npm install -g --ignore-scripts oh-my-opencode 2>&1 || echo "=== WARNING: npm install oh-my-opencode failed ==="
+                  echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_VER} ==="
+                  apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
+                  if [ "$USE_CN_MIRROR" = "true" ]; then
+                    npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+                  fi
+                  if npm install -g --ignore-scripts "oh-my-opencode@${OMO_VER}" 2>&1; then
+                    OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
+                    if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
+                      SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
+                      mkdir -p "$(dirname "$SNAP_TARGET")"
+                      rm -rf "$SNAP_TARGET"
+                      cp -a "$OMO_DIR" "$SNAP_TARGET" 2>/dev/null && \
+                        echo "=== OMO: patched into snapshot for next restart ==="
+                    fi
+                  else
+                    echo "=== WARNING: npm install oh-my-opencode@${OMO_VER} failed ==="
+                  fi
                 fi
                 chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
               }
@@ -914,7 +914,15 @@ spec:
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
 
-              olares_run_omo
+              echo "=== Installing global npm tools: $GLOBAL_NPM_TOOLS ==="
+              if [ "$USE_CN_MIRROR" = "true" ]; then
+                npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+              fi
+              if npm install -g --ignore-scripts $GLOBAL_NPM_TOOLS 2>&1; then
+                echo "=== Global npm tools installed at: $(command -v vite 2>/dev/null || echo 'vite NOT in PATH') ==="
+              else
+                echo "=== WARNING: npm install -g $GLOBAL_NPM_TOOLS failed ==="
+              fi
 
               echo "=== Snapshotting filesystem to $PKG ==="
               rm -rf "$PKG"
@@ -945,6 +953,12 @@ spec:
               echo "=== Snapshot complete ($(du -sh "$PKG" | cut -f1)) ==="
 
               restore_user_packages
+
+              # Install OMO (plugin layer) AFTER base snapshot is sealed.
+              # olares_run_omo saves OMO into $PKG via its own cp, independent of
+              # the base snapshot's "cp -a /usr" sweep. Keeps plugin/base decoupled
+              # and makes OMO persistence robust even if base-layer sweeps miss it.
+              olares_run_omo
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
@@ -962,7 +976,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
@@ -1086,7 +1100,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.4.4"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           securityContext:
             runAsUser: 0
           command:
