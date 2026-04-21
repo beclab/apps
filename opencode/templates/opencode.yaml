@@ -1,5 +1,7 @@
 {{- $opencodeDomainENV := split  ","  .Values.domain.opencode -}}
 {{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
 
 ---
 apiVersion: apps/v1
@@ -22,15 +24,30 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: opencode
+        bytetrade.io/terminal: opencode
     spec:
       initContainers:
         - name: init-setup
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
             - |
+              set -e
+              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+              _wpid=$!
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+              _gpid=$!
+              if ! wait "$_wpid" 2>/dev/null; then
+                echo "=== init-setup: Alpine CDN unreachable or too slow, switching to China mirrors ==="
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
+              kill "$_gpid" 2>/dev/null || true
+              wait "$_gpid" 2>/dev/null || true
+              apk add --no-cache python3
               OC_DOMAIN="{{ $opencodeDomain }}"
+              export OLARES_OC_DOMAIN="$OC_DOMAIN"
+              export OLARES_ENABLE_OMO="{{ if $enableOMO }}1{{ else }}0{{ end }}"
               mkdir -p /home/opencode/workspace \
                        /home/opencode/.opencode \
                        /home/opencode/.config/opencode \
@@ -41,129 +58,83 @@ spec:
               printf '%s\n' \
                 '---' \
                 'name: web-preview' \
-                'description: "MUST load before running ANY server, creating ANY web page, building ANY project, or showing ANY preview URL. Covers Vite, React, Next.js, Vue, Flask, FastAPI, Go, Rust, static sites. Also load when user says run, start, serve, preview, demo, test, open, launch, deploy, build, create site, create app, create page, show me, make a website."' \
+                'description: "Framework-specific dev-server configs (Vite / Next.js / FastAPI / Flask / static / Go / Express), HMR setup, and a troubleshooting table for previewing web pages in Olares. The baseline 5-step launch flow is authoritative; this skill only fills in per-framework details."' \
                 '---' \
                 '' \
-                '## How to preview' \
+                '## Scope' \
                 '' \
-                'This environment has a built-in reverse-proxy.' \
-                'Dev servers inside the container are reachable at `/__preview/<port>/` on the same domain the user is already on.' \
+                'The mandatory 5-step launch flow is in the system baseline (always in your context).' \
+                'This skill provides framework config snippets, optional HMR setup, and a troubleshooting table.' \
+                'Do NOT re-derive the launch flow here; follow the baseline and use this document for details only.' \
                 '' \
-                '## Starting dev servers — MANDATORY pattern' \
+                '## Framework configs' \
                 '' \
-                'EVERY dev server or web service MUST be started with `nohup ... &` so it keeps running after the command returns.' \
-                'EVERY dev server MUST bind to `0.0.0.0` (not localhost, not 127.0.0.1).' \
-                'EVERY dev server MUST set its base/public path to `/__preview/<port>/`.' \
-                '' \
-                'General pattern:' \
-                '' \
-                '```' \
-                'nohup <command> --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/dev-server.log 2>&1 &' \
-                '```' \
-                '' \
-                'After starting, ALWAYS verify the server is running:' \
-                '' \
-                '```' \
-                'sleep 2 && ss -tlnp | grep <PORT>' \
-                '```' \
-                '' \
-                '## Choosing a port' \
-                '' \
-                'BEFORE starting any server, check if the port is free:' \
-                '```' \
-                'ss -tlnp | grep <PORT>' \
-                '```' \
-                'If the port is in use, pick a different one (e.g. 4000, 4001, 8080, 8081, 9000...).' \
-                'NEVER blindly reuse a hardcoded port from examples below — always pick a free port.' \
-                '' \
-                '## Vite (React / Vue / Svelte / vanilla)' \
-                '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'If the project uses npm scripts:' \
-                '' \
-                '```' \
-                'nohup npm run dev -- --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                'When scaffolding a NEW Vite project, also set base in vite.config:' \
+                '### Vite (vite.config.js / vite.config.ts)' \
                 '' \
                 '```js' \
-                'export default defineConfig({ base: "/__preview/<PORT>/" })' \
+                'export default defineConfig({' \
+                '  base: "/__preview/<PORT>/",' \
+                '  server: {' \
+                '    host: "0.0.0.0",' \
+                '    port: <PORT>,' \
+                '    // Optional: HMR over the TLS reverse proxy' \
+                '    hmr: { protocol: "wss", clientPort: 443 },' \
+                '  },' \
+                '})' \
                 '```' \
                 '' \
-                '## Next.js' \
-                '' \
-                'Set basePath in next.config.js BEFORE starting:' \
+                '### Next.js (next.config.js / next.config.mjs)' \
                 '' \
                 '```js' \
-                'module.exports = { basePath: "/__preview/<PORT>" }' \
+                'module.exports = {' \
+                '  basePath: "/__preview/<PORT>",' \
+                '  assetPrefix: "/__preview/<PORT>",' \
+                '}' \
                 '```' \
                 '' \
-                'Then:' \
+                'Launch: `setsid nohup npx next dev -H 0.0.0.0 -p <PORT> >/tmp/preview-<PORT>.log 2>&1 </dev/null &`' \
+                '' \
+                '### FastAPI / uvicorn' \
                 '' \
                 '```' \
-                'nohup npx next dev -H 0.0.0.0 -p <PORT> > /tmp/next.log 2>&1 &' \
+                'setsid nohup uvicorn app:app --host 0.0.0.0 --port <PORT> --root-path /__preview/<PORT> >/tmp/preview-<PORT>.log 2>&1 </dev/null &' \
                 '```' \
                 '' \
-                '## Python (Flask / FastAPI / http.server)' \
+                '### Flask' \
+                '' \
+                'Flask does not accept a base-path flag. Use a WSGI prefix middleware (werkzeug DispatcherMiddleware) or set APPLICATION_ROOT in config. Bind `--host 0.0.0.0 --port <PORT>` and launch with the same `setsid nohup` template.' \
+                '' \
+                '### Static HTML (no bundler)' \
+                '' \
+                'Vite is pre-installed globally; no project setup or config file needed.' \
                 '' \
                 '```' \
-                'nohup python3 -m http.server <PORT> --bind 0.0.0.0 > /tmp/pyserver.log 2>&1 &' \
+                'setsid nohup vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ >/tmp/preview-<PORT>.log 2>&1 </dev/null &' \
                 '```' \
                 '' \
-                'For Flask:' \
+                '### Go / Express / custom servers' \
+                '' \
+                'Bind to `0.0.0.0:<PORT>` and route everything under `/__preview/<PORT>/`. Examples:' \
+                '- Express: `app.use("/__preview/<PORT>", router)`' \
+                '- Go: `http.Handle("/__preview/<PORT>/", http.StripPrefix("/__preview/<PORT>", handler))`' \
+                '' \
+                '## Troubleshooting' \
+                '' \
+                '| Symptom | Likely cause | Fix |' \
+                '|---|---|---|' \
+                '| White page; console 404 on /src/main.js or /assets/* | base path not configured | Set `base` (Vite) / `basePath` (Next) to `/__preview/<PORT>/` |' \
+                '| HMR / WebSocket errors in browser console | dev-server WS unaware of the TLS proxy | Vite: add `server.hmr: { protocol: "wss", clientPort: 443 }` |' \
+                '| EADDRINUSE at launch | port chosen per baseline is still in use | `fuser -k <PORT>/tcp 2>/dev/null` then re-launch (follow baseline step 1 to decide whether to reuse or pick another port) |' \
+                '| Server dies immediately after launch | shell hangup; missing `setsid` or stdio not closed | Use the exact launch template from the baseline |' \
+                '| 502 / connection refused via the preview URL | server bound to 127.0.0.1 only | Add `--host 0.0.0.0` (or framework equivalent) |' \
+                '' \
+                '## Verifying a running server' \
                 '' \
                 '```' \
-                'nohup flask run --host 0.0.0.0 --port <PORT> > /tmp/flask.log 2>&1 &' \
+                'tail -f /tmp/preview-<PORT>.log          # startup output' \
+                'ss -tlnp | grep ":<PORT>\b"              # confirm the listener' \
+                'curl -sI http://127.0.0.1:<PORT>/        # local-side sanity check' \
                 '```' \
-                '' \
-                '## Static HTML (no bundler)' \
-                '' \
-                'Use Vite to serve:' \
-                '' \
-                '```' \
-                'nohup npx vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ > /tmp/vite.log 2>&1 &' \
-                '```' \
-                '' \
-                '## Go / Rust / Other custom servers' \
-                '' \
-                'Make sure the server listens on 0.0.0.0:<PORT>, then:' \
-                '' \
-                '```' \
-                'nohup ./myserver --addr 0.0.0.0:<PORT> > /tmp/server.log 2>&1 &' \
-                '```' \
-                '' \
-                '## Stopping a dev server' \
-                '' \
-                '```' \
-                'kill $(lsof -t -i:<PORT>)   # or: pkill -f "vite"' \
-                '```' \
-                '' \
-                '## Preview URL' \
-                '' \
-                'NEVER use localhost or 127.0.0.1 in any URL you show to the user.' \
-                'The domain for this OpenCode instance is: '"$OC_DOMAIN" \
-                '' \
-                'Tell the user:' \
-                '`https://'"$OC_DOMAIN"'/__preview/<port>/`' \
-                '' \
-                'Example (if your dev server runs on port 4000):' \
-                '`https://'"$OC_DOMAIN"'/__preview/4000/`' \
-                '' \
-                '## CRITICAL rules (MUST follow every time)' \
-                '' \
-                '1. ALWAYS use `nohup ... > /tmp/<name>.log 2>&1 &` to start servers — NEVER run in foreground' \
-                '2. ALWAYS bind to `0.0.0.0` — NEVER localhost or 127.0.0.1' \
-                '3. ALWAYS set `--base /__preview/<port>/` (Vite) or `basePath` (Next.js) — without this, assets 404' \
-                '4. ALWAYS verify the server is running after starting: `sleep 2 && ss -tlnp | grep <PORT>`' \
-                '5. NEVER output `http://localhost` in any URL — the user accesses remotely' \
-                '6. The trailing slash after the port number is REQUIRED: `/__preview/<PORT>/` not `/__preview/<PORT>`' \
-                '7. If a port is busy, pick another port and adjust `--base` accordingly' \
-                '8. When the user asks to "create a web page", "build a website", or "start a project":' \
-                '   automatically create the project, install deps, start the dev server with nohup, and show the preview URL' \
                 > "$SKILL"
               ADMIN="/home/opencode/.config/opencode/skills/system-admin/SKILL.md"
               printf '%s\n' \
@@ -270,14 +241,258 @@ spec:
                 '- NEVER modify ~/.profile or ~/.bashrc for PATH — packages install to standard paths' \
                 '- When unsure about the package name, use `pkg-install --search <keyword>` first' \
                 > "$ADMIN"
+              echo "=== Olares global baseline / plugin + workspace legacy instructions cleanup (python) ==="
+              OLARES_PY=/tmp/olares-init-opencode-cfg.py
               printf '%s\n' \
-                '{' \
-                '  "instructions": [' \
-                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. ALWAYS run /skill load system-admin BEFORE installing ANY system package.",' \
-                '    "NEVER use sudo, apt, or apk directly. Use pkg-install instead.",' \
-                '    "NEVER show localhost URLs. The domain is '"$OC_DOMAIN"'. Dev server preview URL format: https://'"$OC_DOMAIN"'/__preview/<port>/"' \
-                '  ]' \
-                '}' > /home/opencode/workspace/opencode.json
+                'import json' \
+                'import os' \
+                'from pathlib import Path' \
+                '' \
+                'DOMAIN = os.environ.get("OLARES_OC_DOMAIN", "")' \
+                'ENABLE_OMO = os.environ.get("OLARES_ENABLE_OMO", "0") == "1"' \
+                'BASELINE_MD = Path("/home/opencode/.config/opencode/olares-baseline-instructions.md")' \
+                'GLOBAL_JSON = Path("/home/opencode/.config/opencode/opencode.json")' \
+                'WORKSPACE_JSON = Path("/home/opencode/workspace/opencode.json")' \
+                'OLARES_REF = "/home/opencode/.config/opencode/olares-baseline-instructions.md"' \
+                'PLUGIN_NPM = "oh-my-openagent"' \
+                'STALE_PLUGIN_NPM = "oh-my-opencode"' \
+                '' \
+                'LEGACY_S1 = (' \
+                '    "CRITICAL: You have special skills. ALWAYS run /skill load web-preview BEFORE any task involving "' \
+                '    "web, server, preview, run, start, serve, build, create, demo, test, launch, deploy, site, app, page, "' \
+                '    "website, frontend, backend, API, port, vite, react, next, vue, flask, go server, python server. "' \
+                '    "ALWAYS run /skill load system-admin BEFORE installing ANY system package."' \
+                ')' \
+                'LEGACY_S2 = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                'LEGACY_S3 = (' \
+                '    f"NEVER show localhost URLs. The domain is {DOMAIN}. "' \
+                '    f"Dev server preview URL format: https://{DOMAIN}/__preview/<port>/"' \
+                ')' \
+                'LEGACY = {LEGACY_S1, LEGACY_S2, LEGACY_S3}' \
+                '' \
+                '# --- BASELINE content (free to edit; independent from LEGACY cleanup below) ---' \
+                'BASELINE_WEB = (' \
+                '    f"URL pattern: https://{DOMAIN}/__preview/<PORT>/\n"' \
+                '    "Never show localhost or pod IPs; always use the URL above.\n\n"' \
+                '    "When the user asks to preview a running web page, follow EXACTLY:\n\n"' \
+                '    "1. Pick <PORT>:\n"' \
+                '    "     - If the user specified a port, use it exactly; free it first: fuser -k <PORT>/tcp 2>/dev/null || true\n"' \
+                '    "     - Else if you already started a preview in this session for the same project, reuse that port; free it with the same fuser -k command.\n"' \
+                '    "     - Else pick the first free port starting from 5173 (Vite) or 3000 (others).\n"' \
+                '    "2. Ensure deps: [ -d node_modules ] || npm install --silent\n"' \
+                '    "3. Configure the framework for base path /__preview/<PORT>/:\n"' \
+                '    "     Vite (vite.config.*): base: \"/__preview/<PORT>/\"\n"' \
+                '    "     Next.js (next.config.*): basePath: \"/__preview/<PORT>\"; start with -H 0.0.0.0 -p <PORT>\n"' \
+                '    "4. Launch exactly:\n"' \
+                '    "     setsid nohup <START_CMD> >/tmp/preview-<PORT>.log 2>&1 </dev/null &   # verify: tail -f /tmp/preview-<PORT>.log\n\n"' \
+                '    "NEVER use a plain HTTP server (python3 -m http.server, npx serve, npx http-server, busybox httpd, etc.) - they cannot serve files under /__preview/<PORT>/.\n"' \
+                '    "For plain HTML (no framework), use vite as the server (pre-installed, no vite.config.js needed):\n"' \
+                '    "     setsid nohup vite --host 0.0.0.0 --port <PORT> --base /__preview/<PORT>/ >/tmp/preview-<PORT>.log 2>&1 </dev/null &"' \
+                ')' \
+                'BASELINE_PKG = "NEVER use sudo, apt, or apk directly. Use pkg-install instead."' \
+                '' \
+                'BASELINE_MD.parent.mkdir(parents=True, exist_ok=True)' \
+                'md = (' \
+                '    "<!-- olares-managed: baseline-instructions v2 (rewritten each pod start) -->\n\n"' \
+                '    "# Olares environment baseline\n\n"' \
+                '    "## Web preview and dev servers\n\n"' \
+                '    + BASELINE_WEB' \
+                '    + "\n\n## System packages\n\n"' \
+                '    + BASELINE_PKG' \
+                '    + "\n"' \
+                ')' \
+                'BASELINE_MD.write_text(md, encoding="utf-8")' \
+                '' \
+                'cfg = {}' \
+                'if GLOBAL_JSON.is_file():' \
+                '    try:' \
+                '        cfg = json.loads(GLOBAL_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        cfg = {}' \
+                'instr = cfg.get("instructions")' \
+                'if not isinstance(instr, list):' \
+                '    instr = []' \
+                'if OLARES_REF not in instr:' \
+                '    instr = list(instr) + [OLARES_REF]' \
+                'cfg["instructions"] = instr' \
+                'cfg.setdefault("$schema", "https://opencode.ai/config.json")' \
+                'plugins = cfg.get("plugin")' \
+                'if not isinstance(plugins, list):' \
+                '    plugins = []' \
+                'plugins = [p for p in plugins if isinstance(p, str)]' \
+                'plugins = [p for p in plugins if p != STALE_PLUGIN_NPM]' \
+                'if ENABLE_OMO:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
+                '    plugins.append(PLUGIN_NPM)' \
+                'else:' \
+                '    plugins = [p for p in plugins if p != PLUGIN_NPM]' \
+                'if plugins:' \
+                '    cfg["plugin"] = plugins' \
+                'else:' \
+                '    cfg.pop("plugin", None)' \
+                'GLOBAL_JSON.parent.mkdir(parents=True, exist_ok=True)' \
+                'GLOBAL_JSON.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '' \
+                '' \
+                'if WORKSPACE_JSON.is_file():' \
+                '    try:' \
+                '        wcfg = json.loads(WORKSPACE_JSON.read_text(encoding="utf-8"))' \
+                '    except json.JSONDecodeError:' \
+                '        wcfg = None' \
+                '    if wcfg is not None:' \
+                '        winst = wcfg.get("instructions")' \
+                '        legacy_changed = False' \
+                '        if isinstance(winst, list):' \
+                '            new_inst = [x for x in winst if x not in LEGACY]' \
+                '            if new_inst != winst:' \
+                '                legacy_changed = True' \
+                '                if new_inst:' \
+                '                    wcfg["instructions"] = new_inst' \
+                '                else:' \
+                '                    wcfg.pop("instructions", None)' \
+                '        only_schema = isinstance(wcfg, dict) and set(wcfg.keys()) == {"$schema"}' \
+                '        if legacy_changed:' \
+                '            if not wcfg or only_schema:' \
+                '                WORKSPACE_JSON.unlink(missing_ok=True)' \
+                '            else:' \
+                '                WORKSPACE_JSON.write_text(json.dumps(wcfg, indent=2, ensure_ascii=False), encoding="utf-8")' \
+                '        elif only_schema:' \
+                '            WORKSPACE_JSON.unlink(missing_ok=True)' \
+                > "$OLARES_PY"
+              python3 "$OLARES_PY"
+              rm -f "$OLARES_PY"
+              OMO_AGENT_CFG="/home/opencode/.config/opencode/oh-my-openagent.json"
+              if [ ! -f "$OMO_AGENT_CFG" ]; then
+                echo "=== Writing default oh-my-openagent.json ==="
+                printf '%s\n' \
+                  '{' \
+                  '  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",' \
+                  '  "runtime_fallback": { "enabled": true, "max_fallback_attempts": 7 },' \
+                  '  "agents": {' \
+                  '    "sisyphus": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "hephaestus": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "oracle": { "model": "openai/gpt-5.4", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "explore": { "model": "anthropic/claude-haiku-4-5", "fallback_models": [' \
+                  '      { "model": "github-copilot/grok-code-fast-1" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "multimodal-looker": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "openai/gpt-5-nano" },' \
+                  '      { "model": "github-copilot/gpt-5-nano" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "prometheus": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "metis": { "model": "anthropic/claude-opus-4-6", "variant": "max", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "momus": { "model": "openai/gpt-5.4", "variant": "xhigh", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "xhigh" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "atlas": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "sisyphus-junior": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] }' \
+                  '  },' \
+                  '  "categories": {' \
+                  '    "visual-engineering": { "model": "google/gemini-3.1-pro-preview", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "ultrabrain": { "model": "openai/gpt-5.4", "variant": "xhigh", "fallback_models": [' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "deep": { "model": "openai/gpt-5.4", "variant": "medium", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4", "variant": "medium" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "google/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "artistry": { "model": "google/gemini-3.1-pro-preview", "variant": "high", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3.1-pro-preview", "variant": "high" },' \
+                  '      { "model": "anthropic/claude-opus-4-6", "variant": "max" },' \
+                  '      { "model": "github-copilot/claude-opus-4.6", "variant": "max" },' \
+                  '      { "model": "openai/gpt-5.4" },' \
+                  '      { "model": "github-copilot/gpt-5.4" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "quick": { "model": "openai/gpt-5.4-mini", "fallback_models": [' \
+                  '      { "model": "github-copilot/gpt-5.4-mini" },' \
+                  '      { "model": "anthropic/claude-haiku-4-5" },' \
+                  '      { "model": "github-copilot/claude-haiku-4.5" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/gpt-5-nano" }' \
+                  '    ] },' \
+                  '    "unspecified-low": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.3-codex", "variant": "medium" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "unspecified-high": { "model": "anthropic/claude-sonnet-4-6", "fallback_models": [' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "openai/gpt-5.3-codex", "variant": "medium" },' \
+                  '      { "model": "google/gemini-3-flash-preview" },' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] },' \
+                  '    "writing": { "model": "google/gemini-3-flash-preview", "fallback_models": [' \
+                  '      { "model": "github-copilot/gemini-3-flash-preview" },' \
+                  '      { "model": "anthropic/claude-sonnet-4-6" },' \
+                  '      { "model": "github-copilot/claude-sonnet-4.6" },' \
+                  '      { "model": "opencode/big-pickle" }' \
+                  '    ] }' \
+                  '  }' \
+                  '}' \
+                  > "$OMO_AGENT_CFG"
+              fi
               chown 1000:1000 /home/opencode /home/opencode/workspace
               find /home/opencode -mindepth 1 -maxdepth 1 ! -name '.pkg-root' \
                 -exec chown -R 1000:1000 {} +
@@ -295,18 +510,61 @@ spec:
             runAsUser: 0
 
         - name: init-packages
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
             - |
               PKG="/home/opencode/.pkg-root"
-              OC_VER="1.2.27"
+              OC_VER="1.14.19"
               GLIBC_VER="2.35-r1"
               BASE_PKGS="python3 py3-pip git curl wget bash openssh-client nodejs npm go rust cargo iproute2 zip unzip gzip bzip2 xz tar zstd"
-              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS}"
+              GLOBAL_NPM_TOOLS="vite"
+              FINGERPRINT="oc=${OC_VER} glibc=${GLIBC_VER} arch=$(uname -m) pkgs=${BASE_PKGS} npm=${GLOBAL_NPM_TOOLS}"
               PKG_HASH=$(printf '%s' "$FINGERPRINT" | sha256sum | cut -c1-16)
               MARKER="$PKG/.installed-${PKG_HASH}"
+
+              OMO_VER="{{ index $env "OPENCODE_OMO_VERSION" | default "3.17.4" }}"
+              case "$OMO_VER" in
+                ""|latest|next|beta|*[!0-9.]*)
+                  echo "=== WARNING: invalid OPENCODE_OMO_VERSION '$OMO_VER', falling back to 3.17.4 ==="
+                  OMO_VER="3.17.4"
+                  ;;
+              esac
+
+              setup_mirrors() {
+                USE_CN_MIRROR=false
+                wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+                _wpid=$!
+                ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+                _gpid=$!
+                if wait "$_wpid" 2>/dev/null; then
+                  echo "=== Network: Alpine CDN reachable ==="
+                else
+                  echo "=== Network: Alpine CDN unreachable or too slow, switching to China mirrors ==="
+                  USE_CN_MIRROR=true
+                  sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+                fi
+                kill "$_gpid" 2>/dev/null || true
+                wait "$_gpid" 2>/dev/null || true
+              }
+
+              github_download() {
+                local url="$1" output="$2"
+                if [ "$USE_CN_MIRROR" = "true" ]; then
+                  for proxy in https://ghproxy.net https://gh-proxy.com https://ghproxy.homeboyc.cn https://ghfast.top; do
+                    echo "=== Trying proxy $proxy for: $url ==="
+                    if curl -fsSL --connect-timeout 15 --speed-limit 10000 --speed-time 30 \
+                         "${proxy}/$url" -o "$output"; then
+                      return 0
+                    fi
+                    rm -f "$output"
+                    echo "=== Proxy $proxy failed ==="
+                  done
+                  echo "=== All proxies failed, falling back to direct ==="
+                fi
+                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --speed-limit 10000 --speed-time 30 "$url" -o "$output"
+              }
 
               verify_cache() {
                 [ ! -d "$PKG/bin" ] || [ ! -d "$PKG/usr" ] || [ ! -d "$PKG/lib" ] && return 1
@@ -326,6 +584,24 @@ spec:
                     return 1
                   fi
                 done
+                # vite may land in /usr/bin or /usr/local/bin depending on npm's default prefix
+                VITE_FOUND=false
+                for p in usr/bin/vite usr/local/bin/vite; do
+                  if [ -e "$PKG/$p" ] || [ -L "$PKG/$p" ]; then
+                    VITE_FOUND=true
+                    break
+                  fi
+                done
+                if [ "$VITE_FOUND" != "true" ]; then
+                  echo "=== Cache invalid: vite missing (checked usr/bin and usr/local/bin) ==="
+                  return 1
+                fi
+                if [ "$(uname -m)" = "x86_64" ]; then
+                  if [ ! -e "$PKG/lib64/ld-linux-x86-64.so.2" ] && [ ! -L "$PKG/lib64/ld-linux-x86-64.so.2" ]; then
+                    echo "=== Cache invalid: glibc linker (ld-linux-x86-64.so.2) missing ==="
+                    return 1
+                  fi
+                fi
                 return 0
               }
 
@@ -379,9 +655,51 @@ spec:
               cp /home/opencode/.profile /home/opencode/.bashrc
               chown 1000:1000 /home/opencode/.profile /home/opencode/.bashrc
 
+              olares_run_omo() {
+                OMO_FOUND=false
+                for d in /usr/lib/node_modules/oh-my-opencode \
+                         /usr/local/lib/node_modules/oh-my-opencode \
+                         "$PKG/usr/lib/node_modules/oh-my-opencode" \
+                         "$PKG/usr/local/lib/node_modules/oh-my-opencode"; do
+                  [ -d "$d" ] && [ -f "$d/package.json" ] || continue
+                  INST_VER=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$d/package.json" | head -n1)
+                  if [ "$INST_VER" = "$OMO_VER" ]; then
+                    OMO_FOUND=true
+                    break
+                  else
+                    echo "=== OMO: $d at '${INST_VER:-unknown}', want '$OMO_VER', will reinstall ==="
+                  fi
+                done
+                if [ "$OMO_FOUND" = "true" ]; then
+                  echo "=== OMO: oh-my-opencode@${OMO_VER} already installed, skipping ==="
+                else
+                  echo "=== OMO: installing nodejs+npm and oh-my-opencode@${OMO_VER} ==="
+                  apk add --no-cache nodejs npm 2>&1 || { echo "=== WARNING: apk add nodejs npm failed ==="; return; }
+                  if [ "$USE_CN_MIRROR" = "true" ]; then
+                    npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+                  fi
+                  if npm install -g --ignore-scripts "oh-my-opencode@${OMO_VER}" 2>&1; then
+                    OMO_DIR=$(npm root -g 2>/dev/null)/oh-my-opencode
+                    if [ -d "$OMO_DIR" ] && [ -d "$PKG/usr" ]; then
+                      SNAP_TARGET="$PKG$(npm root -g 2>/dev/null)/oh-my-opencode"
+                      mkdir -p "$(dirname "$SNAP_TARGET")"
+                      rm -rf "$SNAP_TARGET"
+                      cp -a "$OMO_DIR" "$SNAP_TARGET" 2>/dev/null && \
+                        echo "=== OMO: patched into snapshot for next restart ==="
+                    fi
+                  else
+                    echo "=== WARNING: npm install oh-my-opencode@${OMO_VER} failed ==="
+                  fi
+                fi
+                chown -R 1000:1000 /home/opencode/.local 2>/dev/null || true
+              }
+
+              setup_mirrors
+
               if [ -f "$MARKER" ] && verify_cache; then
                 echo "=== Package snapshot cached (${PKG_HASH}) ==="
                 restore_user_packages
+                olares_run_omo
                 exit 0
               fi
               rm -f "$MARKER"
@@ -409,10 +727,9 @@ spec:
               ARCH=$(uname -m)
               if [ "$ARCH" = "x86_64" ]; then
                 echo "=== Installing glibc (x86_64) ==="
-                curl -sL https://alpine-pkgs.sgerrand.com/sgerrand.rsa.pub \
-                  -o /etc/apk/keys/sgerrand.rsa.pub
-                curl -sL "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" \
-                  -o /tmp/glibc.apk
+                echo "=== Embedding sgerrand RSA public key ==="
+                echo "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlJQklqQU5CZ2txaGtpRzl3MEJBUUVGQUFPQ0FROEFNSUlCQ2dLQ0FRRUFwWjJ1MUtKS1V1L2ZXNEEyNXk5bQp5NzBBR0VhL0ozV2k1aWJOVkdObjFnVDFyMFZmZ2VXZDBwVXliUzRVbWNIZGlOenhKUGdvV1FoVjJTU1cxSll1CnRPcUtaRjVRU042WDkzN1BUVXBOQmpVdkx0VFExdmUxZnAzOXVmL2xFWFBwRnBPUEw4OExLbkRCZ2JoN3drQ3AKbTJLekxWR0NoZjgzTVMwU2hMNkc5RVFJQVV4TG05OVZwZ1Jqd3FUUS9LZnpHdHBrZTF3cXdzNGF1MEFiNHFQWQpLWHZNTFNQTFVwN2NmdWxXdmhtWlNlZ3I1QWRoTnc1S05pelBxQ0pUOFpyR3ZnSHlwWHlpRnZ2QUg1WVJ0U3NjClp2bzlHSTJlMk1hWnlvOS9sdmIrTGJMRUpaS0VRY2txUmo0UDI2Z21BU3JaRVBTdHdjK3lxeTFTaEhMQTBqNm0KMVFJREFRQUIKLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0tCg==" | base64 -d > /etc/apk/keys/sgerrand.rsa.pub
+                github_download "https://github.com/sgerrand/alpine-pkg-glibc/releases/download/${GLIBC_VER}/glibc-${GLIBC_VER}.apk" /tmp/glibc.apk
                 echo "=== Removing libc6-compat/gcompat before glibc install ==="
                 apk del libc6-compat gcompat 2>&1 || true
                 if apk add --no-cache --force-overwrite /tmp/glibc.apk libstdc++ 2>&1; then
@@ -420,8 +737,7 @@ spec:
                   ln -sf /usr/glibc-compat/lib/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
                   echo "=== Replacing opencode binary with glibc build ==="
                   cp /usr/local/bin/opencode /tmp/opencode.musl.bak 2>/dev/null || true
-                  if curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" \
-                    -o /tmp/opencode-glibc.tar.gz && \
+                  if github_download "https://github.com/anomalyco/opencode/releases/download/v${OC_VER}/opencode-linux-x64.tar.gz" /tmp/opencode-glibc.tar.gz && \
                     tar -xzf /tmp/opencode-glibc.tar.gz -C /usr/local/bin; then
                     chmod +x /usr/local/bin/opencode
                   else
@@ -598,6 +914,16 @@ spec:
               EOFWRAPPER
               chmod +x /usr/local/bin/pkg-install
 
+              echo "=== Installing global npm tools: $GLOBAL_NPM_TOOLS ==="
+              if [ "$USE_CN_MIRROR" = "true" ]; then
+                npm config set registry https://registry.npmmirror.com 2>/dev/null || true
+              fi
+              if npm install -g --ignore-scripts $GLOBAL_NPM_TOOLS 2>&1; then
+                echo "=== Global npm tools installed at: $(command -v vite 2>/dev/null || echo 'vite NOT in PATH') ==="
+              else
+                echo "=== WARNING: npm install -g $GLOBAL_NPM_TOOLS failed ==="
+              fi
+
               echo "=== Snapshotting filesystem to $PKG ==="
               rm -rf "$PKG"
               mkdir -p "$PKG" "$PKG/etc" "$PKG/tmp"
@@ -613,7 +939,9 @@ spec:
               cp -a /etc/apk "$PKG/etc/apk"    || SNAP_OK=false
               cp -a /etc/ssl "$PKG/etc/ssl"     || SNAP_OK=false
               mkdir -p "$PKG/lib64"
-              [ -d /lib64 ] && cp -a /lib64/* "$PKG/lib64/" 2>/dev/null || true
+              if [ -d /lib64 ]; then
+                cp -a /lib64/* "$PKG/lib64/" || echo "=== WARNING: lib64 snapshot copy failed ==="
+              fi
 
               if [ "$SNAP_OK" != "true" ]; then
                 echo "=== FATAL: snapshot copy failed (disk full?), cleaning up ==="
@@ -625,9 +953,17 @@ spec:
               echo "=== Snapshot complete ($(du -sh "$PKG" | cut -f1)) ==="
 
               restore_user_packages
+
+              # Install OMO (plugin layer) AFTER base snapshot is sealed.
+              # olares_run_omo saves OMO into $PKG via its own cp, independent of
+              # the base snapshot's "cp -a /usr" sweep. Keeps plugin/base decoupled
+              # and makes OMO persistence robust even if base-layer sweeps miss it.
+              olares_run_omo
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
           resources:
             requests:
               cpu: 100m
@@ -640,7 +976,7 @@ spec:
 
       containers:
         - name: opencode
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           command:
             - sh
             - "-c"
@@ -677,11 +1013,11 @@ spec:
               value: /usr/glibc-compat/lib
           resources:
             limits:
-              cpu: "2"
-              memory: 2Gi
+              cpu: "4"
+              memory: 4Gi
             requests:
-              cpu: 100m
-              memory: 512Mi
+              cpu: 200m
+              memory: 1Gi
           ports:
             - containerPort: 3000
               protocol: TCP
@@ -720,6 +1056,8 @@ spec:
           image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
           ports:
             - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
               protocol: TCP
           env:
             - name: OPENRESTY_CONF_FILE
@@ -762,7 +1100,7 @@ spec:
               mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
               subPath: nginx.conf
         - name: pkg-manager
-          image: "docker.io/beclab/anomalyco-opencode:1.2.27"
+          image: "docker.io/beclab/anomalyco-opencode:1.14.19"
           securityContext:
             runAsUser: 0
           command:
@@ -777,6 +1115,17 @@ spec:
               touch "$UPKGS"
 
               rm -f /lib/apk/db/lock 2>/dev/null || true
+
+              wget -q -O /dev/null https://dl-cdn.alpinelinux.org/alpine/v3.23/main/x86_64/APKINDEX.tar.gz 2>/dev/null &
+              _wpid=$!
+              ( sleep 5 && kill "$_wpid" 2>/dev/null ) &
+              _gpid=$!
+              if ! wait "$_wpid" 2>/dev/null; then
+                echo "=== pkg-manager: switching to China mirrors ==="
+                sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
+              fi
+              kill "$_gpid" 2>/dev/null || true
+              wait "$_gpid" 2>/dev/null || true
 
               echo "=== APK DB check ==="
               echo "installed: $(wc -l < /lib/apk/db/installed 2>/dev/null || echo 'NOT FOUND')"
