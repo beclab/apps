@@ -9,9 +9,11 @@ spec:
     ## 应用概览 ##
     真人级语音生成 & 声音克隆
 
-    FishAudio-S1 是由 Fish Audio 开发的富有表现力的文本转语音 (TTS) 和语音克隆模型，旨在生成听起来自然、真实且情感丰富的语音——不机械、不平淡，也不局限于录音室风格的朗读。
+    内置模型权重：[fishaudio/s2-pro](https://huggingface.co/fishaudio/s2-pro) —— Fish Audio 表现力 TTS / 声音克隆系列的最新 Pro 级版本。
 
-    FishAudio-S1 专注于人类真实的说话方式：带有情感、变化、停顿和意图。
+    FishAudio-S2 Pro 是由 Fish Audio 开发的富有表现力的文本转语音 (TTS) 和语音克隆模型，旨在生成听起来自然、真实且情感丰富的语音——不机械、不平淡，也不局限于录音室风格的朗读。
+
+    FishAudio-S2 Pro 专注于人类真实的说话方式：带有情感、变化、停顿和意图。
 
     功能特性
     - 零样本和少样本 TTS： 输入 10 到 30 秒的语音样本即可生成高质量的 TTS 输出
@@ -22,3 +24,9 @@ spec:
     - WebUI 推理： 具有易于使用的基于 Gradio 的网络界面，兼容 Chrome、Firefox、Edge 和其他浏览器。
     - GUI 推理： 提供与 API 服务器无缝配合的 PyQt6 图形界面。支持 Linux、Windows 和 macOS。
     - 部署友好： 轻松设置推理服务器，原生支持 Linux、Windows（MacOS 即将推出），最小化速度损失。
+
+  upgradeDescription: |
+    - feat(模型)：内置权重切换为 fishaudio/s2-pro（表现力 TTS / 声音克隆系列的最新 Pro 级版本）。
+    - chore(运行时)：fishspeech 主容器的启动命令会先轮询 s2-pro 下载 Job 写出的 `.s2-pro.done` 标记，再启动 WebUI，避免 WebUI 在权重就绪前先行启动。
+    - fix(cuda)：启动时绕过 `uv run`，直接用 `/app/.venv/bin/python` 执行 `run_webui.py`（并设置 `UV_NO_SYNC=1` / `UV_FROZEN=1`）。此前镜像里的 `start_webui.sh` 走 `uv run`，会在运行时隐式执行一次不带 `--extra cu129` 的 `uv sync`，把 torch 静默降级为 cu126，Blackwell（sm_120）就会报 "no kernel image is available for execution on the device"。现在镜像里构建好的 cu129 venv 会被原样保留。
+    - fix(docker)：将 CUDA 12.6 → 12.9 以支持 Blackwell（sm_120）(#1225)。在 Blackwell 架构 GPU（RTX 5000 系列，sm_120）上，CUDA 12.6 / cu126 会报 "no kernel image available" 错误，升级至 CUDA 12.9 / cu129 即可修复。compose.base.yml 中已将 CUDA_VER 与 UV_EXTRA 暴露为可覆盖的构建参数，旧驱动用户可通过 CUDA_VER=12.6.0 UV_EXTRA=cu126 回滚至原行为。
