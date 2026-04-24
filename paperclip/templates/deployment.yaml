@@ -1,0 +1,197 @@
+{{- $paperclipDomainENV := split  ","  .Values.domain.paperclip -}}
+{{- $paperclipDomain := index $paperclipDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: paperclip
+  name: paperclip
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: paperclip
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: paperclip
+    spec:
+      initContainers:
+      - name: init-permissions
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /paperclip/instances/default/logs
+            mkdir -p /paperclip/instances/default/data/storage
+            mkdir -p /paperclip/instances/default/secrets
+            chown -R 1000:1000 /paperclip
+        resources: {}
+        volumeMounts:
+          - name: data
+            mountPath: /paperclip
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext:
+          runAsUser: 0
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      containers:
+        - name: paperclip
+          image: beclab/paperclip:v1.0.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3100
+          command:
+            - /bin/sh
+            - '-c'
+            - |
+              set -e
+
+              export HOME="/paperclip"
+              export NPM_CONFIG_PREFIX="/paperclip/.npm-global"
+              export PATH="/paperclip/.local/bin:/paperclip/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+              mkdir -p "/paperclip/.local/bin" "/paperclip/.npm-global/bin" \
+                "/paperclip/.config" "/paperclip/.local/share" "/paperclip/.cache"
+
+              echo "Ensuring local adapter CLIs are available..."
+              CONFIG_PATH="/paperclip/instances/default/config.json"
+              if [ ! -f "$CONFIG_PATH" ]; then
+                echo "No config found. Creating authenticated config..."
+                mkdir -p "$(dirname "$CONFIG_PATH")"
+                export CONFIG_PATH AUTH_BASE_URL="https://{{ $paperclipDomain }}" DATABASE_URL
+                node -e "const fs=require('fs');const crypto=require('crypto');const path=process.env.CONFIG_PATH;const baseUrl=process.env.AUTH_BASE_URL;const dbUrl=process.env.DATABASE_URL||'';const now=new Date().toISOString();let host='';try{host=new URL(baseUrl).hostname}catch{};const metaKey='$'+'meta';const cfg={database:{mode:dbUrl?'postgres':'embedded-postgres',embeddedPostgresDataDir:'~/.paperclip/instances/default/db',embeddedPostgresPort:54329,backup:{enabled:true,intervalMinutes:60,retentionDays:30,dir:'/paperclip/instances/default/data/backups'}},logging:{mode:'file',logDir:'/paperclip/instances/default/logs'},server:{deploymentMode:'authenticated',exposure:'private',host:'0.0.0.0',port:3100,allowedHostnames:host?[host]:[],serveUi:true},telemetry:{enabled:true},auth:{baseUrlMode:'explicit',publicBaseUrl:baseUrl,disableSignUp:false},storage:{provider:'local_disk',localDisk:{baseDir:'/paperclip/instances/default/data/storage'},s3:{bucket:'paperclip',region:'us-east-1',prefix:'',forcePathStyle:false}},secrets:{provider:'local_encrypted',strictMode:false,localEncrypted:{keyFilePath:'/paperclip/instances/default/secrets/master.key'}}};if(dbUrl){cfg.database.connectionString=dbUrl;}cfg[metaKey]={version:1,updatedAt:now,source:'configure'};fs.writeFileSync(path,JSON.stringify(cfg,null,2)+'\n');const envPath='/paperclip/instances/default/.env';if(!fs.existsSync(envPath)){fs.writeFileSync(envPath,'PAPERCLIP_AGENT_JWT_SECRET='+crypto.randomBytes(32).toString('hex')+'\n');}console.log('Created config:',path);"
+              fi
+              echo "Manual setup:"
+              echo "pnpm paperclipai auth bootstrap-ceo --base-url \"https://{{ $paperclipDomain }}\""
+
+              node --import ./server/node_modules/tsx/dist/loader.mjs server/dist/index.js &
+              SERVER_PID=$!
+
+              echo "Waiting for server to be ready..."
+              for i in $(seq 1 60); do
+                if curl -sf http://127.0.0.1:3100 > /dev/null 2>&1; then
+                  echo "Server is ready."
+                  break
+                fi
+                sleep 2
+              done
+
+              wait $SERVER_PID
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "3100"
+            - name: SERVE_UI
+              value: "true"
+            - name: PAPERCLIP_HOME
+              value: "/paperclip"
+            - name: HOME
+              value: "/paperclip"
+            - name: XDG_CONFIG_HOME
+              value: "/paperclip/.config"
+            - name: XDG_DATA_HOME
+              value: "/paperclip/.local/share"
+            - name: XDG_CACHE_HOME
+              value: "/paperclip/.cache"
+            - name: PAPERCLIP_DEPLOYMENT_MODE
+              value: "authenticated"
+            - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
+              value: "private"
+            - name: PAPERCLIP_PUBLIC_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: BETTER_AUTH_SECRET
+              value: "{{ .Release.Name }}-{{ .Release.Namespace }}-paperclip-secret"
+            - name: BETTER_AUTH_BASE_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.paperclip }}"
+            - name: ANTHROPIC_API_KEY
+              value: '{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}'
+            - name: OPENAI_API_KEY
+              value: '{{ .Values.olaresEnv.OPENAI_API_KEY }}'
+            - name: GEMINI_API_KEY
+              value: '{{ .Values.olaresEnv.GEMINI_API_KEY }}'
+            - name: CURSOR_API_KEY
+              value: '{{ .Values.olaresEnv.CURSOR_API_KEY }}'
+            - name: PAPERCLIP_API_URL
+              value: "http://localhost:3100"
+            - name: PAPERCLIP_INTERNAL_URL
+              value: "http://localhost:3100"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - mountPath: /paperclip
+              name: data
+          readinessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+            {{- end }}
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paperclip
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paperclip
+spec:
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+  selector:
+    io.kompose.service: paperclip
