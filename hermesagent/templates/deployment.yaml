@@ -1,0 +1,253 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: hermesagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hermesagent
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hermesagent
+        bytetrade.io/terminal: hermesagent
+    spec:
+      {{- $oe := .Values.olaresEnv | default dict }}
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      initContainers:
+        - name: init-hermes-data
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /opt/hermes-home /home/node /home/node/.local/bin /home/node/.npm-global/bin
+              chown -R 1000:1000 /opt/hermes-home /home/node || true
+              chmod 700 /opt/hermes-home || true
+          volumeMounts:
+            - name: hermes-home
+              mountPath: /opt/hermes-home
+            - name: node-home
+              mountPath: /home/node
+      containers:
+        - name: workspace
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: hermesagent-config
+          command: ["workspace"]
+          resources:
+            requests:
+              cpu: {{ .Values.resources.workspace.requests.cpu | quote }}
+              memory: {{ .Values.resources.workspace.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.workspace.limits.cpu | quote }}
+              memory: {{ .Values.resources.workspace.limits.memory | quote }}
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-lc", "test -x /opt/hermes/.venv/bin/hermes"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-lc", "test -d \"$HERMES_HOME\" -a -d \"$HOME\""]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: hermes-home
+              mountPath: /opt/hermes-home
+            - name: node-home
+              mountPath: /home/node
+            {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+            - name: olares-home-dir
+              mountPath: /home/userdata/home
+            {{- end }}
+            {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+            - name: olares-external-dir
+              mountPath: /home/userdata/external
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+        - name: dashboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: hermesagent-config
+          command: ["dashboard"]
+          ports:
+            - name: dashboard
+              containerPort: {{ .Values.service.dashboardPort }}
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ .Values.resources.dashboard.requests.cpu | quote }}
+              memory: {{ .Values.resources.dashboard.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.dashboard.limits.cpu | quote }}
+              memory: {{ .Values.resources.dashboard.limits.memory | quote }}
+          startupProbe:
+            tcpSocket:
+              port: dashboard
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/status
+              port: dashboard
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/status
+              port: dashboard
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: hermes-home
+              mountPath: /opt/hermes-home
+            - name: node-home
+              mountPath: /home/node
+            {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+            - name: olares-home-dir
+              mountPath: /home/userdata/home
+            {{- end }}
+            {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+            - name: olares-external-dir
+              mountPath: /home/userdata/external
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: hermesagent-config
+          command: ["gateway"]
+          ports:
+            - name: gateway
+              containerPort: {{ .Values.service.gatewayPort }}
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ .Values.resources.gateway.requests.cpu | quote }}
+              memory: {{ .Values.resources.gateway.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.gateway.limits.cpu | quote }}
+              memory: {{ .Values.resources.gateway.limits.memory | quote }}
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -lc
+                - |
+                  python - <<'PY'
+                  import sys
+                  from pathlib import Path
+                  p = Path("/opt/hermes-home/logs")
+                  sys.exit(0 if p.exists() else 1)
+                  PY
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 18
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -lc
+                - |
+                  python - <<'PY'
+                  import sys
+                  from gateway.status import get_running_pid, read_runtime_status
+                  runtime = read_runtime_status() or {}
+                  state = runtime.get("gateway_state")
+                  pid = get_running_pid()
+                  sys.exit(0 if pid is not None or state in ("stopped", "startup_failed", "starting", "running") else 1)
+                  PY
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: hermes-home
+              mountPath: /opt/hermes-home
+            - name: node-home
+              mountPath: /home/node
+            {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+            - name: olares-home-dir
+              mountPath: /home/userdata/home
+            {{- end }}
+            {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+            - name: olares-external-dir
+              mountPath: /home/userdata/external
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+      volumes:
+        - name: hermes-home
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/config"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/config"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/config"
+            {{- end }}
+            type: DirectoryOrCreate
+        - name: node-home
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/node"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/node"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/node"
+            {{- end }}
+            type: DirectoryOrCreate
+        {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
