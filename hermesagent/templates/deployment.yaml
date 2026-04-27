@@ -43,9 +43,33 @@ spec:
               mountPath: /opt/hermes-home
             - name: node-home
               mountPath: /home/node
+        - name: init-hermes-config
+          image: "ghcr.io/progress44/hermes-agent-olares:1.1.0"
+          imagePullPolicy: Always
+          envFrom:
+            - configMapRef:
+                name: hermesagent-config
+          command:
+            - /bin/sh
+            - -lc
+            - |
+              set -eu
+              [ -f "$HERMES_HOME/.env" ] || cp /opt/hermes/.env.example "$HERMES_HOME/.env"
+              [ -f "$HERMES_HOME/config.yaml" ] || cp /opt/hermes/cli-config.yaml.example "$HERMES_HOME/config.yaml"
+              [ -f "$HERMES_HOME/SOUL.md" ] || cp /opt/hermes/docker/SOUL.md "$HERMES_HOME/SOUL.md"
+              "$HERMES_PYTHON" /opt/hermes/tools/skills_sync.py >/dev/null 2>&1 || true
+          volumeMounts:
+            - name: hermes-home
+              mountPath: /opt/hermes-home
+            - name: node-home
+              mountPath: /home/node
+          securityContext:
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
       containers:
         - name: workspace
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "ghcr.io/progress44/hermes-agent-olares:1.1.0"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:
             - configMapRef:
@@ -90,7 +114,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
         - name: dashboard
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "ghcr.io/progress44/hermes-agent-olares:1.1.0"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:
             - configMapRef:
@@ -146,7 +170,7 @@ spec:
             runAsNonRoot: true
             runAsUser: 1000
         - name: gateway
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "ghcr.io/progress44/hermes-agent-olares:1.1.0"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           envFrom:
             - configMapRef:
@@ -178,24 +202,6 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 18
-          readinessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -lc
-                - |
-                  python - <<'PY'
-                  import sys
-                  from gateway.status import get_running_pid, read_runtime_status
-                  runtime = read_runtime_status() or {}
-                  state = runtime.get("gateway_state")
-                  pid = get_running_pid()
-                  sys.exit(0 if pid is not None or state in ("stopped", "startup_failed", "starting", "running") else 1)
-                  PY
-            initialDelaySeconds: 10
-            periodSeconds: 20
-            timeoutSeconds: 5
-            failureThreshold: 5
           volumeMounts:
             - name: hermes-home
               mountPath: /opt/hermes-home
