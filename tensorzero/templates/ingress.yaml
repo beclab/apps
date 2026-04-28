@@ -1,0 +1,331 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      # Support large file uploads (eval datasets, optimization batches, etc.)
+      client_max_body_size 100m;
+
+      # Server-level timeouts. LLM gateway traffic dominates this proxy and is
+      # intrinsically long-tail: large context + slow providers + reasoning
+      # models can run multi-minute. Server-default values are floors that
+      # individual locations can override.
+      proxy_connect_timeout                          30s;
+      proxy_send_timeout                             300s;
+      proxy_read_timeout                             300s;
+      proxy_set_header      host                      $host;
+      proxy_set_header      x-forwarded-host          $http_host;
+      proxy_set_header      x-real-ip                 $remote_addr;
+      proxy_set_header      x-forwarded-for           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+
+      proxy_set_header upgrade $http_upgrade;
+      proxy_set_header connection "upgrade";
+
+      # === Routing policy ===
+      #
+      # Two backends share this single public entrance:
+      #   - gateway (port 3000): the actual TensorZero gateway — LLM inference,
+      #     feedback, datasets, optimization, evaluations, MCP, ops, ...
+      #   - ui (port 4000): the TensorZero Web UI (react-router SSR app)
+      #
+      # Every gateway-owned path is listed as its own `location` below; the
+      # default `location /` falls through to the UI. We derived the gateway
+      # route set from `crates/gateway/src/routes/external.rs` in the upstream
+      # repo and cross-checked it against the UI's `app/routes.ts` to make
+      # sure no prefix is ambiguous:
+      #
+      #   - UI uses   /datasets/, /optimization/supervised-fine-tuning/,
+      #               /workflow-evaluations/ (hyphen), /autopilot/, /playground,
+      #               /observability/, /api-keys, /config, /api/, /health
+      #   - Gateway uses  /inference, /batch_inference, /feedback, /openai/,
+      #                   /v1/ (inferences | datasets | optimization/gepa),
+      #                   /experimental_optimization*, /workflow_evaluation_run
+      #                   (underscore), /metrics, /status, /mcp
+      #
+      # `/internal/*` is intentionally NOT exposed: the UI calls it from its
+      # SSR loaders in-cluster (http://tensorzero:3000), there is no reason to
+      # let external clients reach it.
+      #
+      # `/health` collides by name: gateway returns JSON, UI serves a React
+      # page. We keep `/health` on the UI (human-facing); anything that needs
+      # gateway's JSON healthcheck externally should hit `/status` instead.
+      #
+      # Streaming endpoints (SSE): /inference, /openai/v1/chat/completions,
+      # /mcp. For those we MUST disable proxy_buffering / proxy_cache and turn
+      # chunked_transfer_encoding on, otherwise nginx accumulates the whole
+      # response, clients see a hang followed by a single blob, and truly long
+      # generations can be dropped. For non-streaming JSON endpoints we leave
+      # buffering at its default.
+
+      # -- TensorZero-native inference (SSE when stream=true) -----------------
+      location /inference {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          # Critical for SSE/streaming - disable response buffering
+          proxy_buffering off;
+          proxy_cache off;
+          chunked_transfer_encoding on;
+
+          client_max_body_size 100m;
+      }
+
+      # -- OpenAI-compatible surface (chat/completions + embeddings) ----------
+      # This is what 3rd-party tools (OpenCode, AgentZero, OpenNotebook, any
+      # LangChain/LlamaIndex-based app, etc.) hit when they want TensorZero to
+      # act as a drop-in LLM proxy. Clients set their OpenAI `base_url` to
+      # https://<entrance>/openai/v1 and TensorZero transparently routes to
+      # whichever provider is configured behind the model alias.
+      # chat/completions streams exactly like /inference; embeddings returns a
+      # single JSON body but the extra syscalls from `proxy_buffering off` are
+      # negligible compared to the benefit of never accidentally blocking SSE.
+      location /openai/ {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          proxy_buffering off;
+          proxy_cache off;
+          chunked_transfer_encoding on;
+
+          client_max_body_size 100m;
+      }
+
+      # -- MCP (Streamable HTTP, long-lived SSE) ------------------------------
+      # MCP HTTP transport keeps a persistent SSE channel for server->client
+      # push; read/send timeouts are set to 1h to let a single client working
+      # session live its natural life. proxy_next_upstream is deliberately NOT
+      # set: retrying a half-open MCP stream would replay tool calls.
+      #
+      # DNS-rebinding protection bypass: gateway delegates /mcp to rmcp's
+      # StreamableHttpService, whose default allowed_hosts is hardcoded to
+      # ["localhost","127.0.0.1","::1"] and rejects every other Host with 421.
+      # TensorZero 2026.4.0 does not yet expose this allowlist as config, so
+      # we rewrite Host at the proxy boundary. Drop the override if a future
+      # gateway release lets us pass an allowed_hosts list via config/env.
+      location /mcp {
+          proxy_pass http://tensorzero:3000;
+          proxy_set_header Host 127.0.0.1;
+
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+
+          proxy_buffering off;
+          proxy_cache off;
+          chunked_transfer_encoding on;
+
+          client_max_body_size 100m;
+      }
+
+      # -- Batch inference (POST to launch, GET to poll) ----------------------
+      # Batch payloads can be significantly larger than a single prompt, so we
+      # raise client_max_body_size here; polling is cheap but we still allow
+      # the same 5min window for the launch call to finish persisting.
+      location /batch_inference {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          client_max_body_size 1000m;
+      }
+
+      # -- Workflow evaluation runs (long-running) ----------------------------
+      # Evaluation runs block until the whole run completes. 30min is chosen
+      # as a practical ceiling that covers typical model grading jobs without
+      # letting genuinely stuck requests pile up forever.
+      location /workflow_evaluation_run {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 1800s;
+          proxy_send_timeout 1800s;
+
+          client_max_body_size 100m;
+      }
+
+      # -- Experimental optimization workflows --------------------------------
+      # The launch endpoint returns a handle quickly; the poll endpoint may
+      # wait on a running job. Workflows themselves run asynchronously in the
+      # gateway, so 5min read is more than enough for the HTTP round-trip.
+      location /experimental_optimization {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          client_max_body_size 100m;
+      }
+
+      # -- Stable /v1/ API family ---------------------------------------------
+      # Covers:
+      #   /v1/inferences/{list_inferences,get_inferences}  (ClickHouse queries)
+      #   /v1/datasets/{name}/...                          (datapoint CRUD)
+      #   /v1/optimization/gepa[/{task_id}]                (GEPA launch/poll)
+      # All non-streaming JSON; 5min is generous for the heaviest of these
+      # (list_inferences over a very large ClickHouse window).
+      location /v1/ {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          client_max_body_size 100m;
+      }
+
+      # -- Feedback ingestion (small POST, fast) ------------------------------
+      location /feedback {
+          proxy_pass http://tensorzero:3000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 30s;
+          proxy_read_timeout 60s;
+          proxy_send_timeout 60s;
+
+          client_max_body_size 10m;
+      }
+
+      # -- Prometheus metrics scrape ------------------------------------------
+      location /metrics {
+          proxy_pass http://tensorzero:3000;
+          proxy_connect_timeout 10s;
+          proxy_read_timeout 30s;
+          proxy_send_timeout 30s;
+      }
+
+      # -- Gateway status JSON (external healthcheck) -------------------------
+      # `/health` is intentionally NOT proxied here (see header comment); if
+      # you need gateway's JSON healthcheck from the outside, hit /status.
+      location /status {
+          proxy_pass http://tensorzero:3000;
+          proxy_connect_timeout 5s;
+          proxy_read_timeout 10s;
+          proxy_send_timeout 10s;
+      }
+
+      # -- Web UI (default fallback) ------------------------------------------
+      # Mostly normal HTML/JSON traffic, but observability pages can issue
+      # slow ClickHouse-backed queries via SSR loaders; bumping read/send to
+      # 300s prevents 504s on those screens. UI itself doesn't stream, so we
+      # leave proxy_buffering at its default (on) here.
+      location / {
+          proxy_pass http://tensorzero:4000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+
+          client_max_body_size 100m;
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: tensorzeroingress
+  name: tensorzeroingress
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: tensorzeroingress
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: tensorzeroingress
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+      containers:
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            limits:
+              cpu: 300m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tensorzeroingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: tensorzeroingress
+  ports:
+    - name: tensorzeroingress
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
