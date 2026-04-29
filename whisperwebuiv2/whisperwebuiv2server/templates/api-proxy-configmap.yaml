@@ -1,0 +1,170 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: whisper-openai-api
+  namespace: {{ .Release.Namespace }}
+data:
+  whisper_openai_api.py: |
+    #!/usr/bin/env python3
+    """
+    OpenAI-compatible API wrapper for Whisper-WebUI.
+    Runs a lightweight FastAPI server (port 8000) alongside the Gradio UI (port 7860),
+    sharing the same faster-whisper model instance. Zero extra GPU memory.
+    """
+
+    # PyTorch 2.6+ flipped torch.load default to weights_only=True, which breaks
+    # pyannote.audio 3.x diarization checkpoints (they embed TorchVersion / omegaconf
+    # configs that aren't in the safe-globals allowlist). pyannote refuses to fix in
+    # 3.x (see https://github.com/pyannote/pyannote-audio/issues/1908). The model files
+    # come from the official pyannote HF repos via HF_TOKEN, so trusted unpickling is
+    # acceptable here. Patch must run before any "import torch" by downstream modules.
+    #
+    # NOTE: Must FORCE-OVERRIDE weights_only, not just setdefault. lightning_fabric
+    # explicitly passes weights_only=None down to torch.load (see
+    # lightning/fabric/utilities/cloud_io.py::_load), and in PyTorch 2.6+ a None
+    # value resolves to True. So the kwarg is always present and setdefault is a no-op.
+    import torch as _torch
+    _ORIG_TORCH_LOAD = _torch.load
+    def _torch_load_compat(*args, **kwargs):
+        if kwargs.get("weights_only") in (None, True):
+            kwargs["weights_only"] = False
+        return _ORIG_TORCH_LOAD(*args, **kwargs)
+    _torch.load = _torch_load_compat
+
+    import os
+    import sys
+    import tempfile
+    import threading
+    import logging
+    import time
+
+    sys.path.insert(0, "/Whisper-WebUI")
+
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+    from fastapi.responses import PlainTextResponse
+    from fastapi.middleware.cors import CORSMiddleware
+    import uvicorn
+
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("whisper-api")
+
+    api_app = FastAPI(title="Whisper OpenAI-Compatible API", version="1.0.0")
+    api_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    _whisper_inf = None
+    _lock = threading.Lock()
+    _current_model = None
+
+    def _ensure_model_loaded(requested_model: str = None):
+        """Load model on demand, switching if a different model is requested."""
+        global _current_model
+        if _whisper_inf is None:
+            raise HTTPException(503, "Whisper inference not initialized")
+
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml
+            params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            default_model = params.get("whisper", {}).get("model_size", "large-v3")
+            compute_type = params.get("whisper", {}).get("compute_type", "float16")
+        except Exception:
+            default_model, compute_type = "large-v3", "float16"
+
+        target = default_model if (not requested_model or requested_model == "whisper-1") else requested_model
+
+        if _whisper_inf.model is None or _current_model != target:
+            try:
+                logger.info(f"Loading model: {target} ({compute_type})")
+                _whisper_inf.update_model(target, compute_type)
+                _current_model = target
+            except Exception as e:
+                raise HTTPException(503, f"Failed to load model {target}: {e}")
+
+    @api_app.get("/healthz")
+    async def healthz():
+        ready = _whisper_inf is not None and _whisper_inf.model is not None
+        return {"status": "ok" if ready else "loading"}
+
+    @api_app.get("/v1/models")
+    async def list_models():
+        models = []
+        if _whisper_inf and hasattr(_whisper_inf, "available_models"):
+            for m in _whisper_inf.available_models:
+                models.append({"id": m, "object": "model", "owned_by": "local", "created": 0})
+        if not models:
+            models.append({"id": "whisper-1", "object": "model", "owned_by": "local", "created": 0})
+        return {"object": "list", "data": models}
+
+    @api_app.post("/v1/audio/transcriptions")
+    async def transcribe(
+        file: UploadFile = File(...),
+        model: str = Form("whisper-1"),
+        language: str = Form(None),
+        response_format: str = Form("json"),
+        prompt: str = Form(None),
+        temperature: float = Form(0),
+    ):
+        suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(await file.read())
+            tmp_path = tmp.name
+
+        try:
+            kwargs = {"word_timestamps": True}
+            if language:
+                kwargs["language"] = language
+            if prompt:
+                kwargs["initial_prompt"] = prompt
+            if temperature > 0:
+                kwargs["temperature"] = temperature
+
+            with _lock:
+                _ensure_model_loaded(model)
+                segments, info = _whisper_inf.model.transcribe(tmp_path, **kwargs)
+                text = " ".join(seg.text for seg in segments).strip()
+
+            if response_format == "text":
+                return PlainTextResponse(text)
+            elif response_format == "verbose_json":
+                return {
+                    "text": text,
+                    "language": info.language if info else None,
+                    "duration": info.duration if info else None,
+                }
+            else:
+                return {"text": text}
+        except Exception as e:
+            logger.error(f"Transcription error: {e}")
+            raise HTTPException(500, str(e))
+        finally:
+            os.unlink(tmp_path)
+
+    def run_api(whisper_inf, port=8000):
+        global _whisper_inf
+        _whisper_inf = whisper_inf
+        logger.info(f"OpenAI-compatible API starting on port {port}")
+        uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
+
+    if __name__ == "__main__":
+        from app import App, parser as app_parser
+
+        args = app_parser.parse_args()
+        app_instance = App(args)
+
+        api_thread = threading.Thread(
+            target=run_api,
+            args=(app_instance.whisper_inf, 8000),
+            daemon=True,
+        )
+        api_thread.start()
+        logger.info("API thread started, launching Gradio UI...")
+
+        app_instance.launch()
+{{- end }}
