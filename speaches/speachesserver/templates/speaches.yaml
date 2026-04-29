@@ -102,6 +102,18 @@ spec:
             - '-c'
             - |
               uv tool install huggingface-hub 2>/dev/null || true
+              # Install misaki[zh] for proper Chinese phonemization.
+              # Without it, kokoro_onnx delegates to phonemizer/espeak-ng which
+              # rejects lang="zh" with RuntimeError, so any Chinese voice
+              # (zf_*/zm_*) would crash. Install is idempotent and best-effort:
+              # if PyPI is unreachable, the runtime patch below falls back to
+              # espeak-ng's "cmn" code so the request still succeeds.
+              if ! /home/ubuntu/speaches/.venv/bin/python -c "from misaki import zh" 2>/dev/null; then
+                echo "=== Installing misaki[zh] for Chinese TTS support ==="
+                uv pip install --python /home/ubuntu/speaches/.venv/bin/python --quiet 'misaki[zh]' 2>/dev/null \
+                  || /home/ubuntu/speaches/.venv/bin/python -m pip install --no-cache-dir --quiet 'misaki[zh]' 2>/dev/null \
+                  || echo "WARN: failed to install misaki[zh] - Chinese voices will fall back to espeak cmn"
+              fi
               python3 << 'PATCH_EOF'
               import pathlib, json, os
               patched = []
@@ -193,6 +205,48 @@ spec:
               if s != o:
                   f.write_text(s)
                   patched.append('dependencies.py')
+
+              # text_utils.py: drop the over-broad emoji range that wipes out
+              # CJK / Hangul / Kana (U+24C2..U+1F251 covers the entire CJK
+              # block, so any non-Latin input reaches generate_audio() empty
+              # and a 0-byte mp3 is returned with HTTP 200). Upstream master
+              # already removed this line; we backport the fix to v0.8.2.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/text_utils.py')
+              s = f.read_text()
+              o = s
+              s = s.replace('        "\\U000024c2-\\U0001f251"\n', '')
+              if s != o:
+                  f.write_text(s)
+                  patched.append('text_utils.py (CJK-safe strip_emojis)')
+
+              # kokoro/utils.py: route Chinese voices (zf_*/zm_*) through misaki[zh]
+              # so they don't hit espeak-ng (which rejects lang="zh" and crashes
+              # the /v1/audio/speech request). Falls back to espeak "cmn" if
+              # misaki couldn't be installed at startup.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/executors/kokoro/utils.py')
+              s = f.read_text()
+              o = s
+              old_zh = '    async for audio_data, _ in kokoro_tts.create_stream(text, voice, lang=voice_language, speed=speed):'
+              new_zh = (
+                  '    if voice_language == "zh":\n'
+                  '        try:\n'
+                  '            if "_zh_g2p" not in globals():\n'
+                  '                from misaki import zh as _misaki_zh\n'
+                  '                globals()["_zh_g2p"] = _misaki_zh.ZHG2P(version=None)\n'
+                  '            _phonemes, _ = globals()["_zh_g2p"](text)\n'
+                  '            _stream = kokoro_tts.create_stream(_phonemes, voice, is_phonemes=True, speed=speed)\n'
+                  '        except Exception as _e:\n'
+                  '            logger.warning(f"misaki[zh] unavailable ({_e}); falling back to espeak cmn for Chinese TTS")\n'
+                  '            _stream = kokoro_tts.create_stream(text, voice, lang="cmn", speed=speed)\n'
+                  '    else:\n'
+                  '        _stream = kokoro_tts.create_stream(text, voice, lang=voice_language, speed=speed)\n'
+                  '    async for audio_data, _ in _stream:'
+              )
+              if old_zh in s:
+                  s = s.replace(old_zh, new_zh)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('kokoro/utils.py (Chinese voice support)')
 
               if patched:
                   print(f'=== Speaches hotfix: patched {len(patched)} files ===')
