@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nofx
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nofx-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: nofx-frontend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: nofx-frontend
+    spec:
+      containers:
+        - name: nofx-frontend
+          image: "docker.io/goai007/nofx-frontend:20260425"
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 80
+          env:
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: 128m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nofx-frontend
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nofx-frontend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+  selector:
+    io.kompose.service: nofx-frontend
