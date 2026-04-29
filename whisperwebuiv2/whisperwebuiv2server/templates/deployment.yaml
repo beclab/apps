@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -20,10 +20,11 @@ spec:
     metadata:
       labels:
         app: whisperwebui
+        bytetrade.io/terminal: whisperwebui
     spec:
       initContainers:
         - name: init-configs
-          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.6"
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
           command:
             - sh
             - -c
@@ -39,7 +40,7 @@ spec:
               mountPath: /Whisper-WebUI/configs
       containers:
         - name: whisperwebui
-          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.6"
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
           envFrom:
             - configMapRef:
                 name: whisperwebui-config
@@ -56,10 +57,12 @@ spec:
               {{- end }}
               echo "All model files are ready."
               {{- end }}
+              pip install audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
               echo "Starting application..."
-              python app.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
+              python /Whisper-WebUI/whisper_openai_api.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
           ports:
             - containerPort: 7860
+            - containerPort: 8000
           env:
             - name: PGID
               value: "1000"
@@ -81,9 +84,18 @@ spec:
               mountPath: /Whisper-WebUI/outputs
             - name: configs
               mountPath: /Whisper-WebUI/configs
+            - name: api-proxy-script
+              mountPath: /Whisper-WebUI/whisper_openai_api.py
+              subPath: whisper_openai_api.py
           securityContext:
             runAsUser: 0
       volumes:
+        - name: api-proxy-script
+          configMap:
+            name: whisper-openai-api
+            items:
+              - key: whisper_openai_api.py
+                path: whisper_openai_api.py
         - name: models
           hostPath:
             path: "{{ .Values.sharedlib }}/ai/whisperwebui"
@@ -169,9 +181,12 @@ spec:
   selector:
     app: whisperwebui
   ports:
-    - name: api
+    - name: gradio
       port: 7860
       targetPort: 7860
+    - name: openai-api
+      port: 8000
+      targetPort: 8000
   type: ClusterIP
 ---
 apiVersion: v1
@@ -187,4 +202,19 @@ spec:
       port: 8090
       targetPort: 8090
   type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: whisperwebui
+  name: sharedentrances-whisperwebui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  selector:
+    app: whisperwebui
 {{- end }}
