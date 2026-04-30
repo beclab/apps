@@ -1,0 +1,207 @@
+# Claude Code on Olares
+#
+# Architecture:
+#   - Base image: beclab/harveyff-claudecode-base (Ubuntu 24.04 with
+#     common CLI deps pre-installed, non-root user UID 1000 baked in).
+#   - initContainers:
+#       * init-chmod-data (root): ensures /opt/data is owned by 1000:1000.
+#       * init-install-claude (UID 1000): installs the claude native
+#         binary into /opt/data/.local/bin/ via https://claude.ai/install.sh
+#         on first run, then leaves a sentinel so subsequent restarts
+#         skip the download and start instantly.
+#   - Main container runs as UID 1000 with all Linux capabilities
+#     dropped and privilege escalation forbidden. The entrypoint is
+#     `sleep infinity`; the real work happens when the Olares terminal
+#     entrance kubectl-execs into this container.
+#   - /opt/data is the single source of truth: ~/.claude (sessions,
+#     skills, plugins), ~/.claude.json (OAuth login + project list),
+#     and .local/share/claude/<version>/ (the versioned native binary).
+#     All persisted through the app-data-home hostPath volume.
+#   - Auto-updates are disabled; upgrades go through chart version bumps.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: claudecode
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: claudecode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: claudecode
+        bytetrade.io/terminal: claudecode
+    spec:
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        # Fix ownership of the PVC so the non-root runtime user can
+        # write to it. Root is required here because hostPath volumes
+        # land on disk with root ownership on first create.
+        - name: init-chmod-data
+          image: "beclab/ubuntu:24.04"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/data/.local/bin /opt/data/.claude /opt/data/.install-state
+              chown -R 1000:1000 /opt/data
+              chmod -R 0755 /opt/data
+              echo "[init-chmod-data] /opt/data owned by 1000:1000"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # First-run only: install the claude native binary into the
+        # shared /opt/data PVC. Runs as UID 1000 since the installer
+        # only writes under $HOME. A sentinel file makes subsequent
+        # Pod starts skip the download.
+        - name: init-install-claude
+          image: "beclab/harveyff-claudecode-base:0.1.0"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HOME
+              value: /opt/data
+            - name: DISABLE_AUTOUPDATER
+              value: "1"
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              SENTINEL="$HOME/.install-state/install-complete"
+              mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
+
+              if [ -x "$HOME/.local/bin/claude" ] && [ -f "$SENTINEL" ]; then
+                echo "[init-install-claude] cached binary found (installed $(cat "$SENTINEL"))"
+                "$HOME/.local/bin/claude" --version
+                exit 0
+              fi
+
+              INSTALLER="$(mktemp --suffix=.sh)"
+              trap 'rm -f "$INSTALLER"' EXIT
+
+              echo "[init-install-claude] fetching installer script..."
+              curl -fSL --retry 5 --retry-delay 3 \
+                https://claude.ai/install.sh -o "$INSTALLER"
+              echo "[init-install-claude] installer downloaded ($(wc -c < "$INSTALLER") bytes)"
+
+              echo "[init-install-claude] running installer..."
+              bash "$INSTALLER"
+
+              if [ ! -x "$HOME/.local/bin/claude" ]; then
+                echo "[init-install-claude] installer completed but binary not found at $HOME/.local/bin/claude" >&2
+                ls -la "$HOME/.local/bin" "$HOME/.local/share" 2>/dev/null >&2 || true
+                exit 1
+              fi
+
+              date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
+              echo "[init-install-claude] installed"
+              "$HOME/.local/bin/claude" --version
+          resources:
+            limits:
+              cpu: "2"
+              memory: 6Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+      containers:
+        # Workspace container. kubectl exec from the beclab terminal
+        # apiserver lands here as UID 1000. HOME/PATH are set on env so
+        # login / non-login / interactive / non-interactive shells all
+        # see the claude binary on PATH.
+        - name: claudecode
+          image: "beclab/harveyff-claudecode-base:0.1.0"
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/data
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: TERM
+              value: xterm-256color
+            - name: HOME
+              value: /opt/data
+            - name: PATH
+              value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: DISABLE_AUTOUPDATER
+              value: "1"
+            - name: ANTHROPIC_API_KEY
+              value: "{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}"
+            - name: ANTHROPIC_BASE_URL
+              value: "{{ .Values.olaresEnv.ANTHROPIC_BASE_URL }}"
+            - name: CLAUDE_CODE_USE_BEDROCK
+              value: "{{ .Values.olaresEnv.CLAUDE_CODE_USE_BEDROCK }}"
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "{{ .Values.olaresEnv.CLAUDE_CODE_USE_VERTEX }}"
+          command:
+            - sleep
+            - infinity
+          resources:
+            limits:
+              cpu: "4"
+              memory: 16Gi
+            requests:
+              cpu: 100m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+
+      restartPolicy: Always
+      volumes:
+        - name: app-data-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/home"
+            type: DirectoryOrCreate
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
