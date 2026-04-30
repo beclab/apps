@@ -1,19 +1,44 @@
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
 apiVersion: v1
 data:
   nginx.conf: |
-    stream {
-      server {
-          listen  8001;  
-          proxy_pass 127.0.0.1:8123;
-      }
-    }
-
     events {
-      # Your event-related configurations go here
+      worker_connections 1024;
     }
 
     http {
-      # Your HTTP server configurations go here
+      upstream homeassistant {
+        server 127.0.0.1:8123;
+      }
+
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+
+      server {
+        listen 8001;
+        server_name _;
+
+        client_max_body_size 0;
+        proxy_connect_timeout 60s;
+
+        location / {
+          proxy_pass http://homeassistant;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+          add_header X-Frame-Options "";
+        }
+      }
     }
 
 kind: ConfigMap
@@ -58,7 +83,7 @@ spec:
     matchLabels:
       app: homeassistant
   strategy:
-    type: Recreate      
+    type: Recreate
   template:
     metadata:
       labels:
@@ -86,71 +111,117 @@ spec:
           securityContext:
             runAsUser: 0
       containers:
-      - name: homeassistant
-        image: "docker.io/beclab/linuxserver-homeassistant:2026.1.3"
-        resources:
-          requests:
-            cpu: 100m
-            memory: 256Mi
-          limits:
-            cpu: 1500m
-            memory: 2000Mi
-        ports:
-        - containerPort: 8123
-        volumeMounts:
-        - mountPath: /config
-          name: homeassistant-config
-        - mountPath: /etc/localtime
-          name: homeassistant-localtime
-      - name: nginx
-        image: "docker.io/beclab/aboveos-nginx:1.27.0"
-        volumeMounts:
-        - name: nginx-config 
-          mountPath: /etc/nginx/nginx.conf
-          subPath: nginx.conf
-        ports:
-        - containerPort: 8001
-        imagePullPolicy: IfNotPresent
-        resources:
-          requests:
-            cpu: 10m
-            memory: 64Mi
-          limits:
-            cpu: 100m
-            memory: 256Mi
+        - name: homeassistant
+          image: "docker.io/beclab/homeassistant-home-assistant:2026.3.1"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 3Gi
+          ports:
+            - containerPort: 8123
+          startupProbe:
+            httpGet:
+              path: /
+              port: 8123
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8123
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8123
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - mountPath: /config
+              name: homeassistant-config
+            - mountPath: /etc/localtime
+              name: homeassistant-localtime
+              readOnly: true
+        - name: nginx
+          image: "docker.io/beclab/aboveos-nginx:1.27.0"
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          ports:
+            - containerPort: 8001
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 256Mi
       volumes:
-      - name: homeassistant-config
-        hostPath:
-          type: DirectoryOrCreate
-          path: "{{ .Values.userspace.appData}}/homeassistant"
-      - name: homeassistant-localtime
-        hostPath:
-          type: DirectoryOrCreate
-          path: "{{ .Values.userspace.appData}}/homeassistant/localtime"
-      - name: config
-        configMap:
-          name: {{ .Release.Name }}-config
-          items:
-            - key: configuration.yaml
-              path: configuration.yaml
-          defaultMode: 420
-      - name: nginx-config
-        configMap:
-          name: nginx-config
-          defaultMode: 438
-          items:
-          - key: nginx.conf
-            path: nginx.conf
+        - name: homeassistant-config
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}{{ else }}{{ .Values.userspace.appData }}/homeassistant{{ end }}'
+        - name: homeassistant-localtime
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/localtime{{ else }}{{ .Values.userspace.appData }}/homeassistant/localtime{{ end }}'
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+            items:
+              - key: configuration.yaml
+                path: configuration.yaml
+            defaultMode: 420
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Release.Name }}-svc
+  name: homeassistant-svc
   namespace: {{ .Release.Namespace }}
 spec:
   type: ClusterIP
   selector:
-    app: {{ .Release.Name }}
+    app: homeassistant
   ports:
     - protocol: TCP
       port: 8123
@@ -158,7 +229,5 @@ spec:
       name: ha-service
     - protocol: TCP
       port: 8001
-      targetPort: 8001  
+      targetPort: 8001
       name: ha-proxy
-
-
