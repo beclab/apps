@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nofx-backend
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nofx-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: nofx-backend
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: nofx-backend
+    spec:
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          env:
+            - name: CHART_USERSPACE_APPDATA
+              value: {{ .Values.userspace.appData | quote }}
+            - name: CHART_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "nofx-backend init: userspace.appData=[${CHART_USERSPACE_APPDATA}] hostPath=appData only (release=[${CHART_RELEASE_NAME}] for debug only)"
+              mkdir -p /data
+              chown -R 1000:1000 /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+        # Same image:tag as templates/nginx (explicit tag; omitting tag defaults to :latest and breaks Olares mirrors).
+        - name: init-rsa-env
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          command:
+            - sh
+            - "-c"
+            - |
+              set -e
+              OPENSSL_BIN=""
+              for c in openssl /usr/bin/openssl /opt/bitnami/common/bin/openssl; do
+                if command -v "$c" >/dev/null 2>&1; then OPENSSL_BIN=$c; break; fi
+                if [ -x "$c" ]; then OPENSSL_BIN=$c; break; fi
+              done
+              if [ -z "$OPENSSL_BIN" ]; then
+                echo "init-rsa-env: openssl not found in image" >&2
+                exit 1
+              fi
+              # Same encoding as https://github.com/NoFxAiOS/nofx/blob/main/install.sh (single line, \n escapes).
+              # Multiline PEM in .env breaks godotenv / crypto; do not use echo here (can mangle backslashes).
+              if [ ! -f /data/.env ]; then
+                RSA_PRIVATE_KEY=$("$OPENSSL_BIN" genrsa 2048 2>/dev/null | tr '\n' '\\' | sed 's/\\/\\n/g' | sed 's/\\n$//')
+                if [ -z "$RSA_PRIVATE_KEY" ]; then
+                  echo "init-rsa-env: openssl genrsa produced empty key" >&2
+                  exit 1
+                fi
+                umask 077
+                printf 'RSA_PRIVATE_KEY=%s\n' "$RSA_PRIVATE_KEY" > /data/.env
+                chmod 600 /data/.env
+                chown 1000:1000 /data/.env
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: nofx-backend
+          image: "docker.io/goai007/nofx-backend:20260425"
+          imagePullPolicy: "IfNotPresent"
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: nofx-backend-env
+          env:
+            - name: TZ
+              value: "{{ .Values.timezone | default "Etc/UTC" }}"
+            - name: AI_MAX_TOKENS
+              value: "8000"
+          resources:
+            requests:
+              cpu: 256m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: data
+              mountPath: /app/.env
+              subPath: .env
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}'
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nofx-backend
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nofx-backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    io.kompose.service: nofx-backend
