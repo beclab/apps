@@ -24,29 +24,36 @@ spec:
     - **持续更新**：通过定期更新和社区贡献持续改进。
 
   upgradeDescription: |
-    **升级版本：0.8.12**
+    **升级 Open WebUI 至 v0.9.2（Chart 1.0.27）**
 
-    **重要变更**
-    - 默认模式已切换为在线模式（HF_HUB_OFFLINE=false），以更好地支持语音等本地功能。如需切换回离线模式，请前往 设置 > 应用 > Manage Environment Variables，将 HF_HUB_OFFLINE 修改为 true。
-    - 用户数据自动从 appCache 迁移至 appData，确保升级时数据不丢失。
-    - CUDA 镜像现根据 GPU 硬件可用性自动选择，不再依赖离线模式设置。
-    - HuggingFace 模型缓存（embedding、STT、TTS）现存储在 userData 下，便于独立管理。
-    - 健康探针从 tcpSocket 升级为 HTTP /ready 端点，状态检测更准确。
-    - RAG 嵌入引擎默认使用 Ollama，避免启动时自动下载模型。
+    **本 Chart 打包说明（Olares）**
+    - **升级前数据库备份（默认开启）：** **`ENABLE_WEBUI_DB_BACKUP`** 默认 **`true`**。每个新 Chart 版本首次启动前，若存在 `webui.db` 且尚无 `data/backups/webui_chart_<chart 版本>.db`，init 容器会复制一份（仍在同一 appData 卷）；同一 Chart 版本重复重启不会重复生成该文件。若某次升级**不需要**备份，请在升级前在 **设置 → 应用 → 环境变量** 中将该项设为 **`false`**。
+    - **升级之后：** 保持 **`true`** 则后续 Chart 升级仍会按版本自动备份一次；改为 **`false`** 则之后不再备份，直到再次设为 **`true`**。
+    - **纯 Helm：** 使用 `backupWebuiDb.enabled`（chart 默认 `false`）；需要备份 init 时再设为 `true`。
+    - **已有数据：** appData 中的数据库文件会保留；Open WebUI 会在首次启动时自动完成库结构升级。
 
-    **更新亮点（v0.8.11 - v0.8.12）**
+    **Open WebUI v0.9.2 主要更新**
 
-    **新增功能**
-    - **渲染速度提升约 25%**。Svelte 升级优化页面和 Markdown 渲染，内存占用更低。
-    - **工具调用和思考折叠分组**。连续的工具调用分组为简洁的可折叠摘要。
-    - **Ollama Anthropic 端点支持**。现支持 Anthropic 兼容的 /v1/messages 端点。
-    - **拖拽聊天作为引用**。可将侧边栏聊天拖入消息输入框作为参考聊天。
-    - **终端改进**。端口预览、文件重命名、文件夹下载和状态持久化。
+    **新功能与增强**
+    - **PaddleOCR-vl：** 可选文档抽取引擎（管理员可在文档检索配置里设置 API 地址与 Token）。
+    - **Firecrawl v2：** 网页抓取改用 v2 API，带重试、限流时指数退避与可配置超时（云端或自建均适用）。
+    - **日历：** 日程支持 **`reminder_minutes`**，可由模型自定义提前提醒时长（不再固定 10 分钟）。
+    - **`CUSTOM_API_KEY_HEADER`：** 可自定义 API Key 请求头名称，便于前置反向代理已占用 `Authorization` 的场景。
+    - **OAuth：** 支持按提供商断开 OAuth 会话（例如 MCP），并提供专用接口，便于重新登录。
+    - **来源：** 来源按钮在超过三条来源时显示 **+N**，提示仍有隐藏引用。
 
-    **问题修复**
-    - **模型访问控制绕过**。修复外部客户端访问控制的安全漏洞。
-    - **OAuth 会话持久化**。用户登录后可保持配置的 JWT 过期时长。
-    - **多项安全修复**。终端代理、工具配置访问控制等。
+    **性能与界面**
+    - **模型页：** 分页接口去掉 base64 头像以减小体积；标签与工具列表加载更快。
+    - **头像与启动图：** 默认模型图标减少磁盘读取；启动图更早预加载以改善首屏。
+    - **长会话：** 消息列表改用浏览器原生 **content-visibility** 虚拟化，替代原有 JS 占位方案，滚动更稳、组件抖动更少。
+    - **流式 Markdown：** 减少重复清理注册，流式更新更省内存。
 
-    查看完整发布说明：
-    https://github.com/open-webui/open-webui/releases/tag/v0.8.12
+    **稳定性、安全与其他**
+    - **MCP：** 中断的工具调用不再引发 CPU 飙升；正确处理 resource 类型工具结果；Redis 订阅对更多服务端配置更兼容。
+    - **Skills：** 持久化对话里提到的技能会稳定注入系统提示；`<$skillId|label>` 等标签在服务端剥离后再送给模型。
+    - **接口与鉴权：** 直连聊天 API 失败时返回明确 HTTP 错误；取消生成时正确关闭上游流；OAuth 发现增加 RFC 9728 回退；forward-auth 场景下会话解析更稳健；模型头像重定向路径校验更严；RAG 模板重复 `[context]` / {{ "{{CONTEXT}}" }} 时界面告警。
+    - **依赖与镜像：** Brotli 升级修复 **CVE-2025-6176**；ARM64 镜像构建设置 **`UV_LINK_MODE=copy`**，减轻 QEMU 交叉编译下 Python 依赖损坏问题。
+
+    **翻译：** 芬兰语、韩语、巴西葡萄牙语、荷兰语等改进。
+
+    完整发布说明：https://github.com/open-webui/open-webui/releases/tag/v0.9.2
