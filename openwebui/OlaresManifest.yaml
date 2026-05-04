@@ -6,7 +6,7 @@ metadata:
   title: Open WebUI
   description: User-friendly WebUI for LLMs
   icon: https://app.cdn.olares.com/appstore/openwebui/icon.png
-  version: '1.0.25'
+  version: '1.0.27'
   appid: openwebui
   categories:
   - Productivity
@@ -20,7 +20,7 @@ entrances:
   port: 8080
   title: Open WebUI
 spec:
-  versionName: '0.8.12'
+  versionName: '0.9.2'
   featuredImage: https://app.cdn.olares.com/appstore/openwebui/1.webp
   promoteImage:
   - https://app.cdn.olares.com/appstore/openwebui/1.webp
@@ -30,7 +30,7 @@ spec:
   fullDescription: |
     Open WebUI(Formerly Ollama WebUI) is an extensible, feature-rich, and user-friendly self-hosted WebUI designed to operate entirely offline. It supports various LLM runners, including Ollama and OpenAI-compatible APIs. For more information, be sure to check out our Open WebUI Documentation.
 
-    Key Features of Open WebUI
+    **Key Features of Open WebUI**
     - Ollama/OpenAI API Integration: Effortlessly integrate OpenAI-compatible APIs for versatile conversations alongside Ollama models. Customize the OpenAI API URL to link with LMStudio, GroqCloud, Mistral, OpenRouter, and more.
 
     - Pipelines, Open WebUI Plugin Support: Seamlessly integrate custom logic and Python libraries into Open WebUI using Pipelines Plugin Framework. Launch your Pipelines instance, set the OpenAI URL to the Pipelines URL, and explore endless possibilities. Examples include Function Calling, User Rate Limiting to control access, Usage Monitoring with tools like Langfuse, Live Translation with LibreTranslate for multilingual support, Toxic Message Filtering and much more.
@@ -64,31 +64,39 @@ spec:
     - Continuous Updates: We are committed to improving Open WebUI with regular updates, fixes, and new features.
 
   upgradeDescription: |
-    Upgrade app version to 0.8.12
+    Upgrade Open WebUI to **v0.9.2** (chart **1.0.27**).
 
-    Important
-    - Default mode changed to online (HF_HUB_OFFLINE=false) for better support of local features such as speech-to-text. To switch back to offline mode, go to Settings > Application > Manage Environment Variables, and set HF_HUB_OFFLINE to true.
-    - User data automatically migrated from appCache to appData for better persistence across upgrades.
-    - CUDA image now selected based on GPU hardware availability instead of offline mode setting.
-    - HuggingFace model cache (embedding, STT, TTS) now stored under userData for separate management.
-    - Health probes upgraded from tcpSocket to HTTP /ready endpoint for more accurate status detection.
-    - RAG embedding engine defaults to Ollama to avoid unnecessary model downloads at startup.
+    Packaged (Olares chart)
+    - **DB backup before upgrade (default on):** **`ENABLE_WEBUI_DB_BACKUP`** defaults to **`true`**. On each new chart version, before the app starts, if `webui.db` exists and `data/backups/webui_chart_<chart-version>.db` is not there yet, the init container copies it once (same appData volume). Same chart version restarts never duplicate that file. To **skip** backup for a rollout, set **`ENABLE_WEBUI_DB_BACKUP`** to **`false`** under Settings → Application → environment variables **before** upgrading.
+    - **After upgrade:** Leave **`true`** to keep automatic backups on future chart bumps, or set **`false`** if you do not want further backups until you enable it again.
+    - **Helm without Olares UI:** use `backupWebuiDb.enabled` (defaults `false` in chart values); set `true` only when you want the backup init.
+    - **Existing data:** Your database file under appData is kept; Open WebUI upgrades its schema automatically on startup.
 
-    Highlights (v0.8.11 - v0.8.12)
+    Open WebUI v0.9.2 — main changes
 
-    Added
-    - **~25% faster rendering.** Svelte upgrade improves page and markdown rendering with less memory usage.
-    - **Collapsible tool and thinking groups.** Consecutive tool calls grouped into clean collapsible summaries.
-    - **Ollama Anthropic endpoint support.** Anthropic-compatible /v1/messages endpoint now supported.
-    - **Drag chats as references.** Drag chats from sidebar into message input as Reference Chats.
-    - **Terminal improvements.** Port previews, file renaming, folder downloads, and state persistence.
+    **New & improved features**
+    - **PaddleOCR-vl:** optional document extraction engine (admin-configurable API URL and token in document retrieval settings).
+    - **Firecrawl v2:** web loading uses the v2 API with retries, exponential backoff on rate limits, and configurable timeouts (cloud or self-hosted).
+    - **Calendar:** events support **`reminder_minutes`** so models can set custom reminder lead times (not fixed at 10 minutes).
+    - **`CUSTOM_API_KEY_HEADER`:** admins can set a custom header name for API key auth (helps when `Authorization` is already used by a reverse proxy).
+    - **OAuth:** disconnect OAuth sessions per provider (e.g. MCP) via a dedicated API for cleaner re-login flows.
+    - **Sources:** the Sources control shows a **+N** badge when there are more than three sources so hidden items are obvious.
 
-    Fixed
-    - **Model access control bypass.** Fixed security vulnerability with external client access controls.
-    - **OAuth session persistence.** Users stay logged in for configured JWT expiry duration.
-    - **Multiple security fixes.** Terminal proxy, tool configuration access control, and more.
+    **Performance & UI**
+    - **Models page:** smaller model-list API payloads (no base64 avatars in paginated results), faster tag loading, quicker tools list.
+    - **Avatars & splash:** less disk work for default model icons; splash images preloaded earlier for faster first load.
+    - **Long chats:** message list uses native **content-visibility** virtualization instead of custom JS spacers—smoother scrolling and less thrashing.
+    - **Streaming markdown:** streaming updates avoid repeated cleanup registration and stay more memory-efficient.
 
-    View full release notes at: https://github.com/open-webui/open-webui/releases/tag/v0.8.12
+    **Reliability, security & misc**
+    - **MCP:** safer cancellation (no CPU spikes from interrupted tool calls); resource-type tool results handled correctly; Redis pub/sub tolerates more server configs.
+    - **Skills:** skills referenced in saved chats inject into the system prompt reliably; skill tags are stripped server-side before the model sees them.
+    - **API & auth:** better behavior for direct chat API errors, cancelled streams, OAuth discovery fallback, session resolution behind forward-auth proxies; stricter validation for model profile image redirects; RAG template UI warns on duplicate context placeholders.
+    - **Dependencies:** Brotli updated (**CVE-2025-6176**); ARM64 Docker builds set **`UV_LINK_MODE=copy`** to avoid corrupted Python installs under QEMU.
+
+    **Translations:** Finnish, Korean, Portuguese (Brazil), and Dutch improved.
+
+    Full release notes: https://github.com/open-webui/open-webui/releases/tag/v0.9.2
 
   developer: OpenWebUI
   website: https://openwebui.com/
@@ -176,3 +184,9 @@ envs:
     applyOnChange: true
     valueFrom:
       envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: ENABLE_WEBUI_DB_BACKUP
+    required: false
+    type: bool
+    editable: true
+    applyOnChange: true
+    default: "true"

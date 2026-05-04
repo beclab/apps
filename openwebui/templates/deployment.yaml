@@ -2,6 +2,18 @@
 {{- $appDomain := index $appDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
 {{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $envBackup := false -}}
+{{- if hasKey $oe "ENABLE_WEBUI_DB_BACKUP" -}}
+{{- $v := index $oe "ENABLE_WEBUI_DB_BACKUP" -}}
+{{- $vs := lower (toString $v) -}}
+{{- if or (eq $vs "true") (eq $vs "1") (eq $vs "yes") -}}
+{{- $envBackup = true -}}
+{{- end -}}
+{{- end -}}
+{{- $bw := .Values.backupWebuiDb | default dict -}}
+{{- $helmBackup := $bw.enabled | default false -}}
+{{- $backupWebuiDbEnabled := or $envBackup $helmBackup -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -68,12 +80,36 @@ spec:
               readOnly: true
             - name: appdata
               mountPath: /new-data
+{{- if $backupWebuiDbEnabled }}
+        - name: backup-webui-db
+          image: 'docker.io/beclab/busybox:1.37'
+          command: ['sh', '-c']
+          args:
+            - |
+              CHART_VER="{{ .Chart.Version }}"
+              BACKUP_DIR=/data/backups
+              DEST="$BACKUP_DIR/webui_chart_${CHART_VER}.db"
+              mkdir -p "$BACKUP_DIR"
+              if [ ! -f /data/webui.db ]; then
+                echo "No webui.db yet, skipping backup."
+                exit 0
+              fi
+              if [ -f "$DEST" ]; then
+                echo "Backup for chart version ${CHART_VER} already exists: $DEST"
+                exit 0
+              fi
+              cp -a /data/webui.db "$DEST" || exit 1
+              echo "Backed up webui.db for chart version ${CHART_VER} -> $DEST"
+          volumeMounts:
+            - name: appdata
+              mountPath: /data
+{{- end }}
       containers:
         - name: openwebui
 {{- if .Values.GPU }}
-          image: 'docker.io/beclab/openwebui-open-webui:0.8.12-cuda'
+          image: 'docker.io/beclab/openwebui-open-webui:0.9.2-cuda'
 {{- else }}
-          image: 'docker.io/beclab/openwebui-open-webui:0.8.12'
+          image: 'docker.io/beclab/openwebui-open-webui:0.9.2'
 {{- end }}
           ports:
             - containerPort: 8080
@@ -91,10 +127,11 @@ spec:
             httpGet:
               path: /ready
               port: 8080
-            timeoutSeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: 30
+            timeoutSeconds: 15
+            periodSeconds: 15
             successThreshold: 1
-            failureThreshold: 30
+            failureThreshold: 60
 
           env:
             - name: PGID
@@ -114,6 +151,8 @@ spec:
             - name: HF_HUB_OFFLINE
               value: "1"
 {{- end }}
+            - name: ENABLE_WEBUI_DB_BACKUP
+              value: {{ index $oe "ENABLE_WEBUI_DB_BACKUP" | default "false" | toString | quote }}
             - name: OLLAMA_BASE_URL
               {{- if $isNewVersion }}
               value: "http://d54536a50.shared.{{ $topDomain }}"
@@ -123,7 +162,7 @@ spec:
             - name: CORS_ALLOW_ORIGIN
               value: "*"
             - name: USER_AGENT
-              value: "OpenWebUI/0.8.12"
+              value: "OpenWebUI/0.9.2"
             - name: WEBSOCKET_EVENT_CALLER_TIMEOUT
               value: "600"
             - name: RAG_EMBEDDING_ENGINE
