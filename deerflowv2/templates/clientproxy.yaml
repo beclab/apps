@@ -17,9 +17,28 @@ data:
         proxy_read_timeout 1800s;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
+        # Propagate the real browser IP from the Olares entrance proxy
+        # (which sets X-Real-IP for us) instead of overwriting with
+        # $remote_addr (the entrance pod IP). Without this every browser
+        # behind the entrance shares one X-Real-IP, so the gateway's
+        # per-IP cooldown on /api/v1/auth/setup-status (60s) bites the
+        # second tab/refresh as 429 Too Many Requests, and the frontend
+        # never gets a `needs_setup` answer to redirect on. Fall back to
+        # $remote_addr only when the upstream chain didn't set the
+        # header (single-pod, no-entrance test deployments).
+        set $real_client_ip $http_x_real_ip;
+        if ($real_client_ip = "") {
+            set $real_client_ip $remote_addr;
+        }
+        proxy_set_header X-Real-IP $real_client_ip;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        # Olares entrance terminates HTTPS and forwards plain HTTP to this
+        # clientproxy, so $scheme is "http" here. Hard-coding "https" keeps
+        # the backend's Origin / X-Forwarded-Proto check (CSRFMiddleware)
+        # in agreement with the browser's Origin header
+        # (https://<entrance>.olares.com), which would otherwise fail the
+        # auth POST with: Cross-site auth request denied.
+        proxy_set_header X-Forwarded-Proto https;
 
         proxy_http_version 1.1;
 
@@ -36,12 +55,23 @@ data:
             return 204;
         }
 
-        # LangGraph API: /api/langgraph/* -> langgraph:2024
+        # LangGraph-compatible API: /api/langgraph/* -> Gateway's compat
+        # routers (threads, runs, thread_runs, assistants_compat) which
+        # internally talk to the langgraph container via langgraph_sdk.
+        # Browsers MUST NOT hit langgraph:2024 directly — it would trip
+        # langgraph_auth.py's user lookup against an uninitialised engine
+        # in that process (langgraph dev does not run gateway lifespan)
+        # and 500 with `RuntimeError: get_local_provider() called before
+        # init_engine_from_config()`. Routing the rewrite to gateway
+        # mirrors the official docker/nginx/nginx.conf in deer-flow.
         location /api/langgraph/ {
-            rewrite ^/api/langgraph/(.*) /$1 break;
-            proxy_pass http://deerflowv2-backend-svc:2024;
+            rewrite ^/api/langgraph/(.*) /api/$1 break;
+            proxy_pass http://deerflowv2-backend-svc:8001;
             proxy_http_version 1.1;
             proxy_set_header Connection '';
+
+            # SSE / streaming runs: disable nginx buffering so chunks
+            # reach the browser as they are produced.
             proxy_buffering off;
             proxy_cache off;
             proxy_set_header X-Accel-Buffering no;
@@ -103,6 +133,20 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: {{ .Release.Name }}
+      annotations:
+        # Force a clientproxy rollout on every chart upgrade. The nginx
+        # configmap is mounted via subPath (see volumeMounts below); K8s
+        # does NOT propagate live updates to subPath-mounted ConfigMaps,
+        # so a chart bump that changes nginx.conf would otherwise leave
+        # the pod silently running the previous chart's config. Symptom
+        # in 1.1.5 was /api/langgraph/* still routing to langgraph:2024
+        # (old) instead of gateway:8001 (new), causing 500s with
+        # `RuntimeError: get_local_provider() called before
+        # init_engine_from_config()` from langgraph_auth.py because the
+        # langgraph dev process has no initialised db engine. Pinning
+        # the chart version here makes the pod template hash change on
+        # every release, which forces helm to roll a new pod.
+        chart/version: {{ .Chart.Version | quote }}
     spec:
       volumes:
         - name: nginx-config
