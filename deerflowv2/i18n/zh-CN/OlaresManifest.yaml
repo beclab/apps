@@ -41,3 +41,19 @@ spec:
       - 研究报告、幻灯片、网页和图像生成
       - 自定义技能用于专业工作流
       - 播客脚本生成和音频合成
+
+  upgradeDescription: |
+    **迁移老对话记录（一次性，可选）** —— 如果你在本次升级前用过 DeerFlow，老的聊天记录保存在本地 SQLite 文件里（`<appData>/deerflowv2/deer-flow/checkpoints.db`），新版 PostgreSQL 后端不会自动读取。要让这些对话出现在新版侧边栏：
+    
+    1. 完成升级，打开 app，按 `/setup` 流程创建 admin 账号（记住邮箱）。
+    2. 打开 **Control Hub** → **Olares** → **Terminal**，跑内置的迁移脚本 —— 把 `<EMAIL>` 换成步骤 1 里刚创建的 admin 账号邮箱（namespace 自动获取）：
+
+       kubectl exec -it -n $(kubectl get pods -A -l app=deerflowv2-backend -o jsonpath='{.items[0].metadata.namespace}') deploy/deerflowv2-backend -c gateway -- sh /migrate/migrate_legacy_sqlite.sh <EMAIL>
+       
+    3. 刷新浏览器 —— 老对话出现在 admin 侧边栏。
+    
+    脚本幂等，且以只读方式打开 SQLite 文件，可以放心重跑。附件不迁移（只迁对话内容）。全新安装可以完全跳过本步。
+
+    新增 PostgreSQL 数据库后端（由 Olares `middleware.postgres` 自动创建）以及内置账户与认证系统。升级后打开 app 会跳到 `/setup` 页面，请按提示创建首个 admin 账号。修复 `/setup` 报 403 "Cross-site auth request denied" 的问题：从 Olares 注入的入口域名渲染出 `GATEWAY_CORS_ORIGINS` 注入到后端，CSRF 中间件改为走显式白名单，不再依赖根据代理头重建 origin 的脆弱链路。
+
+    新增一组 subagent 调度上限的环境变量到 `deerflowv2-env-config`，无需重新打包镜像就能在线调整、解决 `Recursion limit reached` 报错。每个 subagent 有两个旋钮：`*_MAX_TURNS` 控制 LLM ↔ 工具最大往返轮数（超出时 LangGraph 抛 `GraphRecursionError`），`*_TIMEOUT_SECONDS` 控制墙钟上限（建议 ≥ `MAX_TURNS × 单轮耗时`）。`GENERAL_PURPOSE_*` 给深度研究子 agent 用（默认 `500` / `7200`），`BASH_*` 给 shell 子 agent 用（`300` / `1800`），`DEFAULT_*`（`200` / `1800`）只对你在 `config.yaml` 的 `subagents.custom_agents` 里自定义的子 agent 生效。常见症状对应：报 `Recursion limit reached` → 调高 `*_MAX_TURNS`；报"timed out" → 调高 `*_TIMEOUT_SECONDS`；本地小模型 / 量化重的模型通常需要更大的上限。修改 ConfigMap 后重启后端 deployment 即可生效。
