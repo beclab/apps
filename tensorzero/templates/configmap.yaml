@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-startups
+  namespace: {{ .Release.Namespace }}
+data:
+  tensorzero.toml: |
+    # Demo below: config as demand, remove "#" and restart tensorzero to enable
+    # official doc:
+    # - https://www.tensorzero.com/docs/quickstart#migrating-to-tensorzero
+    # more reference:
+    # - https://github.com/tensorzero/tensorzero/blob/main/ui/fixtures/config/tensorzero.toml
+
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                   MODELS                                   │
+    # └────────────────────────────────────────────────────────────────────────────┘
+
+    # [models."gpt-4o-mini-2024-07-18"]
+    # routing = ["openai"]
+
+    # [models."gpt-4o-mini-2024-07-18".providers.openai]
+    # type = "openai"
+    # model_name = "gpt-4o-mini-2024-07-18"
+
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                 FUNCTIONS                                  │
+    # └────────────────────────────────────────────────────────────────────────────┘
+
+    # [functions.simple_llm_call]
+    # type = "chat"
+
+    # [functions.simple_llm_call.variants.baseline]
+    # type = "chat_completion"
+    # model = "gpt-4o-mini-2024-07-18"
+
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                  METRICS                                   │
+    # └────────────────────────────────────────────────────────────────────────────┘
+
+    # [metrics.task_success]
+    # type = "boolean"
+    # optimize = "max"
+    # level = "episode"
+
+  start.sh: |
+    #!/bin/bash
+    set -e
+
+    echo "Exporting environments..."
+    source /etc/gateway/env.sh
+    env
+
+    echo "Waiting for PostgreSQL..."
+    for i in {1..30}; do
+      if echo > /dev/tcp/{{ .Values.postgres.host }}/{{ .Values.postgres.port }} 2>/dev/null; then
+        echo "PostgreSQL is ready!"
+        break
+      fi
+      echo "Waiting... ($i/30)"
+      sleep 2
+    done
+    sleep 2
+
+    # Note: `--enable-optimization-postgres-migrations` existed up to gateway
+    # 2026.3.x and was removed in 2026.4.0 (all postgres migrations, including
+    # the optimization-related tables, are now handled by a single
+    # `--run-postgres-migrations`). Keep only the unified flag going forward.
+    echo "Running database migrations..."
+    gateway --run-postgres-migrations
+
+    echo "Running clickhouse migrations..."
+    gateway --run-clickhouse-migrations
+
+    echo "Starting gateway server..."
+    # exec gateway --default-config
+    exec gateway --config-file /app/config/tensorzero.toml
+
+  env.sh: |
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                 CLICKHOUSE                                 │
+    # └────────────────────────────────────────────────────────────────────────────┘
+    export TENSORZERO_CLICKHOUSE_URL="http://chuser:chpassword@localhost:8123/tensorzero"
+
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                                 POSTGRESQL                                 │
+    # └────────────────────────────────────────────────────────────────────────────┘
+    export TENSORZERO_POSTGRES_URL="postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.tensorzerodb }}?sslmode=disable"
+
+    # ┌────────────────────────────────────────────────────────────────────────────┐
+    # │                              MODEL PROVIDERS                               │
+    # └────────────────────────────────────────────────────────────────────────────┘
+
+    # Each of these is optional but necessary to infer using the provider
+
+    # export ANTHROPIC_API_KEY=example
+    # export AWS_ACCESS_KEY_ID=example
+    # export AWS_REGION=us-east-1
+    # export AWS_SECRET_ACCESS_KEY=example
+    # export AZURE_API_KEY=example
+    # export DEEPSEEK_API_KEY=example
+    # export FIREWORKS_API_KEY=example
+    # export GCP_VERTEX_CREDENTIALS_PATH=/path/to/credentials.json
+    # export GOOGLE_AI_STUDIO_API_KEY=example
+    # export HYPERBOLIC_API_KEY=example
+    # export MISTRAL_API_KEY=example
+    # export OPENAI_API_KEY=example
+    # export TGI_API_KEY=example
+    # export TOGETHER_API_KEY=example
+    # export VLLM_API_KEY=example
+    # export VOYAGE_API_KEY=example
+    # export XAI_API_KEY=example
