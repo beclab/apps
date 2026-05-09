@@ -1,0 +1,357 @@
+# Install-progress placeholder served on pod :18790 while NemoClaw onboard
+# + sandbox bring-up is in progress. Replaces the socat 503-only placeholder
+# so the browser sees real progress + live tail of onboard logs instead of
+# a blank "Service Unavailable".
+#
+# Lifecycle (see chat-ui-bridge in deployment.yaml):
+#   1. start_placeholder_18790() launches python3 install-ui.py.
+#   2. start_relay_18790() pkills anything on :18790 (including this python
+#      process) then binds socat to 18790 -> sandbox 18789.
+#   3. Browser is already on / polling /api/status.json every 2s; when
+#      /workspace/.nemoclaw-cli-ready appears it location.reload()s and
+#      hits the real WebUI through the relay.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemoclaw-install-ui
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nemoclaw
+data:
+  install-ui.py: |
+    #!/usr/bin/env python3
+    """Pod-local placeholder HTTP server on :18790 with a real install
+    progress page. Runs only until chat-ui-bridge swaps it out for the
+    socat relay to the sandbox.
+    """
+    import argparse, json, os, re, time
+    from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse
+
+    LOG_PATHS = [
+        "/tmp/nemoclaw-onboard.log",
+    ]
+    PULL_LOG_DIR = "/tmp/nemoclaw-pull"
+    SENTINELS = {
+        "installed": "/workspace/.nemoclaw-installed",
+        "skillenv":  "/workspace/.nemoclaw-skillenv-installed",
+        "cli":       "/workspace/.nemoclaw-cli-ready",
+        "relay":     "/workspace/.nemoclaw-chat-relay-ready",
+    }
+    START_TIME = time.time()
+
+    def tail_file(path, lines=200):
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                read = min(size, 65536)
+                f.seek(size - read)
+                data = f.read(read)
+            text = data.decode("utf-8", errors="replace")
+            return "\n".join(text.splitlines()[-lines:])
+        except FileNotFoundError:
+            return ""
+        except Exception as e:
+            return "[install-ui] log read error: %s" % e
+
+    def latest_log():
+        for p in LOG_PATHS:
+            if os.path.isfile(p):
+                t = tail_file(p, 200)
+                if t:
+                    return t
+        # fallback to [5a/5] pull logs (live only during the pre-pull window)
+        parts = []
+        if os.path.isdir(PULL_LOG_DIR):
+            try:
+                for name in sorted(os.listdir(PULL_LOG_DIR)):
+                    if name.endswith(".log"):
+                        tail = tail_file(os.path.join(PULL_LOG_DIR, name), 40)
+                        if tail:
+                            parts.append("=== %s ===\n%s" % (name, tail))
+            except Exception:
+                pass
+        return "\n\n".join(parts) or "(waiting for log output...)"
+
+    # Human-readable labels shown on the install-progress page. Keys match
+    # detect_stage() return values. All strings are English per product spec.
+    STAGE_LABEL = {
+        "initializing": "Initializing",
+        "preflight":    "Preflight endpoint health check",
+        "pulling":      "Pre-pulling base images (cluster / sandbox-base / node)",
+        "onboard_1":    "NemoClaw onboard [1/8]",
+        "onboard_2":    "NemoClaw onboard [2/8] (gateway cluster)",
+        "onboard_3":    "NemoClaw onboard [3/8] (inference probe)",
+        "onboard_4":    "NemoClaw onboard [4/8]",
+        "onboard_5":    "NemoClaw onboard [5/8]",
+        "building":     "Building sandbox image [6/8] (first boot: 5-15 min; docker build)",
+        "onboard_7":    "NemoClaw onboard [7/8]",
+        "onboard_8":    "NemoClaw onboard [8/8]",
+        "skillenv":     "Installing sandbox environment (brew / gcc / CA certificates)",
+        "gateway":      "Starting openclaw gateway",
+        "ready":        "Ready - redirecting",
+    }
+
+    def detect_stage(log_tail, sentinels):
+        if sentinels["cli"]:
+            return "ready"
+        # Most specific signals first.
+        for line in reversed(log_tail.splitlines()[-80:]):
+            if "Still building sandbox image" in line or re.search(r"Step\s+\d+/\d+", line):
+                return "building"
+            m = re.search(r"\[(\d)/8\]", line)
+            if m:
+                n = m.group(1)
+                return "building" if n == "6" else "onboard_%s" % n
+            if "[5a/5]" in line and "pull" in line.lower():
+                return "pulling"
+            if "[preflight]" in line:
+                return "preflight"
+            if "skill-env" in line.lower():
+                return "skillenv"
+            if "sandbox-gw" in line or ("gateway" in line.lower() and "health" in line.lower()):
+                return "gateway"
+        if sentinels["installed"]:
+            return "gateway"
+        return "initializing"
+
+    HTML_PAGE = r"""<!doctype html>
+    <html lang="en"><head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>NemoClaw is installing</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html,body { margin:0; height:100%; }
+      body {
+        background:#0b0d10; color:#d6dee6;
+        font: 14px/1.5 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+        display:flex; flex-direction:column; align-items:center; padding:24px;
+        min-height:100vh;
+      }
+      .card {
+        background:#14181d; border:1px solid #232a32; border-radius:12px;
+        padding:22px 26px; max-width:960px; width:100%; margin-bottom:14px;
+      }
+      h1 { margin:0 0 6px; font-size:22px; font-weight:600; display:flex; align-items:center; }
+      .sub { color:#8899a7; margin:0; }
+      .elapsed { margin-left:auto; color:#6f7f8d; font-size:14px; font-weight:400; }
+      .bar-wrap { margin:18px 0 6px; height:6px; background:#232a32; border-radius:4px; overflow:hidden; }
+      .bar { height:100%; width:5%; background:linear-gradient(90deg,#3ea6ff,#7a6bff); transition:width .6s ease; }
+      .stage { color:#9fb1c1; font-size:13px; }
+      .stage strong { color:#e0eaf5; }
+      .log {
+        background:#08090b; border:1px solid #232a32; border-radius:8px;
+        padding:12px; font: 12px/1.38 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+        color:#b0bcc5; white-space:pre; overflow:auto;
+        height: clamp(240px, 48vh, 480px);
+      }
+      .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+             background:#3ea6ff; box-shadow:0 0 0 4px rgba(62,166,255,.18);
+             margin-right:10px; animation:pulse 1.4s infinite; }
+      @keyframes pulse { 0%,100%{opacity:.45} 50%{opacity:1} }
+      .ready .dot { background:#4ade80; box-shadow:0 0 0 4px rgba(74,222,128,.18); animation:none; }
+      .ready h1 .title-text { color:#4ade80; }
+      .checks { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; font-size:12px; }
+      .check { color:#6f7f8d; }
+      .check.ok { color:#4ade80; }
+      .check.ok::before { content:"\2713  "; }
+      .check::before { content:"\22EF  "; }
+      .log-head { display:flex; justify-content:space-between; margin-bottom:8px; color:#8899a7; font-size:13px; }
+      .log-head .mini { color:#556773; font-size:11px; }
+      footer { color:#556773; font-size:12px; margin-top:4px; text-align:center; }
+      code { background:#0b0d10; padding:2px 6px; border-radius:4px; color:#8899a7; }
+    </style>
+    </head>
+    <body>
+      <div class="card" id="main">
+        <h1>
+          <span class="dot" id="dot"></span>
+          <span class="title-text" id="title">NemoClaw is installing</span>
+          <span class="elapsed" id="elapsed">0s</span>
+        </h1>
+        <p class="sub" id="sub">First boot downloads base images and builds the sandbox image. This typically takes 5-20 minutes. You can leave this page open - it will redirect automatically when NemoClaw is ready.</p>
+        <div class="bar-wrap"><div class="bar" id="bar"></div></div>
+        <div class="stage">Current stage: <strong id="stageText">Initializing</strong></div>
+        <div class="checks">
+          <span class="check" id="c-installed">NemoClaw install (onboard)</span>
+          <span class="check" id="c-skillenv">Sandbox env (skill-env)</span>
+          <span class="check" id="c-cli">Gateway ready (TUI usable)</span>
+          <span class="check" id="c-relay">WebUI relay (socat tunnel)</span>
+        </div>
+      </div>
+      <div class="card" style="padding:14px 16px;">
+        <div class="log-head">
+          <strong>Install log (live tail of /tmp/nemoclaw-onboard.log)</strong>
+          <span class="mini" id="logHint">Refreshing every 2s</span>
+        </div>
+        <pre class="log" id="log">Waiting for log output...</pre>
+      </div>
+      <footer>
+        For deeper debugging: <code>kubectl logs &lt;nemoclaw-pod&gt; -c nemoclaw --tail=200</code>
+      </footer>
+    <script>
+    const STAGE_PROG = {
+      initializing: 5, preflight: 10, pulling: 20,
+      onboard_1: 30, onboard_2: 35, onboard_3: 40, onboard_4: 45, onboard_5: 55,
+      building: 70, onboard_7: 82, onboard_8: 88,
+      skillenv: 92, gateway: 96, ready: 100,
+    };
+    function fmtElapsed(s) {
+      s = parseInt(s||0);
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+      if (h>0) return h+"h"+m+"m";
+      if (m>0) return m+"m"+sec+"s";
+      return sec+"s";
+    }
+    async function refresh() {
+      try {
+        const [s, l] = await Promise.all([
+          fetch("/api/status.json", {cache:"no-store"}).then(r=>r.json()),
+          fetch("/api/logs",        {cache:"no-store"}).then(r=>r.text()),
+        ]);
+        const logEl = document.getElementById("log");
+        const atBottom = (logEl.scrollTop + logEl.clientHeight) >= (logEl.scrollHeight - 20);
+        logEl.textContent = l || "(no log output yet)";
+        if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+        document.getElementById("elapsed").textContent = fmtElapsed(s.elapsed);
+        document.getElementById("stageText").textContent = s.stage_label || s.stage;
+        const prog = STAGE_PROG[s.stage] ?? 10;
+        document.getElementById("bar").style.width = prog + "%";
+        ["installed","skillenv","cli","relay"].forEach(k=>{
+          const e = document.getElementById("c-"+k);
+          if (s.sentinels[k]) e.classList.add("ok"); else e.classList.remove("ok");
+        });
+        if (s.ready) {
+          document.body.classList.add("ready");
+          document.getElementById("title").textContent = "Install complete - entering NemoClaw";
+          document.getElementById("sub").textContent = "Redirecting in 3 seconds. If it doesn't auto-redirect, refresh the page.";
+          document.getElementById("bar").style.width = "100%";
+          setTimeout(()=>location.reload(), 3000);
+        }
+      } catch (e) {
+        // transient fetch failure; page keeps polling
+      }
+    }
+    refresh(); setInterval(refresh, 2000);
+    </script>
+    </body></html>"""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            # Suppress per-request noise; errors still surface via tracebacks.
+            return
+
+        def do_GET(self):
+            try:
+                path = urlparse(self.path).path
+                if path == "/api/status.json":
+                    return self._json(self._status())
+                if path == "/api/logs":
+                    return self._text(latest_log())
+                if path == "/_probe":
+                    # Legacy readiness probe. Kept for external callers that
+                    # expect 503 while installing. The terminal-gate in
+                    # ingress-weui.yaml now uses /_auth_probe below instead
+                    # (see comment on that branch for the rationale).
+                    ready = os.path.isfile(SENTINELS["cli"])
+                    return self._text("ready\n" if ready else "not ready\n",
+                                      code=200 if ready else 503)
+                if path == "/_auth_probe":
+                    # Readiness probe designed for nginx `auth_request`.
+                    # `auth_request` only understands three responses:
+                    #   2xx -> allow
+                    #   401/403 -> deny (catchable by error_page)
+                    #   anything else -> HTTP 500 to the client
+                    # We therefore return 403 (not 503) while the CLI is
+                    # not yet ready. The terminal-gate error_page routes
+                    # 403 to the install-progress page and 200 straight to
+                    # the beclab/terminal Service.
+                    #
+                    # This endpoint is served by the *permanent* install-ui
+                    # instance on pod :18791 (see deployment.yaml,
+                    # start_probe_responder_18791). The original :18790
+                    # install-ui is swapped out for socat once cli is
+                    # ready, after which /_probe on :18789 gets forwarded
+                    # to openclaw gateway and returns 404 -- which auth_request
+                    # would treat as 500. Dedicating :18791 to this endpoint
+                    # guarantees a stable 200/403 answer at all times.
+                    ready = os.path.isfile(SENTINELS["cli"])
+                    return self._text("ready\n" if ready else "not ready\n",
+                                      code=200 if ready else 403)
+                return self._html()
+            except BrokenPipeError:
+                return
+            except Exception as e:
+                try:
+                    self._text("install-ui error: %s" % e, code=500)
+                except Exception:
+                    pass
+
+        def do_POST(self):
+            return self.do_GET()
+
+        def _status(self):
+            s = {k: os.path.isfile(v) for k, v in SENTINELS.items()}
+            log = latest_log()
+            stage = detect_stage(log, s)
+            last = ""
+            for line in reversed(log.splitlines()):
+                if line.strip():
+                    last = line.strip(); break
+            return {
+                "ready": s["cli"],
+                "elapsed": int(time.time() - START_TIME),
+                "stage": stage,
+                "stage_label": STAGE_LABEL.get(stage, stage),
+                "sentinels": s,
+                "last_log_line": last[:400],
+            }
+
+        def _html(self):
+            body = HTML_PAGE.encode("utf-8")
+            # 503 until Gateway is ready so upstream health checks (nginx
+            # proxy_next_upstream) see the installing state; once cli
+            # sentinel exists chat-ui-bridge will replace this process.
+            code = 200 if os.path.isfile(SENTINELS["cli"]) else 503
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Retry-After", "5")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _json(self, obj):
+            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _text(self, s, code=200):
+            body = s.encode("utf-8", errors="replace")
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+    def main():
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--port", type=int, default=18790)
+        ap.add_argument("--bind", default="0.0.0.0")
+        args = ap.parse_args()
+        srv = ThreadingHTTPServer((args.bind, args.port), Handler)
+        print("[install-ui] listening on %s:%d (pid=%d)" % (args.bind, args.port, os.getpid()), flush=True)
+        try:
+            srv.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+    if __name__ == "__main__":
+        main()

@@ -1,0 +1,2197 @@
+# Scripts that bridge external chat clients (pod :18790) to OpenClaw's gateway
+# which runs inside the NemoClaw sandbox pod. OpenShell >= 0.0.36 runs the sandbox
+# as a k3s pod inside the `openshell-cluster-nemoclaw` Docker container, so the
+# old `docker ps | grep my-assistant` approach no longer works.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemoclaw-sandbox-bridge
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nemoclaw
+data:
+  # Idempotently ensures `openclaw gateway` is running inside the sandbox pod.
+  # HOME=/sandbox is essential: without it, openclaw reads /root/.openclaw
+  # (empty) instead of the NemoClaw-provisioned /sandbox/.openclaw state,
+  # which causes the gateway to fall back to the built-in anthropic default
+  # model instead of the configured `inference/*` provider.
+  sandbox-ensure-gateway.sh: |
+    #!/bin/sh
+    set -u
+    CLUSTER_CTR="${CLUSTER_CTR:-openshell-cluster-nemoclaw}"
+    NS="${NS:-openshell}"
+    SBX="${SBX:-my-assistant}"
+    # Interactive sessions (`nemoclaw my-assistant connect`) land as the non-root
+    # `sandbox` user, but `kubectl exec` defaults to the image's USER (root).
+    # If the gateway is started as root, every file under /sandbox/.openclaw and
+    # /sandbox/.openclaw-data ends up root-owned, and subsequent interactive
+    # `openclaw config ...` runs fail with EACCES on the tmp write. Run everything
+    # as the sandbox user and pre-chown any previously root-created state.
+    SBX_USER="${SBX_USER:-sandbox}"
+
+    health_ok() {
+      # Probe gateway readiness from the agent container by TCP-connecting to
+      # 127.0.0.1:18789 via nsenter into the user/sandbox netns first (chart
+      # v1.7.10+ launches the gateway there) and falling back to agent netns.
+      # We use a TCP probe instead of `openclaw gateway health` because the
+      # health CLI authenticates with the auth.token stored in openclaw.json,
+      # which the gateway -- launched with `--auth none --allow-unconfigured`
+      # -- does not accept, so the WS handshake hangs until the CLI 10s
+      # timeout. Verified in chart v1.7.11 production: TCP probe in user netns
+      # returns OK in <100ms while `openclaw gateway health` times out after
+      # 10s with "Error: gateway timeout after 10000ms". The gateway only
+      # bind()s :18789 once it has finished loading config and reached the
+      # "ready" state (gateway.out shows "starting HTTP server" -> "ready"
+      # transition under 100ms), so a TCP probe is a reliable readiness
+      # signal.
+      docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- sh -c '
+        _agent=$(readlink /proc/self/ns/net 2>/dev/null)
+        _pick=""
+        if [ -n "$_agent" ] && command -v nsenter >/dev/null 2>&1; then
+          for _name in openshell sshd ssh node openclaw bash; do
+            for _cand in $(ps -ef 2>/dev/null | awk -v n="$_name" "index(\$0,n) && !/awk/ && !/grep/ {print \$2}"); do
+              [ -r "/proc/$_cand/ns/net" ] || continue
+              _ns=$(readlink "/proc/$_cand/ns/net" 2>/dev/null) || continue
+              if [ -n "$_ns" ] && [ "$_ns" != "$_agent" ]; then _pick=$_cand; break 2; fi
+            done
+          done
+        fi
+        if [ -n "$_pick" ]; then
+          nsenter --net="/proc/$_pick/ns/net" -- timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/18789" >/dev/null 2>&1 && exit 0
+        fi
+        timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/18789" >/dev/null 2>&1
+      ' >/dev/null 2>&1
+    }
+
+    # Do NOT exit early when health_ok: nemoclaw onboard starts the gateway before chat-ui-bridge
+    # runs this script, and we would skip the .bashrc / PATH hooks forever (brew: command not found).
+
+    echo "[sandbox-gw] shell rc + gateway check inside ${SBX} (user ${SBX_USER})..."
+    # Forward GOG_KEYRING_* from the nemoclaw pod (bound via Secret in deployment.yaml)
+    # into the inner shell. Openclaw subprocess skill runners (the TUI agent, any
+    # "gog auth" / "gog ... read" call) run with a sanitized HOME=/tmp and do NOT
+    # source ~/.bash_profile, so the only reliable way to feed the keyring
+    # passphrase is to bake it into the openclaw gateway process environment
+    # (inherited by every subprocess openclaw spawns). Without this, gog prompts
+    # "Enter passphrase to unlock /tmp/.config/gogcli/keyring" even though the env
+    # is correctly set in interactive shells.
+    GKP="${GOG_KEYRING_PASSWORD:-}"
+    # gateway.controlUi.allowedOrigins: forward CHAT_UI_URL + extras into the sandbox
+    # so patch_origins.py (same logic as workspace /opt/nemoclaw/patch_origins.py) can merge.
+    _ORIG_CSV="${CHAT_UI_URL:-}"
+    if [ -n "${OPENCLAW_EXTRA_ALLOWED_ORIGINS:-}" ]; then
+      if [ -n "$_ORIG_CSV" ]; then
+        _ORIG_CSV="${_ORIG_CSV},${OPENCLAW_EXTRA_ALLOWED_ORIGINS}"
+      else
+        _ORIG_CSV="${OPENCLAW_EXTRA_ALLOWED_ORIGINS}"
+      fi
+    fi
+    _TPCSV="${OPENCLAW_TRUSTED_PROXIES:-}"
+    # models.providers.inference.baseUrl self-heal uses NEMOCLAW_ENDPOINT_URL
+    # (the same value the operator typed in OlaresManifest, already validated
+    # as reachable in deployment.yaml preflight [4/5]). Must be forwarded into
+    # the inner docker-exec env otherwise patch_inference_baseurl.py exits 0
+    # silently and the unresolvable https://inference.local/v1 stays on disk.
+    _NEM_EP="${NEMOCLAW_ENDPOINT_URL:-}"
+    # Single-quoted remote body: avoids the host re-parsing a double-quoted string (where backticks
+    # in comments became command substitution and destroyed runuser / LAUNCH).
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      env "SBX_USER=${SBX_USER:-sandbox}" "GOG_KEYRING_PASSWORD=${GKP}" "GOG_KEYRING_BACKEND=file" \
+      "ORIGIN_CSV=${_ORIG_CSV}" "OPENCLAW_TRUSTED_PROXIES=${_TPCSV}" \
+      "NEMOCLAW_ENDPOINT_URL=${_NEM_EP}" \
+      "NEMOCLAW_SANDBOX_HTTP_PROXY=${NEMOCLAW_SANDBOX_HTTP_PROXY:-}" \
+      "NEMOCLAW_SANDBOX_NO_PROXY_EXTRA=${NEMOCLAW_SANDBOX_NO_PROXY_EXTRA:-}" \
+      "NEMOCLAW_GATEWAY_NETNS=${NEMOCLAW_GATEWAY_NETNS:-auto}" sh -c '
+      set -u
+      cd /sandbox || exit 1
+      # Pick a pid in a non-agent netns (= user/sandbox netns where openshell-spawned
+      # ssh sessions live). Echoes pid or empty. Used by both the early-exit health
+      # probe below AND the post-launch wait loop, so they agree on which netns
+      # the gateway lives in (chart v1.7.10+ launches gateway via nsenter into
+      # this same netns -- see LAUNCH section). Without this, both probes run in
+      # agent netns and never see the user-netns gateway -> infinite stop+launch
+      # loop where every iteration kills the previously-launched gateway.
+      _netns_pick_pid() {
+        _np_agent=$(readlink /proc/self/ns/net 2>/dev/null) || return 1
+        for _np_n in openshell sshd ssh node openclaw bash; do
+          for _np_c in $(ps -ef 2>/dev/null | awk -v n="$_np_n" "index(\$0,n) && !/awk/ && !/grep/ {print \$2}"); do
+            [ -r "/proc/$_np_c/ns/net" ] || continue
+            _np_ns=$(readlink "/proc/$_np_c/ns/net" 2>/dev/null) || continue
+            if [ -n "$_np_ns" ] && [ "$_np_ns" != "$_np_agent" ]; then
+              echo "$_np_c"
+              return 0
+            fi
+          done
+        done
+        for _np_l in /proc/[0-9]*/ns/net; do
+          [ -r "$_np_l" ] || continue
+          _np_ns=$(readlink "$_np_l" 2>/dev/null) || continue
+          if [ -n "$_np_ns" ] && [ "$_np_ns" != "$_np_agent" ]; then
+            echo "$_np_l" | awk -F/ "{print \$3}"
+            return 0
+          fi
+        done
+        return 1
+      }
+      _health_via_netns() {
+        # Returns 0 if 127.0.0.1:18789 accepts a TCP connection in either the
+        # user netns (preferred, where chart v1.7.10+ launches the gateway via
+        # nsenter) or the agent netns (fallback for cold starts before any
+        # user-netns process exists). We DO NOT use `openclaw gateway health`
+        # here because that command reads /sandbox/.openclaw/openclaw.json,
+        # picks up the stored auth.token, and tries to authenticate the WS
+        # handshake -- but the gateway is launched with `--auth none
+        # --allow-unconfigured`, so the auth-token handshake never gets a
+        # response and times out at the CLI defaults 10s timeout. Verified in
+        # production: TCP probe in same user netns returns OK in <100ms while
+        # `openclaw gateway health` times out after 10s with
+        # "Error: gateway timeout after 10000ms" (chart v1.7.11 logs). TCP
+        # probe is sufficient -- gateway only `bind`s :18789 after it has
+        # finished loading config and is ready to accept connections (see
+        # gateway.out: "starting HTTP server" -> "ready" within 100ms).
+        _hv_pid=$(_netns_pick_pid 2>/dev/null) || true
+        if [ -n "$_hv_pid" ] && command -v nsenter >/dev/null 2>&1; then
+          nsenter --net="/proc/$_hv_pid/ns/net" -- timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/18789" >/dev/null 2>&1 && return 0
+        fi
+        timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/18789" >/dev/null 2>&1
+      }
+      mkdir -p /sandbox /sandbox/.openclaw /sandbox/.openclaw-data /sandbox/.nemoclaw /sandbox/.config /sandbox/inbox /sandbox/.local/bin /sandbox/.openclaw/tasks 2>/dev/null || true
+      touch /sandbox/.openclaw-data/gateway.out 2>/dev/null || true
+      chown -R "$SBX_USER:$SBX_USER" /sandbox/.openclaw /sandbox/.openclaw-data /sandbox/.nemoclaw /sandbox/.config /sandbox/inbox /sandbox/.local/bin /sandbox/.openclaw/tasks 2>/dev/null || true
+      # Self-heal stuck session locks (common cause of "agent卡住/不返回").
+      find /sandbox/.openclaw-data/agents -type f -name "*.jsonl.lock" -delete 2>/dev/null || true
+      # Optional: tune OpenClaw inference provider API + token limits.
+      # NOTE: clamp body lives in clamp-openclaw-config.py to avoid single-quote pitfalls in sh -c.
+      # Mirror openclaw.json snapshots into /tmp so we can tell whether
+      # clamp / patch_origins actually mutated the file. The gateway reads
+      # its config ONCE at startup (no SIGHUP / no file watcher), so a
+      # silent mutation to allowedOrigins / trustedProxies / providers
+      # produced no observable change in the running gateway -- in
+      # particular, new browser Origins never entered the in-memory
+      # controlUi.allowedOrigins set, which looked to end users like
+      # "WebUI chat has no response / request never reaches GPU" (CORS
+      # drop before the inference call). We now compare SHA256 before vs
+      # after the python patchers and force _cfg_changed=1 on delta, so
+      # the gateway is killed + respawned and picks up the new config.
+      _cfg_changed=0
+      if [ -f /sandbox/.openclaw/openclaw.json ]; then
+        mkdir -p /sandbox/.nemoclaw 2>/dev/null || true
+        _pre=""
+        if command -v sha256sum >/dev/null 2>&1; then
+          _pre=$(sha256sum /sandbox/.openclaw/openclaw.json 2>/dev/null | awk "{print \$1}")
+        fi
+        # clamp lives on the workspace pod at /opt/nemoclaw -- NOT mounted inside the sandbox.
+        # chat-ui-bridge + skill-env stage a copy under /sandbox/.nemoclaw/ so this succeeds.
+        if [ -f /sandbox/.nemoclaw/clamp-openclaw-config.py ]; then
+          python3 /sandbox/.nemoclaw/clamp-openclaw-config.py /sandbox/.openclaw/openclaw.json >/dev/null 2>&1 || true
+        fi
+        if [ -f /sandbox/.nemoclaw/patch_origins.py ]; then
+          # Keep stdout so we see "patched <path>" in bridge logs; also
+          # check after the run whether allowedOrigins actually picked up
+          # something matching ORIGIN_CSV (helpful when CHAT_UI_URL is
+          # the wrong host for this users browser, eg multi-tenant Olares).
+          python3 /sandbox/.nemoclaw/patch_origins.py 2>/dev/null || true
+        fi
+        # Self-heal models.providers.inference.baseUrl.
+        # Background: nemoclaw [3/8] onboard persists baseUrl=https://inference.local/v1
+        # into openclaw.json. On Olares node layouts where inference.local
+        # does NOT resolve (getent hosts inference.local -> NXDOMAIN),
+        # every WebUI turn goes through inference/<model> and fails as
+        # "LLM request failed: network connection error" while TUI might
+        # still work via a non-inference provider. We rewrite baseUrl back
+        # to the operator-supplied NEMOCLAW_ENDPOINT_URL (already probed
+        # reachable in preflight /models 200) so WebUI works from turn #1.
+        # Any mutation here flips _cfg_changed=1 below and forces a gateway
+        # restart so the in-memory provider table is reloaded.
+        if [ -f /sandbox/.nemoclaw/patch_inference_baseurl.py ] && [ -n "${NEMOCLAW_ENDPOINT_URL:-}" ]; then
+          python3 /sandbox/.nemoclaw/patch_inference_baseurl.py 2>/dev/null || true
+        fi
+        if [ -n "$_pre" ] && command -v sha256sum >/dev/null 2>&1; then
+          _post=$(sha256sum /sandbox/.openclaw/openclaw.json 2>/dev/null | awk "{print \$1}")
+          if [ -n "$_post" ] && [ "$_pre" != "$_post" ]; then
+            _cfg_changed=1
+            echo "[sandbox-gw] openclaw.json mutated by clamp/patch_origins/patch_inference_baseurl; gateway restart required for new allowedOrigins / trustedProxies / inference.baseUrl to take effect"
+          fi
+        fi
+        # Visible sanity line -- so we can see what the gateway WILL pick
+        # up once restarted, and compare with the browser Origin header.
+        # Single-line form so YAML block-scalar indentation stays intact.
+        if command -v python3 >/dev/null 2>&1; then
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); g=d.get(\"gateway\",{}) or {}; c=g.get(\"controlUi\",{}) or {}; ao=c.get(\"allowedOrigins\") or []; tp=g.get(\"trustedProxies\") or []; print(\"[sandbox-gw] openclaw.json controlUi.allowedOrigins=\"+json.dumps(ao)+\" trustedProxies=\"+json.dumps(tp))" \
+            /sandbox/.openclaw/openclaw.json 2>/dev/null || true
+        fi
+        chown "$SBX_USER:$SBX_USER" /sandbox/.openclaw/openclaw.json 2>/dev/null || true
+      fi
+      # Always sync PATH hooks first (idempotent). Runs even when gateway is already healthy.
+      # /sandbox/.local/bin wins over Homebrew/bin/gog so the nemoclaw gog shim is used
+      # (brew link would otherwise keep recreating its own symlink under Homebrew/bin).
+      for _bf in /sandbox/.bashrc /sandbox/.profile /sandbox/.bash_profile; do
+        touch "$_bf" 2>/dev/null || true
+        chown "$SBX_USER:$SBX_USER" "$_bf" 2>/dev/null || true
+        grep -q nemoclaw-linuxbrew-path-v3 "$_bf" 2>/dev/null || printf "%s\n" \
+          "# nemoclaw-linuxbrew-path-v3" \
+          "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.local/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin:\$PATH" >> "$_bf"
+        grep -q nemoclaw-xdg-gogcli "$_bf" 2>/dev/null || printf "%s\n" \
+          "# nemoclaw-xdg-gogcli" \
+          "export XDG_CONFIG_HOME=/sandbox/.config" >> "$_bf"
+        if [ -f /etc/profile.d/nemoclaw-linuxbrew.sh ]; then
+          grep -q nemoclaw-linuxbrew-rc "$_bf" 2>/dev/null || printf "%s\n" \
+            "# nemoclaw-linuxbrew-rc" \
+            "[ -f /etc/profile.d/nemoclaw-linuxbrew.sh ] && . /etc/profile.d/nemoclaw-linuxbrew.sh" >> "$_bf"
+        fi
+      done
+      # NOTE: every line in this block -- including these comments -- runs
+      # inside the outer docker-exec sh -c wrapper whose body is delimited
+      # by SINGLE QUOTES. POSIX sh does not allow nested single quotes in a
+      # single-quoted string, so a stray apostrophe anywhere below would
+      # close the wrapper prematurely and surface as e.g.
+      #   sandbox-ensure-gateway.sh: 119: Syntax error: ( unexpected
+      # (the ( was whatever character followed the misclosed quote). So:
+      #   - keep comments apostrophe-free (no isn, no word that ends in -s)
+      #   - NEVER write sample sh invocations here (no sh -c ...),
+      #   - use double quotes for every printf argument and escape dollar
+      #     as backslash-dollar and embedded quote as backslash-quote.
+      # The /sandbox/.local/bin/brew file below used to be a plain symlink
+      # to /sandbox/.linuxbrew/Homebrew/bin/brew, but Homebrew derives
+      # HOMEBREW_PREFIX from the unresolved argv[0] path when HOMEBREW_PREFIX
+      # is missing from env. Openclaw skill runners sanitize env before
+      # spawning brew, so the symlink made brew pick /sandbox/.local as
+      # prefix and EACCES on its vendor-install-ruby flock. The wrapper
+      # below pins HOMEBREW_PREFIX so locks always land under
+      # /sandbox/.linuxbrew/var/homebrew/locks.
+      if [ -x /sandbox/.linuxbrew/Homebrew/bin/brew ]; then
+        mkdir -p /sandbox/.local/bin \
+                 /sandbox/.local/var/homebrew/locks \
+                 /sandbox/.linuxbrew/var/homebrew/locks \
+                 /sandbox/.linuxbrew/Homebrew/var/homebrew/locks
+        rm -f /sandbox/.local/bin/brew 2>/dev/null || true
+        {
+          printf "%s\n" "#!/bin/sh"
+          printf "%s\n" "# Managed by nemoclaw-sandbox-bridge. Do not edit."
+          printf "%s\n" "# Pins HOMEBREW_PREFIX so openclaw skill runners cannot trick brew"
+          printf "%s\n" "# into using /sandbox/.local as its prefix via the wrapper path."
+          printf "%s\n" "export HOMEBREW_PREFIX=/sandbox/.linuxbrew"
+          printf "%s\n" "export HOMEBREW_REPOSITORY=/sandbox/.linuxbrew/Homebrew"
+          printf "%s\n" "export HOMEBREW_CELLAR=/sandbox/.linuxbrew/Cellar"
+          printf "%s\n" "export HOMEBREW_NO_AUTO_UPDATE=1"
+          printf "%s\n" "export HOMEBREW_NO_ENV_HINTS=1"
+          printf "%s\n" "export HOMEBREW_NO_ANALYTICS=1"
+          printf "%s\n" "export HOMEBREW_NO_ENV_FILTERING=1"
+          printf "%s\n" ": \"\${HOMEBREW_TEMP:=/tmp/homebrew-tmp}\";   export HOMEBREW_TEMP"
+          printf "%s\n" ": \"\${HOMEBREW_CACHE:=/tmp/homebrew-cache}\"; export HOMEBREW_CACHE"
+          printf "%s\n" ": \"\${HOMEBREW_LOGS:=/tmp/homebrew-logs}\";   export HOMEBREW_LOGS"
+          printf "%s\n" ": \"\${TMPDIR:=/tmp/homebrew-tmp}\";            export TMPDIR"
+          printf "%s\n" "mkdir -p \"\$HOMEBREW_TEMP\" \"\$HOMEBREW_CACHE\" \"\$HOMEBREW_LOGS\" 2>/dev/null || true"
+          printf "%s\n" "exec /sandbox/.linuxbrew/Homebrew/bin/brew \"\$@\""
+        } > /sandbox/.local/bin/brew
+        chmod 0755 /sandbox/.local/bin/brew
+        chown "$SBX_USER:$SBX_USER" /sandbox/.local/bin/brew 2>/dev/null || true
+        chown -R "$SBX_USER:$SBX_USER" /sandbox/.local 2>/dev/null || true
+      fi
+      # Self-heal Homebrew permissions. `brew vendor-install ruby` (triggered
+      # by e.g. `brew install gog`) mkdirs var/homebrew/locks inside the repo;
+      # if even a single ancestor is still root-owned from an earlier sync,
+      # the install bails with "cannot create directory". Cheap to re-run on
+      # every health loop because chown -R bails out quickly when everything
+      # is already owned by SBX_USER.
+      if id "$SBX_USER" >/dev/null 2>&1 && [ -d /sandbox/.linuxbrew ]; then
+        mkdir -p /sandbox/.linuxbrew/var/homebrew/locks \
+                 /sandbox/.linuxbrew/Homebrew/var/homebrew/locks \
+                 /sandbox/.linuxbrew/Homebrew/Library/Caches/Homebrew \
+                 /sandbox/.linuxbrew/Homebrew/Library/Homebrew/vendor/portable-ruby \
+                 /sandbox/.local/var/homebrew/locks 2>/dev/null || true
+        # Recreate portable-ruby/current symlink if missing (see skill-env for why).
+        VDIR=/sandbox/.linuxbrew/Homebrew/Library/Homebrew/vendor/portable-ruby
+        if [ -d "$VDIR" ] && [ ! -e "$VDIR/current" ]; then
+          RV=$(ls -1 "$VDIR" 2>/dev/null | awk "/^[0-9]+\\.[0-9]+\\.[0-9]+$/{print; exit}")
+          if [ -n "$RV" ] && [ -x "$VDIR/$RV/bin/ruby" ]; then
+            (cd "$VDIR" && ln -sfn "$RV" current) 2>/dev/null || true
+          fi
+        fi
+        chown -R "$SBX_USER:$SBX_USER" /sandbox/.linuxbrew /sandbox/.local 2>/dev/null || true
+        chmod -R u+rwX /sandbox/.linuxbrew 2>/dev/null || true
+        chmod -R u+rwX /sandbox/.local 2>/dev/null || true
+        [ -L "$VDIR/current" ] && chown -h "$SBX_USER:$SBX_USER" "$VDIR/current" 2>/dev/null || true
+        # Flush stale lockfiles left root-owned. Homebrew acquires flock on
+        # files like var/homebrew/locks/vendor-install-ruby when running
+        # brew vendor-install ruby. If a previous install ran as root before
+        # the brew wrapper below pinned HOMEBREW_PREFIX, the file can survive
+        # root-owned mode 0644, which makes a later exec 200 redirection
+        # return EACCES from the sandbox user and lock.sh mis-report
+        # "Another brew vendor-install ruby process is already running".
+        # We only delete files NOT owned by SBX_USER; an actively-running
+        # brew would own its own lockfiles, so this cannot race.
+        # NOTE: no single quotes allowed inside the outer sh -c wrapper --
+        # sed script uses double quotes (no $ expansion needed here).
+        for _ld in /sandbox/.linuxbrew/var/homebrew/locks \
+                   /sandbox/.linuxbrew/Homebrew/var/homebrew/locks \
+                   /sandbox/.local/var/homebrew/locks; do
+          [ -d "$_ld" ] || continue
+          find "$_ld" -maxdepth 1 -type f ! -user "$SBX_USER" \
+            -print -delete 2>/dev/null | sed "s#^#[sandbox-brew-lock] stale: #" || true
+        done
+      fi
+      # /var/tmp self-heal (see skill-env). Cheap idempotent re-check so an image
+      # rebuild or a brew install gone sideways cannot leave root-owned litter
+      # and block subsequent installs.
+      mkdir -p /var/tmp 2>/dev/null || true
+      chmod 1777 /var/tmp 2>/dev/null || true
+      if id "$SBX_USER" >/dev/null 2>&1; then
+        find /var/tmp -mindepth 1 -maxdepth 1 ! -user "$SBX_USER" -print \
+          -exec rm -rf {} + 2>/dev/null || true
+      fi
+      # Staleness criterion: XDG_CONFIG_HOME absent -> gog/openclaw skill subprocesses
+      # would be sanitized to /tmp/.config and miss keyring tokens. Force restart.
+      _gw_pid=""
+      _gw_pid=$(pgrep -f "openclaw[- ]gateway" 2>/dev/null | head -1) || true
+      if [ -z "$_gw_pid" ]; then
+        _gw_pid=$(ps -eo pid,comm 2>/dev/null \
+                  | awk '"'"'$2 ~ /^openclaw[- ]gateway$/ || $2 == "openclaw-gateway" {print $1; exit}'"'"')
+      fi
+      _gw_stale=0
+      if [ -n "$_gw_pid" ] && [ -r "/proc/$_gw_pid/environ" ]; then
+        if ! tr "\0" "\n" < "/proc/$_gw_pid/environ" 2>/dev/null \
+             | grep -qiE "^XDG_CONFIG_HOME=/sandbox"; then
+          _gw_stale=1
+          echo "[sandbox-gw] running gateway pid=$_gw_pid lacks XDG_CONFIG_HOME under /sandbox; forcing restart"
+        fi
+      fi
+      # Config mutation staleness: openclaw gateway does NOT re-read
+      # openclaw.json on file change, so a healthy gateway still runs
+      # with a stale allowedOrigins / trustedProxies copy after
+      # patch_origins.py appended new entries. That manifests as WebUI
+      # chat silently dropped at the CORS gate (TUI path bypasses it
+      # because it connects locally without an Origin header).
+      if [ "${_cfg_changed:-0}" = "1" ]; then
+        _gw_stale=1
+        echo "[sandbox-gw] openclaw.json changed; forcing gateway restart to pick up allowedOrigins / trustedProxies"
+      fi
+      # Gateway readiness gate (chart v1.7.12+).
+      #
+      # PRIORITY: a TCP probe (via _health_via_netns -> nsenter into user netns
+      # -> /dev/tcp/127.0.0.1/18789) decides everything. If the gateway answers
+      # TCP, we exit 0 and skip kill+launch even when:
+      #   - _gw_stale=1 (running gateway pid lacks XDG_CONFIG_HOME=/sandbox)
+      #   - _cfg_changed=1 (clamp/patch_origins/patch_inference_baseurl
+      #     mutated openclaw.json this iteration)
+      # Rationale (post chart-v1.7.10 production diagnostics):
+      #   1) After our nsenter LAUNCH succeeds, BOTH the old onboard-spawned
+      #      gateway (pid<3000, XDG missing) AND the new chart-spawned one
+      #      (pid>5000, XDG=/sandbox/.config) are alive in user netns. Only
+      #      one of them holds :18789 (the first to bind); the other lingers
+      #      because it could not bind. pgrep | head -1 always returns the
+      #      lowest PID = the onboard one, so the env-staleness check sees
+      #      "no XDG" forever and keeps requesting restart.
+      #   2) The kill-loop below sends kill -9 from agent root. The
+      #      onboard-spawned gateway lives in a SEPARATE user namespace
+      #      (openshell >= 0.0.36 isolation), so agent root maps to UID 65534
+      #      inside that userns and the signal is rejected with EPERM. The
+      #      kill silently fails and the next iteration repeats the same
+      #      restart attempt, accumulating dead-but-unkillable openclaw
+      #      processes (verified: D-1 diagnostic showed two pairs alive in
+      #      user netns; only pid=2417 was actually LISTENing).
+      #   3) Net effect of the previous logic: a HEALTHY gateway (TCP
+      #      reachable, gateway.out shows "ready") was being mistaken for
+      #      stale every ~15s, the readiness sentinel never got written, and
+      #      the WebUI hung on the install-progress placeholder forever
+      #      ("还没启动好，是卡住了吗").
+      # Trade-off: a gateway with wrong XDG_CONFIG_HOME may not find gog
+      # keyring tokens for `gog auth`-backed skills. We accept that as a
+      # known soft failure (skill-level) rather than the previous hard
+      # failure (whole pod stays NotReady). When the user re-onboards or
+      # explicitly restarts the gateway via TUI, the env normalizes.
+      if _health_via_netns; then
+        if [ "${_gw_stale:-0}" = "1" ]; then
+          echo "[sandbox-gw] gateway responding on TCP :18789 despite stale env / cfg-changed; not forcing restart (would create unkillable cross-userns duplicates). gog skills may need a manual restart inside the sandbox shell to pick up XDG_CONFIG_HOME=/sandbox/.config."
+        else
+          echo "[sandbox-gw] gateway already healthy (TCP); rc hooks applied"
+        fi
+        exit 0
+      fi
+      [ "$_gw_stale" = "1" ] || echo "[sandbox-gw] gateway not responding; restarting..."
+      openclaw gateway stop 2>/dev/null || true
+      ps -eo pid,command 2>/dev/null | awk '"'"'/openclaw[- ]gateway/ && !/awk/ {print $1}'"'"' | while read -r _pid; do
+        kill -9 "$_pid" 2>/dev/null || true
+      done
+      sleep 1
+      # GOG_KEYRING_BACKEND + GOG_KEYRING_PASSWORD MUST be in openclaw gateway process
+      # env so its skill subprocesses (sanitized HOME) inherit them; otherwise gog
+      # prompts for the passphrase interactively, which fails in non-TTY agent context.
+      GOG_ENV=""
+      if [ -n "${GOG_KEYRING_PASSWORD:-}" ]; then
+        GOG_ENV="GOG_KEYRING_BACKEND=file GOG_KEYRING_PASSWORD=${GOG_KEYRING_PASSWORD}"
+      fi
+      # OpenClaw binary selection (chart NEMOCLAW_OPENCLAW_VERSION pin support).
+      # When the chart-side helper has installed a pinned version (npm prefix
+      # /sandbox/.local) AND written the marker file below, we explicitly invoke
+      # that binary by full path AND PATH-prepend /sandbox/.local/bin. Without
+      # this, the default PATH below puts /usr/local/bin first and the pre-baked
+      # openclaw (typically NemoClaw blueprint floor 2026.4.24) wins -- making
+      # NEMOCLAW_OPENCLAW_VERSION look like a no-op even after npm install
+      # succeeded into the user prefix. /sandbox/.openclaw-pinned-marker is
+      # owned by chat-ui-bridge (writes/removes it; we only consume).
+      OPENCLAW_BIN=openclaw
+      _PIN_PATH_PREFIX=""
+      if [ -f /sandbox/.openclaw-pinned-marker ] && [ -x /sandbox/.local/bin/openclaw ]; then
+        OPENCLAW_BIN=/sandbox/.local/bin/openclaw
+        _PIN_PATH_PREFIX="/sandbox/.local/bin:"
+        _PIN_VER=$(head -1 /sandbox/.openclaw-pinned-marker 2>/dev/null | tr -d "\r\n ")
+        echo "[sandbox-gw] using pinned openclaw at /sandbox/.local/bin/openclaw (NEMOCLAW_OPENCLAW_VERSION=${_PIN_VER:-<unknown>})"
+      fi
+      # Sandbox egress proxy (chart v1.7.13+).
+      #
+      # When chart v1.7.10+ launches the gateway via nsenter into the user
+      # netns, the gateway loses agent-netns connectivity to in-cluster
+      # Service IPs (e.g. Olares shared inference at 10.233.0.0/16). The
+      # user netns has only a single veth `veth-s-*` (typically
+      # 10.200.0.2/24) with default route pointing at the openshell-sandbox
+      # HTTP egress proxy in the agent netns. Verified in production
+      # (chart v1.7.12 H-4 diagnostic on openshell 0.0.36): direct curl to
+      # inference Service IP fails with "Could not connect to server"
+      # after 0ms, while same request via http_proxy = the user-netns
+      # default-gateway IP at :3128 returns HTTP 200 in ~7ms. Without this
+      # fix the gateway can serve TUI/WebUI sessions but every LLM call
+      # surfaces as "LLM request failed: network connection error" /
+      # "Connection error" (gateway.out fills with
+      # `embedded run agent end isError=true`).
+      #
+      # Detection (NOT hardcoded -- subnet/port can change across openshell
+      # versions):
+      #   1. Read user netns default-route gateway with `ip -4 route show
+      #      default` (= 10.200.0.1 on openshell 0.0.36, but the chart does
+      #      not depend on that constant).
+      #   2. Probe TCP connect to that gateway on a small ordered list of
+      #      well-known proxy ports (3128 = squid/openshell-sandbox default,
+      #      8080 = generic, 1080 = SOCKS-style fallback some setups use).
+      #   3. First port that accepts a TCP handshake within 2s wins.
+      #   4. If detection fails entirely (no default route, or no port
+      #      responding), we LAUNCH without proxy and emit a WARN -- the
+      #      gateway will still serve TUI/WebUI but LLM calls will fail
+      #      until ops investigates (or sets a manual override below).
+      #
+      # Both lowercase and uppercase env-var forms are set because the node
+      # ecosystem is inconsistent (undici/axios/openai-sdk pick different
+      # variants; openclaw model-pricing fetches use lowercase). NO_PROXY
+      # excludes loopback so the gateway internal API + canvas + browser
+      # control sidecar (127.0.0.1:18789 / 18791) bypass the proxy, and
+      # also lists the detected proxy host itself so a request from the
+      # proxy back through itself does not loop.
+      _detect_sandbox_proxy() {
+        _dsp_pid="$1"
+        [ -n "$_dsp_pid" ] || return 1
+        command -v nsenter >/dev/null 2>&1 || return 1
+        _dsp_gw=$(nsenter --net="/proc/${_dsp_pid}/ns/net" -- ip -4 route show default 2>/dev/null | awk "/^default/ {print \$3; exit}")
+        [ -n "$_dsp_gw" ] || return 1
+        for _dsp_port in 3128 8080 1080; do
+          if nsenter --net="/proc/${_dsp_pid}/ns/net" -- timeout 2 bash -c "exec 3<>/dev/tcp/${_dsp_gw}/${_dsp_port}" >/dev/null 2>&1; then
+            echo "http://${_dsp_gw}:${_dsp_port}"
+            return 0
+          fi
+        done
+        return 1
+      }
+      _build_proxy_env() {
+        _bpe_url="$1"
+        [ -n "$_bpe_url" ] || return 0
+        _bpe_host=$(echo "$_bpe_url" | sed -E "s|^https?://||; s|:.*$||")
+        _bpe_no="127.0.0.1,localhost,::1"
+        [ -n "$_bpe_host" ] && _bpe_no="${_bpe_no},${_bpe_host}"
+        # Public-Internet egress hosts that the openclaw plugin loader (and
+        # interactive shells under `nemoclaw connect`) reach via npm/pip/
+        # git/docker/etc. These are PUBLIC IPs (not RFC1918 / cluster-
+        # internal), so user netns can connect directly without going
+        # through the sandbox HTTP proxy. Bypassing the proxy here is
+        # preferable for two reasons:
+        #   1) The openshell-sandbox HTTP proxy MITMs HTTPS with its own CA
+        #      (so JS extensions can be policy-checked). On openshell 0.0.36
+        #      this MITM has a known bug with %-encoded scoped npm package
+        #      URLs (e.g. "@clack%2fprompts" -> Empty reply). Bypassing the
+        #      proxy makes scoped packages fetch normally.
+        #   2) Direct connect is ~10x faster (verified in I-5: feishu
+        #      @larksuiteoapi/node-sdk install -- 49 packages -- direct=7s
+        #      vs via-proxy=60s+ and frequently fails on scoped deps).
+        # Curated list grouped by ecosystem (chart v1.7.14+):
+        #   * npm/yarn (incl. cn mirrors): npmjs / yarnpkg / npmmirror /
+        #     npm.taobao.org / npm.aliyun.com / unpkg.com / cdn.jsdelivr.net
+        #     / cdnjs.cloudflare.com / esm.sh
+        #   * python: pypi / files.pythonhosted.org / mirrors.aliyun.com /
+        #     pypi.tuna.tsinghua.edu.cn / pypi.douban.com
+        #   * github: raw / objects / codeload / api / github-releases
+        #   * AI/ML providers (used by openclaw skills + plugin SDKs):
+        #     api.openai.com / api.anthropic.com / openrouter.ai /
+        #     api.together.xyz / generativelanguage.googleapis.com /
+        #     huggingface.co / cdn-lfs.huggingface.co / hf.co
+        #   * container registries: docker.io / registry-1.docker.io /
+        #     ghcr.io / quay.io / gcr.io / mcr.microsoft.com / k8s.gcr.io /
+        #     registry.k8s.io
+        #   * cloud storage / CDN: storage.googleapis.com / fonts.* /
+        #     blob.core.windows.net / s3.amazonaws.com / *.cloudfront.net
+        #   * other language ecosystems: crates.io (rust) / proxy.golang.org
+        #     (go) / sum.golang.org / repo1.maven.org (java) /
+        #     repo.maven.apache.org / rubygems.org
+        #   * NVIDIA (NeMo / CUDA bits some plugins pull): developer.nvidia.com
+        #     / download.nvidia.com / catalog.ngc.nvidia.com
+        # Operators can append site-specific entries via
+        # NEMOCLAW_SANDBOX_NO_PROXY_EXTRA (comma-separated, no spaces).
+        _bpe_pub="registry.npmjs.org,.npmjs.org,registry.yarnpkg.com,registry.npmmirror.com,registry.npm.taobao.org,npm.aliyun.com,unpkg.com,cdn.jsdelivr.net,cdnjs.cloudflare.com,esm.sh"
+        _bpe_pub="${_bpe_pub},pypi.org,files.pythonhosted.org,mirrors.aliyun.com,pypi.tuna.tsinghua.edu.cn,pypi.douban.com"
+        _bpe_pub="${_bpe_pub},github.com,.github.com,raw.githubusercontent.com,objects.githubusercontent.com,codeload.github.com,api.github.com,github-releases.githubusercontent.com"
+        _bpe_pub="${_bpe_pub},api.openai.com,api.anthropic.com,openrouter.ai,api.together.xyz,generativelanguage.googleapis.com,huggingface.co,cdn-lfs.huggingface.co,hf.co"
+        _bpe_pub="${_bpe_pub},docker.io,registry-1.docker.io,ghcr.io,quay.io,gcr.io,mcr.microsoft.com,k8s.gcr.io,registry.k8s.io"
+        _bpe_pub="${_bpe_pub},storage.googleapis.com,fonts.googleapis.com,fonts.gstatic.com,blob.core.windows.net,s3.amazonaws.com,.cloudfront.net"
+        _bpe_pub="${_bpe_pub},crates.io,static.crates.io,proxy.golang.org,sum.golang.org,repo1.maven.org,repo.maven.apache.org,rubygems.org"
+        _bpe_pub="${_bpe_pub},developer.nvidia.com,download.nvidia.com,catalog.ngc.nvidia.com"
+        # Messaging channel realtime hosts. WSS upgrades are mangled by the
+        # openshell-sandbox MITM HTTP proxy (the proxy terminates TLS and re-
+        # signs with its own CA, but does not implement the websocket upgrade
+        # handshake correctly for these providers -- verified in chart v1.7.15
+        # debugging: enabling channels.discord on a healthy gateway sends
+        # SIGUSR1 + restart; the new gateway hangs in "starting..." for 60s+
+        # because discord-channel init blocks on the WSS connect to
+        # gateway.discord.gg, never reaches "starting HTTP server", and the
+        # bridge then kills + relaunches in a loop). Bypassing the proxy makes
+        # the WSS go straight from user netns to the public host. Each channel
+        # also needs the matching openshell policy preset (slack/discord/
+        # telegram/jira/outlook); included in NEMOCLAW_POLICY_TIER=open by
+        # default since chart v1.7.16. Feishu (Lark) is added here too because
+        # @larksuiteoapi/node-sdk auto-loads when channels.feishu is enabled
+        # and uses long-poll HTTPS to open.feishu.cn. Same logic for
+        # work.weixin.qq.com (work-wechat) and api.line.me (line bot).
+        _bpe_pub="${_bpe_pub},gateway.discord.gg,discord.com,cdn.discordapp.com,media.discordapp.net,discordapp.com"
+        _bpe_pub="${_bpe_pub},slack.com,wss-primary.slack.com,wss-mobile.slack.com,files.slack.com,edgeapi.slack.com"
+        _bpe_pub="${_bpe_pub},api.telegram.org,telegram.org,telegra.ph,t.me"
+        _bpe_pub="${_bpe_pub},open.feishu.cn,open.larksuite.com,passport.feishu.cn,passport.larksuite.com,internal-api-lark-api.feishu.cn,internal-api-lark-api.larksuite.com"
+        _bpe_pub="${_bpe_pub},work.weixin.qq.com,qyapi.weixin.qq.com,api.line.me,api-data.line.me"
+        _bpe_pub="${_bpe_pub},login.microsoftonline.com,graph.microsoft.com,outlook.office.com,outlook.live.com"
+        _bpe_pub="${_bpe_pub},api.atlassian.com,id.atlassian.com,gateway.atlassian.com"
+        _bpe_no="${_bpe_no},${_bpe_pub}"
+        if [ -n "${NEMOCLAW_SANDBOX_NO_PROXY_EXTRA:-}" ]; then
+          _bpe_no="${_bpe_no},${NEMOCLAW_SANDBOX_NO_PROXY_EXTRA}"
+        fi
+        echo "http_proxy=$_bpe_url https_proxy=$_bpe_url HTTP_PROXY=$_bpe_url HTTPS_PROXY=$_bpe_url no_proxy=$_bpe_no NO_PROXY=$_bpe_no"
+      }
+      # Manual override (rarely needed; only set when openshell or Olares
+      # operators ship a non-default sandbox proxy that detection cannot
+      # reach -- e.g. a different listen port or off-default netns layout):
+      _PROXY_ENV=""
+      if [ -n "${NEMOCLAW_SANDBOX_HTTP_PROXY:-}" ]; then
+        _PROXY_ENV=$(_build_proxy_env "$NEMOCLAW_SANDBOX_HTTP_PROXY")
+        echo "[sandbox-gw] sandbox egress proxy from NEMOCLAW_SANDBOX_HTTP_PROXY env: ${NEMOCLAW_SANDBOX_HTTP_PROXY}"
+      fi
+      LAUNCH="HOME=/sandbox XDG_CONFIG_HOME=/sandbox/.config ${GOG_ENV} ${_PROXY_ENV} PATH=${_PIN_PATH_PREFIX}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.local/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin nohup ${OPENCLAW_BIN} gateway run --port 18789 --bind loopback --auth none --allow-unconfigured >>/sandbox/.openclaw-data/gateway.out 2>&1 </dev/null"
+      # NETNS PICKER (chart v1.7.10+).
+      # OpenShell >= 0.0.36 puts processes started via "nemoclaw my-assistant connect"
+      # (i.e. "openshell my-assistant ssh ...") in a SEPARATE net namespace from
+      # processes we launch here via "kubectl exec -c agent --". The agent netns is
+      # what THIS script runs in (we are PID-namespace-shared with the sandbox pod
+      # but our /proc/self/ns/net is the agent containers netns).
+      # Symptom of getting this wrong: gateway listens on 127.0.0.1:18789 in agent
+      # netns; "openclaw tui" launched by the user via "nemoclaw my-assistant
+      # connect" lives in user netns and sees a different loopback -> immediate
+      # "gateway disconnected: closed | idle". WebUI happens to work because
+      # sandbox-tunnel.sh (the per-connection relay below) walks /proc and nsenters
+      # the right netns at request time -- but TUI has no such adapter.
+      # User-confirmed manual workaround: starting the gateway from inside a
+      # "nemoclaw my-assistant connect" shell (= user netns) makes BOTH TUI and
+      # WebUI work concurrently.
+      # We replicate that by detecting the user netns from agent context: any pid
+      # whose /proc/<pid>/ns/net inode != /proc/self/ns/net inode is in a different
+      # netns -- typically the openshell-spawned ssh session created by nemoclaw
+      # onboards auto-port-forward. nsenter --net into that ns + runuser preserves
+      # all other namespaces (mount, user, pid) so /sandbox paths still resolve.
+      AGENT_NETNS=$(readlink /proc/self/ns/net 2>/dev/null)
+
+      # Decide which netns the gateway should be launched in (chart v1.7.18+).
+      #
+      # Background: chart v1.7.10 moved the gateway into the user/sandbox netns
+      # so TUI (= openclaw shell launched by `nemoclaw my-assistant connect`,
+      # which lives in user netns) and WebUI could share one running gateway.
+      # That works for chat, but the user netns has NO route to the public
+      # internet -- only a default route to the openshell sandbox HTTP egress
+      # proxy at 10.200.0.1:3128 (verified by U1-U5 diagnostics: U1 raw TCP
+      # connect to gateway.discord.gg:443 from user netns = TCP_USER_FAIL;
+      # same call via --proxy http://10.200.0.1:3128 = http=200). Node`s `ws`
+      # library does NOT honor HTTP_PROXY for WebSocket upgrade, so the
+      # openclaw gateways messaging-channel sidecars (Discord/Slack/Telegram/
+      # Feishu/Outlook/...) cannot ever reach gateway.discord.gg etc. while
+      # the gateway runs in user netns -- gateway.out fills with
+      # "fetch failed" + "Gateway websocket closed: 1006" + "AggregateError @
+      # internalConnectMultiple" no matter how generous NO_PROXY or openshell
+      # network policy is. The agent netns (= the cluster pods netns visible
+      # from `kubectl exec -c agent --`) DOES have direct cluster + public
+      # routes (verified by A/B/C diagnostics: REST + raw TCP + TLS handshake
+      # to Discord all OK in agent netns). Trade-off: gateway in agent netns
+      # means TUI in user netns sees a different 127.0.0.1 and shows
+      # "gateway disconnected: closed | idle" -- WebUI keeps working because
+      # sandbox-tunnel.sh walks /proc and nsenters the right netns at request
+      # time.
+      #
+      # Modes (knob: NEMOCLAW_GATEWAY_NETNS, propagated from the parent
+      # nemoclaw container env via the env passthrough above):
+      #   - auto    (default) : agent netns IFF /sandbox/.openclaw/openclaw.json
+      #                         has any channels.<name>.enabled=true (excluding
+      #                         the synthetic channels.defaults entry); user
+      #                         netns otherwise. Trades TUI concurrency for
+      #                         channel egress only when channels are actually
+      #                         configured.
+      #   - agent             : force agent netns (channels work, TUI does not).
+      #   - user              : force user netns (chart v1.7.10 default; TUI +
+      #                         WebUI both work but messaging channels cannot
+      #                         reach their public WSS endpoints).
+      #
+      # Anything else logs a WARN and is treated as auto.
+      _decide_gateway_netns() {
+        _dgn_mode="${NEMOCLAW_GATEWAY_NETNS:-auto}"
+        case "$_dgn_mode" in
+          agent)
+            GW_NETNS_MODE=agent
+            GW_NETNS_REASON="explicit NEMOCLAW_GATEWAY_NETNS=agent (TUI will be unavailable; WebUI + messaging channels work)"
+            return 0
+            ;;
+          user)
+            GW_NETNS_MODE=user
+            GW_NETNS_REASON="explicit NEMOCLAW_GATEWAY_NETNS=user (TUI + WebUI work; messaging channels cannot reach public WSS)"
+            return 0
+            ;;
+          auto|"")
+            ;;
+          *)
+            echo "[sandbox-gw] WARN: NEMOCLAW_GATEWAY_NETNS=${_dgn_mode} unrecognized; treating as auto" >&2
+            ;;
+        esac
+        # auto branch: scan openclaw.json for any non-default channel that is enabled.
+        GW_NETNS_MODE=user
+        GW_NETNS_REASON="auto: no enabled non-default channel in openclaw.json (TUI+WebUI concurrency preserved)"
+        if [ -f /sandbox/.openclaw/openclaw.json ] && command -v python3 >/dev/null 2>&1; then
+          _dgn_chans=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); ch=(d.get(\"channels\") or {}); en=[k for k,v in ch.items() if k!=\"defaults\" and isinstance(v,dict) and v.get(\"enabled\") is True]; print(\",\".join(sorted(en)))" /sandbox/.openclaw/openclaw.json 2>/dev/null) || _dgn_chans=""
+          if [ -n "$_dgn_chans" ]; then
+            GW_NETNS_MODE=agent
+            GW_NETNS_REASON="auto: channels enabled in openclaw.json: ${_dgn_chans} (user netns has no public route; ws lib ignores HTTPS_PROXY)"
+          fi
+        fi
+      }
+      GW_NETNS_MODE=user
+      GW_NETNS_REASON="(uninitialized)"
+      _decide_gateway_netns
+      echo "[sandbox-gw] gateway netns choice: ${GW_NETNS_MODE} -- ${GW_NETNS_REASON}"
+
+      USER_NETNS_PID=""
+      if [ "$GW_NETNS_MODE" = "user" ] && [ -n "$AGENT_NETNS" ] && command -v nsenter >/dev/null 2>&1; then
+        # Prefer well-known names first (cheap, deterministic). Fall through to a
+        # full /proc walk only if none match.
+        for _name in openshell sshd ssh node openclaw bash; do
+          # ps options vary across busybox/distro -- keep -ef portable.
+          for _cand in $(ps -ef 2>/dev/null | awk -v n="$_name" "index(\$0,n) && !/awk/ && !/grep/ {print \$2}"); do
+            [ -r "/proc/$_cand/ns/net" ] || continue
+            _ns=$(readlink "/proc/$_cand/ns/net" 2>/dev/null) || continue
+            if [ -n "$_ns" ] && [ "$_ns" != "$AGENT_NETNS" ]; then
+              USER_NETNS_PID="$_cand"
+              echo "[sandbox-gw] netns picker: matched name=${_name} pid=${_cand} (ns=${_ns} != agent ${AGENT_NETNS})"
+              break 2
+            fi
+          done
+        done
+        if [ -z "$USER_NETNS_PID" ]; then
+          for _link in /proc/[0-9]*/ns/net; do
+            [ -r "$_link" ] || continue
+            _ns=$(readlink "$_link" 2>/dev/null) || continue
+            if [ -n "$_ns" ] && [ "$_ns" != "$AGENT_NETNS" ]; then
+              USER_NETNS_PID=$(echo "$_link" | awk -F/ "{print \$3}")
+              echo "[sandbox-gw] netns picker: /proc walk matched pid=${USER_NETNS_PID} (ns=${_ns} != agent ${AGENT_NETNS})"
+              break
+            fi
+          done
+        fi
+      fi
+      if [ -n "$USER_NETNS_PID" ]; then
+        # Auto-detect sandbox egress proxy from the picked user netns
+        # (skip if operator already pinned NEMOCLAW_SANDBOX_HTTP_PROXY above).
+        if [ -z "$_PROXY_ENV" ]; then
+          _PROXY_URL=$(_detect_sandbox_proxy "$USER_NETNS_PID" 2>/dev/null) || true
+          if [ -n "$_PROXY_URL" ]; then
+            _PROXY_ENV=$(_build_proxy_env "$_PROXY_URL")
+            echo "[sandbox-gw] sandbox egress proxy detected: ${_PROXY_URL} (probed via user-netns default route + TCP); injecting http_proxy/https_proxy into gateway env so LLM calls route through it"
+          else
+            _DSP_GW=$(nsenter --net="/proc/${USER_NETNS_PID}/ns/net" -- ip -4 route show default 2>/dev/null | awk "/^default/ {print \$3; exit}")
+            echo "[sandbox-gw] WARN: no sandbox egress proxy reachable from user netns (default-gw=${_DSP_GW:-<none>}; tried ports 3128/8080/1080). Gateway will start without http_proxy and LLM calls to in-cluster Service IPs will fail. Set NEMOCLAW_SANDBOX_HTTP_PROXY env on the nemoclaw deployment to override (e.g. http://10.200.0.1:3128)."
+          fi
+          # Re-render LAUNCH now that _PROXY_ENV is known.
+          LAUNCH="HOME=/sandbox XDG_CONFIG_HOME=/sandbox/.config ${GOG_ENV} ${_PROXY_ENV} PATH=${_PIN_PATH_PREFIX}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.local/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin nohup ${OPENCLAW_BIN} gateway run --port 18789 --bind loopback --auth none --allow-unconfigured >>/sandbox/.openclaw-data/gateway.out 2>&1 </dev/null"
+        fi
+        echo "[sandbox-gw] launching gateway via nsenter into user netns (pid=${USER_NETNS_PID}) so TUI (also in user netns) can reach 127.0.0.1:18789 directly"
+        if command -v runuser >/dev/null 2>&1; then
+          nsenter --net="/proc/${USER_NETNS_PID}/ns/net" -- runuser -u "$SBX_USER" -- sh -c "$LAUNCH & sleep 2; exit 0"
+        else
+          nsenter --net="/proc/${USER_NETNS_PID}/ns/net" -- su - "$SBX_USER" -s /bin/sh -c "cd /sandbox; $LAUNCH & sleep 2; exit 0"
+        fi
+      else
+        # Agent-netns launch path. Two sub-cases:
+        #   * GW_NETNS_MODE=agent : intentional (auto-detected channels OR explicit
+        #     NEMOCLAW_GATEWAY_NETNS=agent). Channels can reach public WSS.
+        #   * GW_NETNS_MODE=user but no user-netns process visible yet: cold start
+        #     before nemoclaw onboard spawned its forwarder. The next bridge loop
+        #     iteration relaunches via nsenter once a user-netns pid appears.
+        # WebUI works in either sub-case because sandbox-tunnel.sh walks /proc and
+        # nsenters whichever netns has :18789 LISTENing.
+        if [ "$GW_NETNS_MODE" = "agent" ]; then
+          echo "[sandbox-gw] launching gateway in agent netns (${GW_NETNS_REASON}); WebUI works via sandbox-tunnel.sh, TUI in user netns will show -- gateway disconnected: closed | idle -- by design"
+        else
+          echo "[sandbox-gw] WARN: no user-netns process detected yet; launching gateway in agent netns (TUI may show -- gateway disconnected: closed | idle -- until a user-netns process spawns)"
+        fi
+        if command -v runuser >/dev/null 2>&1; then
+          runuser -u "$SBX_USER" -- sh -c "$LAUNCH & sleep 2; exit 0"
+        else
+          su - "$SBX_USER" -s /bin/sh -c "cd /sandbox; $LAUNCH & sleep 2; exit 0"
+        fi
+      fi
+      exit 0
+    ' 2>&1 | sed 's/^/[sandbox-gw] /'
+
+    for i in $(seq 1 45); do
+      if health_ok; then
+        echo "[sandbox-gw] up after ${i}s"
+        exit 0
+      fi
+      sleep 1
+    done
+
+    echo "[sandbox-gw] gateway still not responding after 45s; last log tail:"
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      tail -40 /sandbox/.openclaw-data/gateway.out 2>&1 | sed 's/^/[sandbox-gw] /'
+    exit 1
+
+  # Per-connection stdio<->TCP bridge used as socat EXEC target.
+  # socat pipes the accepted TCP socket to this script's stdin/stdout; node inside
+  # the sandbox opens 127.0.0.1:<PORT> and pipes both directions. Target port is
+  # the first argument (defaults to 18789 for the chat gateway). Used by:
+  #   - chat:   EXEC:"/opt/nemoclaw/sandbox-tunnel.sh 18789"
+  #   - oauth:  EXEC:"/opt/nemoclaw/sandbox-tunnel.sh 8080"
+  # Per-connection cost is one `docker exec` + `kubectl exec` + `node` startup
+  # (~300-800ms), fine for long-lived WebSocket sessions and one-shot OAuth callbacks.
+  #
+  # OpenShell >= 0.0.36 places processes started via `nemoclaw my-assistant connect`
+  # (e.g. `gog auth add`) in a SEPARATE network namespace from processes started via
+  # `kubectl exec -c agent` (where openclaw gateway runs). So a naive TCP connect on
+  # the port inside the agent netns fails with ECONNREFUSED even though `ss` in the
+  # sandbox shows the port LISTEN. The script therefore:
+  #   1. Try 127.0.0.1:<PORT> in the agent netns (chat case -- gateway is here).
+  #   2. Prefer a known-name process (gog/openclaw) and nsenter into its netns
+  #      (oauth case -- gog runs in the user/sandbox netns).
+  #   3. Otherwise walk /proc with a strict column-aligned grep of
+  #      /proc/<pid>/net/tcp[6] so we do not false-positive on :1F90 appearing in
+  #      tx_queue or inode columns (seen in production -- path 1 hits PID 1 whose
+  #      agent-netns view has that substring elsewhere and the connect then fails
+  #      silently -> socat curls "Empty reply from server").
+  # NOTE: all comments below intentionally avoid apostrophes to keep the outer
+  # `sh -c '...'` single-quoted body from closing early under dash.
+  sandbox-tunnel.sh: |
+    #!/bin/sh
+    CLUSTER_CTR="${CLUSTER_CTR:-openshell-cluster-nemoclaw}"
+    NS="${NS:-openshell}"
+    SBX="${SBX:-my-assistant}"
+    PORT="${1:-18789}"
+    # Rules learned the hard way (all tested):
+    #   1. Do not rely on s.on("close") to exit: under HTTP/1.1 keep-alive gog never closes,
+    #      and `curl -m 5` tears down the peer before node ever sees close. Exit on
+    #      s.on("end") (server-side FIN after the response) instead, or on stdin EOF as
+    #      a fallback for keep-alive requests.
+    #   2. Pipe with {end:false} both ways so stdin EOF does not auto-close the write side
+    #      and mid-flight response bytes are not lost.
+    #   3. Explicitly s.end() on stdin EOF (half-close write side) so gog sees the
+    #      request terminator for Content-Length-less GETs.
+    #   4. Wait for process.stdout.end() callback before exit to flush queued bytes
+    #      (kubectl exec remote stdout pipe is NOT a TTY; premature exit truncates).
+    NODE_EXPR='const PORT=Number(process.env.TUNNEL_PORT||18789);const s=require("net").connect(PORT,"127.0.0.1");let done=false;function bye(c){if(done)return;done=true;try{process.stdout.end(()=>process.exit(c));}catch(_){process.exit(c);}}s.on("error",()=>bye(1));s.on("end",()=>bye(0));s.on("close",()=>bye(0));process.stdin.on("end",()=>{try{s.end();}catch(_){}setTimeout(()=>bye(0),15000);});process.stdin.on("error",()=>{});process.stdin.pipe(s,{end:false});s.pipe(process.stdout,{end:false});'
+    exec docker exec -i "$CLUSTER_CTR" \
+      kubectl -n "$NS" exec -i "$SBX" -c agent -- \
+      env TUNNEL_PORT="$PORT" NODE_EXPR="$NODE_EXPR" sh -c '
+        HEX_PORT=$(printf "%04X" "$TUNNEL_PORT")
+        # 1) Same netns path: fast path for chat (openclaw gateway listens here).
+        if grep -qE "^ *[0-9]+: [0-9A-F]+:${HEX_PORT} " /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+          exec node -e "$NODE_EXPR"
+        fi
+        # 2) Well-known-name fast path: gog auth / openclaw listen on oauth/gateway ports.
+        for name_pat in "gog auth" "openclaw-gatewa" "openclaw gateway"; do
+          TPID=$(ps -eo pid,args 2>/dev/null | awk -v p="$name_pat" "index(\$0,p)&&!/awk/{print \$1;exit}")
+          if [ -n "$TPID" ] && [ -r "/proc/$TPID/ns/net" ] \
+             && grep -qE "^ *[0-9]+: [0-9A-F]+:${HEX_PORT} " \
+                "/proc/$TPID/net/tcp" "/proc/$TPID/net/tcp6" 2>/dev/null; then
+            exec nsenter --net=/proc/$TPID/ns/net -- node -e "$NODE_EXPR"
+          fi
+        done
+        # 3) Fallback: walk /proc with strict column-aligned grep so we do not
+        #    false-positive on HEX appearing in tx_queue / inode columns.
+        SEEN=""
+        for link in /proc/[0-9]*/ns/net; do
+          [ -r "$link" ] || continue
+          INO=$(readlink "$link" 2>/dev/null)
+          case " $SEEN " in *" $INO "*) continue ;; esac
+          SEEN="$SEEN $INO"
+          PID=$(echo "$link" | awk -F/ "{print \$3}")
+          if grep -qE "^ *[0-9]+: [0-9A-F]+:${HEX_PORT} " \
+             "/proc/$PID/net/tcp" "/proc/$PID/net/tcp6" 2>/dev/null; then
+            exec nsenter --net=/proc/"$PID"/ns/net -- node -e "$NODE_EXPR"
+          fi
+        done
+        echo "[tunnel] no netns listens on port $TUNNEL_PORT" >&2
+        exit 1
+      '
+
+  # Template for the sandbox's ~/.bash_profile. `__GOG_KEYRING_PASSWORD__` is the
+  # only placeholder — cold-reset substitutes it at render time with the Olares-
+  # provided password (persisted in the `nemoclaw-gog-keyring` Secret). Everything
+  # else that used to live here (HOMEBREW_*, HOMEBREW_CC/CXX detection) is now
+  # written to /etc/environment + /etc/profile.d/nemoclaw-*.sh by skill-env, so
+  # both login + non-login shells get it without duplicating the logic.
+  sandbox-bash-profile.tpl: |
+    # nemoclaw-skill-env (managed; do not edit)
+    # HOMEBREW_* knobs + HOMEBREW_CC/HOMEBREW_CXX/CC/CXX are written to /etc/environment
+    # and /etc/profile.d/nemoclaw-*.sh by sandbox-install-skill-env.sh, so this file
+    # only needs to carry the per-user PATH prepend + gog keyring bits.
+    export PATH="/sandbox/.local/bin:/sandbox/.local/go/bin:/sandbox/go/bin:$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin:$PATH"
+    export GOG_KEYRING_BACKEND=file
+    export GOG_KEYRING_PASSWORD='__GOG_KEYRING_PASSWORD__'
+    # end-nemoclaw-skill-env
+
+  # Gog shim (Olares hydration has no Helm .Files — edit files/gog-shim-reconcile.sh then re-embed here).
+  gog-shim-reconcile.sh: |
+    #!/bin/sh
+    # Canonical copy: also embedded under key gog-shim-reconcile.sh in
+    # templates/configmap-sandbox-bridge.yaml (Olares chart renderer has no Helm .Files.Get).
+    # After edits: from repo root run  python3 scripts/embed-gog-shim.py
+    #
+    # gogcli is meant to be installed only via OpenClaw: `openclaw config --section skills`
+    # (which runs brew against NemoClaw's Linuxbrew tree). Do not rely on ad-hoc copies
+    # under ~/.linuxbrew or manual `brew install` outside that flow.
+    # Installed into the sandbox as /sandbox/.nemoclaw-reconcile-gog-shim.sh by skill-env + bridge.
+    set -u
+    SHIM_MAGIC="# nemoclaw-gog-shim:v18"
+    
+    find_gogcli_bin() {
+      for c in \
+        /sandbox/.linuxbrew/Homebrew/opt/gogcli/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.13.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.14.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.15.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.16.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.17.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.18.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.19.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.20.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.21.0/bin/gog \
+        /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.22.0/bin/gog \
+        /sandbox/.linuxbrew/opt/gogcli/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.13.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.14.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.15.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.16.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.17.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.18.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.19.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.20.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.21.0/bin/gog \
+        /sandbox/.linuxbrew/Cellar/gogcli/0.22.0/bin/gog \
+        /sandbox/.local/opt/gogcli/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.13.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.14.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.15.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.16.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.17.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.18.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.19.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.20.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.21.0/bin/gog \
+        /sandbox/.local/Cellar/gogcli/0.22.0/bin/gog \
+      ; do
+        case "$c" in
+          /usr/local/bin/gog) continue ;;
+          /sandbox/.linuxbrew/Homebrew/bin/gog) continue ;;
+        esac
+        if [ -x "$c" ]; then echo "$c"; return 0; fi
+      done
+      for c in /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/*/bin/gog \
+               /sandbox/.linuxbrew/Cellar/gogcli/*/bin/gog \
+               /sandbox/.local/Cellar/gogcli/*/bin/gog; do
+        [ -x "$c" ] || continue
+        echo "$c"; return 0
+      done
+      if command -v brew >/dev/null 2>&1; then
+        _pfx=$(brew --prefix gogcli 2>/dev/null || true)
+        case "$_pfx" in
+          /sandbox/.linuxbrew*|/sandbox/.local*)
+            if [ -n "$_pfx" ] && [ -x "$_pfx/bin/gog" ]; then echo "$_pfx/bin/gog"; return 0; fi
+            ;;
+        esac
+      fi
+      return 1
+    }
+    
+    REAL_OUTER=$(find_gogcli_bin)
+    
+    SHIM_TMP="$(mktemp /tmp/.gog-shim.XXXXXX)"
+    if [ -z "$REAL_OUTER" ]; then
+      echo "[gog-shim] no gogcli binary; removing nemoclaw shims (install gog via openclaw config --section skills)" >&2
+      for SLOT in /sandbox/.local/bin/gog /sandbox/.linuxbrew/Homebrew/bin/gog /usr/local/bin/gog; do
+        if [ -f "$SLOT" ] && [ ! -L "$SLOT" ] \
+             && head -2 "$SLOT" 2>/dev/null | grep -Eq "^# nemoclaw-gog-shim:v[0-9]+"; then
+          rm -f "$SLOT" && echo "[gog-shim] removed shim at $SLOT" >&2
+        fi
+      done
+      rm -f "$SHIM_TMP" 2>/dev/null || true
+    else
+      cat > "$SHIM_TMP" <<'SHIM'
+    #!/bin/sh
+    # nemoclaw-gog-shim:v18
+    # Counteracts openclaw skill-spawn sanitization (XDG override + GOG_* env filter)
+    # and exec's the real gog via a path on the OpenShell GOOGLE_BINS allowlist.
+    #
+    # NemoClaw pins Homebrew to /sandbox/.linuxbrew (see /etc/environment + profile.d).
+    # Install gogcli only through: openclaw config --section skills
+    #
+    # v18: same as v17; outer reconcile skips installing this file until gogcli exists.
+    export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/sandbox/.linuxbrew}"
+    export HOMEBREW_REPOSITORY="${HOMEBREW_REPOSITORY:-/sandbox/.linuxbrew/Homebrew}"
+    export HOMEBREW_CELLAR="${HOMEBREW_CELLAR:-/sandbox/.linuxbrew/Cellar}"
+    REAL=""
+    for c in \
+      /sandbox/.linuxbrew/Homebrew/opt/gogcli/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.13.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.14.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.15.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.16.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.17.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.18.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.19.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.20.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.21.0/bin/gog \
+      /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/0.22.0/bin/gog \
+      /sandbox/.linuxbrew/opt/gogcli/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.13.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.14.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.15.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.16.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.17.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.18.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.19.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.20.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.21.0/bin/gog \
+      /sandbox/.linuxbrew/Cellar/gogcli/0.22.0/bin/gog \
+      /sandbox/.local/opt/gogcli/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.13.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.14.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.15.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.16.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.17.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.18.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.19.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.20.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.21.0/bin/gog \
+      /sandbox/.local/Cellar/gogcli/0.22.0/bin/gog \
+    ; do
+      case "$c" in
+        /usr/local/bin/gog) continue ;;
+        /sandbox/.linuxbrew/Homebrew/bin/gog) continue ;;
+      esac
+      if [ -x "$c" ]; then REAL="$c"; break; fi
+    done
+    if [ -z "$REAL" ]; then
+      for c in /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/*/bin/gog \
+               /sandbox/.linuxbrew/Cellar/gogcli/*/bin/gog \
+               /sandbox/.local/Cellar/gogcli/*/bin/gog; do
+        [ -x "$c" ] || continue
+        REAL="$c"; break
+      done
+    fi
+    if [ -z "$REAL" ] && command -v brew >/dev/null 2>&1; then
+      _pfx=$(brew --prefix gogcli 2>/dev/null || true)
+      case "$_pfx" in
+        /sandbox/.linuxbrew*|/sandbox/.local*)
+          [ -n "$_pfx" ] && [ -x "$_pfx/bin/gog" ] && REAL="$_pfx/bin/gog"
+          ;;
+      esac
+    fi
+    unset _pfx 2>/dev/null || true
+    if [ -z "$REAL" ]; then
+      echo "[gog-shim] FATAL: no gogcli binary under /sandbox/.linuxbrew or /sandbox/.local (Cellar/opt)" >&2
+      echo "[gog-shim] Install via: openclaw config --section skills (not manual brew)." >&2
+      exit 127
+    fi
+    if [ -z "${HOME:-}" ] || [ "$HOME" = "/" ] || [ "$HOME" = "/root" ] || [ "$HOME" = "/tmp" ]; then
+      export HOME=/sandbox
+    fi
+    export XDG_CONFIG_HOME=/sandbox/.config
+    if [ -z "${GOG_KEYRING_PASSWORD:-}" ] && [ -r /sandbox/.gog-keyring-password ]; then
+      export GOG_KEYRING_BACKEND=file
+      export GOG_KEYRING_PASSWORD="$(cat /sandbox/.gog-keyring-password)"
+    fi
+    {
+      echo "=== $(date -Is 2>/dev/null) pid=$$ ppid=$PPID ==="
+      echo "argv: $*"
+      echo "real: $REAL"
+      echo "XDG=${XDG_CONFIG_HOME:-unset}  HOME=$HOME  PW_LEN=${#GOG_KEYRING_PASSWORD}"
+    } | tee -a /tmp/gog-shim.log /var/log/nemoclaw-gog-shim.log >/dev/null 2>&1 || true
+    exec "$REAL" "$@"
+    SHIM
+      chmod 0755 "$SHIM_TMP" 2>/dev/null || true
+      for SLOT in /sandbox/.local/bin/gog /sandbox/.linuxbrew/Homebrew/bin/gog /usr/local/bin/gog; do
+        slotdir=$(dirname "$SLOT")
+        mkdir -p "$slotdir" 2>/dev/null || true
+        if [ ! -d "$slotdir" ]; then
+          echo "[gog-shim] WARN: $slotdir missing; skipping $SLOT" >&2
+          continue
+        fi
+        if [ -d "$SLOT" ]; then
+          rm -rf "$SLOT" 2>/dev/null || true
+        fi
+        rm -f "$SLOT" 2>/dev/null || true
+        cp "$SHIM_TMP" "$SLOT.new" 2>/dev/null || {
+          echo "[gog-shim] WARN: cp to $SLOT.new failed; skipping" >&2
+          continue
+        }
+        chmod 0755 "$SLOT.new" 2>/dev/null || true
+        chown sandbox:sandbox "$SLOT.new" 2>/dev/null || true
+        mv -f "$SLOT.new" "$SLOT" 2>/dev/null && \
+          echo "[gog-shim] installed shim at $SLOT ($(wc -c < "$SLOT" 2>/dev/null) bytes)" || \
+          echo "[gog-shim] WARN: mv $SLOT.new -> $SLOT failed" >&2
+      done
+      rm -f "$SHIM_TMP" 2>/dev/null || true
+    fi
+    
+    for stale in \
+      /usr/local/bin/gog.real \
+      /sandbox/.linuxbrew/Homebrew/bin/gog.real \
+      /sandbox/.linuxbrew/bin/gog.real \
+    ; do
+      if [ -f "$stale" ] && ! head -2 "$stale" 2>/dev/null | grep -Fq "$SHIM_MAGIC"; then
+        rm -f "$stale" 2>/dev/null
+      fi
+    done
+    if [ -d /tmp/.config/gogcli ]; then
+      mkdir -p /sandbox/.config/gogcli/keyring 2>/dev/null || true
+      if [ -f /tmp/.config/gogcli/credentials.json ] && [ ! -f /sandbox/.config/gogcli/credentials.json ]; then
+        cp -a /tmp/.config/gogcli/credentials.json /sandbox/.config/gogcli/ 2>/dev/null && \
+          echo "[gog-shim] migrated credentials.json from /tmp/.config/gogcli" >&2
+      fi
+      if [ -d /tmp/.config/gogcli/keyring ]; then
+        for _kf in /tmp/.config/gogcli/keyring/*; do
+          [ -f "$_kf" ] || continue
+          _kb=$(basename "$_kf")
+          [ -e "/sandbox/.config/gogcli/keyring/$_kb" ] && continue
+          cp -an "$_kf" /sandbox/.config/gogcli/keyring/ 2>/dev/null && \
+            echo "[gog-shim] migrated keyring/$_kb from /tmp/.config/gogcli" >&2
+        done
+      fi
+      chown -R sandbox:sandbox /sandbox/.config/gogcli 2>/dev/null || true
+    fi
+    echo "[gog-shim] done. In bash run: hash -r   # if gog was cached before" >&2
+  # Helper for cold-reset: takes GOG_KEYRING_PASSWORD from env, reads the
+  # template + static wrapper scripts from /opt/nemoclaw/, and ships them
+  # into the sandbox over kubectl exec -i. Factored out so deployment.yaml
+  # only has to invoke one thing instead of embedding three heredocs.
+  sandbox-install-skill-env.sh: |
+    #!/bin/sh
+    set -u
+    CLUSTER_CTR="${CLUSTER_CTR:-openshell-cluster-nemoclaw}"
+    NS="${NS:-openshell}"
+    SBX="${SBX:-my-assistant}"
+    SBX_USER="${SBX_USER:-sandbox}"
+    SCRIPT_DIR="${SCRIPT_DIR:-/opt/nemoclaw}"
+    : "${GOG_KEYRING_PASSWORD:?GOG_KEYRING_PASSWORD must be set}"
+
+    # ------------------------------------------------------------------
+    # Mutex: serialise cold-reset vs chat-ui-bridge (both invoke this script).
+    # Without it they race the sandbox dpkg/apt lock. flock -n + exit 0 lets
+    # the loser no-op cleanly; callers only write the skill-env sentinel on
+    # exit 0, and the bridge re-ticks shortly afterwards.
+    _SKILLENV_LOCK=/workspace/.nemoclaw-skillenv-install.lock
+    mkdir -p /workspace 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$_SKILLENV_LOCK"
+      if ! flock -n 9; then
+        echo "[skill-env] another skill-env install is in progress (lock=$_SKILLENV_LOCK); skipping this tick"
+        exit 0
+      fi
+    fi
+
+    # Copy a file from the workspace pod into the sandbox pod via stdin.
+    # $1 = src path on this pod; $2 = dst path in sandbox; $3 = optional mode.
+    copy_to_sandbox() {
+      src="$1"; dst="$2"; mode="${3:-}"
+      docker exec -i "$CLUSTER_CTR" kubectl -n "$NS" exec -i "$SBX" -c agent -- \
+        sh -c 'mkdir -p "$(dirname "$1")" && cat > "$1"' _ "$dst" < "$src"
+      if [ -n "$mode" ]; then
+        docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- chmod "$mode" "$dst"
+      fi
+    }
+
+    # Stage the ~/.bash_profile with GOG_KEYRING_PASSWORD substituted in, then
+    # purge any stale nemoclaw-skill-env block before appending the new one.
+    rendered_bp=$(mktemp)
+    sed "s|__GOG_KEYRING_PASSWORD__|${GOG_KEYRING_PASSWORD}|g" \
+      "$SCRIPT_DIR/sandbox-bash-profile.tpl" > "$rendered_bp"
+
+    # Determine sandbox $HOME (falls back to /sandbox for stock images).
+    SBX_HOME=$(docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      sh -c 'getent passwd "'"$SBX_USER"'" 2>/dev/null | cut -d: -f6' 2>/dev/null)
+    [ -n "$SBX_HOME" ] || SBX_HOME=/sandbox
+
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- sh -c '
+      SBX_HOME="'"$SBX_HOME"'"
+      mkdir -p "$SBX_HOME/.local/bin" /tmp/homebrew-tmp /tmp/homebrew-cache /tmp/homebrew-logs
+      # kubectl exec runs as root, so the three /tmp/homebrew-* dirs above are root-owned 0755.
+      # We push TMPDIR=/tmp/homebrew-tmp into /etc/environment further down, which means every
+      # non-login process (including openclaw, which does `mkdir $TMPDIR/openclaw-<uid>` at
+      # startup) sees this path. Without sticky world-writable perms (1777 like /tmp itself),
+      # openclaw as the sandbox user bombs with
+      #   Error: Unable to create fallback OpenClaw temp dir: /tmp/homebrew-tmp/openclaw-998
+      # the moment anyone tries `openclaw config --section skills`.
+      chmod 1777 /tmp/homebrew-tmp /tmp/homebrew-cache /tmp/homebrew-logs 2>/dev/null || true
+      BP="$SBX_HOME/.bash_profile"
+      [ -f "$BP" ] || touch "$BP"
+      if grep -q "nemoclaw-skill-env" "$BP" 2>/dev/null; then
+        awk "/^# nemoclaw-skill-env \(managed; do not edit\)/{s=1;next} /^# end-nemoclaw-skill-env/{s=0;next} !s{print}" \
+          "$BP" > "$BP.new" && mv "$BP.new" "$BP"
+      fi
+    '
+
+    # Static binaries from the init-prefetch image land in /workspace/.nemoclaw-prefetch/.
+    # Installed before bash_profile so PATH ($SBX_HOME/.local/bin) picks them up.
+    # OpenClaw skill UI may still run brew install (e.g. gogcli); that path needs gcc — distro
+    # build-essential in skill-env covers it.
+    PREF_DIR="${NEMOCLAW_PREFETCH_DIR:-/workspace/.nemoclaw-prefetch}"
+
+    # gog (gogcli) is intentionally NOT prefetched. Users install it in-sandbox via
+    # `openclaw config --section skills` -> brew install steipete/tap/gog so version,
+    # auth flow, and OAuth callback host stay under their control. The brew install
+    # produces /sandbox/.linuxbrew/Homebrew/Cellar/gogcli/<ver>/bin/gog; the shim
+    # reconcile below replaces the sibling Homebrew/bin/gog symlink with our
+    # env-injecting wrapper.
+
+    # --- editors: busybox (static) provides `vi`; micro is a modern TUI ---
+    # Both are single static files with no runtime dependencies — safe to drop into
+    # ~/.local/bin/ and rely on PATH.
+    if [ -f "$PREF_DIR/busybox" ]; then
+      echo "[skill-env] installing prefetched busybox -> $SBX_HOME/.local/bin/busybox (provides vi)"
+      copy_to_sandbox "$PREF_DIR/busybox" "$SBX_HOME/.local/bin/busybox" 755
+      # Expose as `vi` via a wrapper (kubectl cp can't create symlinks; a 2-line wrapper is
+      # portable and behaves identically for interactive editing).
+      _vi_wrapper=$(mktemp)
+      printf '%s\n' '#!/bin/sh' 'exec "$(dirname "$0")/busybox" vi "$@"' > "$_vi_wrapper"
+      copy_to_sandbox "$_vi_wrapper" "$SBX_HOME/.local/bin/vi" 755
+      rm -f "$_vi_wrapper"
+    fi
+    if [ -f "$PREF_DIR/micro" ]; then
+      echo "[skill-env] installing prefetched micro -> $SBX_HOME/.local/bin/micro"
+      copy_to_sandbox "$PREF_DIR/micro" "$SBX_HOME/.local/bin/micro" 755
+    fi
+
+    # --- search tools: ripgrep (rg) and fd (both musl-static single binaries) ---
+    if [ -f "$PREF_DIR/rg" ]; then
+      echo "[skill-env] installing prefetched rg -> $SBX_HOME/.local/bin/rg"
+      copy_to_sandbox "$PREF_DIR/rg" "$SBX_HOME/.local/bin/rg" 755
+    fi
+    if [ -f "$PREF_DIR/fd" ]; then
+      echo "[skill-env] installing prefetched fd -> $SBX_HOME/.local/bin/fd"
+      copy_to_sandbox "$PREF_DIR/fd" "$SBX_HOME/.local/bin/fd" 755
+    fi
+
+    # Prefetched Olares CLI (single-binary ELF). Installed as root into
+    # /usr/local/bin/olares-cli so every user/uid in the sandbox can exec
+    # it directly without PATH juggling. Idempotent: sha256-compared with
+    # the sandbox copy, skipped when already current. copy_to_sandbox
+    # runs via `kubectl exec` (which executes as root inside the agent
+    # container), so writing to /usr/local/bin is allowed even though
+    # the rest of skill-env runs in the non-root sandbox user's scope.
+    if [ -f "$PREF_DIR/olares-cli" ]; then
+      _pref_cli_ver=""
+      [ -f "$PREF_DIR/olares-cli.version" ] && _pref_cli_ver=$(tr -d "\r\n" < "$PREF_DIR/olares-cli.version" 2>/dev/null || true)
+      _pref_cli_sha=$(sha256sum "$PREF_DIR/olares-cli" 2>/dev/null | awk "{print \$1}" | tr -d "\r\n")
+      _sbx_cli_sha=$(docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+        sh -c 'test -x /usr/local/bin/olares-cli && sha256sum /usr/local/bin/olares-cli 2>/dev/null | awk "{print \$1}" || echo ""' 2>/dev/null | tr -d "\r\n")
+      if [ -n "$_sbx_cli_sha" ] && [ -n "$_pref_cli_sha" ] && [ "$_sbx_cli_sha" = "$_pref_cli_sha" ]; then
+        echo "[skill-env] prefetched olares-cli${_pref_cli_ver:+ $_pref_cli_ver} already present at /usr/local/bin/olares-cli (sha256 match; skipping)"
+      else
+        echo "[skill-env] installing prefetched olares-cli${_pref_cli_ver:+ $_pref_cli_ver} -> /usr/local/bin/olares-cli (streaming via kubectl exec)"
+        if copy_to_sandbox "$PREF_DIR/olares-cli" /usr/local/bin/olares-cli 0755; then
+          docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+            sh -c 'chown root:root /usr/local/bin/olares-cli 2>/dev/null || true' \
+            >/dev/null 2>&1 || true
+          echo "[skill-env] prefetched olares-cli installed OK"
+        else
+          echo "[skill-env] WARN: copy of prefetched olares-cli into sandbox failed; \`olares-cli\` will not be available" >&2
+        fi
+      fi
+      unset _pref_cli_ver _pref_cli_sha _sbx_cli_sha
+    fi
+
+    # Prefetched Go toolchain. The image ships /prefetch/go.tar.gz containing a
+    # top-level `go/` dir (bin/, src/, pkg/, ...) = the standard go.dev layout.
+    # Stream it directly into /sandbox/.local via one kubectl-exec + tar pipe so
+    # we avoid staging ~150MB on disk twice. Skipped if the sandbox already has
+    # a matching (or newer) /sandbox/.local/go/bin/go.
+    if [ -f "$PREF_DIR/go.tar.gz" ]; then
+      _pref_go_ver=""
+      [ -f "$PREF_DIR/go.version" ] && _pref_go_ver=$(tr -d "\r\n" < "$PREF_DIR/go.version" 2>/dev/null || true)
+      _sbx_go_ver=$(docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+        sh -c 'test -x /sandbox/.local/go/bin/go && /sandbox/.local/go/bin/go version 2>/dev/null | awk "{print \$3}" | sed "s/^go//" || echo ""' 2>/dev/null | tr -d "\r\n")
+      if [ -n "$_sbx_go_ver" ] && [ -n "$_pref_go_ver" ] && [ "$_sbx_go_ver" = "$_pref_go_ver" ]; then
+        echo "[skill-env] prefetched go ${_pref_go_ver} already present at /sandbox/.local/go (skipping reinstall)"
+      else
+        echo "[skill-env] installing prefetched go${_pref_go_ver:+ $_pref_go_ver} -> /sandbox/.local/go (streaming tarball via kubectl exec)"
+        # mkdir-and-extract in one remote sh so partial prior installs get
+        # cleared before the new tree lands. Extraction lives under
+        # /sandbox/.local so the sandbox user (not root) owns the tree.
+        if docker exec -i "$CLUSTER_CTR" kubectl -n "$NS" exec -i "$SBX" -c agent -- \
+             sh -c 'mkdir -p /sandbox/.local && rm -rf /sandbox/.local/go && tar -xzf - -C /sandbox/.local && test -x /sandbox/.local/go/bin/go' \
+             < "$PREF_DIR/go.tar.gz"; then
+          docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+            sh -c 'chown -R "'"$SBX_USER"'":"'"$SBX_USER"'" /sandbox/.local/go 2>/dev/null || true; mkdir -p /sandbox/go/bin /sandbox/go/src /sandbox/go/pkg 2>/dev/null; chown -R "'"$SBX_USER"'":"'"$SBX_USER"'" /sandbox/go 2>/dev/null || true' \
+            >/dev/null 2>&1 || true
+          echo "[skill-env] prefetched go installed OK"
+        else
+          echo "[skill-env] WARN: tar-extract of prefetched go.tar.gz into sandbox failed; `go` will not be available" >&2
+        fi
+      fi
+      unset _pref_go_ver _sbx_go_ver
+    fi
+
+    # Append the rendered bash_profile block (preserves any previous user edits
+    # outside the managed markers, since we purged only the managed block above).
+    docker exec -i "$CLUSTER_CTR" kubectl -n "$NS" exec -i "$SBX" -c agent -- \
+      sh -c 'printf "\n" >> "$1"; cat >> "$1"' _ "$SBX_HOME/.bash_profile" < "$rendered_bp"
+
+    # Derive the OAuth redirect host from CHAT_UI_URL (strip scheme/port/path).
+    # Pre-exported in the sandbox shell rc as NEMOCLAW_GOG_OAUTH_REDIRECT_HOST so
+    # users can do `gog auth add ... --redirect-host "$NEMOCLAW_GOG_OAUTH_REDIRECT_HOST"`
+    # without copy/pasting the per-user Olares hostname.
+    GOAUTH_REDIRECT_HOST="${NEMOCLAW_GOG_OAUTH_REDIRECT_HOST:-}"
+    if [ -z "$GOAUTH_REDIRECT_HOST" ] && [ -n "${CHAT_UI_URL:-}" ]; then
+      GOAUTH_REDIRECT_HOST=$(printf "%s" "$CHAT_UI_URL" \
+        | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' \
+              -e 's#/.*$##' \
+              -e 's#:.*$##')
+    fi
+
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- sh -c '
+      SBX_HOME="'"$SBX_HOME"'"
+      SBX_USER="'"$SBX_USER"'"
+      GKP="'"$GOG_KEYRING_PASSWORD"'"
+      GOAUTH_REDIRECT_HOST="'"$GOAUTH_REDIRECT_HOST"'"
+      HB_BOTTLE_DOMAIN="'"${NEMOCLAW_HOMEBREW_BOTTLE_DOMAIN:-}"'"
+      GOPROXY_VAL="'"${NEMOCLAW_GOPROXY:-https://goproxy.cn,direct}"'"
+      # kubectl exec runs as root here. Prefer runuser over su for brew/gcc: su can
+      # prompt for a password when PAM is strict, which fails non-interactively and
+      # leaves gcc uninstalled while the rest of skill-env appears to succeed.
+      _nemoclaw_run_sbx() {
+        if command -v runuser >/dev/null 2>&1; then
+          runuser -u "$SBX_USER" -- sh -lc "$1"
+        else
+          su - "$SBX_USER" -c "$1"
+        fi
+      }
+      for f in "$SBX_HOME/.bashrc" "$SBX_HOME/.profile" "$SBX_HOME/.bash_profile" \
+               "$SBX_HOME/.local" "$SBX_HOME/.local/bin"; do
+        [ -e "$f" ] && chown -R "$SBX_USER":"$SBX_USER" "$f" 2>/dev/null || true
+      done
+
+      # Linuxbrew permissions self-heal.
+      if ! id "$SBX_USER" >/dev/null 2>&1; then
+        echo "[skill-env] WARN: user $SBX_USER missing; skipping brew chown"
+      elif [ -d /sandbox/.linuxbrew ]; then
+        BREW_REPO=/sandbox/.linuxbrew/Homebrew
+        # Pre-create directories brew expects; mkdir -p is a no-op if they exist.
+        mkdir -p "$BREW_REPO/var/homebrew/locks" \
+                 "$BREW_REPO/Library/Caches/Homebrew" \
+                 "$BREW_REPO/Library/Homebrew/vendor/portable-ruby" 2>/dev/null || true
+        # Brew vendor-install looks for a `current` symlink to decide whether
+        # portable-ruby is already installed. Recreate it pointing at the
+        # single version directory present so brew does not re-fetch.
+        VDIR="$BREW_REPO/Library/Homebrew/vendor/portable-ruby"
+        if [ -d "$VDIR" ] && [ ! -e "$VDIR/current" ]; then
+          RUBY_VER=$(ls -1 "$VDIR" 2>/dev/null \
+            | awk "/^[0-9]+\\.[0-9]+\\.[0-9]+$/{print; exit}")
+          if [ -n "$RUBY_VER" ] && [ -x "$VDIR/$RUBY_VER/bin/ruby" ]; then
+            (cd "$VDIR" && ln -sfn "$RUBY_VER" current) 2>/dev/null || true
+            echo "[skill-env] portable-ruby current -> $RUBY_VER"
+          fi
+        fi
+        if chown -R "$SBX_USER":"$SBX_USER" /sandbox/.linuxbrew 2>/tmp/brew-chown.err; then
+          chmod -R u+rwX /sandbox/.linuxbrew 2>/dev/null || true
+          # chown -h to keep the symlink itself owned correctly (not follow).
+          [ -L "$VDIR/current" ] && chown -h "$SBX_USER":"$SBX_USER" "$VDIR/current" 2>/dev/null || true
+          echo "[skill-env] linuxbrew owned by $SBX_USER"
+        else
+          echo "[skill-env] WARN: chown /sandbox/.linuxbrew failed:"
+          cat /tmp/brew-chown.err 2>/dev/null | head -5
+        fi
+      fi
+
+      # /var/tmp MUST exist with world-writable sticky perms (1777). Some brew
+      # internal Ruby helpers (github_api fetch, unpack bottle tarballs) write
+      # there with File#open and `dir_s_mkdir`; if the path is missing, root-
+      # owned, or 0755 the installs fail with `Permission denied @ rb_sysopen
+      # - /var/tmp/...` even though HOMEBREW_TEMP is set elsewhere. Clean any
+      # stale root-owned litter from previous failed installs at the same time.
+      mkdir -p /var/tmp 2>/dev/null || true
+      chmod 1777 /var/tmp 2>/dev/null || true
+      if id "$SBX_USER" >/dev/null 2>&1; then
+        find /var/tmp -mindepth 1 -maxdepth 1 ! -user "$SBX_USER" -print \
+          -exec rm -rf {} + 2>/dev/null || true
+      fi
+
+      # Non-login shells (openclaw agent subprocesses) do NOT source
+      # ~/.bash_profile, so HOMEBREW_TEMP/TMPDIR defined there never reach
+      # `brew install` spawned by the openclaw skill runner. /etc/environment
+      # IS read by PAM for every session including those, plus Debian reads
+      # /etc/profile.d for interactive shells. Drop both so the env is
+      # enforced regardless of how brew is invoked.
+      ETCENV=/etc/environment
+      MARK_ENV="# nemoclaw-skill-env (managed; do not edit)"
+      if [ -w /etc ] || [ -w "$ETCENV" ] 2>/dev/null; then
+        [ -f "$ETCENV" ] || touch "$ETCENV" 2>/dev/null || true
+        if [ -w "$ETCENV" ]; then
+          sed -i "/nemoclaw-skill-env/,/end-nemoclaw-skill-env/d" "$ETCENV" 2>/dev/null || true
+          {
+            echo "$MARK_ENV"
+            echo "HOMEBREW_PREFIX=/sandbox/.linuxbrew"
+            echo "HOMEBREW_REPOSITORY=/sandbox/.linuxbrew/Homebrew"
+            echo "HOMEBREW_CELLAR=/sandbox/.linuxbrew/Cellar"
+            echo "HOMEBREW_TEMP=/tmp/homebrew-tmp"
+            echo "HOMEBREW_CACHE=/tmp/homebrew-cache"
+            echo "HOMEBREW_LOGS=/tmp/homebrew-logs"
+            echo "TMPDIR=/tmp/homebrew-tmp"
+            echo "HOMEBREW_NO_AUTO_UPDATE=1"
+            echo "HOMEBREW_NO_ENV_HINTS=1"
+            echo "HOMEBREW_NO_ANALYTICS=1"
+            echo "HOMEBREW_NO_ENV_FILTERING=1"
+            # CA bundle for HTTPS: curl/git read CURL_CA_BUNDLE / GIT_SSL_CAINFO;
+            # Go crypto/tls reads SSL_CERT_FILE / SSL_CERT_DIR (NOT CURL_CA_BUNDLE),
+            # which is why tools like olares-cli hit x509 unknown authority while
+            # curl still works when only CURL_CA_BUNDLE was set.
+            #
+            # Prefer the openshell image bundle (includes Olares / MITM roots),
+            # else Debian ca-certificates.crt after Stage CA below.
+            if [ -r /etc/openshell-tls/ca-bundle.pem ]; then
+              echo "SSL_CERT_FILE=/etc/openshell-tls/ca-bundle.pem"
+              echo "SSL_CERT_DIR=/etc/ssl/certs"
+              echo "GIT_SSL_CAINFO=/etc/openshell-tls/ca-bundle.pem"
+              echo "CURL_CA_BUNDLE=/etc/openshell-tls/ca-bundle.pem"
+              echo "REQUESTS_CA_BUNDLE=/etc/openshell-tls/ca-bundle.pem"
+              echo "NODE_EXTRA_CA_CERTS=/etc/openshell-tls/ca-bundle.pem"
+            elif [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+              echo "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+              echo "SSL_CERT_DIR=/etc/ssl/certs"
+              echo "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt"
+              echo "CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+              echo "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+              echo "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"
+            fi
+            # Bottle / portable-ruby mirror override. Only emit when set --
+            # empty domain triggers brew to use its builtin ghcr.io default.
+            if [ -n "$HB_BOTTLE_DOMAIN" ]; then
+              echo "HOMEBREW_BOTTLE_DOMAIN=$HB_BOTTLE_DOMAIN"
+              echo "HOMEBREW_ARTIFACT_DOMAIN=$HB_BOTTLE_DOMAIN"
+              echo "HOMEBREW_API_DOMAIN=$HB_BOTTLE_DOMAIN"
+            fi
+            # Go toolchain: only emit when the prefetched tree actually landed
+            # in the sandbox (skill-env streams /prefetch/go.tar.gz into
+            # /sandbox/.local/go). GOSUMDB=off is intentional -- sum.golang.org
+            # is frequently blocked / MITM-intercepted on corporate networks and
+            # a stale sumdb would wedge every `go build` indefinitely.
+            if [ -x /sandbox/.local/go/bin/go ]; then
+              echo "GOROOT=/sandbox/.local/go"
+              echo "GOPATH=/sandbox/go"
+              echo "GOBIN=/sandbox/go/bin"
+              echo "GO111MODULE=on"
+              echo "GOPROXY=$GOPROXY_VAL"
+              echo "GOSUMDB=off"
+            fi
+            echo "GOG_KEYRING_BACKEND=file"
+            if [ -n "$GKP" ]; then
+              echo "GOG_KEYRING_PASSWORD=$GKP"
+            fi
+            echo "XDG_CONFIG_HOME=/sandbox/.config"
+            echo "# end-nemoclaw-skill-env"
+          } >> "$ETCENV"
+          echo "[skill-env] /etc/environment updated"
+          if [ -r /etc/openshell-tls/ca-bundle.pem ]; then
+            echo "[skill-env] CA bundle for SSL_CERT_FILE: /etc/openshell-tls/ca-bundle.pem (Go x509 + curl + node)"
+          elif [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+            echo "[skill-env] CA bundle for SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt"
+          fi
+        fi
+      fi
+      mkdir -p /etc/profile.d 2>/dev/null || true
+      if [ -w /etc/profile.d ]; then
+        PROFD=/etc/profile.d/nemoclaw-brew-temp.sh
+        {
+          echo "# nemoclaw: keep brew temp files inside /tmp so /var/tmp perms are irrelevant"
+          echo "export HOMEBREW_NO_ENV_FILTERING=1"
+          echo "export HOMEBREW_PREFIX=/sandbox/.linuxbrew"
+          echo "export HOMEBREW_REPOSITORY=/sandbox/.linuxbrew/Homebrew"
+          echo "export HOMEBREW_CELLAR=/sandbox/.linuxbrew/Cellar"
+          echo "# Put distro gcc/clang ahead of brew shims for non-login brew (openclaw skills / gogcli)."
+          echo "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.local/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin:\$PATH"
+          echo "export HOMEBREW_TEMP=/tmp/homebrew-tmp"
+          echo "export HOMEBREW_CACHE=/tmp/homebrew-cache"
+          echo "export HOMEBREW_LOGS=/tmp/homebrew-logs"
+          echo "export TMPDIR=/tmp/homebrew-tmp"
+          echo "mkdir -p \"\$HOMEBREW_TEMP\" \"\$HOMEBREW_CACHE\" \"\$HOMEBREW_LOGS\" 2>/dev/null || true"
+          # chmod 1777 so non-root users (openclaw: uid 998) can mkdir their own
+          # subdirs like openclaw-998 inside TMPDIR. No-op once perms are already correct.
+          echo "chmod 1777 \"\$HOMEBREW_TEMP\" \"\$HOMEBREW_CACHE\" \"\$HOMEBREW_LOGS\" 2>/dev/null || true"
+          # CA bundle path (brew tap / brew update / gogcli self-update all
+          # use git+https). Emit only if the bundle exists so login shells
+          # do not inherit a bogus path.  NOTE: no apostrophes allowed in
+          # this block -- the whole sandbox-install-skill-env.sh body is
+          # wrapped in a kubectl-exec sh -c single-quoted string, and a
+          # stray `do not` -> `don\047t` would silently terminate that
+          # wrapper mid-script. Dash then reinterprets subsequent `echo
+          # "if [ -r ... ]; then"` text as real commands and finally
+          # explodes at the closing `}` with "Syntax error: } unexpected".
+          echo "if [ -r /etc/openshell-tls/ca-bundle.pem ]; then"
+          echo "  export SSL_CERT_FILE=/etc/openshell-tls/ca-bundle.pem"
+          echo "  export SSL_CERT_DIR=/etc/ssl/certs"
+          echo "  export GIT_SSL_CAINFO=/etc/openshell-tls/ca-bundle.pem"
+          echo "  export CURL_CA_BUNDLE=/etc/openshell-tls/ca-bundle.pem"
+          echo "  export REQUESTS_CA_BUNDLE=/etc/openshell-tls/ca-bundle.pem"
+          echo "  export NODE_EXTRA_CA_CERTS=/etc/openshell-tls/ca-bundle.pem"
+          echo "elif [ -r /etc/ssl/certs/ca-certificates.crt ]; then"
+          echo "  export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+          echo "  export SSL_CERT_DIR=/etc/ssl/certs"
+          echo "  export GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt"
+          echo "  export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+          echo "  export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+          echo "  export NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt"
+          echo "fi"
+          if [ -n "$HB_BOTTLE_DOMAIN" ]; then
+            echo "export HOMEBREW_BOTTLE_DOMAIN=$HB_BOTTLE_DOMAIN"
+            echo "export HOMEBREW_ARTIFACT_DOMAIN=$HB_BOTTLE_DOMAIN"
+            echo "export HOMEBREW_API_DOMAIN=$HB_BOTTLE_DOMAIN"
+          fi
+        } > "$PROFD" 2>/dev/null || true
+        chmod 0644 "$PROFD" 2>/dev/null || true
+
+        # Go toolchain env: login shells pick up GOROOT/GOPATH + a PATH prefix
+        # that exposes `go` and `$GOPATH/bin`. Only emit if the prefetched Go
+        # tree actually landed in the sandbox; otherwise a non-existent GOROOT
+        # would surface as `go: cannot find GOROOT directory` on every shell
+        # login. No apostrophes in this block -- see the comment above the
+        # SSL_CERT_FILE block for why stray ones wreck the outer sh -c wrapper.
+        if [ -x /sandbox/.local/go/bin/go ]; then
+          PROFD_GO=/etc/profile.d/nemoclaw-golang.sh
+          {
+            echo "# nemoclaw: prefetched Go toolchain (see docker/prefetch/Dockerfile)"
+            echo "export GOROOT=/sandbox/.local/go"
+            echo "export GOPATH=/sandbox/go"
+            echo "export GOBIN=/sandbox/go/bin"
+            echo "export GO111MODULE=on"
+            echo "export GOPROXY=$GOPROXY_VAL"
+            echo "export GOSUMDB=off"
+            echo "export PATH=/sandbox/.local/go/bin:/sandbox/go/bin:\$PATH"
+          } > "$PROFD_GO" 2>/dev/null || true
+          chmod 0644 "$PROFD_GO" 2>/dev/null || true
+        fi
+
+        # gog keyring env: required by every gog invocation whose HOME gets
+        # sanitized to /tmp by openclaw (skill subprocess) and therefore
+        # does NOT read ~/.bash_profile. /etc/profile.d is sourced by all
+        # login shells; /etc/bash.bashrc hook below catches non-login bash.
+        PROFD_GOG=/etc/profile.d/nemoclaw-gog-env.sh
+        {
+          echo "# nemoclaw: gog file keyring passphrase (see steipete/gogcli)"
+          echo "export GOG_KEYRING_BACKEND=file"
+          echo "export XDG_CONFIG_HOME=/sandbox/.config"
+          if [ -n "$GKP" ]; then
+            # randAlphaNum 8 password contains no shell-special chars.
+            echo "export GOG_KEYRING_PASSWORD=$GKP"
+          fi
+          # OAuth callback host for `gog auth add ... --redirect-host`.
+          # ingress-weui.yaml routes /oauth2/callback on this host to the
+          # sandbox tunnel on :8080 (start_relay_oauth in deployment.yaml).
+          # Pre-exporting saves users from copy/pasting the dynamic per-user
+          # Olares hostname every time they re-auth a Google account.
+          if [ -n "$GOAUTH_REDIRECT_HOST" ]; then
+            echo "export NEMOCLAW_GOG_OAUTH_REDIRECT_HOST=$GOAUTH_REDIRECT_HOST"
+          fi
+        } > "$PROFD_GOG" 2>/dev/null || true
+        chmod 0644 "$PROFD_GOG" 2>/dev/null || true
+      fi
+      # Make sure non-login interactive bash picks up profile.d env too. On
+      # Debian/Ubuntu /etc/bash.bashrc is the non-login interactive rc. By
+      # default it does NOT source /etc/profile.d — add a small shim.
+      BB=/etc/bash.bashrc
+      if [ -f "$BB" ] && [ -w "$BB" ] && ! grep -q nemoclaw-profile-d "$BB" 2>/dev/null; then
+        {
+          printf "\n# nemoclaw-profile-d (managed; do not edit)\n"
+          printf "for __np in /etc/profile.d/nemoclaw-*.sh; do\n"
+          printf "  [ -r \"\$__np\" ] && . \"\$__np\"\n"
+          printf "done\n"
+          printf "unset __np\n"
+          printf "# end-nemoclaw-profile-d\n"
+        } >> "$BB" 2>/dev/null || true
+      fi
+
+      # gogcli has no Linux Homebrew bottle — brew falls back to source builds, which
+      # need a C compiler Homebrew can discover. DevelopmentTools.installed (Homebrew)
+      # on Linux looks for FIXED paths (/usr/bin/gcc, /usr/bin/clang) — not PATH — see
+      # Homebrew/brew#13902. We therefore must guarantee at least one of those symlinks
+      # points at a real compiler before `brew install gogcli` runs.
+      #
+      # Strategy (robust, any-one sufficient — stages tried in order, first win stops):
+      #   0) apt-get install gcc g++ (smallest footprint — highest success rate)
+      #   1) apt-get install build-essential + clang (if stage 0 left gaps)
+      #   2) Fallback symlinks from versioned/arch-triplet names (Debian sid/Ubuntu:
+      #      x86_64-linux-gnu-gcc, gcc-12, etc.) — covers images where apt installed
+      #      a compiler under a versioned name but never wired /usr/bin/gcc.
+      #   3) Last resort: `brew install gcc` as sandbox user + shim to /usr/bin/gcc
+      #   4) Emergency: pin specific versions (gcc-12 g++-12) in case the default
+      #      metapackage was unavailable on this mirror.
+      # Every stage logs to /var/log/nemoclaw-skill-env*.log so a failed bootstrap
+      # can be diagnosed via `kubectl exec <sbx> -- cat /var/log/nemoclaw-skill-env.log`
+      # even when the sentinel was never written.
+      if [ "'"${NEMOCLAW_SKILL_INSTALL_GCC:-1}"'" = "1" ] \
+           && [ -x /sandbox/.linuxbrew/Homebrew/bin/brew ]; then
+        _LOG=/var/log/nemoclaw-skill-env.log
+        _APT_LOG=/var/log/nemoclaw-skill-env-apt.log
+        mkdir -p /var/log 2>/dev/null || true
+        : > "$_LOG" 2>/dev/null || _LOG=/tmp/nemoclaw-skill-env.log
+        : > "$_APT_LOG" 2>/dev/null || _APT_LOG=/tmp/nemoclaw-skill-env-apt.log
+        _log()  { printf "%s\n" "[skill-env] $*"; printf "%s\n" "$*" >>"$_LOG" 2>/dev/null || true; }
+        _warn() { printf "%s\n" "[skill-env] WARN: $*" >&2; printf "WARN: %s\n" "$*" >>"$_LOG" 2>/dev/null || true; }
+
+        # Wait for any concurrent dpkg/apt holder (e.g. openclaw skills installer
+        # triggered by the UI) to release before we touch apt. Poll up to 60s.
+        _apt_wait_lock() {
+          _timeout=60
+          _elapsed=0
+          while [ "$_elapsed" -lt "$_timeout" ]; do
+            if [ ! -e /var/lib/dpkg/lock-frontend ] && [ ! -e /var/lib/apt/lists/lock ]; then
+              return 0
+            fi
+            # Either lock file is present — try fuser to see if anyone is holding
+            # it. `fuser` exit code 1 = no process holds the file.
+            _busy=0
+            for _lk in /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock; do
+              [ -e "$_lk" ] || continue
+              if fuser "$_lk" >/dev/null 2>&1; then
+                _busy=1
+                break
+              fi
+            done
+            [ "$_busy" = "0" ] && return 0
+            [ "$_elapsed" = "0" ] && _log "apt lock busy ($_lk held); waiting up to ${_timeout}s"
+            sleep 2
+            _elapsed=$((_elapsed + 2))
+          done
+          _warn "apt lock still busy after ${_timeout}s; proceeding anyway (apt-get will error out cleanly)"
+          return 1
+        }
+
+        if command -v apt-get >/dev/null 2>&1; then
+          _apt_wait_lock
+          DEBIAN_FRONTEND=noninteractive apt-get clean >>"$_APT_LOG" 2>&1 || true
+          if DEBIAN_FRONTEND=noninteractive apt-get update -o Acquire::Retries=3 -qq >>"$_APT_LOG" 2>&1; then
+            _log "apt update OK (Stage 0 precondition)"
+          else
+            _warn "apt update failed (see $_APT_LOG); Stage 0/1 will fail, fallbacks continue"
+          fi
+        else
+          _warn "apt-get not available; skipping Stages 0 + 1, going straight to symlink + brew"
+        fi
+
+        # --- Stage -1: ca-certificates. brew tap runs `git clone https://...` for
+        # steipete/tap; if the sandbox base image has no CA bundle (common on
+        # slim Debian images) git prints:
+        #   fatal: unable to access URL: server certificate verification
+        #   failed. CAfile: none CRLfile: none
+        # and brew install gog fails with exit 128. We install ca-certificates
+        # + run update-ca-certificates unconditionally (cheap when already
+        # present) and also export GIT_SSL_CAINFO / SSL_CERT_FILE via
+        # /etc/environment so every non-login subprocess (openclaw skill
+        # runner, brew, git) sees a concrete bundle path.
+        if command -v apt-get >/dev/null 2>&1; then
+          _apt_wait_lock
+          _log "Stage CA: apt-get install -y ca-certificates"
+          if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --fix-missing --no-install-recommends \
+               ca-certificates >>"$_APT_LOG" 2>&1; then
+            if command -v update-ca-certificates >/dev/null 2>&1; then
+              update-ca-certificates >>"$_APT_LOG" 2>&1 || \
+                _warn "update-ca-certificates exited non-zero (see $_APT_LOG)"
+            fi
+            if [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+              _log "Stage CA OK: /etc/ssl/certs/ca-certificates.crt present ($(wc -l </etc/ssl/certs/ca-certificates.crt 2>/dev/null) lines)"
+            else
+              _warn "ca-certificates installed but /etc/ssl/certs/ca-certificates.crt missing; git HTTPS will still fail"
+            fi
+          else
+            _warn "Stage CA failed (see $_APT_LOG); brew tap git clone over HTTPS will fail with CAfile: none"
+          fi
+        fi
+
+        # --- Stage INSECURE_TLS: disable TLS verification for git / curl / wget / npm / pip ---
+        # Rationale: in environments with a split-target TLS MITM proxy (a common
+        # corporate setup) curl/git may work for some HTTPS hosts (the ones the
+        # proxy does not touch, e.g. baidu.com) and fail for others
+        # (github.com / ghcr.io) with:
+        #   curl: (60) SSL certificate problem: self-signed certificate in certificate chain
+        #   git fatal: unable to access ...: server certificate verification failed. CAfile: none
+        # Because we cannot install the (unknown, per-site) interceptor root CA,
+        # the only reliable way to let `brew install gog` (and subsequent
+        # `brew tap steipete/tap` git clones) succeed is to skip verification
+        # inside the sandbox.
+        #
+        # Writes these *user* dotfiles (unconditionally trusted by each tool --
+        # CANNOT be stripped by Homebrew superenv):
+        #   /sandbox/.gitconfig  -> [http] sslVerify = false
+        #   /sandbox/.curlrc     -> insecure
+        #   /sandbox/.wgetrc     -> check_certificate = off
+        # And a /etc/profile.d drop-in exporting env-level equivalents:
+        #   GIT_SSL_NO_VERIFY=1   NODE_TLS_REJECT_UNAUTHORIZED=0
+        #   PYTHONHTTPSVERIFY=0   PIP_TRUSTED_HOST="pypi.org files.pythonhosted.org pypi.python.org"
+        #
+        # Gate: NEMOCLAW_SKILL_INSECURE_TLS ("1"/"true"/"yes" -> on, "0"/"false"/"no" -> off).
+        # Default is ON because the install flow has no way to succeed otherwise
+        # on MITM networks and we have no user-provided CA bundle to install.
+        # Power-users on clean networks can set it to "0" in the Olares app env.
+        _ITLS_ON=1
+        case "${NEMOCLAW_SKILL_INSECURE_TLS:-1}" in
+          0|false|False|FALSE|no|No|NO|off|Off|OFF|"") _ITLS_ON=0 ;;
+          *) _ITLS_ON=1 ;;
+        esac
+        if [ "$_ITLS_ON" = "1" ]; then
+          _log "Stage INSECURE_TLS: disabling TLS verification for git/curl/wget/npm/pip inside sandbox"
+          # Dotfiles. All writes overwrite any prior managed copy so chart
+          # upgrades that change content always win.
+          {
+            echo "# nemoclaw-skill-env (managed; do not edit)"
+            echo "[http]"
+            echo "        sslVerify = false"
+            echo "[http \"https://github.com/\"]"
+            echo "        sslVerify = false"
+            echo "[http \"https://ghcr.io/\"]"
+            echo "        sslVerify = false"
+          } > /sandbox/.gitconfig 2>/dev/null || true
+          chown "$SBX_USER:$SBX_USER" /sandbox/.gitconfig 2>/dev/null || true
+          chmod 0644 /sandbox/.gitconfig 2>/dev/null || true
+
+          {
+            echo "# nemoclaw-skill-env (managed; do not edit)"
+            echo "insecure"
+          } > /sandbox/.curlrc 2>/dev/null || true
+          chown "$SBX_USER:$SBX_USER" /sandbox/.curlrc 2>/dev/null || true
+          chmod 0644 /sandbox/.curlrc 2>/dev/null || true
+
+          {
+            echo "# nemoclaw-skill-env (managed; do not edit)"
+            echo "check_certificate = off"
+          } > /sandbox/.wgetrc 2>/dev/null || true
+          chown "$SBX_USER:$SBX_USER" /sandbox/.wgetrc 2>/dev/null || true
+          chmod 0644 /sandbox/.wgetrc 2>/dev/null || true
+
+          # Also point root (/root) at the same files; brew may re-exec itself
+          # across users when HOMEBREW_PREFIX is root-owned briefly on first run.
+          for _root_home in /root; do
+            [ -d "$_root_home" ] || continue
+            cp -f /sandbox/.gitconfig "$_root_home/.gitconfig" 2>/dev/null || true
+            cp -f /sandbox/.curlrc    "$_root_home/.curlrc"    2>/dev/null || true
+            cp -f /sandbox/.wgetrc    "$_root_home/.wgetrc"    2>/dev/null || true
+          done
+
+          # profile.d drop-in for env-level toggles (login shells + PAM).
+          mkdir -p /etc/profile.d 2>/dev/null || true
+          if [ -w /etc/profile.d ]; then
+            PROFD_ITLS=/etc/profile.d/nemoclaw-insecure-tls.sh
+            {
+              echo "# nemoclaw-skill-env (managed; do not edit)"
+              echo "# Disables TLS verification for tools that do not read ~/.gitconfig"
+              echo "# or ~/.curlrc (npm / node / pip / python requests). See the"
+              echo "# Stage INSECURE_TLS block in configmap-sandbox-bridge.yaml."
+              echo "export GIT_SSL_NO_VERIFY=1"
+              echo "export NODE_TLS_REJECT_UNAUTHORIZED=0"
+              echo "export PYTHONHTTPSVERIFY=0"
+              echo "export PIP_TRUSTED_HOST=\"pypi.org files.pythonhosted.org pypi.python.org\""
+              echo "export HOMEBREW_CURLRC=1"
+            } > "$PROFD_ITLS" 2>/dev/null || true
+            chmod 0644 "$PROFD_ITLS" 2>/dev/null || true
+          fi
+
+          # Append to /etc/environment so non-login sessions (openclaw skill
+          # runner, PAM-less kubectl exec) also see these.
+          if [ -w "${ETCENV:-/etc/environment}" ] || [ -w /etc ] 2>/dev/null; then
+            ETCENV_I=${ETCENV:-/etc/environment}
+            [ -f "$ETCENV_I" ] || touch "$ETCENV_I" 2>/dev/null || true
+            if [ -w "$ETCENV_I" ]; then
+              sed -i "/nemoclaw-insecure-tls/,/end-nemoclaw-insecure-tls/d" "$ETCENV_I" 2>/dev/null || true
+              {
+                echo "# nemoclaw-insecure-tls (managed; do not edit)"
+                echo "GIT_SSL_NO_VERIFY=1"
+                echo "NODE_TLS_REJECT_UNAUTHORIZED=0"
+                echo "PYTHONHTTPSVERIFY=0"
+                echo "PIP_TRUSTED_HOST=pypi.org files.pythonhosted.org pypi.python.org"
+                echo "HOMEBREW_CURLRC=1"
+                echo "# end-nemoclaw-insecure-tls"
+              } >> "$ETCENV_I"
+            fi
+          fi
+          _log "Stage INSECURE_TLS OK: dotfiles + profile.d + /etc/environment updated"
+        else
+          _log "Stage INSECURE_TLS skipped (NEMOCLAW_SKILL_INSECURE_TLS=${NEMOCLAW_SKILL_INSECURE_TLS:-}); assuming trusted CA chain"
+        fi
+
+        # --- Stage 0: minimal gcc + g++ (fastest, least likely to hit broken Recommends) ---
+        if [ ! -x /usr/bin/gcc ] && command -v apt-get >/dev/null 2>&1; then
+          _apt_wait_lock
+          _log "Stage 0: apt-get install -y gcc g++ (minimal, ~80MB)"
+          if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --fix-missing --no-install-recommends \
+               gcc g++ >>"$_APT_LOG" 2>&1; then
+            _log "Stage 0 OK: gcc + g++ installed"
+          else
+            _warn "Stage 0 failed (see $_APT_LOG); trying Stage 1 (build-essential + clang)"
+          fi
+        fi
+
+        # --- Stage 1: build-essential + clang (larger but covers make/libc-dev/etc.) ---
+        if [ ! -x /usr/bin/gcc ] && command -v apt-get >/dev/null 2>&1; then
+          _apt_wait_lock
+          _log "Stage 1: apt-get install -y build-essential clang (full toolchain, ~400MB)"
+          if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --fix-missing --no-install-recommends \
+               build-essential clang >>"$_APT_LOG" 2>&1; then
+            _log "Stage 1 OK: build-essential + clang installed"
+          else
+            _warn "Stage 1 failed (see $_APT_LOG); trying Stage 2 symlinks"
+          fi
+        fi
+
+        # --- Stage 2: symlink fixed paths for Homebrew DevelopmentTools probe ---
+        for _bin in gcc clang; do
+          if [ ! -x "/usr/bin/$_bin" ]; then
+            _cand=""
+            for _c in "/usr/bin/x86_64-linux-gnu-$_bin" "/usr/bin/aarch64-linux-gnu-$_bin"; do
+              [ -x "$_c" ] && _cand="$_c" && break
+            done
+            if [ -z "$_cand" ]; then
+              _cand=$(ls -1 /usr/bin/$_bin-[0-9]* 2>/dev/null | sort -V | tail -1)
+            fi
+            if [ -n "$_cand" ] && [ -x "$_cand" ]; then
+              if ln -sfn "$_cand" "/usr/bin/$_bin" 2>/dev/null; then
+                _log "linked /usr/bin/$_bin -> $_cand"
+              else
+                _warn "failed to create symlink /usr/bin/$_bin -> $_cand"
+              fi
+            fi
+          fi
+        done
+        # Shim g++/cpp from versioned names too so brew superenv has companions.
+        for _bin in g++ cpp; do
+          if [ ! -x "/usr/bin/$_bin" ]; then
+            _cand=$(ls -1 /usr/bin/$_bin-[0-9]* 2>/dev/null | sort -V | tail -1)
+            [ -n "$_cand" ] && [ -x "$_cand" ] && ln -sfn "$_cand" "/usr/bin/$_bin" 2>/dev/null \
+              && _log "linked /usr/bin/$_bin -> $_cand" || true
+          fi
+        done
+        unset _c _cand _bin
+
+        # --- Stage 3: brew install gcc fallback (only if /usr/bin/gcc still missing) ---
+        if [ ! -x /usr/bin/gcc ]; then
+          _log "Stage 3: brew install gcc (~160MB, several minutes — apt fallbacks exhausted)"
+          if _nemoclaw_run_sbx "brew install gcc" >>"$_LOG" 2>&1; then
+            _log "Stage 3 OK: brew install gcc succeeded"
+          else
+            _warn "Stage 3 failed (see $_LOG); trying Stage 4 (pinned versions)"
+          fi
+          _nemoclaw_run_sbx "brew unlink gcc 2>/dev/null; brew link --overwrite gcc 2>/dev/null" \
+            >>"$_LOG" 2>&1 || true
+          _brew_gcc=$(ls -1 /sandbox/.linuxbrew/Homebrew/bin/gcc-[0-9]* 2>/dev/null | sort -V | tail -1)
+          if [ -n "$_brew_gcc" ] && [ -x "$_brew_gcc" ]; then
+            ln -sfn "$_brew_gcc" /usr/bin/gcc 2>/dev/null \
+              && _log "linked /usr/bin/gcc -> $_brew_gcc (brew fallback)"
+            for _bin in g++ cpp; do
+              _src=$(ls -1 /sandbox/.linuxbrew/Homebrew/bin/${_bin}-[0-9]* 2>/dev/null | sort -V | tail -1)
+              [ -n "$_src" ] && [ -x "$_src" ] && ln -sfn "$_src" "/usr/bin/$_bin" 2>/dev/null \
+                && _log "linked /usr/bin/$_bin -> $_src (brew fallback)" || true
+            done
+          fi
+          unset _brew_gcc _src
+        fi
+
+        # --- Stage 4: pinned-version apt retry (for images where `gcc` metapkg is broken) ---
+        # Some Debian spins (trixie/sid snapshots) leave the unversioned `gcc` package
+        # temporarily unsatisfiable while `gcc-12`/`gcc-13` are still installable. Try
+        # those explicitly, then symlink. This is also our last chance if brew died on
+        # HTTPS egress (e.g. ghcr.io rate limits or steipete/tap resolution glitches).
+        if [ ! -x /usr/bin/gcc ] && command -v apt-get >/dev/null 2>&1; then
+          _apt_wait_lock
+          _log "Stage 4: pinned-version fallback — apt-get install -y gcc-12 g++-12"
+          if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --fix-missing --no-install-recommends \
+               gcc-12 g++-12 >>"$_APT_LOG" 2>&1; then
+            _log "Stage 4 OK: gcc-12 + g++-12 installed"
+            [ -x /usr/bin/gcc-12 ] && ln -sfn /usr/bin/gcc-12 /usr/bin/gcc 2>/dev/null \
+              && _log "linked /usr/bin/gcc -> /usr/bin/gcc-12 (Stage 4)"
+            [ -x /usr/bin/g++-12 ] && ln -sfn /usr/bin/g++-12 /usr/bin/g++ 2>/dev/null \
+              && _log "linked /usr/bin/g++ -> /usr/bin/g++-12 (Stage 4)"
+          else
+            _apt_wait_lock
+            _log "Stage 4 (gcc-12) failed; trying gcc-13"
+            if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --fix-missing --no-install-recommends \
+                 gcc-13 g++-13 >>"$_APT_LOG" 2>&1; then
+              _log "Stage 4 OK (alt): gcc-13 + g++-13 installed"
+              [ -x /usr/bin/gcc-13 ] && ln -sfn /usr/bin/gcc-13 /usr/bin/gcc 2>/dev/null \
+                && _log "linked /usr/bin/gcc -> /usr/bin/gcc-13 (Stage 4 alt)"
+              [ -x /usr/bin/g++-13 ] && ln -sfn /usr/bin/g++-13 /usr/bin/g++ 2>/dev/null \
+                && _log "linked /usr/bin/g++ -> /usr/bin/g++-13 (Stage 4 alt)"
+            else
+              _warn "Stage 4 exhausted (gcc-12/13 both failed); see $_APT_LOG"
+            fi
+          fi
+        fi
+
+        # --- /usr/bin/cc + /usr/bin/c++: some configure scripts hard-code these names ---
+        # Homebrew superenv does not need them (it drives HOMEBREW_CC directly), but a
+        # missing /usr/bin/cc is a common source of silent "not a C compiler" errors in
+        # autotools-based formula tests. Cheap to wire up defensively.
+        if [ ! -x /usr/bin/cc ] && [ -x /usr/bin/gcc ]; then
+          ln -sfn /usr/bin/gcc /usr/bin/cc 2>/dev/null && _log "linked /usr/bin/cc -> /usr/bin/gcc"
+        fi
+        if [ ! -x /usr/bin/c++ ] && [ -x /usr/bin/g++ ]; then
+          ln -sfn /usr/bin/g++ /usr/bin/c++ 2>/dev/null && _log "linked /usr/bin/c++ -> /usr/bin/g++"
+        fi
+
+        # --- Final sanity: must have /usr/bin/gcc, log brew perspective for debugging ---
+        if [ -x /usr/bin/gcc ]; then
+          _log "final: /usr/bin/gcc -> $(readlink -f /usr/bin/gcc 2>/dev/null || echo /usr/bin/gcc) [$(/usr/bin/gcc --version 2>/dev/null | head -1)]"
+          _log "final: /usr/bin/gcc perms: $(ls -la /usr/bin/gcc 2>&1 | head -1)"
+          # Verify from sandbox user perspective — root seeing it is not enough if
+          # some parent dir denies sandbox-user traversal.
+          _sbx_can_exec=$(_nemoclaw_run_sbx "test -x /usr/bin/gcc && echo YES || echo NO" 2>/dev/null | tr -d '\r\n')
+          _log "final: sandbox user can exec /usr/bin/gcc: ${_sbx_can_exec:-UNKNOWN}"
+          unset _sbx_can_exec
+        else
+          _warn "final: /usr/bin/gcc STILL MISSING — gogcli source builds will fail"
+        fi
+        if [ -x /usr/bin/clang ]; then
+          _log "final: /usr/bin/clang -> $(readlink -f /usr/bin/clang 2>/dev/null || echo /usr/bin/clang)"
+        fi
+        # Surface what Homebrew actually sees — quick win when triaging failures.
+        # NOTE: the entire outer docker exec sh -c is single-quoted (line ~520),
+        # so raw inner single quotes would break the wrap. Use \" inside this
+        # block; the sandbox shell unescapes them after the outer single-quoted
+        # argument is passed through.
+        _nemoclaw_run_sbx "/sandbox/.linuxbrew/Homebrew/bin/brew config 2>/dev/null | \
+          grep -E \"^(Clang|HOMEBREW_PREFIX|/usr/bin/gcc|gcc@)\" || true" 2>/dev/null \
+          | while read -r _ln; do _log "brew config: $_ln"; done
+        unset _ln
+        # Even with shims, openclaw can spawn brew without a PATH superenv likes.
+        # Pin compilers for superenv (brew man: HOMEBREW_CC / HOMEBREW_CXX). Note brew
+        # validates HOMEBREW_CC as a compiler *name* (e.g. "gcc", "gcc-11"). A full path
+        # fails with "Invalid value for HOMEBREW_CC: /usr/bin/gcc". CC / CXX can be paths.
+        GCC_BIN=""; GCC_NAME=""
+        GCC_VER_BIN=$(ls -1 /sandbox/.linuxbrew/Homebrew/bin/gcc-[0-9]* 2>/dev/null | sort -V | tail -1)
+        if [ -n "$GCC_VER_BIN" ] && [ -x "$GCC_VER_BIN" ]; then
+          GCC_BIN=$GCC_VER_BIN
+          GCC_NAME=$(basename "$GCC_VER_BIN")
+        else
+          for cand in /sandbox/.linuxbrew/Homebrew/bin/gcc /usr/local/bin/gcc /usr/bin/gcc; do
+            if [ -x "$cand" ]; then
+              GCC_BIN=$cand
+              GCC_NAME=gcc
+              break
+            fi
+          done
+        fi
+        GXX_BIN=""; GXX_NAME=""
+        GXX_VER_BIN=$(ls -1 /sandbox/.linuxbrew/Homebrew/bin/g++-[0-9]* 2>/dev/null | sort -V | tail -1)
+        if [ -n "$GXX_VER_BIN" ] && [ -x "$GXX_VER_BIN" ]; then
+          GXX_BIN=$GXX_VER_BIN
+          GXX_NAME=$(basename "$GXX_VER_BIN")
+        else
+          for cand in /sandbox/.linuxbrew/Homebrew/bin/g++ /usr/local/bin/g++ /usr/bin/g++; do
+            if [ -x "$cand" ]; then
+              GXX_BIN=$cand
+              GXX_NAME=g++
+              break
+            fi
+          done
+        fi
+        if [ -n "$GCC_BIN" ] && [ -x "$GCC_BIN" ]; then
+          if [ -w "$ETCENV" ] 2>/dev/null; then
+            sed -i "/^HOMEBREW_CC=/d;/^HOMEBREW_CXX=/d;/^CC=/d;/^CXX=/d" "$ETCENV" 2>/dev/null || true
+            echo "HOMEBREW_CC=$GCC_NAME" >> "$ETCENV"
+            echo "CC=$GCC_BIN" >> "$ETCENV"
+            if [ -n "$GXX_BIN" ] && [ -x "$GXX_BIN" ]; then
+              echo "HOMEBREW_CXX=$GXX_NAME" >> "$ETCENV"
+              echo "CXX=$GXX_BIN" >> "$ETCENV"
+            fi
+            echo "[skill-env] HOMEBREW_CC=$GCC_NAME / HOMEBREW_CXX=$GXX_NAME / CC=$GCC_BIN / CXX=$GXX_BIN appended to $ETCENV"
+          fi
+          if [ -w /etc/profile.d ] 2>/dev/null; then
+            PROFD_CC=/etc/profile.d/nemoclaw-homebrew-cc.sh
+            {
+              echo "# nemoclaw: pin Homebrew compilers for source builds (gogcli)"
+              echo "export HOMEBREW_NO_ENV_FILTERING=1"
+              echo "export HOMEBREW_CC=$GCC_NAME"
+              echo "export CC=$GCC_BIN"
+              if [ -n "$GXX_BIN" ] && [ -x "$GXX_BIN" ]; then
+                echo "export HOMEBREW_CXX=$GXX_NAME"
+                echo "export CXX=$GXX_BIN"
+              fi
+            } > "$PROFD_CC" 2>/dev/null || true
+            chmod 0644 "$PROFD_CC" 2>/dev/null || true
+            echo "[skill-env] wrote $PROFD_CC"
+          fi
+        fi
+      fi
+
+      echo "sandbox rc + wrappers installed under $SBX_HOME"
+    '
+
+    # ------------------------------------------------------------------
+    # gog shim is now managed by chat-ui-bridge's ensure_gog_shim_in_sandbox
+    # (deployment.yaml), which runs every loop iteration so the shim's lifecycle
+    # tracks the gogcli Cellar binary's lifecycle: shim appears when the user
+    # installs gog via `openclaw config --section skills`, and disappears when
+    # they uninstall it. Doing it in the bridge (instead of skill-env, which is
+    # sentinel-gated to one run per pod) is what makes that lifecycle work —
+    # otherwise installing gog AFTER first skill-env run would never trigger
+    # shim install. Below we still materialize the keyring password file so it's
+    # ready for the bridge's shim install whenever the user does install gog.
+    # ------------------------------------------------------------------
+    if [ -n "${GOG_KEYRING_PASSWORD:-}" ]; then
+      _gog_pw_b64=$(printf "%s" "$GOG_KEYRING_PASSWORD" | base64 | tr -d "\n")
+    else
+      _gog_pw_b64=""
+    fi
+    # NOTE on indentation: this heredoc is inside a YAML literal-block
+    # ("sandbox-install-skill-env.sh: |") whose indent is 4 spaces. EVERY line
+    # (including blank lines and the GOGPW terminator) MUST start with at least
+    # 4 spaces, otherwise YAML treats a column-0 line as the end of the block.
+    # Both `docker exec -i` AND `kubectl exec -i` are required so the heredoc
+    # body actually reaches the inner /bin/sh; dropping either causes silent
+    # EOF and a no-op write — see git history for the regression analysis.
+    docker exec -i "$CLUSTER_CTR" kubectl -n "$NS" exec -i "$SBX" -c agent -- \
+      env "GOG_PW_B64=${_gog_pw_b64}" SBX_USER="${SBX_USER:-sandbox}" /bin/sh <<'GOGPW'
+    set -u
+    SBX_USER="${SBX_USER:-sandbox}"
+    PW_FILE="/sandbox/.gog-keyring-password"
+    if [ -n "${GOG_PW_B64:-}" ]; then
+      _new_pw=$(printf "%s" "$GOG_PW_B64" | base64 -d 2>/dev/null || true)
+      if [ -n "$_new_pw" ]; then
+        _cur_pw=""
+        [ -r "$PW_FILE" ] && _cur_pw=$(cat "$PW_FILE")
+        if [ "$_cur_pw" != "$_new_pw" ]; then
+          printf "%s" "$_new_pw" > "$PW_FILE"
+          chown "$SBX_USER:$SBX_USER" "$PW_FILE" 2>/dev/null || true
+          chmod 600 "$PW_FILE" 2>/dev/null || true
+          echo "[skill-env] $PW_FILE updated (len=${#_new_pw})"
+        fi
+        unset _cur_pw _new_pw
+      fi
+    else
+      echo "[skill-env] GOG_KEYRING_PASSWORD not set; skipping pw-file write"
+    fi
+    GOGPW
+    unset _gog_pw_b64
+
+    # Fail the whole script if we promised gcc for gogcli but the sandbox still
+    # has no /usr/bin/gcc — Homebrew's DevelopmentTools probe on Linux checks that
+    # exact path (not PATH), and gogcli source builds hit "Install Clang or run
+    # `brew install gcc`" until it exists. Failing here is loud: callers do NOT
+    # write the skill-env sentinel and chat-ui-bridge retries on the next tick.
+    # The diagnostics dump below lands in bridge logs via sed "s/^/[chat-ui-bridge:
+    # skill-env] /", so ops can triage without kubectl-exec-ing into the sandbox.
+    if [ "${NEMOCLAW_SKILL_INSTALL_GCC:-1}" = "1" ]; then
+      if ! docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+           test -x /usr/bin/gcc; then
+        {
+          echo ""
+          echo "================================================================"
+          echo "[skill-env] FATAL: /usr/bin/gcc missing after Stages 0-4 + symlink + brew."
+          echo "[skill-env] gogcli + any other source-build formula will keep failing with:"
+          echo "[skill-env]   Error: Install Clang or run \`brew install gcc\`."
+          echo "[skill-env] Diagnostic snapshot from inside the sandbox (captured now):"
+          echo "----------------------------------------------------------------"
+          docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+            /bin/sh -c '
+              echo "-- /usr/bin compilers:";
+              ls -la /usr/bin/gcc* /usr/bin/g++* /usr/bin/clang* /usr/bin/cc /usr/bin/c++ 2>&1 | head -40;
+              echo "-- /sandbox/.linuxbrew compilers:";
+              ls -la /sandbox/.linuxbrew/Homebrew/bin/gcc* /sandbox/.linuxbrew/Homebrew/bin/g++* 2>&1 | head -20;
+              echo "-- PATH for root:";
+              echo "$PATH";
+              echo "-- /var/log/nemoclaw-skill-env.log (last 40 lines):";
+              tail -40 /var/log/nemoclaw-skill-env.log 2>&1 | head -40;
+              echo "-- /var/log/nemoclaw-skill-env-apt.log (last 30 lines):";
+              tail -30 /var/log/nemoclaw-skill-env-apt.log 2>&1 | head -30;
+            ' 2>&1 || echo "[skill-env] could not exec diagnostic probe"
+          echo "----------------------------------------------------------------"
+          echo "[skill-env] Typical root causes:"
+          echo "[skill-env]   - apt egress blocked (check mirror / cluster DNS)"
+          echo "[skill-env]   - ghcr.io/objects.githubusercontent.com unreachable (brew fallback)"
+          echo "[skill-env]   - /var/lib/dpkg/lock held by another process (rare)"
+          echo "[skill-env] Bridge will retry every loop iteration until gcc appears."
+          echo "================================================================"
+          echo ""
+        } >&2
+        exit 1
+      fi
+    fi
+
+    # Push gog shim reconcile script + run once so /sandbox/.local/bin/gog is never
+    # a stale ELF when gogcli exists (bridge may lag; interactive shells need this).
+    copy_to_sandbox "$SCRIPT_DIR/gog-shim-reconcile.sh" /sandbox/.nemoclaw-reconcile-gog-shim.sh 755
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      /sandbox/.nemoclaw-reconcile-gog-shim.sh >>/var/log/nemoclaw-skill-env.log 2>&1 || true
+
+    # OpenClaw WebUI tool runs need env.vars (XDG_CONFIG_HOME etc.) merged by clamp;
+    # sandbox-ensure-gateway calls it from /sandbox/.nemoclaw (agent has no /opt/nemoclaw).
+    copy_to_sandbox "$SCRIPT_DIR/clamp-openclaw-config.py" /sandbox/.nemoclaw/clamp-openclaw-config.py 644
+    copy_to_sandbox "$SCRIPT_DIR/patch_origins.py" /sandbox/.nemoclaw/patch_origins.py 644
+    # patch_inference_baseurl.py rewrites models.providers.inference.baseUrl
+    # to NEMOCLAW_ENDPOINT_URL when the sandbox still holds the unresolvable
+    # https://inference.local/v1 alias (WebUI path breaks otherwise). See
+    # configmap-patch-origins.yaml header for full rationale.
+    copy_to_sandbox "$SCRIPT_DIR/patch_inference_baseurl.py" /sandbox/.nemoclaw/patch_inference_baseurl.py 644
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      sh -c 'mkdir -p /sandbox/.nemoclaw && [ -f /sandbox/.openclaw/openclaw.json ] && python3 /sandbox/.nemoclaw/clamp-openclaw-config.py /sandbox/.openclaw/openclaw.json' \
+      >>/var/log/nemoclaw-skill-env.log 2>&1 || true
+    _SE_ORIG="${CHAT_UI_URL:-}"
+    if [ -n "${OPENCLAW_EXTRA_ALLOWED_ORIGINS:-}" ]; then
+      if [ -n "$_SE_ORIG" ]; then _SE_ORIG="${_SE_ORIG},${OPENCLAW_EXTRA_ALLOWED_ORIGINS}"; else _SE_ORIG="${OPENCLAW_EXTRA_ALLOWED_ORIGINS}"; fi
+    fi
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      env "ORIGIN_CSV=${_SE_ORIG}" "OPENCLAW_TRUSTED_PROXIES=${OPENCLAW_TRUSTED_PROXIES:-}" \
+      sh -c 'mkdir -p /sandbox/.nemoclaw && [ -f /sandbox/.openclaw/openclaw.json ] && [ -f /sandbox/.nemoclaw/patch_origins.py ] && python3 /sandbox/.nemoclaw/patch_origins.py' \
+      >>/var/log/nemoclaw-skill-env.log 2>&1 || true
+
+    # Also force-correct baseUrl at skill-env stage so the very first chat
+    # after install already hits the reachable endpoint (not inference.local).
+    if [ -n "${NEMOCLAW_ENDPOINT_URL:-}" ]; then
+      docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+        env "NEMOCLAW_ENDPOINT_URL=${NEMOCLAW_ENDPOINT_URL}" \
+        sh -c '[ -f /sandbox/.openclaw/openclaw.json ] && [ -f /sandbox/.nemoclaw/patch_inference_baseurl.py ] && python3 /sandbox/.nemoclaw/patch_inference_baseurl.py' \
+        >>/var/log/nemoclaw-skill-env.log 2>&1 || true
+    fi
+
+    # Version stamp: force re-run of skill-env on chart upgrades that bump this.
+    # Bump whenever sandbox-install-skill-env logic changes in a way existing
+    # sandboxes should pick up. ensure_skill_env_installed in deployment.yaml
+    # (chat-ui-bridge) compares SKILLENV_EXPECTED_VERSION against this file — the
+    # two strings MUST be identical byte-for-byte or the bridge re-installs forever.
+    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
+      /bin/sh -c "mkdir -p /workspace 2>/dev/null; printf %s 2026-05-01-openshell-ssl-cert-file-v1 > /workspace/.nemoclaw-skillenv-version" \
+      >/dev/null 2>&1 || true
+
+    rm -f "$rendered_bp"
+
+  # Clamp OpenClaw runtime config (agents.defaults.timeoutSeconds, provider models maxTokens,
+  # optional inference api override). Lives in a separate file because the inline
+  # python3 -c form would inject apostrophes into a single-quoted sh -c body and
+  # silently corrupt sandbox-ensure-gateway.sh -- see comments there.
+  #
+  # Reads two optional env vars (forwarded into the inner sandbox shell from the
+  # nemoclaw pod env): NEMOCLAW_OPENCLAW_INFERENCE_API and NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT.
+  # Both default to no-op if unset/empty. argv[1] is the openclaw.json path.
+  clamp-openclaw-config.py: |
+    #!/usr/bin/env python3
+    """Idempotently clamp OpenClaw runtime config values that we have to keep sane.
+
+    Why this exists at all:
+      * Some local LLM bottle-runs ship pathological defaults (e.g. timeoutSeconds=10)
+        that surface to the user as generic "network connection error". We raise low
+        values to >=120s and cap absurdly high values.
+      * Stale provider configs sometimes have models[].maxTokens missing or huge,
+        which trips the inference backend. We clamp to <=1024.
+      * Operators may pin a specific provider api flavor via env without editing
+        openclaw.json by hand.
+      * Ensures env.vars.XDG_CONFIG_HOME=/sandbox/.config when unset so gogcli finds
+        OAuth tokens for `openclaw agent` tool runs (same path as `gog auth add`).
+
+    All operations are best-effort: malformed JSON, missing keys, non-writable files
+    just exit 0 silently so the bridge loop never wedges.
+    """
+    import json
+    import os
+    import sys
+
+
+    def _as_int(value, default=0):
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            try:
+                return int(value.strip())
+            except ValueError:
+                return default
+        return default
+
+
+    def main():
+        if len(sys.argv) < 2:
+            return 0
+        path = sys.argv[1]
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                cfg = json.load(fh)
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(cfg, dict):
+            return 0
+
+        # Provider override (optional).
+        models_root = cfg.setdefault("models", {})
+        providers = models_root.setdefault("providers", {})
+        inference = providers.setdefault("inference", {})
+
+        api_override = (os.environ.get("NEMOCLAW_OPENCLAW_INFERENCE_API") or "").strip()
+        if api_override:
+            inference["api"] = api_override
+
+        # Clamp per-model maxTokens.
+        for model in inference.get("models") or []:
+            if not isinstance(model, dict):
+                continue
+            mt = _as_int(model.get("maxTokens"), 0)
+            if mt <= 0 or mt > 1024:
+                model["maxTokens"] = 1024
+
+        # Clamp agent timeout.
+        agents = cfg.setdefault("agents", {}).setdefault("defaults", {})
+        max_env = (os.environ.get("NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT") or "").strip()
+        if max_env.isdigit():
+            requested = int(max_env)
+            upper = requested if 60 <= requested <= 3600 else 300
+        else:
+            upper = 300
+
+        ts_now = _as_int(agents.get("timeoutSeconds"), 0)
+        if ts_now < 120:
+            agents["timeoutSeconds"] = 120
+            ts_now = 120
+        if ts_now > upper:
+            agents["timeoutSeconds"] = upper
+
+        # NemoClaw: gogcli stores OAuth under $XDG_CONFIG_HOME/gogcli. OpenClaw may spawn
+        # tool subprocesses with HOME=/tmp without sourcing shell rc. Official config
+        # `env.vars` supplies defaults when the process env lacks a key (see OpenClaw docs).
+        env_root = cfg.get("env")
+        if not isinstance(env_root, dict):
+            env_root = {}
+            cfg["env"] = env_root
+        vars_root = env_root.get("vars")
+        if not isinstance(vars_root, dict):
+            vars_root = {}
+            env_root["vars"] = vars_root
+        if not str(vars_root.get("XDG_CONFIG_HOME", "")).strip():
+            vars_root["XDG_CONFIG_HOME"] = "/sandbox/.config"
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(cfg, fh, ensure_ascii=False, indent=2)
+                fh.write("\n")
+        except OSError:
+            return 0
+        return 0
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
