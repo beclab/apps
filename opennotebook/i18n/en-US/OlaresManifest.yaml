@@ -9,13 +9,61 @@ spec:
 
     Open Notebook empowers you to:
     - Control your data: Keep your research private and secure
-    - Choose your AI models: Support for 16+ providers including OpenAI, Anthropic, Ollama, LM Studio, and more
+    - Choose your AI models: Support for 16+ providers including OpenAI, Anthropic, Ollama, LM Studio, and more — all configurable via UI
     - Organize multi-modal content: PDFs, videos, audio, web pages, and more
     - Generate professional podcasts: Advanced multi-speaker podcast generation
     - Search intelligently: Full-text and vector search across all your content
     - Chat with context: AI conversations powered by your research
 
   upgradeDescription: |
+    Open Notebook version 1.8.5 (upgraded from 1.4.0)
+
+    Major New Features:
+    - UI-based API Key Management (1.7.0): configure 14 AI providers via Settings → API Keys — OpenAI, Anthropic, Google, Groq, Mistral, DeepSeek, xAI, OpenRouter, Voyage AI, ElevenLabs, Ollama, Azure OpenAI, OpenAI-Compatible, Vertex AI — with Fernet AES-128-CBC + HMAC-SHA256 encrypted storage, one-click connection test and model discovery, and a migration tool for existing .env setups
+    - Two new AI providers (1.8.2): DashScope (Alibaba Cloud Qwen) and MiniMax (204K context) via Esperanto 2.20.0
+    - Podcast Model Registry Integration (1.8.0): episode/speaker profiles now reference the model registry instead of loose provider/model strings; credentials are passed through to podcast-creator automatically; per-speaker voice override; new per-episode language field (BCP 47 codes such as pt-BR, en-US); legacy profiles auto-migrate on first startup; "Templates" tab renamed to "Profiles"; "Setup required" badge on incomplete profiles; new GET /api/languages endpoint
+    - Podcast failure recovery (1.7.3): retry button and error details on failed episodes, plus POST /podcasts/episodes/{id}/retry API and error_message field in episode responses; podcast language support via podcast-creator 0.12.0 (1.8.1)
+    - Internationalization expansion (1.5.0 → 1.8.5): Simplified & Traditional Chinese (1.5.0), Russian and Italian (1.7.0), French (1.7.1), Bengali (1.8.1 / 1.8.2), Spanish (1.8.5) — 8+ locales total, plus a language toggle component, date-fns localization and an error-message translation system
+    - Token-based embedding chunking (1.8.5): chunk sizing migrated from characters to tokens for much better CJK and mixed-language behaviour; OPEN_NOTEBOOK_CHUNK_SIZE / OPEN_NOTEBOOK_CHUNK_OVERLAP semantics changed accordingly (default lowered from 1200 characters to 400 tokens to stay safely below the 512-token ceiling of BERT-family embedders such as mxbai-embed-large)
+    - LLM error classification (1.7.2): invalid API key / wrong model / rate limit / configuration errors now surface descriptive messages via global FastAPI exception handlers instead of generic "An unexpected error occurred"
+    - HTML clipboard detection for text sources, SSRF URL validation and Docker secrets via the _FILE suffix pattern (1.7.0)
+
+    Security Hardening (CERT-EU coordinated disclosures):
+    - 1.8.4 — Remote Code Execution via Jinja2 SSTI in user transformation prompts (CVSS 9.2, Critical), arbitrary file write via filename path traversal (CVSS 7.0, High), arbitrary file read via Local File Inclusion in source creation (CVSS 8.2, High). Fixed via SandboxedEnvironment for all template rendering, os.path.basename() sanitization and resolved-path validation against the uploads directory
+    - 1.8.3 — SurrealDB injection via the order_by query parameter on GET /api/notebooks (CVSS 8.7, High, exploitable via CSRF). Fixed via allowlist validation, $variable parameterized binding instead of f-string interpolation, and defensive validation in the get_all() base method
+
+    Important Improvements:
+    - Removed the 50-source hard cap for notebook chat context (1.8.0)
+    - Large document embedding (3MB+) batched in groups of 50 with per-batch retry to prevent 413 Payload Too Large errors (1.7.4)
+    - Fixed SurrealDB getting stuck (1.8.1) and pinned the SurrealDB version in Docker Compose to prevent breaking upstream updates (1.8.0)
+    - Tiktoken pre-downloads its encoding at build time so the API no longer crashes in offline / air-gapped Docker deployments (1.8.1, follow-up fix in 1.8.2)
+    - Failed sources now persist their asset (URL or file path) so they remain identifiable and retryable (1.8.2)
+    - User-set custom source titles are no longer overwritten by background processing (1.8.2)
+    - Credential cascade delete: deleting a credential automatically removes its linked models instead of returning 409 (1.8.2)
+    - Source list auto-refreshes after adding via URL, file upload or text (1.8.2)
+    - Podcast episode directories now use UUIDs, fixing filesystem errors with special characters in titles (1.8.2)
+    - Esperanto base_url / api_key configuration fixes across multiple embedding providers (1.8.2); ElevenLabs TTS credential passthrough fix (1.7.1)
+    - SqliteSaver async compatibility fixes in the chat system, deletion cascade for notes/sources, YouTube content availability fix and re-embedding-of-empty-content fix (1.7.0)
+    - SSE streaming error events in source chat and ask hooks are now surfaced instead of being swallowed (1.7.2)
+    - Word-wrap and overflow fixes in chat input/messages, source cards, note editor, inline edit, note titles and dialog content (1.7.2)
+    - Embedding field is now optional; transformation max_tokens raised; empty/whitespace source content is handled without retry loops (1.7.1)
+    - CJK text orientation fix in the collapsible column component (1.8.0)
+    - Resilient credentials endpoint: broken or mismatched encryption keys no longer crash the API (no more 500); broken credentials are shown with a decryption warning and can still be deleted; DELETE supports model migration via migrate_to (1.8.5)
+    - Azure default API version upgraded to 2024-10-21 (1.8.2); Azure credentials base_url now correctly maps to endpoint (1.8.5)
+    - llama.cpp / OpenAI-compatible connection error fixed via Esperanto 2.17.2 (1.6.2)
+    - Frontend i18n migrated from the custom Proxy pattern to the standard react-i18next t() function for better tooling compatibility (1.8.5)
+    - Single-container Docker image deprecated in favour of Docker Compose (1.8.2); the Olares deployment is unaffected
+    - Frontend test infrastructure with Vitest, Dockerfile multi-stage build optimisations and accessibility improvements (1.5.0)
+
+    Migration Notes:
+    - Existing podcast profiles auto-migrate to the model registry on first startup (1.8.0); profiles that cannot be auto-mapped will show a "Setup required" badge — open them and re-pick the model
+    - Embedding chunk-size default changed from 1200 characters to 400 tokens (1.8.5); only new ingestions use the new chunking, existing stored embeddings are unaffected
+    - Single-container Docker image is deprecated (1.8.2); use Docker Compose instead. Olares users do not need to do anything
+
+    Full release notes: https://github.com/lfnovo/open-notebook/releases (v1.5.0 through v1.8.5)
+
+    ---
+
     Open Notebook version 1.4.0
     
     Major Updates:
