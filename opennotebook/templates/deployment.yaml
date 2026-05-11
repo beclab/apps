@@ -18,16 +18,48 @@ spec:
       labels:
         io.kompose.service: surrealdb
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       initContainers:
+      - name: migrate-surrealdb-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            if [ -z "$(ls -A /mnt/new 2>/dev/null)" ] && [ -n "$(ls -A /mnt/legacy 2>/dev/null)" ]; then
+              echo "[migrate-surrealdb-data] legacy appCache has data and appData is empty; copying..."
+              cp -a /mnt/legacy/. /mnt/new/
+              echo "[migrate-surrealdb-data] done; legacy source left intact for rollback."
+            else
+              echo "[migrate-surrealdb-data] nothing to do (destination non-empty or source empty)."
+            fi
+        resources: {}
+        volumeMounts:
+          - name: surrealdbdata
+            mountPath: /mnt/new
+          - name: surrealdbdata-legacy
+            mountPath: /mnt/legacy
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: init-chmod-surrealdb
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
+            set -e
             mkdir -p /app-data-root
-            chown -R 0:0 /app-data-root || true
-            chmod -R 777 /app-data-root || true
+            chown -R 1000:1000 /app-data-root
+            find /app-data-root -type d -exec chmod 775 {} +
+            find /app-data-root -type f -exec chmod 664 {} +
         resources: {}
         volumeMounts:
           - name: surrealdbdata
@@ -40,6 +72,10 @@ spec:
       containers:
       - name: surrealdb
         image: "docker.io/beclab/surrealdb-surrealdb:v2.4.1"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
         command:
           - /surreal
           - start
@@ -58,14 +94,26 @@ spec:
         resources:
           limits:
             cpu: "1"
-            memory: 512Mi
+            memory: 2Gi
           requests:
-            cpu: 100m
-            memory: 128Mi
+            cpu: 200m
+            memory: 256Mi
         volumeMounts:
         - mountPath: /mydata
           name: surrealdbdata
       volumes:
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/surrealdb'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook/surrealdb'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook/surrealdb'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: surrealdbdata
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
@@ -77,7 +125,7 @@ spec:
           path: '{{ .Values.userspace.appCache }}/opennotebook/surrealdb'
           {{- end }}
           type: DirectoryOrCreate
-        name: surrealdbdata
+        name: surrealdbdata-legacy
 ---
 apiVersion: v1
 kind: Service
@@ -114,15 +162,43 @@ spec:
         io.kompose.service: opennotebook
     spec:
       initContainers:
+      - name: migrate-opennotebook-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            for sub in data uploads config; do
+              if [ -z "$(ls -A /mnt/new/$sub 2>/dev/null)" ] && [ -n "$(ls -A /mnt/legacy/$sub 2>/dev/null)" ]; then
+                echo "[migrate-opennotebook-data] copying legacy $sub from appCache to appData..."
+                mkdir -p /mnt/new/$sub
+                cp -a /mnt/legacy/$sub/. /mnt/new/$sub/
+                echo "[migrate-opennotebook-data] $sub done."
+              else
+                echo "[migrate-opennotebook-data] skip $sub (destination non-empty or source empty)."
+              fi
+            done
+        resources: {}
+        volumeMounts:
+          - name: app-cache-root
+            mountPath: /mnt/new
+          - name: app-cache-legacy-root
+            mountPath: /mnt/legacy
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: getconfigfile
-        image: "docker.io/beclab/lfnovo-open-notebook:1.4.0"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         imagePullPolicy: IfNotPresent
         command: ["sh", "-c", "if [ ! -f '/app/config/config.toml' ]; then mkdir -p /app/config && touch /app/config/config.toml; fi"]
         volumeMounts:
         - mountPath: /app/config
           name: appconfig
       - name: seed-data
-        image: "docker.io/beclab/lfnovo-open-notebook:1.4.0"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
         command:
           - sh
           - -c
@@ -152,10 +228,207 @@ spec:
           runAsUser: 0
       containers:
       - name: opennotebook
-        image: "docker.io/beclab/lfnovo-open-notebook:1.4.0"
+        image: "docker.io/beclab/lfnovo-open_notebook:1.8.5"
+        command:
+          - sh
+          - '-c'
+          - |
+            python3 << 'PATCH_EOF'
+            import pathlib
+            patched = []
+
+            # source.py: route STT credential precisely by stt_model.credential link.
+            #
+            # Upstream bug: open_notebook/graphs/source.py sets only audio_provider
+            # and audio_model on content_state, but never wires up the credential
+            # the user picked for the STT model. Without an explicit hookup,
+            # content-core/esperanto either has no credential at all, or (worse)
+            # silently grabs whichever openai_compatible credential happens to be
+            # the provider default — which fails with HTTP 404 from a wrong
+            # endpoint as soon as the user has more than one openai_compatible
+            # credential (e.g. Whisper for STT + Speeches for TTS).
+            #
+            # We resolve the credential the model is *explicitly linked to*
+            # (stt_model.credential) and write the *modality-specific* env vars
+            # OPENAI_COMPATIBLE_BASE_URL_STT / OPENAI_COMPATIBLE_API_KEY_STT,
+            # which take precedence over the generic OPENAI_COMPATIBLE_* in
+            # esperanto, so other modalities are not affected.
+            #
+            # Track upstream: lfnovo/open-notebook (related: #654, #676,
+            # esperanto#103). TODO: drop this hotfix when upstream wires
+            # per-model credentials into the STT call path.
+            f = pathlib.Path('/app/open_notebook/graphs/source.py')
+            marker = '# OLARES HOTFIX: route STT credential by stt_model.credential'
+            anchor = (
+                '                content_state["audio_provider"] = stt_model.provider\n'
+                '                content_state["audio_model"] = stt_model.name\n'
+                '                logger.debug(\n'
+                '                    f"Using speech-to-text model: {stt_model.provider}/{stt_model.name}"\n'
+                '                )'
+            )
+            patch_block = (
+                '\n                ' + marker + '\n'
+                '                import os as _olares_os\n'
+                '                _olares_cred_id = getattr(stt_model, "credential", None)\n'
+                '                if _olares_cred_id:\n'
+                '                    from open_notebook.database.repository import (\n'
+                '                        repo_query as _olares_repo_query,\n'
+                '                        ensure_record_id as _olares_ensure_record_id,\n'
+                '                    )\n'
+                '                    _olares_cred_rows = await _olares_repo_query(\n'
+                '                        "SELECT base_url, api_key FROM $id",\n'
+                '                        {"id": _olares_ensure_record_id(_olares_cred_id)},\n'
+                '                    )\n'
+                '                    if _olares_cred_rows and _olares_cred_rows[0].get("base_url"):\n'
+                '                        _olares_os.environ["OPENAI_COMPATIBLE_BASE_URL_STT"] = _olares_cred_rows[0]["base_url"]\n'
+                '                        _olares_ak = _olares_cred_rows[0].get("api_key")\n'
+                '                        if isinstance(_olares_ak, dict):\n'
+                '                            _olares_ak = _olares_ak.get("secret_value") or _olares_ak.get("value") or ""\n'
+                '                        if _olares_ak:\n'
+                '                            _olares_os.environ["OPENAI_COMPATIBLE_API_KEY_STT"] = str(_olares_ak)'
+            )
+            if f.exists():
+                s = f.read_text()
+                if marker not in s and anchor in s:
+                    f.write_text(s.replace(anchor, anchor + patch_block))
+                    patched.append('source.py (STT credential routing)')
+
+            # NOTE: STT httpx timeout is lifted via the env var ESPERANTO_STT_TIMEOUT
+            # set on the container (upstream-supported path). An earlier attempt
+            # monkey-patched `self.timeout = config.get("timeout", 300.0)` inside
+            # openai_compatible.py, but that attribute is never consumed by
+            # esperanto's HttpConnectionMixin — the real httpx timeout comes from
+            # TimeoutMixin._get_timeout(), whose priority is
+            # _config["timeout"] > ESPERANTO_STT_TIMEOUT env > DEFAULT_TIMEOUTS.
+            # Keep this comment as a guard rail against reintroducing that patch.
+
+            if patched:
+                print(f'=== Open Notebook hotfix: patched {len(patched)} files ===')
+                for p in patched:
+                    print(f'  - {p}')
+            else:
+                print('=== Open Notebook hotfix: no patches applied (already patched or upstream changed) ===')
+            PATCH_EOF
+
+            # OLARES HOTFIX (DB): dedupe seed transformation rows on every boot.
+            #
+            # Upstream bug: open-notebook migration `migrations/5.surrealql` seeds
+            # default transformations via a bare `insert into transformation [...]`
+            # (no UPSERT, no unique key). If that migration is ever effectively
+            # replayed against the same SurrealDB data — e.g. namespace/database
+            # changed across upgrades, a seeded `db.sqlite` got merged on top of
+            # existing data, or someone manually rolled back and re-ran migrations —
+            # users end up with every default transformation duplicated ("Paper
+            # Analysis" x 2, "Dense Summary" x 2, ...). A simple restart or
+            # no-data reinstall does NOT fix this, because the duplicates are
+            # already persisted and the migration runner sees version 5 as done.
+            #
+            # We dedupe at boot by (name, title, description, prompt) and keep the
+            # oldest row (`created` ascending). This is conservative: user-edited
+            # clones (different prompt/description/title) are kept intact; only
+            # byte-identical copies are removed. Idempotent across reboots.
+            #
+            # TODO: drop this once upstream switches migration 5 to a content-keyed
+            # UPSERT (tracked informally alongside lfnovo/open-notebook#5xx).
+            if [ -x /app/.venv/bin/python ]; then
+              _OLARES_PY=/app/.venv/bin/python
+            else
+              _OLARES_PY=python3
+            fi
+            cd /app && "$_OLARES_PY" - << 'DEDUPE_EOF' || true
+            import asyncio
+            import sys
+            import time
+
+            sys.path.insert(0, '/app')
+
+            async def _olares_dedupe_transformations():
+                try:
+                    from open_notebook.database.repository import (
+                        db_connection,
+                        repo_delete,
+                        repo_query,
+                    )
+                except Exception as e:
+                    print(f'=== Open Notebook hotfix [dedup-transformation]: skipped (import failed: {type(e).__name__}: {e}) ===')
+                    return
+
+                # Wait up to 60s for SurrealDB to come online. Non-fatal if it
+                # never does — startup must not block on the hotfix.
+                last_err = None
+                connected = False
+                for _ in range(30):
+                    try:
+                        async with db_connection():
+                            connected = True
+                            break
+                    except Exception as e:
+                        last_err = e
+                        await asyncio.sleep(2)
+                if not connected:
+                    print(f'=== Open Notebook hotfix [dedup-transformation]: skipped (SurrealDB unreachable within 60s: {last_err!r}) ===')
+                    return
+
+                try:
+                    rows = await repo_query(
+                        "SELECT id, name, title, description, prompt, created FROM transformation ORDER BY created ASC"
+                    ) or []
+                except Exception as e:
+                    print(f'=== Open Notebook hotfix [dedup-transformation]: skipped (query failed: {type(e).__name__}: {e}) ===')
+                    return
+
+                seen = {}
+                to_delete = []
+                for r in rows:
+                    key = (r.get('name'), r.get('title'), r.get('description'), r.get('prompt'))
+                    if key in seen:
+                        to_delete.append(r['id'])
+                    else:
+                        seen[key] = r['id']
+
+                if not to_delete:
+                    print(f'=== Open Notebook hotfix [dedup-transformation]: clean ({len(rows)} rows, no duplicates) ===')
+                    return
+
+                ok = 0
+                for rid in to_delete:
+                    try:
+                        await repo_delete(rid)
+                        ok += 1
+                    except Exception as e:
+                        print(f'    [dedup-transformation] failed to delete {rid}: {type(e).__name__}: {e}')
+                print(f'=== Open Notebook hotfix [dedup-transformation]: removed {ok}/{len(to_delete)} duplicate row(s), kept {len(seen)} unique ===')
+
+            try:
+                asyncio.run(_olares_dedupe_transformations())
+            except Exception as e:
+                print(f'=== Open Notebook hotfix [dedup-transformation]: skipped (fatal: {type(e).__name__}: {e}) ===')
+            DEDUPE_EOF
+
+            exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
         env:
         - name: HOSTNAME
           value: '0.0.0.0'
+        # esperanto STT client httpx timeout. Default 300s is too tight for
+        # self-hosted whisper large-v2 on CPU: a single ~8-10 min audio segment
+        # regularly exceeds it, surfacing as httpx.ReadTimeout mid-upload.
+        # Upstream supports this env via TimeoutMixin; cap is 3600s.
+        - name: ESPERANTO_STT_TIMEOUT
+          value: "1800"
+        # OLARES HOTFIX: force podcast TTS to serial (batch size 1).
+        #
+        # podcast_creator/nodes.py defaults TTS_BATCH_SIZE=5, issuing 5
+        # concurrent POSTs to the TTS endpoint per batch. Against self-hosted
+        # Speaches (Kokoro-82M-ONNX) on Olares, sustained concurrency drives
+        # the Speaches pod to OOM / connection drop mid-run: a first few
+        # batches succeed, then the whole worker pool starts returning
+        # "peer closed connection" and finally "All connection attempts
+        # failed" (TCP-level — Speaches restarted). Serializing to 1 sharply
+        # reduces peak memory pressure on Speaches and lets full episodes
+        # complete. Cost: +N*~1s wall clock for N clips. Safe to remove once
+        # Speaches has enough memory headroom to survive concurrent load.
+        - name: TTS_BATCH_SIZE
+          value: "1"
         {{- if .Values.olaresEnv.PASSWORD }}
         - name: OPEN_NOTEBOOK_PASSWORD
           value: "{{ .Values.olaresEnv.PASSWORD }}"
@@ -170,10 +443,10 @@ spec:
         resources:
           limits:
             cpu: "2"
-            memory: 2048Mi
+            memory: 2Gi
           requests:
-            cpu: 50m
-            memory: 8Mi
+            cpu: 100m
+            memory: 256Mi
         volumeMounts:
         - mountPath: /app/data
           name: appcache
@@ -185,39 +458,51 @@ spec:
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/data'
+          path: '{{ .Values.userspace.appData }}/data'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/data'
+          path: '{{ .Values.userspace.appData }}/opennotebook/data'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/data'
+          path: '{{ .Values.userspace.appData }}/opennotebook/data'
           {{- end }}
           type: DirectoryOrCreate
         name: appcache
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/uploads'
+          path: '{{ .Values.userspace.appData }}/uploads'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/uploads'
+          path: '{{ .Values.userspace.appData }}/opennotebook/uploads'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/uploads'
+          path: '{{ .Values.userspace.appData }}/opennotebook/uploads'
           {{- end }}
           type: DirectoryOrCreate
         name: appuploads
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/config'
+          path: '{{ .Values.userspace.appData }}/config'
             {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/config'
+          path: '{{ .Values.userspace.appData }}/opennotebook/config'
             {{- end }}
           {{- else }}
-          path: '{{ .Values.userspace.appCache }}/opennotebook/config'
+          path: '{{ .Values.userspace.appData }}/opennotebook/config'
           {{- end }}
           type: DirectoryOrCreate
         name: appconfig
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/opennotebook'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: app-cache-root
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
@@ -229,7 +514,7 @@ spec:
           path: '{{ .Values.userspace.appCache }}/opennotebook'
           {{- end }}
           type: DirectoryOrCreate
-        name: app-cache-root
+        name: app-cache-legacy-root
 ---
 apiVersion: v1
 kind: Service
