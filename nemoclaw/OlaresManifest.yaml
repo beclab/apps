@@ -1,0 +1,339 @@
+olaresManifest.version: '0.11.0'
+olaresManifest.type: app
+metadata:
+  name: nemoclaw
+  icon: https://app.cdn.olares.com/appstore/nemoclaw/icon.png
+  description: NVIDIA NemoClaw - AI Coding Agent with Sandbox Isolation
+  appid: nemoclaw
+  title: NemoClaw
+  version: 1.0.8
+  categories:
+  - Developer Tools
+  - Productivity_v112
+entrances:
+- name: terminal
+  port: 8081
+  host: nemoclawweuiingress
+  title: NemoClaw CLI
+  icon: https://app.cdn.olares.com/appstore/nemoclaw/icon.png
+  openMethod: window
+  authLevel: internal
+- name: webtui
+  host: nemoclawweuiingress
+  port: 8080
+  icon: https://app.cdn.olares.com/appstore/nemoclaw/icon.png
+  title: OpenClaw Web UI
+  openMethod: window
+  authLevel: internal
+spec:
+  versionName: '0.0.36'
+  fullDescription: |
+    **Overview**
+    NVIDIA NemoClaw is an open source reference stack that simplifies running [OpenClaw](https://openclaw.ai) always-on assistants more safely.
+    It installs the [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) runtime, part of NVIDIA Agent Toolkit, which provides additional security for running autonomous agents.
+
+    > **Alpha software**
+    >
+    > NemoClaw is available in early preview starting March 16, 2026. This software is not production-ready. Interfaces, APIs, and behavior may change without notice as we iterate on the design. The project is shared to gather feedback and enable early experimentation. We welcome issues and discussion from the community while the project evolves.
+
+    Official docs: [NemoClaw](https://docs.nvidia.com/nemoclaw/latest/index.html), [Remote dashboard / CHAT_UI_URL](https://docs.nvidia.com/nemoclaw/latest/deployment/deploy-to-remote-gpu.html#remote-dashboard-access).
+
+    **Olares**
+    - **CLI** — Terminal entrance; `nemoclaw my-assistant connect` then `openclaw tui`. OpenShell: `openshell status` / `openshell doctor` (Service **nemoclaw:8080**).
+    - **Web UI** — Relay **18790** → sandbox gateway **127.0.0.1:18789**. Set **CHAT_UI_URL** or **domain.webtui**; chart patches **allowedOrigins** / **trustedProxies**. **Gateway token:** `nemoclaw my-assistant gateway-token --quiet` → paste in Control UI Settings (or `#token=…` in the URL if supported).
+    - **openclaw.json** — Copied to **/openclaw-config** ~every 10 minutes (backup mirror); edits there are not pushed back automatically.
+
+    **Features**
+    - Docker-in-Docker sandbox for isolated execution.
+    - OpenAI-compatible LLM endpoints (incl. Dynamo) via env configuration.
+
+  developer: NVIDIA
+  website: https://github.com/NVIDIA/NemoClaw
+  sourceCode: https://github.com/NVIDIA/NemoClaw
+  submitter: harveyff
+  locale:
+  - en-US
+  - zh-CN
+  doc: https://github.com/NVIDIA/NemoClaw
+  license:
+  - text: Apache-2.0
+    url: https://github.com/NVIDIA/NemoClaw/blob/main/LICENSE
+  requiredMemory: 4Gi
+  limitedMemory: 40Gi
+  requiredDisk: 256Mi
+  limitedDisk: 20Gi
+  requiredCpu: 2
+  limitedCpu: 16
+  supportArch:
+  - amd64
+permission:
+  appData: true
+  appCache: true
+options:
+  apiTimeout: 0
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.5-0'
+envs:
+  - envName: DYNAMO_HOST
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Backend LLM endpoint as host:port. Only used by the legacy in-pod socat proxy on :8000; leave empty to skip (NemoClaw's modern path goes via OpenShell's inference.local). Example: 42726b5b0.shared.olares.com:80"
+  - envName: NEMOCLAW_PROVIDER
+    type: string
+    required: true
+    applyOnChange: true
+    editable: true
+    default: "custom"
+    description: "NemoClaw provider: build|openai|anthropic|anthropicCompatible|gemini|ollama|custom|nim-local|vllm. Use `custom` for any OpenAI-compatible /v1 endpoint (vLLM / Ollama's /v1 / Dynamo). NemoClaw's non-interactive onboard curl-validates the endpoint, so you MUST supply a reachable provider + URL + model at install time."
+    options:
+    - title: custom
+      value: "custom"
+    - title: build
+      value: "build"
+    - title: openai
+      value: "openai"
+    - title: anthropic
+      value: "anthropic"
+    - title: anthropicCompatible
+      value: "anthropicCompatible"
+    - title: gemini
+      value: "gemini"
+    - title: ollama
+      value: "ollama"
+    - title: nim-local
+      value: "nim-local"
+    - title: vllm
+      value: "vllm"
+  - envName: NEMOCLAW_ENDPOINT_URL
+    type: url
+    required: true
+    applyOnChange: true
+    editable: true
+    description: "REQUIRED. OpenAI-compatible base URL including /v1 suffix (e.g. http://<ollama-host>/v1 or https://api.openai.com/v1). Must be reachable from this pod at install time — onboard curl-probes both Responses and Chat Completions APIs. Post-install you can rewire the sandbox to go through OpenShell's inference.local via `openclaw config --section model`."
+  - envName: NEMOCLAW_MODEL
+    type: string
+    required: true
+    applyOnChange: true
+    editable: true
+    description: "REQUIRED. LLM model id (must appear in GET {NEMOCLAW_ENDPOINT_URL}/models). Examples: gemma4:26b-a4b-it-ud-q4_K_XL, llama3.1:8b, gpt-4o-mini."
+  - envName: COMPATIBLE_API_KEY
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "unused"
+    description: "API key for the LLM endpoint. Defaults to `unused` (fine for Ollama/Dynamo which don't check auth); replace with a real key for OpenAI/Anthropic/etc."
+  - envName: CHAT_UI_URL
+    type: url
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "HTTPS origin for Web UI (must match browser address bar). Empty = https:// + first host from domain.webtui (Olares entrance name webtui). Patches gateway.controlUi.allowedOrigins."
+  - envName: OPENCLAW_EXTRA_ALLOWED_ORIGINS
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Comma-separated extra origins for gateway.controlUi.allowedOrigins (e.g. alternate Olares URLs)."
+  - envName: OPENCLAW_TRUSTED_PROXIES
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Optional comma-separated extra IPs/CIDRs for gateway.trustedProxies if Web UI returns 403 behind Olares (e.g. Pod CIDR). Defaults add 127.0.0.1 and ::1."
+  - envName: NEMOCLAW_OPENCLAW_INFERENCE_API
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Optional override for OpenClaw `models.providers.inference.api` inside the sandbox (rewritten on every gateway ensure loop). Empty = do not change OpenClaw's onboard value. If chat/completions negotiation mismatches your stack, try `openai-completions` or `openai-chat-completions` (exact strings depend on backend). Does not change NEMOCLAW_MODEL."
+  - envName: NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT
+    type: int
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Optional max value (seconds) for `agents.defaults.timeoutSeconds` when NemoClaw rewrites `/sandbox/.openclaw/openclaw.json` on every gateway ensure loop. Empty = 300. Local large quants (e.g. 27B+) often need 600-1200+ to avoid OpenClaw surfacing `reason=timeout` / generic `network connection error` while `curl` to https://inference.local/v1/models still returns 200. Must be 60-3600 if set."
+  - envName: NEMOCLAW_OPENCLAW_VERSION
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "2026.5.7"
+    description: "Pin the OpenClaw version inside the sandbox. Chart v1.7.20+ defaults to `2026.5.7` so first-time installs ship a tested release out of the box (NemoClaw blueprint v0.0.37 still floors at 2026.4.24, which carries upstream issue #3145 TUI duplicate-message + channel sidecar fetch retry bugs). On change (or first deploy when this differs from the in-sandbox version), chart runs `npm install -g openclaw@<ver>` inside the sandbox, writes /sandbox/.openclaw-pinned-marker, and restarts the gateway so the new binary is picked up by both gateway LAUNCH and channel sidecars; sticky via /workspace/.nemoclaw-openclaw-pin. Set to empty to fall back to whatever NemoClaw bakes (the marker is torn down + gateway restarted on next bridge tick). Available versions: `npm view openclaw versions --json` (sandbox shell)."
+  - envName: NEMOCLAW_POLICY_TIER
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "open"
+    description: "OpenShell network policy tier for preset packs (discord/slack/npm/…). `open` (default) = npm + pypi + huggingface + brew + brave + slack + discord + telegram + jira + outlook; `balanced` = npm/pypi/huggingface/brew/brave only; `restricted` = baseline only (chart skips tier reconcile). Chart v1.7.16+ runs **`nemoclaw <sandbox> policy-add <preset> --yes`** in the background after the k3s sandbox pod exists whenever **`NEMOCLAW_POLICY_MODE` is not `skip`** — so presets still apply even if **`/workspace/.nemoclaw-installed` skipped onboard [8/8]**. Inspect live policy with **`openshell policy get <sandbox> --full`** (openshell 0.0.36 — there is no `policy show`). Extra hosts: **`openshell policy update <sandbox> --add-endpoint <host>:443:read-write:rest:enforce`**. Docs: https://docs.nvidia.com/nemoclaw/latest/reference/network-policies.html"
+    options:
+    - title: open (full preset packs incl. Slack/Discord/Jira/Outlook)
+      value: "open"
+    - title: balanced (npm/pypi/Hugging Face/brew/brave)
+      value: "balanced"
+    - title: restricted (baseline only)
+      value: "restricted"
+  - envName: NEMOCLAW_POLICY_MODE
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "suggested"
+    description: "How non-interactive onboarding reconciles tier-derived presets with already-applied ones. `suggested` (default) — additive: applies tier defaults + keeps presets you previously added with `nemoclaw policy-add`. `custom` — pair with NEMOCLAW_POLICY_PRESETS to make an explicit list authoritative (anything not listed gets removed). `skip` — leaves the applied set untouched, does NOT apply tier defaults, AND disables the chart background **`nemoclaw … policy-add`** tier reconcile (freeze hand-curated policy)."
+    options:
+    - title: suggested (additive tier defaults + keep prior policy-add presets)
+      value: "suggested"
+    - title: custom (authoritative list via NEMOCLAW_POLICY_PRESETS)
+      value: "custom"
+    - title: skip (freeze policy; no tier reconcile)
+      value: "skip"
+  - envName: NEMOCLAW_POLICY_RECONCILE_WAIT_ITER
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional max polls (2s between polls) waiting for the k3s sandbox pod before **`nemoclaw … policy-add`** tier reconcile runs. Empty = 180 (~6 minutes). Raise only if the sandbox pod is very slow to appear."
+  - envName: NEMOCLAW_SANDBOX_HTTP_PROXY
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Manual override for the openshell-sandbox HTTP egress proxy URL (e.g. `http://10.200.0.1:3128`). Empty = chart auto-detects by probing the user-netns default route gateway IP on ports 3128/8080/1080. The proxy is needed by user-netns processes (the `openclaw gateway` runs there) to reach in-cluster Service IPs like Olares shared inference; bypass for public hosts is controlled separately via NO_PROXY (see NEMOCLAW_SANDBOX_NO_PROXY_EXTRA). Override only when auto-detection picks the wrong port or the proxy listens on a non-default address."
+  - envName: NEMOCLAW_SANDBOX_NO_PROXY_EXTRA
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Comma-separated extra hosts to bypass the sandbox HTTP proxy (no spaces, e.g. `mirror.aliyun.com,my-feeds.cn`). Appends to the chart's curated default list (npm/yarn/pypi/github/huggingface/openai/anthropic/docker/quay/maven/crates etc.). Bypassing the proxy is preferable for public registries because openshell 0.0.36's HTTPS MITM mangles %-encoded URLs for scoped npm packages (e.g. @clack%2fprompts → `Empty reply from server`). Hosts added here ALSO need to be in the OpenShell network policy — bypass alone won't get past the iptables drop. Add via `openshell policy update <sandbox> --add-endpoint <host>:443:read-only:rest:enforce` (or by including a preset that covers them via NEMOCLAW_POLICY_TIER)."
+  - envName: NEMOCLAW_GATEWAY_NETNS
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "auto"
+    description: "Which net namespace the OpenClaw gateway runs in. The user/sandbox netns is a closed network whose only default route is the openshell HTTP egress proxy (10.200.0.1:3128); HTTP REST + LLM calls work via HTTP_PROXY but Node's `ws` library never honors HTTP_PROXY for the WSS upgrade, so messaging-channel sidecars (Discord/Slack/Telegram/Feishu/Outlook) cannot reach gateway.discord.gg / wss-primary.slack.com etc. while the gateway runs there — gateway.out shows `fetch failed` + `Gateway websocket closed: 1006` no matter how generous NO_PROXY or `openshell policy` is. The agent netns has direct cluster + public routes, so the gateway can reach channel WSS endpoints from there at the cost of TUI concurrency (TUI lives in user netns and shows `gateway disconnected: closed | idle` — WebUI keeps working via sandbox-tunnel.sh). Values: `auto` (default; agent IFF any `channels.<name>.enabled=true` exists in `/sandbox/.openclaw/openclaw.json`, otherwise user), `agent` (force agent — channels work, TUI does not), `user` (force chart v1.7.10 default — TUI+WebUI both work but channels cannot connect to public WSS)."
+    options:
+    - title: auto (channels on → agent netns; else user netns)
+      value: "auto"
+    - title: agent (public WSS channels OK; TUI limited)
+      value: "agent"
+    - title: user (TUI + WebUI; public WSS channels blocked)
+      value: "user"
+  - envName: NEMOCLAW_GATEWAY_DOCKER_PORT
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "8080"
+    description: "Docker host port for OpenShell gateway (docker ps). Cluster Service port 8080 targets this."
+  - envName: NEMOCLAW_GATEWAY_SCHEME
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "http"
+    description: "Ingress to gateway: http + openshell --plaintext (default, works behind nginx). Use https if gateway stays TLS."
+    options:
+    - title: http (--plaintext; typical behind nginx)
+      value: "http"
+    - title: https (gateway TLS)
+      value: "https"
+  - envName: NEMOCLAW_GATEWAY_RECREATE
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "0"
+    description: "Set to 1 to pass --recreate on openshell gateway start (fresh cluster). This tears down the gateway container and removes local cluster image tags; the next start must re-pull from ghcr.io (or your NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR). Leave 0 on air-gapped / flaky-registry nodes unless you understand the re-pull requirement."
+  - envName: NEMOCLAW_OPENSHELL_CLUSTER_IMAGE
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "beclab/hys2023-openshell-cluster:v1.16"
+    description: "Image nemoclaw onboard pulls for OpenShell gateway cluster. Default points at the beclab custom fork (policy disabled at source, direct egress — no MITM proxy). NemoClaw's onboard.ts forcibly sets OPENSHELL_CLUSTER_IMAGE=ghcr.io/nvidia/openshell/cluster:<NEMOCLAW_OPENSHELL_VERSION> before spawning `openshell gateway start`, so env-var overrides don't survive. Workaround: after pulling this image, the chart aliases it via `docker tag` to that exact ghcr ref; openshell's ensure_image() inspects locally, finds the alias, and never pulls upstream. Override to ghcr.io/nvidia/openshell/cluster:<tag> to use the upstream copy verbatim."
+  - envName: NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Fallback image ref pulled when ghcr.io is unreachable; retagged locally as NEMOCLAW_OPENSHELL_CLUSTER_IMAGE so onboard's internal docker pull hits cache. Example: ghcr.nju.edu.cn/nvidia/openshell/cluster:0.0.36"
+  - envName: NEMOCLAW_PREFLIGHT_CLUSTER_PULL
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "1"
+    description: "Set to 0 to skip docker pull before first install (not recommended if ghcr.io is slow)."
+  - envName: NEMOCLAW_PREFER_MIRROR
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "0"
+    description: "When 1, the 5a/5 pre-pull tries the _MIRROR variants first (cluster / sandbox-base / node) before falling back to ghcr.io / docker.io. Saves ~90s per image on cold starts in regions where the upstream is slow or blocked. No-op if the corresponding _MIRROR env is empty."
+  - envName: NEMOCLAW_OPENSHELL_VERSION
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "v0.0.36"
+    description: "OpenShell CLI release tag installed by NVIDIA/OpenShell install.sh. Must satisfy NemoClaw's MIN_VERSION..MAX_VERSION (currently 0.0.36). Bump this together with NEMOCLAW_OPENSHELL_CLUSTER_IMAGE."
+  - envName: NEMOCLAW_INSTALL_TAG
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "main"
+    description: "Git branch or tag of NVIDIA/NemoClaw for nemoclaw.sh (uses `git clone --depth 1 --branch <ref>`). MUST be a remote branch/tag name — a 40-char commit SHA is rejected by git (\"Remote branch … not found\"). Default `main` carries PR #2484 (OpenClaw 2026.4.24 Dockerfile Patch 4 + generate-openclaw-config build-context). Older tags v0.0.26–v0.0.29 fail sandbox image step 17/54. Pin a release tag here once upstream ships one past #2484. Empty = latest (risky)."
+  - envName: NEMOCLAW_INSTALL_HOMEBREW
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "1"
+    description: "Pre-install Linuxbrew into /sandbox/.linuxbrew for skills that need `brew install`. Clones Homebrew directly inside the k3s sandbox via git or tarball fallback. Set to 0 to disable. ~130MB first run."
+  - envName: NEMOCLAW_HOMEBREW_GIT_URL
+    type: url
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional. Git clone URL for Homebrew/brew (default https://github.com/Homebrew/brew.git). Set to an internal mirror if the sandbox cannot reach GitHub; otherwise cold-reset leaves brew missing and `brew: command not found`."
+  - envName: NEMOCLAW_HOMEBREW_BOTTLE_DOMAIN
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional. Override brew's bottle + portable-ruby download origin. Default is https://ghcr.io (Homebrew upstream). NOTE: Homebrew 4.x fetches portable-ruby via an OCI blob path (/v2/homebrew/portable-ruby/.../blobs/sha256:*), so classic China mirrors (TUNA/USTC/Aliyun) that only mirror the /homebrew-bottles tarball layout will return 404 for portable-ruby. Only useful if you have a GHCR-compatible mirror. Propagated as HOMEBREW_BOTTLE_DOMAIN + HOMEBREW_ARTIFACT_DOMAIN + HOMEBREW_API_DOMAIN into /etc/environment and /etc/profile.d/nemoclaw-brew-temp.sh inside the sandbox."
+  - envName: NEMOCLAW_GOPROXY
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "https://goproxy.cn,direct"
+    description: "Value for GOPROXY inside the sandbox. Default is goproxy.cn (community CDN in China) with direct fallback. Set to `direct` to disable the proxy, or to an internal Athens server URL for air-gapped / corporate setups. GOSUMDB is hard-wired to `off` because sum.golang.org is frequently blocked and a stale sumdb failure would otherwise wedge every `go build`. Used by the prefetched Go toolchain installed at /sandbox/.local/go during skill-env."
+  - envName: ALLOW_EXTERNAL_DIR_ACCESS
+    type: bool
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "false"
+    description: "Mount Olares' External shared library (userspace.sharedlib) into the workspace container at /home/userdata/external so skills that run inside `nemoclaw my-assistant connect` can read/write shared media via OpenShell's workspace bind. Leave disabled unless a skill explicitly needs it."
+  - envName: GOG_KEYRING_PASSWORD
+    type: password
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Passphrase for the gog CLI keyring (GOG_KEYRING_BACKEND=file). Leave EMPTY (recommended) to auto-generate a unique 8-char random value on first install — the chart stores it in the Helm-managed `nemoclaw-gog-keyring` Secret so it survives `helm upgrade` and pod restarts; uninstalling keeps the Secret (resource-policy: keep) so a later reinstall can still decrypt an existing keyring. Set a custom value here only if you want to pin it explicitly (changing it invalidates any already-authenticated `gog` session — re-run `gog auth add`)."
