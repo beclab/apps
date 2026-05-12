@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 {{- $searxngDomainENV := split  ","  .Values.domain.searxngv2 -}}
 {{- $searxngDomain := index $searxngDomainENV "_0" -}}
 
@@ -26,7 +26,7 @@ spec:
     spec:
       containers:
       - name: searxngshare
-        image: "docker.io/searxng/searxng:2026.3.18-3810dc9d1"
+        image: "docker.io/beclab/searxng-searxng:2026.5.10-df1f24fb7"
         ports:
           - containerPort: 8080
         env:
@@ -40,9 +40,14 @@ spec:
             value: "https://{{ $searxngDomain }}"
         livenessProbe:
           httpGet:
-            path: /
+            path: /healthz
             port: 8080
             scheme: HTTP
+            httpHeaders:
+            - name: X-Real-IP
+              value: 127.0.0.1
+            - name: X-Forwarded-For
+              value: 127.0.0.1
           initialDelaySeconds: 30
           timeoutSeconds: 60
           periodSeconds: 60
@@ -66,8 +71,13 @@ spec:
         - mountPath: /etc/searxng/limiter.toml
           name: config
           subPath: limiter.toml
+        # NOTE: the SearXNG runtime reads /etc/searxng/settings.yml (controlled by
+        # SEARXNG_SETTINGS_PATH). Mounting at /usr/local/searxng/searx/settings.yml
+        # only overrides the default template, which the entrypoint then re-renders
+        # (and strips) into /etc/searxng/settings.yml. Mount directly at the runtime
+        # path so the entrypoint sees the file exists and skips re-creating it.
         - name: config
-          mountPath: /usr/local/searxng/searx/settings.yml
+          mountPath: /etc/searxng/settings.yml
           subPath: settings.yml
       restartPolicy: Always
       volumes:
