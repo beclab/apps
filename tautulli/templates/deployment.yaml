@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tautulli
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: tautulli
+    io.kompose.service: tautulli
+    applications.app.bytetrade.io/name: tautulli
+    applications.app.bytetrade.io/author: donbodbod
+  annotations:
+    applications.app.bytetrade.io/icon: https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/tautulli.png
+    applications.app.bytetrade.io/title: Tautulli
+    applications.app.bytetrade.io/version: "2.17.1"
+    applications.app.bytetrade.io/entrances: '[{"name":"tautulli","host":"tautulli","port":8181,"title":"Tautulli"}]'
+    applications.app.bytetrade.io/default-thirdlevel-domains: '[{"appName":"tautulli","entranceName":"tautulli"}]'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: tautulli
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: tautulli
+        io.kompose.service: tautulli
+      annotations:
+        applications.app.bytetrade.io/studio-expose-ports: "8181"
+    spec:
+      containers:
+        - name: tautulli
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: tautulli
+              containerPort: 8181
+              protocol: TCP
+          env:
+            - name: TZ
+              value: "{{ .Values.env.tz }}"
+            - name: PUID
+              value: "{{ .Values.env.puid }}"
+            - name: PGID
+              value: "{{ .Values.env.pgid }}"
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/config"
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tautulli
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: tautulli
+    io.kompose.service: tautulli
+    olares.service.type: Entrance
+    applications.app.bytetrade.io/name: tautulli
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: tautulli
+  ports:
+    - name: tautulli
+      protocol: TCP
+      port: 8181
+      targetPort: 8181
