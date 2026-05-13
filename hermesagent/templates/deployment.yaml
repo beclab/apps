@@ -1,16 +1,36 @@
 # Hermes Agent on Olares
 #
+# Pod layout:
+#   - One Deployment, three runtime containers + one busybox init container.
+#   - Init `init-chmod-data`: chowns the persistent /opt/data hostPath to
+#     hermes (uid/gid 10000) before any runtime container starts.
+#   - `gateway`     : long-lived messaging-platform gateway + cron scheduler,
+#                     wrapped in a 30s restart loop so a missing .env doesn't
+#                     crash-loop the pod (gateway exits clean when no platforms
+#                     are configured — see release notes for v0.13).
+#   - `dashboard`   : web UI on :9119 (the only HTTP port this app exposes by
+#                     default; surfaces sessions, models, skills, plugins,
+#                     kanban, cron, curator). Reads SQLite + skills + memories
+#                     from /opt/data shared with the other containers.
+#   - `hermesagent` : interactive workspace (sleep infinity). The terminal
+#                     entrance kubectl-execs into this container so users can
+#                     run `hermes setup` / `hermes` / `hermes config set`.
+#
 # Data lifecycle:
-#   - /opt/data inside the container is the single source of truth
-#     (config, API keys, sessions, skills, memories, cron, logs).
-#   - We persist it on the host via app-data-home (userspace.appData/home).
-#   - All containers in this pod share the same /opt/data volume.
-#   - `gateway run` is the long-lived sidecar process.
-#   - The `workspace` container (sleep infinity) exists so the terminal
-#     entrance can `kubectl exec` into it and run `hermes setup` / `hermes`
-#     as an interactive TUI against the same data directory.
-#   - The `dashboard` sidecar renders the web UI on port 9119 and talks to
-#     the gateway via http://localhost:8642.
+#   - /opt/data is the SINGLE SOURCE OF TRUTH. All containers share it via
+#     hostPath app-data-home (userspace.appData/home).
+#   - SQLite (state.db, WAL+SHM), config.yaml, .env, SOUL.md, skills/,
+#     memories/, sessions/, cron/, logs/, checkpoints/ all live there.
+#   - No external database. No Redis. No PostgreSQL. The hostPath survives
+#     pod recreation and chart upgrades.
+#
+# Identity:
+#   - All runtime containers run as hermes (uid 10000) via pod-scope
+#     securityContext.runAsUser. This guarantees `kubectl exec` from the
+#     terminal entrance also attaches as hermes — without it, K8s exec
+#     defaults to the image USER (root, since the upstream Dockerfile has
+#     no USER directive), and TUI-written files would land as root:root,
+#     unreadable by the gateway/dashboard sidecars.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -32,32 +52,101 @@ spec:
         io.kompose.service: hermesagent
         bytetrade.io/terminal: hermesagent
     spec:
+      # All runtime containers run as the hermes user (uid/gid 10000) baked
+      # into the upstream image. This keeps a SINGLE identity across the
+      # gateway sidecar, the dashboard sidecar, the workspace TUI container,
+      # AND any `kubectl exec` session opened from the terminal entrance —
+      # so every file written into /opt/data (config.yaml, .env, state.db,
+      # session WAL, skills/, memories/, ...) is owned by hermes:hermes
+      # and visible to all three containers.
+      #
+      # If we relied on the image entrypoint's `gosu hermes` drop alone,
+      # `kubectl exec` would still attach as root (kubectl exec uses the
+      # image USER, not the runtime PID 1 user — Dockerfile has no USER).
+      # That root-vs-hermes split was the cause of "NO SESSIONS YET" on
+      # the dashboard + "Permission denied: '/opt/data/config.yaml'" in
+      # the gateway log. RunAsUser at the pod scope closes that gap.
       securityContext:
-        fsGroup: 0
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
 
       initContainers:
+        # Bootstrap /opt/data with hermes ownership BEFORE any runtime
+        # container starts. We run this as root (overrides the pod-scope
+        # runAsUser:10000) because the volume may be created by the host as
+        # root on first install. Once chowned, all subsequent containers
+        # can write without elevated privileges.
         - name: init-chmod-data
           image: "beclab/aboveos-busybox:1.37.0"
           securityContext:
             runAsUser: 0
+            runAsGroup: 0
           command:
             - sh
             - "-c"
             - |
               mkdir -p /opt/data
-              chmod -R 0755 /opt/data || true
-              echo "[init] /opt/data ready"
+              chown -R 10000:10000 /opt/data || true
+              chmod -R u+rwX,g+rwX /opt/data || true
+              echo "[init] /opt/data ready (owner=10000:10000)"
           resources: {}
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
 
       containers:
-        # Gateway sidecar: long-lived messaging gateway + OpenAI-compat API.
+        # Gateway sidecar: long-lived messaging gateway + (optional) OpenAI-compat API.
+        #
+        # Why the wrapper loop:
+        #   - `hermes gateway run` exits cleanly when /opt/data/.env has no
+        #     messaging-platform tokens configured (Telegram/Discord/Slack/...).
+        #     Without the loop, K8s sees PID 1 exit, restarts the container,
+        #     it exits again, and the pod ends up in CrashLoopBackOff —
+        #     locking out dashboard + workspace too.
+        #   - With the loop, the gateway auto-restarts every 30s. As soon as
+        #     the user runs `hermes setup` (in the Hermes CLI entrance) or
+        #     edits /opt/data/.env from the dashboard, the next iteration
+        #     picks up the new config — no manual restart needed.
+        #   - The image's tini + docker/entrypoint.sh still run as the
+        #     container ENTRYPOINT, so /opt/data bootstrap (mkdir, .env /
+        #     config.yaml / SOUL.md seeding, skills_sync.py) happens once
+        #     per container start. The entrypoint's root-only branch
+        #     (usermod / chown / `gosu hermes`) is now skipped because the
+        #     pod-level securityContext.runAsUser:10000 already starts this
+        #     container as the hermes user.
+        #   - This mirrors the upstream systemd unit (Restart=always
+        #     RestartSec=5 RestartMaxDelaySec=300) installed by
+        #     `hermes gateway install`. See hermes_cli/gateway.py:2070.
+        #
+        # `hermes gateway run` does NOT bind any TCP port by default — the
+        # OpenAI-compatible API server is opt-in (set API_SERVER_HOST and
+        # API_SERVER_KEY in /opt/data/.env). So we probe the data dir on
+        # disk instead of a TCP port to avoid wedging the pod when the API
+        # server is intentionally disabled.
         - name: gateway
-          image: "beclab/nousresearch-hermes-agent:v2026.4.16"
+          image: "beclab/nousresearch-hermes-agent:v2026.5.7"
           imagePullPolicy: IfNotPresent
-          args: ["gateway", "run"]
+          args:
+            - "/bin/bash"
+            - "-c"
+            - |
+              set -u
+              RETRY_DELAY="${HERMES_GATEWAY_RESTART_DELAY_SECONDS:-30}"
+              # Trap SIGTERM so a `kubectl rollout restart` / pod delete
+              # tears down the inner gateway promptly instead of waiting on
+              # the outer sleep.
+              trap 'echo "[gateway-wrapper] SIGTERM received, exiting"; kill -TERM "${child:-0}" 2>/dev/null; exit 0' TERM
+              while :; do
+                echo "[gateway-wrapper] starting hermes gateway run (HERMES_HOME=${HERMES_HOME})"
+                hermes gateway run &
+                child=$!
+                wait "$child"
+                rc=$?
+                echo "[gateway-wrapper] hermes gateway run exited (code=${rc}); sleeping ${RETRY_DELAY}s before restart"
+                sleep "${RETRY_DELAY}" &
+                wait $!
+              done
           ports:
             - name: gateway
               containerPort: 8642
@@ -65,15 +154,19 @@ spec:
           env:
             - name: TZ
               value: Etc/UTC
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_GATEWAY_RESTART_DELAY_SECONDS
+              value: "30"
           startupProbe:
-            tcpSocket:
-              port: 8642
+            exec:
+              command: ["/bin/sh", "-c", "test -d /opt/data"]
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 60
           readinessProbe:
-            tcpSocket:
-              port: 8642
+            exec:
+              command: ["/bin/sh", "-c", "test -d /opt/data"]
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 5
@@ -101,10 +194,29 @@ spec:
             allowPrivilegeEscalation: false
 
         # Dashboard sidecar: web UI on 9119, reads gateway health on localhost.
+        #
+        # Flag rationale:
+        #   --host 0.0.0.0  K8s service must reach us on the pod IP, not loopback.
+        #   --insecure      Required to allow binding to non-localhost (the flag
+        #                   is a safety gate against accidentally exposing API
+        #                   keys on a host network — that risk doesn't apply
+        #                   here because the only way in is via the Olares
+        #                   ingress, which auth-gates with Olares SSO).
+        #   --no-open       Don't try to xdg-open a browser inside the container.
+        #   --tui           Expose the in-browser Chat tab (embedded `hermes
+        #                   --tui` over PTY/WebSocket). This lets Olares users
+        #                   chat with the agent directly from the dashboard
+        #                   without ever opening the CLI terminal entrance.
         - name: dashboard
-          image: "beclab/nousresearch-hermes-agent:v2026.4.16"
+          image: "beclab/nousresearch-hermes-agent:v2026.5.7"
           imagePullPolicy: IfNotPresent
-          args: ["dashboard", "--host", "0.0.0.0", "--insecure"]
+          args:
+            - "dashboard"
+            - "--host"
+            - "0.0.0.0"
+            - "--insecure"
+            - "--no-open"
+            - "--tui"
           ports:
             - name: dashboard
               containerPort: 9119
@@ -140,16 +252,25 @@ spec:
             allowPrivilegeEscalation: false
 
         # Workspace container for TUI: kept alive so the terminal entrance can
-        # `kubectl exec` into it and run `hermes setup` / `hermes`.
+        # `kubectl exec` into it and run `hermes setup` / `hermes` / etc.
+        #
+        # We deliberately set `args` (not `command`) — that lets the image's
+        # tini + docker/entrypoint.sh run first, do its /opt/data bootstrap
+        # (mkdir, .env / config.yaml / SOUL.md seeding, skills_sync.py), and
+        # then `exec "$@"` into `sleep infinity` because `sleep` is on PATH.
+        # The entrypoint's root-only branch (usermod / chown / `gosu hermes`)
+        # is skipped because the pod-scope securityContext.runAsUser:10000
+        # already starts this container as hermes.
+        #
         # - HERMES_HOME points at the shared /opt/data volume (same as the
         #   gateway/dashboard containers) so the TUI sees the same config,
         #   sessions, skills and memories.
         # - PATH prepends /opt/hermes/.venv/bin so `hermes` is on PATH without
         #   needing to `source activate` the venv first.
         - name: hermesagent
-          image: "beclab/nousresearch-hermes-agent:v2026.4.16"
+          image: "beclab/nousresearch-hermes-agent:v2026.5.7"
           imagePullPolicy: IfNotPresent
-          command: ["sleep", "infinity"]
+          args: ["sleep", "infinity"]
           env:
             - name: TZ
               value: Etc/UTC
@@ -203,21 +324,13 @@ spec:
             type: DirectoryOrCreate
         {{- end }}
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    io.kompose.service: hermesagent
-  name: sharedentrances-hermesgateway
-  namespace: "{{ .Release.Namespace }}"
-spec:
-  ports:
-    - name: http
-      port: 80
-      targetPort: 8642
-  selector:
-    io.kompose.service: hermesagent
----
+# Only the dashboard is exposed as a Service. The gateway sidecar does NOT
+# bind a TCP port by default — its OpenAI-compatible API server is opt-in
+# (set API_SERVER_HOST + API_SERVER_KEY in /opt/data/.env). We don't ship a
+# gateway Service because there is no matching `entrances:` entry in
+# OlaresManifest.yaml; users who enable the API server can talk to it from
+# inside the pod via http://localhost:8642 (the workspace and dashboard
+# sidecars already do this).
 apiVersion: v1
 kind: Service
 metadata:
