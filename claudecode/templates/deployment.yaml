@@ -1,23 +1,3 @@
-# Claude Code on Olares
-#
-# Architecture:
-#   - Base image: beclab/harveyff-claudecode-base (Ubuntu 24.04 with
-#     common CLI deps pre-installed, non-root user UID 1000 baked in).
-#   - initContainers:
-#       * init-chmod-data (root): ensures /opt/data is owned by 1000:1000.
-#       * init-install-claude (UID 1000): installs the claude native
-#         binary into /opt/data/.local/bin/ via https://claude.ai/install.sh
-#         on first run, then leaves a sentinel so subsequent restarts
-#         skip the download and start instantly.
-#   - Main container runs as UID 1000 with all Linux capabilities
-#     dropped and privilege escalation forbidden. The entrypoint is
-#     `sleep infinity`; the real work happens when the Olares terminal
-#     entrance kubectl-execs into this container.
-#   - /opt/data is the single source of truth: ~/.claude (sessions,
-#     skills, plugins), ~/.claude.json (OAuth login + project list),
-#     and .local/share/claude/<version>/ (the versioned native binary).
-#     All persisted through the app-data-home hostPath volume.
-#   - Auto-updates are disabled; upgrades go through chart version bumps.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -71,7 +51,7 @@ spec:
         # only writes under $HOME. A sentinel file makes subsequent
         # Pod starts skip the download.
         - name: init-install-claude
-          image: "beclab/harveyff-claudecode-base:0.1.0"
+          image: "beclab/harveyff-claudecode-base:0.3.0"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -83,6 +63,8 @@ spec:
           env:
             - name: HOME
               value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
             - name: DISABLE_AUTOUPDATER
               value: "1"
           command:
@@ -136,7 +118,7 @@ spec:
         # login / non-login / interactive / non-interactive shells all
         # see the claude binary on PATH.
         - name: claudecode
-          image: "beclab/harveyff-claudecode-base:0.1.0"
+          image: "beclab/harveyff-claudecode-base:0.3.0"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
@@ -153,6 +135,8 @@ spec:
               value: xterm-256color
             - name: HOME
               value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
             - name: PATH
               value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: DISABLE_AUTOUPDATER
