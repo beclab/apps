@@ -1393,13 +1393,15 @@ spec:
                 # we skip already-completed stages. The sentinel
                 # /workspace/.nemoclaw-installed is ONLY written after a fully green onboard.
                 echo "[5b/5] Running NemoClaw installer (to change CHAT_UI_URL later: clear app data / remove .nemoclaw-installed and reinstall)"
-                # Pin installer ref. nemoclaw.sh uses `git clone --depth 1 --branch <ref>` — <ref> MUST be
-                # a remote *branch or tag name*. A 40-char commit SHA is NOT a branch; clone fails with
-                # "Remote branch <sha> not found". Use `main` (includes PR #2484 OpenClaw 2026.4.24 Dockerfile
-                # Patch 4) until upstream tags a release; then switch to that tag for reproducibility.
-                NEMOCLAW_PINNED_TAG="${NEMOCLAW_INSTALL_TAG:-main}"
+                # Pin NemoClaw to v0.0.38 — last tag whose install-openshell.sh pins
+                # OpenShell 0.0.36 (musl static, no glibc-2.39 dep). v0.0.39+ ships
+                # *-linux-gnu gateway/sandbox binaries that can't run on bookworm.
+                NEMOCLAW_PINNED_TAG="${NEMOCLAW_INSTALL_TAG:-v0.0.38}"
                 export NEMOCLAW_INSTALL_TAG="$NEMOCLAW_PINNED_TAG"
                 echo "[5b/5] NemoClaw install ref pinned to: $NEMOCLAW_PINNED_TAG (override via olaresEnv NEMOCLAW_INSTALL_TAG)"
+                # Only matters when pin is v0.0.39+; safe no-op on v0.0.38.
+                export NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH="${NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH:-0}"
+                echo "[5b/5] NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH=${NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH}"
                 echo "[5b/5] Inference for installer: provider=${NEMOCLAW_PROVIDER} model=${NEMOCLAW_MODEL}"
                 echo "[5b/5] NEMOCLAW_ENDPOINT_URL=${NEMOCLAW_ENDPOINT_URL}"
                 echo "[5b/5] NEMOCLAW_OPENCLAW_INFERENCE_API=${NEMOCLAW_OPENCLAW_INFERENCE_API:-<unset>} (post-onboard gateway loop may rewrite openclaw.json if set)"
@@ -1414,11 +1416,156 @@ spec:
                   return 1
                 }
 
+                # --- Custom openshell-gateway override (only needed when pin ≥ v0.0.39) ---
+                # On v0.0.38 this whole block is dormant (GATEWAY_OVERRIDE_IMAGE empty,
+                # stage/apply return 0). Re-enable by setting NEMOCLAW_OPENSHELL_GATEWAY_IMAGE
+                # to a fork-built image (e.g. hys2023/openshell-gateway:v1.16) whose
+                # ENTRYPOINT is a glibc-2.36-compatible openshell-gateway binary.
+                GATEWAY_OVERRIDE_IMAGE="${NEMOCLAW_OPENSHELL_GATEWAY_IMAGE:-}"
+                GATEWAY_OVERRIDE_BIN_HINT="${NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH:-}"
+                GATEWAY_OVERRIDE_STAGE=/home/node/.nemoclaw-staging
+                mkdir -p "$GATEWAY_OVERRIDE_STAGE"
+
+                stage_custom_gateway() {
+                  [ -z "$GATEWAY_OVERRIDE_IMAGE" ] && return 0
+                  if [ -f "$GATEWAY_OVERRIDE_STAGE/openshell-gateway.ok" ] \
+                       && [ -f "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" ]; then
+                    return 0
+                  fi
+                  echo "[5b/5|gw-override] pulling $GATEWAY_OVERRIDE_IMAGE for custom openshell-gateway binary"
+                  if ! docker pull "$GATEWAY_OVERRIDE_IMAGE" >/dev/null 2>&1; then
+                    echo "[5b/5|gw-override] WARN: docker pull $GATEWAY_OVERRIDE_IMAGE failed; falling back to upstream gateway (onboard likely to fail on bookworm)" >&2
+                    return 1
+                  fi
+                  _gw_ctr="nemoclaw-gw-extract-$$"
+                  docker rm -f "$_gw_ctr" >/dev/null 2>&1 || true
+                  if ! docker create --name "$_gw_ctr" "$GATEWAY_OVERRIDE_IMAGE" >/dev/null 2>&1; then
+                    echo "[5b/5|gw-override] WARN: docker create from $GATEWAY_OVERRIDE_IMAGE failed" >&2
+                    return 1
+                  fi
+                  _candidates="$GATEWAY_OVERRIDE_BIN_HINT /usr/local/bin/openshell-gateway /opt/openshell/bin/openshell-gateway /usr/bin/openshell-gateway /openshell-gateway"
+                  _found=""
+                  for _c in $_candidates; do
+                    [ -z "$_c" ] && continue
+                    if docker cp "$_gw_ctr:$_c" "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" 2>/dev/null; then
+                      _found="$_c"; break
+                    fi
+                  done
+                  docker rm -f "$_gw_ctr" >/dev/null 2>&1 || true
+                  if [ -z "$_found" ] || [ ! -s "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" ]; then
+                    echo "[5b/5|gw-override] WARN: openshell-gateway not found in $GATEWAY_OVERRIDE_IMAGE at any of:$_candidates" >&2
+                    echo "[5b/5|gw-override]       set NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH=<path-in-image> via Olares UI and reinstall" >&2
+                    rm -f "$GATEWAY_OVERRIDE_STAGE/openshell-gateway"
+                    return 1
+                  fi
+                  chmod +x "$GATEWAY_OVERRIDE_STAGE/openshell-gateway"
+                  _gwsz=$(stat -c %s "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" 2>/dev/null || echo '?')
+                  _gwsha=$(sha256sum "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" 2>/dev/null | awk '{print $1}')
+                  echo "[5b/5|gw-override] staged $GATEWAY_OVERRIDE_IMAGE:$_found size=$_gwsz sha256=$_gwsha"
+                  touch "$GATEWAY_OVERRIDE_STAGE/openshell-gateway.ok"
+                }
+
+                apply_custom_gateway() {
+                  [ -z "$GATEWAY_OVERRIDE_IMAGE" ] && return 0
+                  [ -f "$GATEWAY_OVERRIDE_STAGE/openshell-gateway.ok" ] || return 0
+                  # Overlay both common install paths (PATH order: /usr/local/bin wins).
+                  _gw_overlaid=0
+                  for _gw_target in /usr/local/bin/openshell-gateway /home/node/.local/bin/openshell-gateway; do
+                    _gw_target_dir="$(dirname "$_gw_target")"
+                    mkdir -p "$_gw_target_dir" 2>/dev/null || true
+                    if [ ! -w "$_gw_target_dir" ]; then
+                      echo "[5b/5|gw-override] skip $_gw_target (parent dir not writable)"
+                      continue
+                    fi
+                    cp "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" "$_gw_target"
+                    chmod 0755 "$_gw_target"
+                    echo "[5b/5|gw-override] overlaid $_gw_target from $GATEWAY_OVERRIDE_IMAGE"
+                    _gw_overlaid=$((_gw_overlaid + 1))
+                  done
+                  # Sanity scan: if any other writable PATH entry shadows our overlay with
+                  # an older binary, replace it too. Defensive against PATH shifts.
+                  _IFS_old="$IFS"
+                  IFS=":"
+                  for _p in $PATH; do
+                    IFS="$_IFS_old"
+                    [ -z "$_p" ] && continue
+                    case "$_p" in
+                      /usr/local/bin|/home/node/.local/bin) continue ;;
+                    esac
+                    if [ -f "$_p/openshell-gateway" ] && [ -w "$_p" ]; then
+                      cp "$GATEWAY_OVERRIDE_STAGE/openshell-gateway" "$_p/openshell-gateway"
+                      chmod 0755 "$_p/openshell-gateway"
+                      echo "[5b/5|gw-override] overlaid extra PATH entry $_p/openshell-gateway"
+                      _gw_overlaid=$((_gw_overlaid + 1))
+                    fi
+                    IFS=":"
+                  done
+                  IFS="$_IFS_old"
+                  if [ "$_gw_overlaid" = "0" ]; then
+                    echo "[5b/5|gw-override] WARN: no path overlaid — neither /usr/local/bin nor /home/node/.local/bin was writable" >&2
+                  fi
+                  # Quick proof-of-life: dump the highest GLIBC symbol required by the binary
+                  # at the canonical /usr/local/bin location (if present) so the operator can
+                  # spot-check that the hys2023 fork really is glibc-2.36-compatible.
+                  if [ -f /usr/local/bin/openshell-gateway ]; then
+                    _gw_max_glibc=$(strings /usr/local/bin/openshell-gateway 2>/dev/null \
+                                    | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
+                                    | sort -V -u | tail -1)
+                    echo "[5b/5|gw-override] /usr/local/bin/openshell-gateway highest GLIBC symbol: ${_gw_max_glibc:-<none>}"
+                  fi
+
+                  # printf (not heredoc) so the YAML literal block never sees column-0 lines.
+                  printf '%s\n' \
+                    '#!/bin/sh' \
+                    '# Auto-generated by nemoclaw chart 5b/5 gw-override: announce glibc 2.39' \
+                    '# to nemoclaw gateway compat detector even though we are on bookworm.' \
+                    '# Pass everything else through to the real ldd.' \
+                    'case "$1" in' \
+                    '  --version|-v)' \
+                    '    echo "ldd (Debian GLIBC 2.39-0+deb13) 2.39"' \
+                    '    echo "Copyright (C) 2024 Free Software Foundation, Inc."' \
+                    '    echo "This is free software; see the source for copying conditions."' \
+                    '    exit 0' \
+                    '    ;;' \
+                    'esac' \
+                    'for _real in /usr/bin/ldd /bin/ldd; do' \
+                    '  [ -x "$_real" ] && exec "$_real" "$@"' \
+                    'done' \
+                    'echo "ldd: real ldd not found" >&2' \
+                    'exit 127' \
+                    > /home/node/.local/bin/ldd
+                  chmod +x /home/node/.local/bin/ldd
+
+                  printf '%s\n' \
+                    '#!/bin/sh' \
+                    'if [ "$1" = "GNU_LIBC_VERSION" ]; then' \
+                    '  echo "glibc 2.39"' \
+                    '  exit 0' \
+                    'fi' \
+                    'for _real in /usr/bin/getconf /bin/getconf; do' \
+                    '  [ -x "$_real" ] && exec "$_real" "$@"' \
+                    'done' \
+                    'exit 127' \
+                    > /home/node/.local/bin/getconf
+                  chmod +x /home/node/.local/bin/getconf
+
+                  # Hint-style envs in case future nemoclaw honours any of these.
+                  export NEMOCLAW_FORCE_NATIVE_GATEWAY=1
+                  export OPENSHELL_GATEWAY_FORCE_NATIVE=1
+                  export NEMOCLAW_SKIP_GLIBC_CHECK=1
+                }
+
+                # Stage once; the apply_custom_gateway call at the top of each retry
+                # iteration re-overlays the binary after nemoclaw.sh re-installs the upstream.
+                stage_custom_gateway || echo "[5b/5|gw-override] staging failed; will fall back to upstream gateway"
+
                 onboard_ok=0
                 : > /tmp/nemoclaw-onboard.log
                 echo "[5b/5] onboard transcript -> /tmp/nemoclaw-onboard.log (kubectl exec deploy/nemoclaw -c nemoclaw -- tail -200 /tmp/nemoclaw-onboard.log)"
                 for onboard_attempt in 1 2 3; do
                   echo "[5b/5] ----- onboard attempt ${onboard_attempt}/3 (LLM: ${NEMOCLAW_PROVIDER} @ ${NEMOCLAW_ENDPOINT_URL} model=${NEMOCLAW_MODEL}) -----"
+                  # Re-overlay every attempt: attempt 1's install-openshell.sh would overwrite us.
+                  apply_custom_gateway
                   if [ "$onboard_attempt" = "1" ] || ! command -v nemoclaw >/dev/null 2>&1; then
                     echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw.sh installer (NEMOCLAW_INSTALL_TAG=$NEMOCLAW_PINNED_TAG)"
                     curl -fsSL https://nvidia.com/nemoclaw.sh 2>&1 | tee -a /tmp/nemoclaw-onboard.log | bash 2>&1 | tee -a /tmp/nemoclaw-onboard.log
@@ -2030,6 +2177,23 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLI_URL | default "https://cdn.olares.com/nemoclaw/openshell-20264302050" }}"
             - name: NEMOCLAW_OPENSHELL_SANDBOX_URL
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_SANDBOX_URL | default "https://cdn.olares.com/nemoclaw/openshell-sandbox-20264302050" }}"
+            # Glibc-2.36-compat openshell-gateway image (e.g. hys2023/openshell-gateway:v1.16).
+            # Only relevant when NEMOCLAW_INSTALL_TAG ≥ v0.0.39; empty / no-op on v0.0.38.
+            - name: NEMOCLAW_OPENSHELL_GATEWAY_IMAGE
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_IMAGE | default "" }}"
+            # Optional explicit path to openshell-gateway inside NEMOCLAW_OPENSHELL_GATEWAY_IMAGE.
+            # When empty the chart tries (in order):
+            #   /usr/local/bin/openshell-gateway
+            #   /opt/openshell/bin/openshell-gateway
+            #   /usr/bin/openshell-gateway
+            #   /openshell-gateway
+            # Set if your fork installs the binary at a non-standard path.
+            - name: NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH | default "" }}"
+            # "0" disables nemoclaw's compat-container fallback (broken under DinD).
+            # Only consulted by v0.0.39+ onboard; no-op on v0.0.38.
+            - name: NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH | default "0" }}"
             # Force OpenShell to use the custom cluster image.
             - name: OPENSHELL_CLUSTER_IMAGE
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE | default "beclab/hys2023-openshell-cluster:v1.16" }}"
@@ -2075,12 +2239,10 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_PREFER_MIRROR | default "0" }}"
             - name: NEMOCLAW_OPENSHELL_VERSION
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_VERSION | default "v0.0.36" }}"
-            # Pin NemoClaw git ref to dodge the v0.0.27 upstream bug where
-            # stageOptimizedSandboxBuildContext() omits scripts/generate-openclaw-config.py
-            # and the sandbox Dockerfile build dies at step 21/56 with "COPY failed: file not found".
-            # Honoured by nemoclaw.sh via NEMOCLAW_INSTALL_TAG (bootstrap resolves it via git clone --branch).
+            # NemoClaw git ref. v0.0.38 = last pre-glibc-regression tag (pins openshell 0.0.36).
+            # v0.0.39+ needs glibc ≥ 2.38; only safe with NEMOCLAW_OPENSHELL_GATEWAY_IMAGE override.
             - name: NEMOCLAW_INSTALL_TAG
-              value: "{{ .Values.olaresEnv.NEMOCLAW_INSTALL_TAG | default "main" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_INSTALL_TAG | default "v0.0.38" }}"
             - name: NEMOCLAW_INSTALL_HOMEBREW
               value: "{{ .Values.olaresEnv.NEMOCLAW_INSTALL_HOMEBREW | default "1" }}"
             # cold-reset sandbox wait: iterations * 2s (default empty = auto: 900 when
