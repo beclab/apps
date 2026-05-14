@@ -52,6 +52,32 @@ spec:
         io.kompose.service: hermesagent
         bytetrade.io/terminal: hermesagent
     spec:
+      # Share PID namespace across the workspace, gateway, and dashboard
+      # containers (1.3.1+). Without this, each container scans its own
+      # /proc when answering "is the gateway running?" — the workspace's
+      # `hermes gateway status` and the dashboard's "GATEWAY STATUS"
+      # indicator both falsely report STOPPED because they can't see the
+      # sidecar's `hermes gateway run` process. With shared PID namespace,
+      # all three containers see the same processes and upstream's PID-
+      # scanning status checks Just Work.
+      #
+      # Trade-offs we've already mitigated:
+      #   - PID 1 becomes the K8s `pause` container instead of tini. The
+      #     sidecar's gateway wrapper still installs a SIGTERM trap, so
+      #     pod terminate / `kubectl rollout restart` shuts down cleanly.
+      #   - Containers can `kill` each other's PIDs. All three containers
+      #     run as the same user (uid 10000), in the same Olares app,
+      #     under the same trust boundary — there is no isolation to
+      #     leak. The shim installed by the workspace container guards
+      #     the only destructive raw CLI paths (`hermes gateway
+      #     run/restart/install/stop`) so an over-eager user can't
+      #     accidentally fight the sidecar.
+      #   - Dashboard's "Restart Gateway" button now actually kills the
+      #     sidecar gateway, after which the wrapper auto-restarts it
+      #     within HERMES_GATEWAY_RESTART_DELAY_SECONDS (default 30s).
+      #     Faster path is still `touch /opt/data/.gateway-restart-requested`.
+      shareProcessNamespace: true
+
       # All runtime containers run as the hermes user (uid/gid 10000) baked
       # into the upstream image. This keeps a SINGLE identity across the
       # gateway sidecar, the dashboard sidecar, the workspace TUI container,
@@ -119,6 +145,30 @@ spec:
         #     RestartSec=5 RestartMaxDelaySec=300) installed by
         #     `hermes gateway install`. See hermes_cli/gateway.py:2070.
         #
+        # Sentinel-file restart mechanism (1.3.0+):
+        #   `hermes gateway restart` from the workspace TUI does NOT work in
+        #   K8s because PID namespaces are container-local — that command
+        #   silently falls back to running a duplicate gateway in the
+        #   workspace shell, which then races the sidecar for messaging-
+        #   platform tokens (e.g. duplicate Discord replies). To give users
+        #   a usable cross-container restart trigger, this wrapper polls for
+        #   /opt/data/.gateway-restart-requested. Operator workflow:
+        #
+        #       # from any container that mounts /opt/data (workspace TUI,
+        #       # dashboard's embedded chat tab, etc.):
+        #       touch /opt/data/.gateway-restart-requested
+        #
+        #   Within ${HERMES_GATEWAY_SENTINEL_POLL_SECONDS:-2} seconds the
+        #   watcher in this wrapper:
+        #     1. deletes the sentinel (so the next iteration starts clean),
+        #     2. SIGTERMs the running `hermes gateway run` child,
+        #     3. flags this as an operator-requested restart (so the wrapper
+        #        uses the short SENTINEL restart delay instead of the long
+        #        crash-loop backoff).
+        #
+        #   Same sentinel is also honored DURING the post-crash sleep, so
+        #   operators can shorten a long backoff window by touching the file.
+        #
         # `hermes gateway run` does NOT bind any TCP port by default — the
         # OpenAI-compatible API server is opt-in (set API_SERVER_HOST and
         # API_SERVER_KEY in /opt/data/.env). So we probe the data dir on
@@ -133,19 +183,75 @@ spec:
             - |
               set -u
               RETRY_DELAY="${HERMES_GATEWAY_RESTART_DELAY_SECONDS:-30}"
-              # Trap SIGTERM so a `kubectl rollout restart` / pod delete
-              # tears down the inner gateway promptly instead of waiting on
-              # the outer sleep.
-              trap 'echo "[gateway-wrapper] SIGTERM received, exiting"; kill -TERM "${child:-0}" 2>/dev/null; exit 0' TERM
+              SENTINEL="${HERMES_GATEWAY_RESTART_SENTINEL:-/opt/data/.gateway-restart-requested}"
+              POLL="${HERMES_GATEWAY_SENTINEL_POLL_SECONDS:-2}"
+              SENTINEL_DELAY="${HERMES_GATEWAY_SENTINEL_RESTART_DELAY_SECONDS:-3}"
+              FLAG="/tmp/.gateway-wrapper-sentinel-fired"
+
+              # Trap SIGTERM so a `kubectl rollout restart` / pod delete tears
+              # down the inner gateway + watcher promptly instead of waiting
+              # on the outer sleep.
+              cleanup() {
+                echo "[gateway-wrapper] SIGTERM received, exiting"
+                [ -n "${watcher:-}" ] && kill -TERM "$watcher" 2>/dev/null || true
+                [ -n "${child:-}"   ] && kill -TERM "$child"   2>/dev/null || true
+                exit 0
+              }
+              trap cleanup TERM
+
+              # Clear any stale sentinel/flag left over from a crashed wrapper
+              rm -f "$SENTINEL" "$FLAG" 2>/dev/null || true
+
               while :; do
                 echo "[gateway-wrapper] starting hermes gateway run (HERMES_HOME=${HERMES_HOME})"
                 hermes gateway run &
                 child=$!
+
+                # Background watcher: polls the sentinel; on touch, kills the
+                # child and records WHY (so the main loop picks the short delay).
+                (
+                  while kill -0 "$child" 2>/dev/null; do
+                    if [ -f "$SENTINEL" ]; then
+                      echo "[gateway-wrapper] restart requested via $SENTINEL"
+                      rm -f "$SENTINEL" 2>/dev/null
+                      : > "$FLAG"
+                      kill -TERM "$child" 2>/dev/null
+                      break
+                    fi
+                    sleep "$POLL"
+                  done
+                ) &
+                watcher=$!
+
                 wait "$child"
                 rc=$?
-                echo "[gateway-wrapper] hermes gateway run exited (code=${rc}); sleeping ${RETRY_DELAY}s before restart"
-                sleep "${RETRY_DELAY}" &
-                wait $!
+
+                # Reap the watcher whether it triggered or self-exited
+                kill "$watcher" 2>/dev/null || true
+                wait "$watcher" 2>/dev/null || true
+
+                if [ -f "$FLAG" ]; then
+                  rm -f "$FLAG"
+                  delay="$SENTINEL_DELAY"
+                  reason="restart requested via sentinel"
+                else
+                  delay="$RETRY_DELAY"
+                  reason="natural exit (code=${rc})"
+                fi
+                echo "[gateway-wrapper] gateway ${reason}; sleeping ${delay}s before restart"
+
+                # Sleep, but allow the sentinel to short-circuit the backoff
+                # (so operators don't have to wait through a 30s crash backoff
+                # after fixing config).
+                end_ts=$(( $(date +%s) + delay ))
+                while [ "$(date +%s)" -lt "$end_ts" ]; do
+                  if [ -f "$SENTINEL" ]; then
+                    echo "[gateway-wrapper] sentinel observed during backoff, restarting immediately"
+                    rm -f "$SENTINEL" 2>/dev/null
+                    break
+                  fi
+                  sleep 1
+                done
               done
           ports:
             - name: gateway
@@ -158,6 +264,13 @@ spec:
               value: /opt/data
             - name: HERMES_GATEWAY_RESTART_DELAY_SECONDS
               value: "30"
+            # Sentinel-file restart (see comment above on the wrapper).
+            - name: HERMES_GATEWAY_RESTART_SENTINEL
+              value: "/opt/data/.gateway-restart-requested"
+            - name: HERMES_GATEWAY_SENTINEL_POLL_SECONDS
+              value: "2"
+            - name: HERMES_GATEWAY_SENTINEL_RESTART_DELAY_SECONDS
+              value: "3"
           startupProbe:
             exec:
               command: ["/bin/sh", "-c", "test -d /opt/data"]
