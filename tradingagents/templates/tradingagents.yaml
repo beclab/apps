@@ -1,0 +1,172 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tradingagents
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: tradingagents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: tradingagents
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: tradingagents
+        io.kompose.network/chrome-default: "true"
+        bytetrade.io/terminal: tradingagents
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /data
+              mkdir -p /data/reports
+              chown -R 1000:1000 /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+        # Seed $appData/.env from ConfigMap (nofx-style; edit .env on host under Data/...).
+        - name: init-seed-dotenv
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              set -e
+              if [ ! -f /data/.env ]; then
+                cp /seed/dotenv /data/.env
+                chmod 600 /data/.env
+                chown 1000:1000 /data/.env
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: dotenv-template
+              mountPath: /seed
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      containers:
+        # Stable shell for beclab/terminal (clawdbot-style). No probes — never killed for 8080 issues.
+        - name: tradingagents-shell
+          image: "docker.io/goai007/tradingagents:0.2.5"
+          imagePullPolicy: IfNotPresent
+          workingDir: /home/appuser/app
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              ln -sf /app/data/.env /home/appuser/app/.env 2>/dev/null || true
+              if [ -d /home/appuser/app/reports ] && [ ! -L /home/appuser/app/reports ]; then rm -rf /home/appuser/app/reports; fi
+              mkdir -p /app/data/reports
+              ln -sfn /app/data/reports /home/appuser/app/reports
+              exec sleep infinity
+          env:
+            - name: HOME
+              value: /home/appuser
+            - name: TZ
+              value: Etc/UTC
+            - name: SHELL
+              value: /bin/bash
+            - name: TERM
+              value: xterm-256color
+            {{- $e := .Values.olaresEnv | default dict }}
+            {{- range $name := list "OLLAMA_BASE_URL" "OPENAI_API_KEY" "DEEPSEEK_API_KEY" "ANTHROPIC_API_KEY" "GOOGLE_API_KEY" "DASHSCOPE_API_KEY" "ZHIPU_API_KEY" "OPENROUTER_API_KEY" "XAI_API_KEY" "ALPHA_VANTAGE_API_KEY" }}
+            {{- $val := index $e $name }}
+            {{- if $val }}
+            - name: {{ $name | quote }}
+              value: {{ $val | quote }}
+            {{- end }}
+            {{- end }}              
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+        # HTTP only; restarts do not affect tradingagents-shell / web terminal sessions.
+        - name: tradingagents
+          image: "docker.io/goai007/tradingagents:0.2.5"
+          imagePullPolicy: IfNotPresent
+          workingDir: /home/appuser/app
+          # Inline .env symlink — do not rely on /usr/local/bin/entrypoint-web.sh (missing in some image tags).
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if [ -f /app/data/.env ]; then ln -sf /app/data/.env /home/appuser/app/.env; fi
+              if [ -d /home/appuser/app/reports ] && [ ! -L /home/appuser/app/reports ]; then rm -rf /home/appuser/app/reports; fi
+              mkdir -p /app/data/reports
+              ln -sfn /app/data/reports /home/appuser/app/reports
+              exec /opt/venv/bin/python -u serve.py
+          ports:
+            - containerPort: 8080
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: PORT
+              value: "8080"
+            - name: SHELL
+              value: /bin/bash
+          resources:
+            requests:
+              cpu: 256m
+              memory: 384Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          # Startup only: no liveness — tcp flaps or brief stalls were restarting the container and killing exec sessions.
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}'
+            type: DirectoryOrCreate
+        - name: dotenv-template
+          configMap:
+            name: tradingagents-dotenv-template
+            defaultMode: 0444
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tradingagents
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: tradingagents
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    io.kompose.service: tradingagents
