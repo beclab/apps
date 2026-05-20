@@ -141,14 +141,47 @@ spec:
               value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: DISABLE_AUTOUPDATER
               value: "1"
+            {{- /*
+              All Anthropic / Claude Code routing env vars are CONDITIONALLY
+              injected. Claude Code treats `CLAUDE_CODE_USE_*` as a presence
+              check (any non-empty string, including "false", routes to that
+              backend), so we MUST omit the env entry entirely when the user
+              wants the default (Anthropic / Anthropic-compatible API).
+
+              ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL
+              are skipped when blank so that downstream code sees them as
+              truly unset rather than as "" — important for OAuth login flow
+              and for routing through Anthropic-compatible endpoints (e.g.
+              an Olares-hosted Ollama proxy that exposes /v1/messages).
+            */ -}}
+            {{- with .Values.olaresEnv.ANTHROPIC_AUTH_TOKEN }}
+            - name: ANTHROPIC_AUTH_TOKEN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_API_KEY }}
             - name: ANTHROPIC_API_KEY
-              value: "{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}"
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_BASE_URL }}
             - name: ANTHROPIC_BASE_URL
-              value: "{{ .Values.olaresEnv.ANTHROPIC_BASE_URL }}"
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_MODEL }}
+            - name: ANTHROPIC_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_BEDROCK) "true" }}
             - name: CLAUDE_CODE_USE_BEDROCK
-              value: "{{ .Values.olaresEnv.CLAUDE_CODE_USE_BEDROCK }}"
+              value: "1"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_VERTEX) "true" }}
             - name: CLAUDE_CODE_USE_VERTEX
-              value: "{{ .Values.olaresEnv.CLAUDE_CODE_USE_VERTEX }}"
+              value: "1"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_FOUNDRY) "true" }}
+            - name: CLAUDE_CODE_USE_FOUNDRY
+              value: "1"
+            {{- end }}
           command:
             - sleep
             - infinity

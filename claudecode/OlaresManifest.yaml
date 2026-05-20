@@ -7,7 +7,7 @@ metadata:
   description: Anthropic's official agentic coding CLI that lives in your terminal
   appid: claudecode
   title: Claude Code
-  version: 0.1.2
+  version: 0.1.3
   categories:
   - Developer Tools
   - Productivity_v112
@@ -35,6 +35,17 @@ spec:
 
     **First-time Setup**
     Open the `Claude Code CLI` entrance and run `claude` to launch the OAuth login flow, or set `ANTHROPIC_API_KEY` in the app environment variables and restart.
+
+    **Use a Local Model (Ollama / Anthropic-compatible Gateway)**
+    To route Claude Code at a local Ollama (or any Anthropic-compatible `/v1/messages` proxy) deployed inside your Olares cluster, configure these env vars in the app settings — no manual `export`/`unset` needed each session:
+
+    - `ANTHROPIC_BASE_URL` = `http://<your-shared-domain>` (e.g. the shared entrance of an Ollama Olares app)
+    - `ANTHROPIC_AUTH_TOKEN` = `ollama`
+    - `ANTHROPIC_API_KEY` = (leave blank)
+    - `ANTHROPIC_MODEL` = `qwen3-coder:30b` (or whichever model that gateway exposes)
+    - `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_USE_FOUNDRY` = false
+
+    These vars are conditionally injected: blank strings and `false` toggles are *not* placed into the container env, so Claude Code sees them as truly unset (which is required — it treats `CLAUDE_CODE_USE_*` by presence, not value).
 
   developer: Anthropic
   website: https://code.claude.com
@@ -75,28 +86,49 @@ envs:
     applyOnChange: true
     editable: true
     default: ""
-    description: "Anthropic API key (leave empty to use interactive OAuth login with a Claude Pro/Max subscription)"
+    description: "Anthropic API key. Leave empty for OAuth login (Claude Pro/Max subscription) or when routing to an Anthropic-compatible gateway (e.g. Ollama) via ANTHROPIC_AUTH_TOKEN."
+  - envName: ANTHROPIC_AUTH_TOKEN
+    type: password
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Bearer token sent as `Authorization: Bearer ...` to the Anthropic-compatible API. For Ollama set this to `ollama` and leave ANTHROPIC_API_KEY blank."
   - envName: ANTHROPIC_BASE_URL
     type: url
     required: false
     applyOnChange: true
     editable: true
     default: ""
-    description: "Custom Anthropic-compatible API endpoint (optional, for proxies or self-hosted gateways)"
+    description: "Custom Anthropic-compatible API endpoint (e.g. https://your-shared-domain for an Olares-hosted Ollama proxy). Leave empty to use Anthropic's official endpoint."
+  - envName: ANTHROPIC_MODEL
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Default model to use when running `claude` without --model (e.g. qwen3-coder:30b for an Ollama backend). Leave empty to let Claude Code prompt or use its own default."
   - envName: CLAUDE_CODE_USE_BEDROCK
     type: bool
     required: false
     applyOnChange: true
     editable: true
     default: "false"
-    description: "Route through Amazon Bedrock instead of the Anthropic API"
+    description: "Route through Amazon Bedrock instead of the Anthropic API. Leave false unless you specifically want Bedrock — Claude Code treats this var by presence, the chart only injects it when true."
   - envName: CLAUDE_CODE_USE_VERTEX
     type: bool
     required: false
     applyOnChange: true
     editable: true
     default: "false"
-    description: "Route through Google Vertex AI instead of the Anthropic API"
+    description: "Route through Google Vertex AI instead of the Anthropic API. Leave false unless you specifically want Vertex — Claude Code treats this var by presence, the chart only injects it when true."
+  - envName: CLAUDE_CODE_USE_FOUNDRY
+    type: bool
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "false"
+    description: "Route through Azure AI Foundry instead of the Anthropic API. Leave false unless you specifically want Foundry — Claude Code treats this var by presence, the chart only injects it when true."
   - envName: ALLOW_HOME_DIR_ACCESS
     type: bool
     required: false
