@@ -8,8 +8,8 @@ metadata:
     app.kubernetes.io/instance: radicale
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: radicale
-    app.kubernetes.io/version: 3.1.1.0
-    helm.sh/chart: radicale-1.2.2
+    app.kubernetes.io/version: "3.7.3"
+    helm.sh/chart: radicale-1.0.7
   annotations:
 spec:
   type: ClusterIP
@@ -32,8 +32,8 @@ metadata:
     app.kubernetes.io/instance: radicale
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/name: radicale
-    app.kubernetes.io/version: 3.1.1.0
-    helm.sh/chart: radicale-1.2.2
+    app.kubernetes.io/version: "3.7.3"
+    helm.sh/chart: radicale-1.0.7
 spec:
   revisionHistoryLimit: 3
   replicas: 1
@@ -49,31 +49,53 @@ spec:
         app.kubernetes.io/name: radicale
         app.kubernetes.io/instance: radicale
     spec:
-      
       serviceAccountName: default
       automountServiceAccountToken: true
       dnsPolicy: ClusterFirst
       enableServiceLinks: true
+      securityContext:
+        fsGroup: 2999
+      initContainers:
+        - name: fix-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+          args:
+            - |
+              mkdir -p /data/collections
+              chown -R 2999:2999 /data
+              chmod -R 770 /data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: radicale-data
+              mountPath: /data
       containers:
         - name: radicale
-          image: "docker.io/beclab/aboveos-tomsquest-docker-radicale:3.1.1.0"
+          image: "docker.io/beclab/tomsquest-docker-radicale:3.7.3.0"
           imagePullPolicy: IfNotPresent
           resources:
             requests:
-              cpu: 100m
-              memory: 64Mi
+              cpu: 250m
+              memory: 512Mi
             limits:
-              cpu: 500m
-              memory: 128Mi
+              cpu: 1000m
+              memory: 2Gi
           env:
             - name: RADICALE_CONFIG
               value: /config/config
             - name: TZ
               value: UTC
+            - name: TAKE_FILE_OWNERSHIP
+              value: "false"
           ports:
             - name: http
               containerPort: 5232
               protocol: TCP
+          volumeMounts:
+            - name: radicale-data
+              mountPath: /data
           livenessProbe:
             tcpSocket:
               port: 5232
@@ -95,3 +117,16 @@ spec:
             failureThreshold: 30
             timeoutSeconds: 1
             periodSeconds: 5
+      volumes:
+        - name: radicale-data
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/radicale'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/radicale'
+            {{- end }}
