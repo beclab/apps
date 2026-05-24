@@ -1,45 +1,3 @@
-﻿apiVersion: v1
-data:
-  nginx.conf: |
-    server {
-        listen 8080;
-        access_log /opt/bitnami/openresty/nginx/logs/access.log;
-        error_log /opt/bitnami/openresty/nginx/logs/error.log;
-
-        proxy_connect_timeout 30s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 300s;
-        proxy_set_header host $host;
-        proxy_set_header x-forwarded-host $http_host;
-
-        proxy_http_version 1.1;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header upgrade $http_upgrade;
-        proxy_set_header connection "upgrade";
-
-        location / {
-            proxy_hide_header Access-Control-Allow-Origin;
-            proxy_hide_header Access-Control-Allow-Methods;
-            proxy_hide_header Access-Control-Allow-Headers;
-            add_header Access-Control-Allow-Origin *;
-            add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
-            add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
-            if ($request_method = 'OPTIONS') {
-                add_header Access-Control-Allow-Origin *;
-                add_header Access-Control-Allow-Methods GET,POST,PUT,DELETE,OPTIONS;
-                add_header Access-Control-Allow-Headers "deviceType,token, authorization, content-type,x-csrftoken";
-                return 204;
-            }
-            proxy_pass http://nextcloud-svc:80;
-        }
-    }
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: {{ .Release.Namespace }}
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,6 +17,8 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: nextcloudweb
+      annotations:
+        checksum/nginx-config: {{ include "nextcloud.nginx.conf" . | sha256sum }}
     spec:
       volumes:
         - name: nginx-config
@@ -78,18 +38,23 @@ spec:
             - name: OPENRESTY_CONF_FILE
               value: /etc/nginx/nginx.conf
           readinessProbe:
-            exec:
-              command:
-                - /bin/sh
-                - -c
-                - |
-                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
-                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
-            initialDelaySeconds: 20
-            timeoutSeconds: 10
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
             periodSeconds: 5
             successThreshold: 1
-            failureThreshold: 240
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 3
           resources:
             limits:
               cpu: 500m
