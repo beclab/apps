@@ -39,11 +39,16 @@ data:
     import threading
     import logging
     import time
+    import re
+    import json
+    import shutil
+    import traceback
+    from typing import List, Optional
 
     sys.path.insert(0, "/Whisper-WebUI")
 
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-    from fastapi.responses import PlainTextResponse
+    from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
+    from fastapi.responses import PlainTextResponse, JSONResponse, Response
     from fastapi.middleware.cors import CORSMiddleware
     import uvicorn
 
@@ -62,9 +67,293 @@ data:
     _lock = threading.Lock()
     _current_model = None
 
-    def _ensure_model_loaded(requested_model: str = None):
-        """Load model on demand, switching if a different model is requested."""
-        global _current_model
+    # ------------------------------------------------------------------
+    # Per-call diagnostics (thread-local)
+    # ------------------------------------------------------------------
+    # FastAPI dispatches sync endpoints to a thread pool, so threading.local
+    # gives us a per-request scratch space that we can write into from
+    # ``_patched_transcribe`` (engine layer) and read back in
+    # ``_do_transcribe`` (HTTP layer) without changing function signatures.
+    #
+    # The collected ``_meta`` dict is attached to verbose_json responses,
+    # and the same fields are surfaced as response headers for non-JSON
+    # formats so that test scripts can verify which code path actually
+    # executed without relying on container log scraping.
+    _call_meta_tls = threading.local()
+
+    def _meta_reset():
+        _call_meta_tls.current = {
+            "path": None,                       # batched | buffered | batched_fallback_to_buffered
+            "batched_requested": None,          # what the caller asked for (True/False/None)
+            "batched_globally_enabled": None,   # the yaml-persisted flag
+            "batched_dropped_kwargs": [],       # kwargs removed by _BATCHED_DROPPED_KWARGS
+            "vad_dropped_fields": [],           # fields removed by _VAD_OPTIONS_FIELDS filter
+            "transcribe_dropped_kwargs": [],    # kwargs removed by _TRANSCRIBE_KWARGS filter
+            "batched_typeerror": None,          # str if BatchedInferencePipeline rejected our kwargs
+            "text_cleaning_active": None,       # actual on/off used after override+global resolution
+            "segment_merging_active": None,
+            "condition_on_previous_text_used": None,
+            "temperature_used": None,
+            "batch_size_used": None,
+            "language_requested": None,         # what the caller sent BEFORE normalisation
+            "language_resolved": None,          # what was actually used (ISO code)
+        }
+
+    def _meta_set(**fields):
+        if not hasattr(_call_meta_tls, "current"):
+            _meta_reset()
+        _call_meta_tls.current.update(fields)
+
+    def _meta_append(field, value):
+        if not hasattr(_call_meta_tls, "current"):
+            _meta_reset()
+        _call_meta_tls.current.setdefault(field, []).append(value)
+
+    def _meta_get():
+        # Strip the internal ``_diag_enabled`` thread-local flag from the
+        # surfaced meta dict -- it's a control bit for engine-layer
+        # logging, not a diagnostic field worth exposing to the caller.
+        out = dict(getattr(_call_meta_tls, "current", {}) or {})
+        out.pop("_diag_enabled", None)
+        return out
+
+    def _diag_enabled():
+        """True when the current request opted in via ``_diag=true`` form
+        field.  Engine-layer code (``_patched_transcribe``) reads this
+        from thread-local so it can choose INFO vs DEBUG for the few
+        per-call decision logs without needing the diag flag in its
+        signature."""
+        return bool(getattr(_call_meta_tls, "current", {}).get("_diag_enabled"))
+
+    def _diag_log(msg, *args):
+        """Log at INFO when diagnostics are opted-in for this request,
+        otherwise DEBUG.  Used for the small set of per-call decision
+        traces (transcribe path choice, dropped kwargs lists, etc.)
+        that would otherwise spam the Pod's normal INFO stream and
+        leak this dev build's diagnostic surface to ops.
+        """
+        if _diag_enabled():
+            logger.info(msg, *args)
+        else:
+            logger.debug(msg, *args)
+
+    # ------------------------------------------------------------------
+    # Language code normalisation
+    # ------------------------------------------------------------------
+    # faster-whisper's ``WhisperModel.transcribe(language=...)`` ONLY accepts
+    # ISO 639-1 codes (``en``, ``zh``, ``ja`` ...).  Passing the English name
+    # ("English", "Chinese") -- which is what upstream Whisper-WebUI's Gradio
+    # UI sends -- raises::
+    #
+    #   ValueError: 'English' is not a valid language code
+    #                (accepted language codes: af, am, ar, ...)
+    #
+    # To keep the API friendly for users who follow Whisper-WebUI / OpenAI
+    # SDK conventions, we accept BOTH forms (English name AND ISO code) and
+    # normalise to lower-case ISO before handing to faster-whisper.  The
+    # canonical mapping below is inlined (rather than relying on
+    # ``whisper.tokenizer.TO_LANGUAGE_CODE``) so that it works irrespective
+    # of whether openai-whisper is installed alongside faster-whisper.
+    _ISO_TO_LANGUAGE_NAME = {
+        "en": "english", "zh": "chinese", "de": "german", "es": "spanish",
+        "ru": "russian", "ko": "korean", "fr": "french", "ja": "japanese",
+        "pt": "portuguese", "tr": "turkish", "pl": "polish", "ca": "catalan",
+        "nl": "dutch", "ar": "arabic", "sv": "swedish", "it": "italian",
+        "id": "indonesian", "hi": "hindi", "fi": "finnish", "vi": "vietnamese",
+        "he": "hebrew", "uk": "ukrainian", "el": "greek", "ms": "malay",
+        "cs": "czech", "ro": "romanian", "da": "danish", "hu": "hungarian",
+        "ta": "tamil", "no": "norwegian", "th": "thai", "ur": "urdu",
+        "hr": "croatian", "bg": "bulgarian", "lt": "lithuanian", "la": "latin",
+        "mi": "maori", "ml": "malayalam", "cy": "welsh", "sk": "slovak",
+        "te": "telugu", "fa": "persian", "lv": "latvian", "bn": "bengali",
+        "sr": "serbian", "az": "azerbaijani", "sl": "slovenian",
+        "kn": "kannada", "et": "estonian", "mk": "macedonian", "br": "breton",
+        "eu": "basque", "is": "icelandic", "hy": "armenian", "ne": "nepali",
+        "mn": "mongolian", "bs": "bosnian", "kk": "kazakh", "sq": "albanian",
+        "sw": "swahili", "gl": "galician", "mr": "marathi", "pa": "punjabi",
+        "si": "sinhala", "km": "khmer", "sn": "shona", "yo": "yoruba",
+        "so": "somali", "af": "afrikaans", "oc": "occitan", "ka": "georgian",
+        "be": "belarusian", "tg": "tajik", "sd": "sindhi", "gu": "gujarati",
+        "am": "amharic", "yi": "yiddish", "lo": "lao", "uz": "uzbek",
+        "fo": "faroese", "ht": "haitian creole", "ps": "pashto",
+        "tk": "turkmen", "nn": "nynorsk", "mt": "maltese", "sa": "sanskrit",
+        "lb": "luxembourgish", "my": "myanmar", "bo": "tibetan",
+        "tl": "tagalog", "mg": "malagasy", "as": "assamese", "tt": "tatar",
+        "haw": "hawaiian", "ln": "lingala", "ha": "hausa", "ba": "bashkir",
+        "jw": "javanese", "su": "sundanese",
+    }
+    _LANGUAGE_NAME_TO_ISO = {
+        **{name: code for code, name in _ISO_TO_LANGUAGE_NAME.items()},
+        # Common aliases (mirror openai-whisper's TO_LANGUAGE_CODE)
+        "burmese": "my", "valencian": "ca", "flemish": "nl", "haitian": "ht",
+        "letzeburgesch": "lb", "pushto": "ps", "panjabi": "pa",
+        "moldavian": "mo", "moldovan": "mo", "sinhalese": "si",
+        "castilian": "es", "mandarin": "zh",
+    }
+    _VALID_ISO_CODES = frozenset(_ISO_TO_LANGUAGE_NAME.keys())
+
+    def _normalize_language(lang):
+        """Normalise a user-supplied language string to ISO 639-1 code.
+
+        Accepts None/empty (→ None, auto-detect), 2/3-letter ISO codes
+        (case-insensitive), and full English language names (also
+        case-insensitive, plus a few common aliases like ``mandarin``).
+        Raises HTTPException(400) on unknown values, with the accepted
+        forms listed so the caller can fix their request.
+        """
+        if lang is None:
+            return None
+        cleaned = lang.strip()
+        if not cleaned:
+            return None
+        lower = cleaned.lower()
+        if lower in _VALID_ISO_CODES:
+            return lower
+        if lower in _LANGUAGE_NAME_TO_ISO:
+            return _LANGUAGE_NAME_TO_ISO[lower]
+        raise HTTPException(
+            400,
+            f"Unknown language '{lang}'. Accepted values are ISO 639-1 "
+            f"codes (e.g. 'en', 'zh', 'ja') or English language names "
+            f"(e.g. 'English', 'Chinese', 'Japanese').",
+        )
+
+    # ------------------------------------------------------------------
+    # Defensive transcribe kwarg introspection
+    # ------------------------------------------------------------------
+    # Mirrors the VadOptions introspection below.  ``WhisperModel.transcribe``
+    # has accumulated kwargs across faster-whisper releases
+    # (``multilingual``, ``log_progress``, ``language_detection_threshold``,
+    # ``language_detection_segments`` were added in 0.10.x / 1.0).  Older
+    # wheels still baked into the image would raise ``TypeError`` on these.
+    # We introspect once at import time and drop any unknown kwarg before
+    # the call.
+    _TRANSCRIBE_KWARGS: frozenset = frozenset()
+    try:
+        import inspect as _tx_inspect
+        from faster_whisper import WhisperModel as _WhisperModel
+        _TRANSCRIBE_KWARGS = frozenset(
+            _tx_inspect.signature(_WhisperModel.transcribe).parameters.keys()
+        )
+        logger.debug(
+            f"faster_whisper WhisperModel.transcribe supports "
+            f"{len(_TRANSCRIBE_KWARGS)} kwargs"
+        )
+    except Exception as _tx_introspect_exc:
+        logger.warning(
+            f"Could not introspect WhisperModel.transcribe; will pass all "
+            f"kwargs as-is: {_tx_introspect_exc}"
+        )
+
+    # ------------------------------------------------------------------
+    # Defensive VAD field introspection
+    # ------------------------------------------------------------------
+    # ``faster_whisper.vad.VadOptions`` gained two extra fields
+    # (``min_silence_at_max_speech`` / ``use_max_poss_sil_at_max_speech``)
+    # only in faster-whisper >= 1.1.x.  Older wheels baked into the image
+    # raise::
+    #
+    #     TypeError: VadOptions.__init__() got an unexpected keyword
+    #                argument 'min_silence_at_max_speech'
+    #
+    # the first time we call ``model.transcribe(vad_parameters=...)``.
+    # To stay compatible across faster-whisper versions while still
+    # exposing the full Form surface, we introspect VadOptions at import
+    # time and drop any field the installed dataclass doesn't accept
+    # before handing the dict to faster-whisper.
+    _VAD_OPTIONS_FIELDS: frozenset = frozenset()
+    try:
+        import inspect as _vad_inspect
+        from faster_whisper.vad import VadOptions as _VadOptions
+        _VAD_OPTIONS_FIELDS = frozenset(
+            _vad_inspect.signature(_VadOptions).parameters.keys()
+        )
+        logger.debug(
+            f"faster_whisper VadOptions supports fields: "
+            f"{sorted(_VAD_OPTIONS_FIELDS)}"
+        )
+    except Exception as _vad_introspect_exc:
+        logger.warning(
+            f"Could not introspect VadOptions; will pass all VAD kwargs as-is "
+            f"(may TypeError on transcribe): {_vad_introspect_exc}"
+        )
+
+    _LANG_PROMPTS = {
+        "zh": "以下是普通话的句子，使用简体中文标点符号。",
+        "en": "The following is a conversation in English with proper punctuation.",
+        "ja": "以下は日本語の文章です。句読点を正しく使用してください。",
+        "ko": "다음은 한국어 문장입니다. 올바른 구두점을 사용합니다.",
+        "fr": "Ce qui suit est une conversation en français avec une ponctuation correcte.",
+        "de": "Das Folgende ist ein Gespräch auf Deutsch mit korrekter Zeichensetzung.",
+        "es": "Lo siguiente es una conversación en español con puntuación correcta.",
+        "ru": "Далее следует разговор на русском языке с правильной пунктуацией.",
+        "pt": "A seguir está uma conversa em português com pontuação correta.",
+    }
+
+    _LANG_DETECT_CONFIDENCE = 0.8
+
+    def _fmt_ts(seconds: float) -> str:
+        """Format seconds as SRT/VTT timestamp HH:MM:SS,mmm."""
+        h = int(seconds // 3600)
+        m = int((seconds % 3600) // 60)
+        s = int(seconds % 60)
+        ms = int(round((seconds - int(seconds)) * 1000))
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    def _fmt_ts_vtt(seconds: float) -> str:
+        ts = _fmt_ts(seconds)
+        return ts.replace(",", ".")
+
+    def _segments_to_srt(segments: list) -> str:
+        lines = []
+        for i, seg in enumerate(segments, 1):
+            lines.append(str(i))
+            lines.append(f"{_fmt_ts(seg['start'])} --> {_fmt_ts(seg['end'])}")
+            lines.append(seg["text"].strip())
+            lines.append("")
+        return "\n".join(lines)
+
+    def _segments_to_vtt(segments: list) -> str:
+        lines = ["WEBVTT", ""]
+        for seg in segments:
+            lines.append(f"{_fmt_ts_vtt(seg['start'])} --> {_fmt_ts_vtt(seg['end'])}")
+            lines.append(seg["text"].strip())
+            lines.append("")
+        return "\n".join(lines)
+
+    def _fmt_ts_lrc(seconds: float) -> str:
+        m = int(seconds // 60)
+        s = seconds % 60
+        return f"{m:02d}:{s:05.2f}"
+
+    def _segments_to_lrc(segments: list) -> str:
+        lines = []
+        for seg in segments:
+            lines.append(f"[{_fmt_ts_lrc(seg['start'])}]{seg['text'].strip()}")
+        return "\n".join(lines)
+
+    def _parse_temperature(raw: str) -> list:
+        """Parse comma-separated temperature string into a list of floats."""
+        try:
+            vals = [float(v.strip()) for v in raw.split(",") if v.strip()]
+            return vals if vals else [0]
+        except ValueError:
+            return [0]
+
+    def _parse_int_list(raw: str) -> list:
+        """Parse comma-separated string into a list of ints (e.g. suppress_tokens)."""
+        if not raw or not raw.strip():
+            return [-1]
+        try:
+            return [int(v.strip()) for v in raw.split(",") if v.strip()]
+        except ValueError:
+            return [-1]
+
+    _current_compute_type = None
+
+    def _ensure_model_loaded(requested_model: str = None, requested_compute_type: str = None):
+        """Load model on demand, switching if a different model or compute type is requested."""
+        global _current_model, _current_compute_type
         if _whisper_inf is None:
             raise HTTPException(503, "Whisper inference not initialized")
 
@@ -72,18 +361,20 @@ data:
             from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
             from modules.utils.files_manager import load_yaml
             params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
-            default_model = params.get("whisper", {}).get("model_size", "large-v3")
-            compute_type = params.get("whisper", {}).get("compute_type", "float16")
+            default_model = params.get("whisper", {}).get("model_size", "large-v2")
+            default_compute = params.get("whisper", {}).get("compute_type", "float16")
         except Exception:
-            default_model, compute_type = "large-v3", "float16"
+            default_model, default_compute = "large-v2", "float16"
 
         target = default_model if (not requested_model or requested_model == "whisper-1") else requested_model
+        ctype = requested_compute_type or default_compute
 
-        if _whisper_inf.model is None or _current_model != target:
+        if _whisper_inf.model is None or _current_model != target or _current_compute_type != ctype:
             try:
-                logger.info(f"Loading model: {target} ({compute_type})")
-                _whisper_inf.update_model(target, compute_type)
+                logger.info(f"Loading model: {target} ({ctype})")
+                _whisper_inf.update_model(target, ctype)
                 _current_model = target
+                _current_compute_type = ctype
             except Exception as e:
                 raise HTTPException(503, f"Failed to load model {target}: {e}")
 
@@ -102,49 +393,1121 @@ data:
             models.append({"id": "whisper-1", "object": "model", "owned_by": "local", "created": 0})
         return {"object": "list", "data": models}
 
-    @api_app.post("/v1/audio/transcriptions")
-    async def transcribe(
-        file: UploadFile = File(...),
+    def _run_bgm_separation(audio_path: str, model_name: str, device: str,
+                            segment_size: int, save_file: bool, enable_offload: bool) -> str:
+        """Pre-process audio with BGM separation, returns path to vocals-only audio."""
+        try:
+            separator = _whisper_inf.music_separator
+            _, vocals, files = separator.separate(
+                audio=audio_path,
+                model_name=model_name,
+                device=device,
+                segment_size=segment_size,
+                save_file=save_file,
+            )
+            if enable_offload:
+                separator.offload()
+            if files and len(files) > 1:
+                return files[1]
+            vocals_path = audio_path + ".vocals.wav"
+            import soundfile as sf
+            sf.write(vocals_path, vocals, 16000, format="WAV")
+            return vocals_path
+        except Exception as e:
+            logger.warning(f"BGM separation failed, using original audio: {e}")
+            return audio_path
+
+    def _run_diarization(audio_path: str, segments: list, hf_token: str,
+                         device: str, enable_offload: bool) -> list:
+        """Post-process segments with speaker diarization labels."""
+        try:
+            diarizer = _whisper_inf.diarizer
+            if hf_token:
+                diarizer.run(
+                    audio=audio_path,
+                    use_auth_token=hf_token,
+                    device=device,
+                )
+            else:
+                diarizer.run(audio=audio_path, device=device)
+
+            for seg in segments:
+                seg_mid = (seg["start"] + seg["end"]) / 2
+                speaker = diarizer.get_speaker(seg_mid)
+                if speaker:
+                    seg["speaker"] = speaker
+
+            if enable_offload:
+                diarizer.offload()
+        except Exception as e:
+            logger.warning(f"Diarization failed, returning segments without speaker labels: {e}")
+        return segments
+
+    # ──────────────────────────────────────────────────────────────
+    # Shared helpers used by the audio endpoints below.  Routes own the
+    # life-cycle of the source audio file (upload or YouTube download);
+    # ``_do_transcribe`` is task-agnostic and only owns ``vocals_path``
+    # (the BGM-separated working copy it creates internally, if any).
+    # ──────────────────────────────────────────────────────────────
+
+    async def _save_upload_to_temp(file: UploadFile) -> str:
+        """Spool an UploadFile to a unique temp file.  Caller unlinks."""
+        suffix = os.path.splitext(file.filename or "")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="up_") as tmp:
+            tmp.write(await file.read())
+            return tmp.name
+
+    def _download_youtube_audio(url: str) -> str:
+        """Download an audio-only stream from YouTube to a per-request temp
+        directory and return the absolute file path.
+
+        Uses ``pytubefix`` (the actively-maintained pytube fork that
+        upstream Whisper-WebUI ships in its requirements).  We deliberately
+        do NOT reuse upstream's ``modules.utils.youtube_manager.get_ytaudio``
+        because that helper writes to a fixed global ``modules/yt_tmp.wav``
+        path which is not safe under concurrent API calls.  Each request
+        gets its own ``mkdtemp`` directory that the caller cleans up.
+        """
+        try:
+            from pytubefix import YouTube
+        except ImportError as exc:
+            raise HTTPException(
+                500,
+                "pytubefix is not installed inside the runtime image; "
+                "rebuild / reinstall the chart to pull in this dependency.",
+            ) from exc
+
+        try:
+            yt = YouTube(url)
+            stream = yt.streams.get_audio_only()
+            if stream is None:
+                raise RuntimeError("no audio-only stream available for this video")
+            tmpdir = tempfile.mkdtemp(prefix="yt_")
+            audio_path = stream.download(output_path=tmpdir, skip_existing=False)
+            if not audio_path or not os.path.exists(audio_path):
+                raise RuntimeError("pytubefix returned no output path")
+            return audio_path
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(400, f"Failed to download YouTube audio: {exc}") from exc
+
+    # ──────────────────────────────────────────────────────────────
+    # Subtitle parsers used by the NLLB / DeepL text-translation routes
+    # so callers can hand us an SRT/VTT upload and get the same format
+    # back without writing to disk.  Re-emission goes through the same
+    # ``_segments_to_srt`` / ``_segments_to_vtt`` / ``_segments_to_lrc``
+    # helpers the audio routes already use, so timestamp formatting is
+    # consistent across all output paths.
+    # ──────────────────────────────────────────────────────────────
+
+    _SRT_TS_RE = re.compile(r"(\d{1,2}):(\d{2}):(\d{2})[,\.](\d{1,3})")
+
+    def _parse_ts_str(ts: str) -> float:
+        m = _SRT_TS_RE.match(ts.strip())
+        if not m:
+            return 0.0
+        h, mn, s, ms = m.groups()
+        return int(h) * 3600 + int(mn) * 60 + int(s) + int(ms.ljust(3, "0")[:3]) / 1000.0
+
+    def _parse_srt(content: str) -> List[dict]:
+        out = []
+        for blk in re.split(r"\n\s*\n", content.strip()):
+            lines = [ln for ln in blk.splitlines() if ln.strip()]
+            if len(lines) < 2:
+                continue
+            idx = 1 if lines[0].strip().isdigit() else 0
+            if idx >= len(lines) or "-->" not in lines[idx]:
+                continue
+            start_str, end_str = [s.strip() for s in lines[idx].split("-->", 1)]
+            text = "\n".join(lines[idx + 1:]).strip()
+            if not text:
+                continue
+            out.append({"start": _parse_ts_str(start_str), "end": _parse_ts_str(end_str), "text": text})
+        return out
+
+    def _parse_vtt(content: str) -> List[dict]:
+        if content.lstrip().startswith("WEBVTT"):
+            content = content.split("\n", 1)[1] if "\n" in content else ""
+        out = []
+        for blk in re.split(r"\n\s*\n", content.strip()):
+            first = blk.lstrip().split("\n", 1)[0].strip().upper()
+            if first.startswith(("NOTE", "STYLE", "REGION")):
+                continue
+            lines = [ln for ln in blk.splitlines() if ln.strip()]
+            if not lines:
+                continue
+            if "-->" not in lines[0]:
+                if len(lines) < 2 or "-->" not in lines[1]:
+                    continue
+                lines = lines[1:]
+            start_str, end_str = [s.strip() for s in lines[0].split("-->", 1)]
+            text = "\n".join(lines[1:]).strip()
+            if not text:
+                continue
+            out.append({
+                "start": _parse_ts_str(start_str.replace(".", ",")),
+                "end": _parse_ts_str(end_str.replace(".", ",")),
+                "text": text,
+            })
+        return out
+
+    def _parse_subtitle_bytes(filename: str, raw: bytes) -> List[dict]:
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            content = raw.decode("utf-8", errors="replace")
+        name = (filename or "").lower()
+        if name.endswith(".vtt") or content.lstrip()[:8].upper().startswith("WEBVTT"):
+            return _parse_vtt(content)
+        return _parse_srt(content)
+
+    # ──────────────────────────────────────────────────────────────
+    # Whisper transcribe Form-param dependency.  Declaring all 56
+    # parameters once and reusing them via ``Depends`` across the
+    # three audio routes (upload-transcribe / upload-translate /
+    # youtube-transcribe) is what gives the translations endpoint
+    # full parity with transcriptions without duplicating signatures.
+    # The signature is faithfully copied from the legacy in-line
+    # /v1/audio/transcriptions handler -- DO NOT remove or rename
+    # fields here without auditing every audio endpoint downstream.
+    # ──────────────────────────────────────────────────────────────
+
+    def _transcribe_form_params(
         model: str = Form("whisper-1"),
         language: str = Form(None),
         response_format: str = Form("json"),
         prompt: str = Form(None),
-        temperature: float = Form(0),
-    ):
-        suffix = os.path.splitext(file.filename)[1] if file.filename else ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(await file.read())
-            tmp_path = tmp.name
+        temperature: str = Form("0,0.2,0.4,0.6,0.8,1.0"),
+        hotwords: str = Form(None),
+        task: str = Form("transcribe"),
+        compute_type: str = Form(None),
+        beam_size: int = Form(5),
+        best_of: int = Form(5),
+        patience: float = Form(1),
+        length_penalty: float = Form(1),
+        repetition_penalty: float = Form(1),
+        no_repeat_ngram_size: int = Form(0),
+        condition_on_previous_text: bool = Form(False),
+        prompt_reset_on_temperature: float = Form(0.5),
+        prefix: str = Form(None),
+        suppress_blank: bool = Form(True),
+        suppress_tokens: str = Form("-1"),
+        without_timestamps: bool = Form(False),
+        max_initial_timestamp: float = Form(1.0),
+        word_timestamps: bool = Form(False),
+        prepend_punctuations: str = Form(None),
+        append_punctuations: str = Form(None),
+        multilingual: bool = Form(False),
+        hallucination_silence_threshold: float = Form(2),
+        compression_ratio_threshold: float = Form(2.4),
+        log_prob_threshold: float = Form(-1.0),
+        no_speech_threshold: float = Form(0.6),
+        max_new_tokens: int = Form(None),
+        clip_timestamps: str = Form("0"),
+        chunk_length: int = Form(None),
+        log_progress: bool = Form(False),
+        language_detection_threshold: float = Form(0.5),
+        language_detection_segments: int = Form(1),
+        vad_filter: bool = Form(True),
+        vad_threshold: float = Form(0.5),
+        vad_neg_threshold: float = Form(None),
+        vad_min_speech_duration_ms: int = Form(250),
+        vad_max_speech_duration_s: float = Form(9999),
+        vad_min_silence_duration_ms: int = Form(500),
+        vad_speech_pad_ms: int = Form(400),
+        vad_min_silence_at_max_speech: int = Form(98),
+        vad_use_max_poss_sil_at_max_speech: bool = Form(True),
+        is_separate_bgm: bool = Form(False),
+        uvr_model_size: str = Form("UVR-MDX-NET-Inst_HQ_4"),
+        uvr_device: str = Form(None),
+        uvr_segment_size: int = Form(256),
+        uvr_save_file: bool = Form(False),
+        uvr_enable_offload: bool = Form(True),
+        is_diarize: bool = Form(False),
+        hf_token: str = Form(""),
+        diarization_device: str = Form(None),
+        diarization_enable_offload: bool = Form(True),
+        text_cleaning: bool = Form(True),
+        segment_merging: bool = Form(True),
+        batched: bool = Form(None),
+        batch_size: int = Form(None),
+        # ── OpenAI compatibility shim ─────────────────────────────────
+        # The official OpenAI Whisper request schema exposes word-level
+        # timestamps via the array field ``timestamp_granularities[]``
+        # (values: ``"word"`` and/or ``"segment"``).  Our long-standing
+        # form field is ``word_timestamps: bool``.  Accept both so
+        # OpenAI SDK clients work unmodified.  This is a pure API-layer
+        # shim -- the engine and the WebUI never see this field.
+        timestamp_granularities: Optional[List[str]] = Form(
+            None,
+            alias="timestamp_granularities[]",
+            description=(
+                "OpenAI-compatible array. Pass `word` to enable "
+                "word-level timestamps (equivalent to "
+                "`word_timestamps=true`). `segment` is implicit and "
+                "always returned for verbose_json."
+            ),
+        ),
+        # ── Diagnostics opt-in (this dev build only) ─────────────────
+        # When ``_diag`` is omitted or ``false`` the response is byte-
+        # identical to the OpenAI Whisper API (no extra JSON keys, no
+        # extra response headers, no observable difference).  Setting
+        # ``_diag=true`` switches on the per-call ``_meta`` diagnostics
+        # used by the internal verification test bundle: verbose_json
+        # responses gain a ``_meta`` field, non-JSON responses gain
+        # ``X-Whisper-*`` headers.  Not documented in the public STT
+        # guide -- this is purely for our own controlled verification.
+        diag: bool = Form(False, alias="_diag"),
+    ) -> dict:
+        return {k: v for k, v in locals().items()}
 
+    async def _do_transcribe(audio_path: str, force_task: Optional[str] = None, **p):
+        """Run the full transcription pipeline against a local audio file.
+
+        Caller owns ``audio_path`` (does NOT get deleted here); this function
+        only owns the optional BGM-separated working copy it creates.
+
+        ``force_task`` allows the /v1/audio/translations route to pin
+        ``task="translate"`` regardless of what the form field said.
+        Diarization deliberately runs against the ORIGINAL audio mix
+        (``audio_path``), not the BGM-separated vocals -- speaker labels
+        come out more stable on the mixed signal.
+        """
+        task = force_task or p.get("task") or "transcribe"
+
+        # Diagnostics are STRICTLY opt-in.  When ``_diag`` is not set
+        # (the default for every external caller, every example in the
+        # public STT guide, and every OpenAI SDK call), the response is
+        # byte-identical to upstream OpenAI Whisper API: no ``_meta``
+        # field, no ``X-Whisper-*`` headers, no observable difference.
+        # The engine layer still writes thread-local meta for cheapness
+        # of code paths, but nothing reaches the wire unless ``_diag``
+        # opted in.
+        diag_on = bool(p.get("diag"))
+
+        _meta_reset()
+        if diag_on:
+            _meta_set(
+                _diag_enabled=True,
+                batched_requested=p.get("batched"),
+                language_requested=p.get("language"),
+                text_cleaning_active=p.get("text_cleaning"),
+                segment_merging_active=p.get("segment_merging"),
+                condition_on_previous_text_used=bool(p.get("condition_on_previous_text", False)),
+            )
+
+        _DEFAULT_PREPEND_PUNCT = "\"" + chr(0x2018) + chr(0x201C) + chr(0x00BF) + "([{-"
+        _DEFAULT_APPEND_PUNCT = (
+            "\"" + chr(0x2019) + "." + chr(0x3002) + "," + chr(0xFF0C)
+            + "!" + chr(0xFF01) + "?" + chr(0xFF1F) + ":" + chr(0xFF1A)
+            + chr(0x201D) + ")]}" + chr(0x3001)
+        )
+        prepend_punctuations = p.get("prepend_punctuations") or _DEFAULT_PREPEND_PUNCT
+        append_punctuations = p.get("append_punctuations") or _DEFAULT_APPEND_PUNCT
+
+        response_format = p.get("response_format") or "json"
+        word_timestamps = bool(p.get("word_timestamps", False))
+        # OpenAI compat: if the caller asked for the ``word`` granularity
+        # via ``timestamp_granularities[]=word`` (the official OpenAI
+        # field), flip on word_timestamps.  ``segment`` is implicit and
+        # ignored.  Unknown values are silently dropped to stay forward-
+        # compatible with future OpenAI additions.
+        if not word_timestamps:
+            granularities = p.get("timestamp_granularities") or []
+            if isinstance(granularities, list) and any(
+                isinstance(g, str) and g.strip().lower() == "word"
+                for g in granularities
+            ):
+                word_timestamps = True
+        is_separate_bgm = bool(p.get("is_separate_bgm", False))
+
+        vocals_path = None
         try:
-            kwargs = {"word_timestamps": True}
-            if language:
-                kwargs["language"] = language
-            if prompt:
-                kwargs["initial_prompt"] = prompt
-            if temperature > 0:
-                kwargs["temperature"] = temperature
+            if is_separate_bgm:
+                with _lock:
+                    vocals_path = _run_bgm_separation(
+                        audio_path,
+                        p.get("uvr_model_size") or "UVR-MDX-NET-Inst_HQ_4",
+                        p.get("uvr_device") or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu"),
+                        int(p.get("uvr_segment_size") or 256),
+                        bool(p.get("uvr_save_file", False)),
+                        bool(p.get("uvr_enable_offload", True)),
+                    )
+                transcribe_path = vocals_path
+            else:
+                transcribe_path = audio_path
+
+            need_segments = response_format in ("verbose_json", "srt", "vtt", "lrc")
+            temps = _parse_temperature(p.get("temperature") or "0,0.2,0.4,0.6,0.8,1.0")
+
+            vad_params = {
+                "threshold": p.get("vad_threshold", 0.5),
+                "min_speech_duration_ms": p.get("vad_min_speech_duration_ms", 250),
+                "max_speech_duration_s": p.get("vad_max_speech_duration_s", 9999),
+                "min_silence_duration_ms": p.get("vad_min_silence_duration_ms", 500),
+                "speech_pad_ms": p.get("vad_speech_pad_ms", 400),
+                "min_silence_at_max_speech": p.get("vad_min_silence_at_max_speech", 98),
+                "use_max_poss_sil_at_max_speech": p.get("vad_use_max_poss_sil_at_max_speech", True),
+            }
+            if p.get("vad_neg_threshold") is not None:
+                vad_params["neg_threshold"] = p["vad_neg_threshold"]
+
+            # Drop VAD kwargs that the installed faster-whisper's
+            # VadOptions doesn't accept (see introspection block above).
+            # This keeps the Form API surface stable while degrading
+            # gracefully on older wheels.
+            if _VAD_OPTIONS_FIELDS:
+                _dropped = [k for k in vad_params if k not in _VAD_OPTIONS_FIELDS]
+                if _dropped:
+                    _diag_log(
+                        "Dropping VAD kwargs not supported by installed "
+                        "VadOptions: %s", _dropped,
+                    )
+                    _meta_set(vad_dropped_fields=_dropped)
+                    vad_params = {
+                        k: v for k, v in vad_params.items()
+                        if k in _VAD_OPTIONS_FIELDS
+                    }
+
+            kwargs = {
+                "task": task,
+                "beam_size": p.get("beam_size", 5),
+                "best_of": p.get("best_of", 5),
+                "patience": p.get("patience", 1),
+                "length_penalty": p.get("length_penalty", 1),
+                "repetition_penalty": p.get("repetition_penalty", 1),
+                "no_repeat_ngram_size": p.get("no_repeat_ngram_size", 0),
+                "condition_on_previous_text": p.get("condition_on_previous_text", False),
+                "prompt_reset_on_temperature": p.get("prompt_reset_on_temperature", 0.5),
+                "hallucination_silence_threshold": p.get("hallucination_silence_threshold", 2),
+                "compression_ratio_threshold": p.get("compression_ratio_threshold", 2.4),
+                "log_prob_threshold": p.get("log_prob_threshold", -1.0),
+                "no_speech_threshold": p.get("no_speech_threshold", 0.6),
+                "temperature": temps,
+                "word_timestamps": word_timestamps or need_segments,
+                "without_timestamps": p.get("without_timestamps", False),
+                "max_initial_timestamp": p.get("max_initial_timestamp", 1.0),
+                "suppress_blank": p.get("suppress_blank", True),
+                "suppress_tokens": _parse_int_list(p.get("suppress_tokens") or "-1"),
+                "prepend_punctuations": prepend_punctuations,
+                "append_punctuations": append_punctuations,
+                "multilingual": p.get("multilingual", False),
+                "log_progress": p.get("log_progress", False),
+                "language_detection_threshold": p.get("language_detection_threshold", 0.5),
+                "language_detection_segments": p.get("language_detection_segments", 1),
+                "vad_filter": p.get("vad_filter", True),
+                "vad_parameters": vad_params,
+            }
+            # ── clip_timestamps API-layer normalisation ──────────────
+            # The Form field is a string ("0" by default, or "5,12.5,20"
+            # for explicit clip points).  ``WhisperModel.transcribe``
+            # parses such strings internally so Buffered has always
+            # worked, but ``BatchedInferencePipeline.transcribe`` in some
+            # faster-whisper versions iterates the value directly and
+            # explodes on a string with ``TypeError: string indices must
+            # be integers, not 'str'`` -- which would silently force
+            # every Batched call to fall back to Buffered.
+            #
+            # Fix is intentionally scoped to ``_do_transcribe`` (API
+            # layer only) so the shared ``_patched_transcribe`` engine
+            # path is not touched -- the WebUI never sets this kwarg
+            # explicitly, so its behaviour is byte-identical with or
+            # without this normalisation.
+            ct_raw = (p.get("clip_timestamps") or "0").strip()
+            if ct_raw and ct_raw != "0":
+                try:
+                    kwargs["clip_timestamps"] = [
+                        float(x) for x in ct_raw.split(",") if x.strip()
+                    ]
+                except ValueError:
+                    # Unparseable -> leave the kwarg out so faster-whisper
+                    # uses its own default rather than choking on garbage.
+                    pass
+            # else: omit the kwarg (faster-whisper's own default = no
+            # clipping = full audio, on both Buffered and Batched paths)
+            if p.get("max_new_tokens") is not None:
+                kwargs["max_new_tokens"] = p["max_new_tokens"]
+            if p.get("chunk_length") is not None:
+                kwargs["chunk_length"] = p["chunk_length"]
+
+            # Accept either ISO 639-1 codes (``en``, ``zh``) or English
+            # names (``English``, ``Chinese``); faster-whisper itself only
+            # accepts the former.  See _normalize_language above.
+            resolved_lang = _normalize_language(p.get("language"))
+            _meta_set(language_resolved=resolved_lang)
+            if not resolved_lang:
+                with _lock:
+                    _ensure_model_loaded(p.get("model"), p.get("compute_type"))
+                    # _skip_pipeline=True: only ``info`` is consulted, so we
+                    # skip the cost of cleaning / merging on this throwaway
+                    # transcription.
+                    _, detect_info = _whisper_inf.model.transcribe(
+                        transcribe_path, vad_filter=True,
+                        _skip_pipeline=True,
+                    )
+                if detect_info and detect_info.language_probability >= _LANG_DETECT_CONFIDENCE:
+                    resolved_lang = detect_info.language
+                    _diag_log(
+                        "Auto-detected language: %s (confidence=%.2f)",
+                        resolved_lang, detect_info.language_probability,
+                    )
+                    _meta_set(language_resolved=resolved_lang)
+
+            if resolved_lang:
+                kwargs["language"] = resolved_lang
+
+            if p.get("prompt"):
+                kwargs["initial_prompt"] = p["prompt"]
+            elif resolved_lang in _LANG_PROMPTS:
+                kwargs["initial_prompt"] = _LANG_PROMPTS[resolved_lang]
+
+            if p.get("hotwords"):
+                kwargs["hotwords"] = p["hotwords"]
+            if p.get("prefix"):
+                kwargs["prefix"] = p["prefix"]
+
+            kwargs["_text_cleaning"] = bool(p.get("text_cleaning", True))
+            kwargs["_segment_merging"] = bool(p.get("segment_merging", True))
+            if p.get("batched") is not None:
+                kwargs["_batched"] = bool(p["batched"])
+            if p.get("batch_size") is not None:
+                kwargs["_batch_size"] = int(p["batch_size"])
+
+            # API-only defensive filter: drop any kwarg the installed
+            # WhisperModel.transcribe doesn't recognise.  Same pattern
+            # we use above for VadOptions.  This filter is scoped to
+            # ``_do_transcribe`` (API path) intentionally -- the shared
+            # ``_patched_transcribe`` engine layer is untouched so the
+            # Gradio UI path keeps its byte-identical kwargs flow.
+            #
+            # Special keys starting with ``_`` (``_text_cleaning``,
+            # ``_segment_merging``, ``_batched``, ``_batch_size``) are
+            # popped by ``_patched_transcribe`` before it forwards
+            # kwargs to faster-whisper, so they're whitelisted here.
+            _PASSTHROUGH = {
+                "_text_cleaning", "_segment_merging", "_batched", "_batch_size",
+            }
+            if _TRANSCRIBE_KWARGS:
+                _unknown = [
+                    k for k in kwargs
+                    if k not in _TRANSCRIBE_KWARGS and k not in _PASSTHROUGH
+                ]
+                if _unknown:
+                    _diag_log(
+                        "Dropping transcribe kwargs not supported by "
+                        "installed WhisperModel.transcribe: %s", _unknown,
+                    )
+                    _meta_set(transcribe_dropped_kwargs=list(_unknown))
+                    for k in _unknown:
+                        kwargs.pop(k, None)
 
             with _lock:
-                _ensure_model_loaded(model)
-                segments, info = _whisper_inf.model.transcribe(tmp_path, **kwargs)
-                text = " ".join(seg.text for seg in segments).strip()
+                _ensure_model_loaded(p.get("model"), p.get("compute_type"))
+                segments_gen, info = _whisper_inf.model.transcribe(transcribe_path, **kwargs)
+                seg_list = []
+                for seg in segments_gen:
+                    seg_dict = {
+                        "id": seg.id,
+                        "start": seg.start,
+                        "end": seg.end,
+                        "text": seg.text,
+                        "avg_logprob": seg.avg_logprob,
+                        "compression_ratio": seg.compression_ratio,
+                        "no_speech_prob": seg.no_speech_prob,
+                        "temperature": seg.temperature,
+                    }
+                    if word_timestamps and hasattr(seg, "words") and seg.words:
+                        seg_dict["words"] = [
+                            {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
+                            for w in seg.words
+                        ]
+                    seg_list.append(seg_dict)
+                text = " ".join(s["text"] for s in seg_list).strip()
+
+            if p.get("is_diarize") and seg_list:
+                with _lock:
+                    d_device = p.get("diarization_device") or ("cuda" if _whisper_inf and hasattr(_whisper_inf, "device") else "cpu")
+                    seg_list = _run_diarization(
+                        audio_path, seg_list, p.get("hf_token", ""),
+                        d_device, bool(p.get("diarization_enable_offload", True)),
+                    )
+
+            # ── Response shape ───────────────────────────────────────
+            # Default path (``_diag`` unset/false): responses are byte-
+            # identical to OpenAI Whisper API -- no extra JSON keys, no
+            # extra headers.  This is what every public-doc example
+            # produces and what every OpenAI SDK sees.
+            #
+            # Opt-in path (``_diag=true``): verbose_json body gains a
+            # ``_meta`` field, non-JSON formats gain a small set of
+            # ``X-Whisper-*`` response headers.  Used only by our
+            # controlled-verification test scripts.
+            def _maybe_headers():
+                if not diag_on:
+                    return None
+                call_meta = _meta_get()
+                hdr = {}
+                for k in ("path", "batched_requested", "text_cleaning_active",
+                          "segment_merging_active", "language_resolved",
+                          "condition_on_previous_text_used"):
+                    v = call_meta.get(k)
+                    if v is None:
+                        continue
+                    hdr[f"X-Whisper-{k.replace('_', '-')}"] = str(v)
+                if call_meta.get("batched_typeerror"):
+                    hdr["X-Whisper-Batched-TypeError"] = call_meta["batched_typeerror"][:200]
+                return hdr
 
             if response_format == "text":
-                return PlainTextResponse(text)
-            elif response_format == "verbose_json":
-                return {
-                    "text": text,
+                return PlainTextResponse(text, headers=_maybe_headers())
+            if response_format == "srt":
+                return PlainTextResponse(
+                    _segments_to_srt(seg_list),
+                    media_type="text/plain",
+                    headers=_maybe_headers(),
+                )
+            if response_format == "vtt":
+                return PlainTextResponse(
+                    _segments_to_vtt(seg_list),
+                    media_type="text/vtt",
+                    headers=_maybe_headers(),
+                )
+            if response_format == "lrc":
+                return PlainTextResponse(
+                    _segments_to_lrc(seg_list),
+                    media_type="text/plain",
+                    headers=_maybe_headers(),
+                )
+            if response_format == "verbose_json":
+                body = {
+                    "task": task,
                     "language": info.language if info else None,
                     "duration": info.duration if info else None,
+                    "text": text,
+                    "segments": seg_list,
                 }
-            else:
-                return {"text": text}
+                if diag_on:
+                    body["_meta"] = _meta_get()
+                return JSONResponse(content=body, headers=_maybe_headers())
+            # Default ``json`` format: byte-identical to OpenAI.
+            return JSONResponse(
+                content={"text": text},
+                headers=_maybe_headers(),
+            )
+        finally:
+            if vocals_path and vocals_path != audio_path and os.path.exists(vocals_path):
+                try:
+                    os.unlink(vocals_path)
+                except OSError:
+                    pass
+
+    @api_app.post("/v1/audio/transcriptions")
+    async def transcribe(
+        file: UploadFile = File(...),
+        p: dict = Depends(_transcribe_form_params),
+    ):
+        """OpenAI-compatible transcription endpoint.  Accepts every Whisper
+        decoder / VAD / BGM / diarization / post-processing knob the engine
+        supports -- see /docs (FastAPI auto-OpenAPI) for the full schema.
+        """
+        tmp_path = await _save_upload_to_temp(file)
+        try:
+            return await _do_transcribe(tmp_path, **p)
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            os.unlink(tmp_path)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    @api_app.post("/v1/audio/transcriptions/youtube")
+    async def transcribe_youtube_url(
+        youtube_url: str = Form(...),
+        p: dict = Depends(_transcribe_form_params),
+    ):
+        """Transcribe a YouTube video by URL.  Audio is downloaded via
+        pytubefix into a per-request temp directory then handed to the
+        same pipeline as the file-upload endpoint, so every form
+        parameter (language / VAD / Batched / Cleaning / Merging /
+        Diarization / etc.) applies here too.
+        """
+        audio_path = _download_youtube_audio(youtube_url)
+        tmp_dir = os.path.dirname(audio_path)
+        try:
+            return await _do_transcribe(audio_path, **p)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"YouTube transcription error: {e}")
+            raise HTTPException(500, str(e))
+        finally:
+            if tmp_dir and os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    @api_app.post("/v1/audio/translations")
+    async def translate_audio(
+        file: UploadFile = File(...),
+        p: dict = Depends(_transcribe_form_params),
+    ):
+        """OpenAI-compatible translation endpoint -- translates speech to
+        English.  Accepts the SAME full parameter set as the transcription
+        endpoint; we deliberately exceed OpenAI's narrow public spec here
+        so that VAD / BGM / Diarization / Batched / post-processing are
+        all available on the translation path too.  Form field ``task``
+        is force-overridden to ``translate``.
+        """
+        tmp_path = await _save_upload_to_temp(file)
+        try:
+            return await _do_transcribe(tmp_path, force_task="translate", **p)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Translation error: {e}")
+            raise HTTPException(500, str(e))
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+    @api_app.get("/v1/youtube/metadata")
+    async def youtube_metadata(url: str = Query(..., description="YouTube video URL")):
+        """Fetch metadata (title, description, thumbnail, duration) for a
+        YouTube URL without downloading the audio.  Mirrors the side panel
+        shown next to upstream Whisper-WebUI's "Youtube" tab.
+        """
+        try:
+            from pytubefix import YouTube
+        except ImportError as exc:
+            raise HTTPException(
+                500,
+                "pytubefix is not installed inside the runtime image.",
+            ) from exc
+        try:
+            yt = YouTube(url)
+            return {
+                "title": getattr(yt, "title", None),
+                "author": getattr(yt, "author", None),
+                "description": getattr(yt, "description", None),
+                "thumbnail_url": getattr(yt, "thumbnail_url", None),
+                "length_seconds": getattr(yt, "length", None),
+                "views": getattr(yt, "views", None),
+                "publish_date": yt.publish_date.isoformat() if getattr(yt, "publish_date", None) else None,
+                "channel_url": getattr(yt, "channel_url", None),
+            }
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Failed to fetch YouTube metadata: {e}")
+
+    # ──────────────────────────────────────────────────────────────
+    # NLLB text / subtitle translation
+    # (modules.translation.nllb_inference.NLLBInference)
+    # ──────────────────────────────────────────────────────────────
+
+    _nllb_inf = None
+    _nllb_init_lock = threading.Lock()
+    _nllb_call_lock = threading.Lock()
+
+    def _get_nllb():
+        """Lazy-init the upstream NLLBInference singleton."""
+        global _nllb_inf
+        if _nllb_inf is not None:
+            return _nllb_inf
+        with _nllb_init_lock:
+            if _nllb_inf is not None:
+                return _nllb_inf
+            try:
+                from modules.translation.nllb_inference import NLLBInference
+                from modules.utils.paths import NLLB_MODELS_DIR, TRANSLATION_OUTPUT_DIR
+                _nllb_inf = NLLBInference(
+                    model_dir=NLLB_MODELS_DIR,
+                    output_dir=TRANSLATION_OUTPUT_DIR,
+                )
+                return _nllb_inf
+            except Exception as exc:
+                logger.exception("NLLBInference unavailable")
+                raise HTTPException(500, f"NLLB unavailable: {exc}")
+
+    def _normalise_nllb_lang(lang: str, what: str) -> str:
+        """Resolve a caller-supplied NLLB source/target language to the
+        friendly name upstream's ``update_model`` requires.
+
+        ``modules.translation.nllb_inference`` indexes
+        ``NLLB_AVAILABLE_LANGS`` by *key* (friendly name) and would fall
+        back to whatever default the upstream model card uses if the
+        argument doesn't match.  The public guide and the
+        ``GET /v1/translations/nllb/languages`` payload advertise
+        ``name`` and ``code`` as interchangeable inputs, so this shim
+        accepts either and returns the friendly name -- and rejects
+        anything else with a clear 400.
+
+        Mirrors ``_normalise_deepl_lang`` so the two text-translation
+        endpoints behave identically from the caller's perspective.
+        """
+        if not isinstance(lang, str) or not lang.strip():
+            raise HTTPException(400, f"NLLB {what} language is required")
+        s = lang.strip()
+        try:
+            from modules.translation.nllb_inference import NLLB_AVAILABLE_LANGS
+        except Exception as exc:
+            raise HTTPException(500, f"NLLB language list unavailable: {exc}")
+        if s in NLLB_AVAILABLE_LANGS:
+            return s
+        for name, code in NLLB_AVAILABLE_LANGS.items():
+            if code == s or code.lower() == s.lower() or name.lower() == s.lower():
+                return name
+        raise HTTPException(
+            400,
+            f"Unknown NLLB {what} language {lang!r}. "
+            f"Use the 'name' or 'code' from "
+            f"GET /v1/translations/nllb/languages."
+        )
+
+    def _nllb_apply_pair(model_size: str, src_lang: str, tgt_lang: str):
+        """Apply the requested (model_size, src_lang, tgt_lang) triple to
+        the shared ``NLLBInference`` singleton by calling
+        ``nllb.update_model(...)`` on every request.
+
+        We deliberately do NOT cache the last applied (model, src, tgt)
+        tuple in the API layer.  The same ``NLLBInference`` singleton is
+        also driven by the WebUI's NLLB Translation tab, which can change
+        the pipeline's pinned language pair behind our back -- a cache
+        keyed on our own bookkeeping would then silently translate in the
+        wrong direction.  The price of always calling ``update_model``
+        here is one cheap dict lookup + one HF pipeline rebuild; the
+        underlying model file is never re-downloaded.
+        """
+        nllb = _get_nllb()
+        try:
+            import gradio as gr
+            nllb.update_model(model_size, src_lang, tgt_lang, gr.Progress())
+        except Exception as exc:
+            raise HTTPException(500, f"Failed to load NLLB model: {exc}")
+
+    @api_app.get("/v1/translations/nllb/models")
+    async def nllb_models():
+        """List NLLB-200 model variants the upstream module advertises."""
+        nllb = _get_nllb()
+        return {
+            "object": "list",
+            "data": [
+                {"id": m, "object": "model", "owned_by": "facebook", "created": 0}
+                for m in getattr(nllb, "available_models", [])
+            ],
+        }
+
+    @api_app.get("/v1/translations/nllb/languages")
+    async def nllb_languages():
+        """List NLLB language friendly-name → code mappings.
+        Either side (name or code) is accepted by the translate endpoint.
+        """
+        try:
+            from modules.translation.nllb_inference import NLLB_AVAILABLE_LANGS
+            return {
+                "object": "list",
+                "data": [{"name": name, "code": code} for name, code in NLLB_AVAILABLE_LANGS.items()],
+            }
+        except Exception as exc:
+            raise HTTPException(500, f"NLLB language list unavailable: {exc}")
+
+    @api_app.post("/v1/text/translations/nllb")
+    async def nllb_translate(
+        src_lang: str = Form(..., description="Source language (friendly name or NLLB code)"),
+        tgt_lang: str = Form(..., description="Target language (friendly name or NLLB code)"),
+        model_size: str = Form("facebook/nllb-200-distilled-600M"),
+        max_length: int = Form(200),
+        text: str = Form(None, description="Plain string OR JSON-encoded list of strings"),
+        file: UploadFile = File(None, description="Optional .srt / .vtt upload"),
+        response_format: str = Form("json", description="json / text / srt / vtt / lrc"),
+    ):
+        """Translate plain text OR a subtitle file using Facebook NLLB-200.
+
+        Provide EITHER ``text`` OR ``file``, not both.
+
+        ``text`` can be a single string (returned as ``{"text": "..."}``)
+        or a JSON-encoded list of strings (returned as ``{"texts": [...]}`` ).
+
+        For ``file`` uploads (.srt/.vtt), the subtitle is parsed in-memory,
+        every cue's text is translated, and the file is rebuilt in the
+        requested ``response_format`` (default ``json`` returns both the
+        joined text and the segments array).
+        """
+        if (not text) and file is None:
+            raise HTTPException(400, "Provide either 'text' or 'file'")
+        if text and file is not None:
+            raise HTTPException(400, "Provide only one of 'text' or 'file'")
+
+        src_lang = _normalise_nllb_lang(src_lang, "source")
+        tgt_lang = _normalise_nllb_lang(tgt_lang, "target")
+
+        nllb = _get_nllb()
+
+        if text:
+            items = None
+            stripped = text.lstrip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                        items = parsed
+                except (ValueError, TypeError):
+                    items = None
+            if items is None:
+                items = [text]
+
+            with _nllb_call_lock:
+                _nllb_apply_pair(model_size, src_lang, tgt_lang)
+                outs = [nllb.translate(t, max_length=max_length) for t in items]
+
+            if response_format == "text":
+                return PlainTextResponse("\n".join(outs))
+            if len(items) == 1:
+                return {"text": outs[0]}
+            return {"texts": outs}
+
+        raw = await file.read()
+        segs = _parse_subtitle_bytes(file.filename or "", raw)
+        if not segs:
+            raise HTTPException(400, "No subtitle segments parsed from the uploaded file")
+
+        with _nllb_call_lock:
+            _nllb_apply_pair(model_size, src_lang, tgt_lang)
+            for s in segs:
+                s["text"] = nllb.translate(s["text"], max_length=max_length)
+
+        full_text = "\n".join(s["text"] for s in segs).strip()
+        if response_format == "srt":
+            return PlainTextResponse(_segments_to_srt(segs), media_type="text/plain")
+        if response_format == "vtt":
+            return PlainTextResponse(_segments_to_vtt(segs), media_type="text/vtt")
+        if response_format == "lrc":
+            return PlainTextResponse(_segments_to_lrc(segs), media_type="text/plain")
+        if response_format == "text":
+            return PlainTextResponse(full_text)
+        return {"text": full_text, "segments": segs}
+
+    # ──────────────────────────────────────────────────────────────
+    # DeepL text / subtitle translation
+    # (modules.translation.deepl_api.DeepLAPI)
+    #
+    # Caller supplies their own DeepL API key per request.  Nothing
+    # is stored server-side -- we deliberately bypass upstream's
+    # ``translate_deepl`` because that one serialises the key to
+    # ``configs/default_parameters.yaml`` as a side effect.  We call
+    # the inner ``request_deepl_translate`` directly to keep the key
+    # in-memory only.
+    # ──────────────────────────────────────────────────────────────
+
+    _deepl_api = None
+    _deepl_init_lock = threading.Lock()
+
+    def _get_deepl():
+        global _deepl_api
+        if _deepl_api is not None:
+            return _deepl_api
+        with _deepl_init_lock:
+            if _deepl_api is not None:
+                return _deepl_api
+            try:
+                from modules.translation.deepl_api import DeepLAPI
+                from modules.utils.paths import TRANSLATION_OUTPUT_DIR
+                _deepl_api = DeepLAPI(output_dir=TRANSLATION_OUTPUT_DIR)
+                return _deepl_api
+            except Exception as exc:
+                logger.exception("DeepLAPI unavailable")
+                raise HTTPException(500, f"DeepL unavailable: {exc}")
+
+    def _normalise_deepl_results(res):
+        out = []
+        for r in res or []:
+            if isinstance(r, dict):
+                out.append(r.get("text", ""))
+            else:
+                out.append(str(r))
+        return out
+
+    def _redact_deepl_error(exc: Exception, auth_key: str) -> str:
+        """Stringify a DeepL request exception with the caller's
+        ``auth_key`` masked.
+
+        DeepL's wrapper occasionally embeds the URL with the key as a
+        query parameter into its error messages.  We don't want to echo
+        that back in HTTP 502 responses.
+        """
+        msg = str(exc)
+        if auth_key and len(auth_key) >= 6:
+            tail = auth_key[-4:]
+            msg = msg.replace(auth_key, f"***{tail}")
+        return msg
+
+    def _normalise_deepl_lang(lang, lookup, what):
+        """Resolve a caller-supplied DeepL source/target language to the
+        friendly name DeepL's wrapper requires.
+
+        ``modules.translation.deepl_api.DeepLAPI.request_deepl_translate``
+        indexes ``DEEPL_AVAILABLE_*_LANGS`` by *key* (friendly name) and
+        rejects anything else with ``ValueError``.  The public guide and
+        the ``GET /v1/translations/deepl/languages`` payload both
+        advertise ``name`` and ``code`` as interchangeable, so this shim
+        bridges the gap: callers can pass ``"English"``, ``"english"``,
+        ``"EN"``, ``"en"``, ``"EN-US"``, ``"Automatic Detection"`` --
+        anything that uniquely identifies an entry in the lookup table.
+
+        Pure API-layer normalisation; the engine layer and the WebUI
+        path never touch this function.
+
+        Empty / whitespace-only inputs raise ``400 Bad Request`` (symmetric
+        with ``_normalise_nllb_lang`` -- both endpoints fail the same way
+        when ``src_lang`` / ``tgt_lang`` is missing, rather than the old
+        asymmetric ``DeepL=502 / NLLB=400`` split caused by silently
+        forwarding empty strings to the upstream wrapper).
+        """
+        if not isinstance(lang, str) or not lang.strip():
+            raise HTTPException(400, f"DeepL {what} language is required")
+        if lang in lookup:
+            return lang
+        folded = lang.casefold()
+        for name in lookup:
+            if name.casefold() == folded:
+                return name
+        upper = lang.upper()
+        for name, code in lookup.items():
+            if code and code.upper() == upper:
+                return name
+        raise HTTPException(
+            400,
+            f"Unknown DeepL {what} language {lang!r}. "
+            f"Use the 'name' or 'code' from "
+            f"GET /v1/translations/deepl/languages."
+        )
+
+    @api_app.get("/v1/translations/deepl/languages")
+    async def deepl_languages():
+        """Return DeepL's accepted source / target language sets.
+        Use these names verbatim or substitute the raw DeepL code.
+        """
+        try:
+            from modules.translation.deepl_api import (
+                DEEPL_AVAILABLE_SOURCE_LANGS,
+                DEEPL_AVAILABLE_TARGET_LANGS,
+            )
+            return {
+                "source": [{"name": n, "code": c} for n, c in DEEPL_AVAILABLE_SOURCE_LANGS.items()],
+                "target": [{"name": n, "code": c} for n, c in DEEPL_AVAILABLE_TARGET_LANGS.items()],
+            }
+        except Exception as exc:
+            raise HTTPException(500, f"DeepL language list unavailable: {exc}")
+
+    @api_app.post("/v1/text/translations/deepl")
+    async def deepl_translate(
+        auth_key: str = Form(..., description="DeepL API key (free or Pro)"),
+        src_lang: str = Form(..., description="Source language (name or DeepL code)"),
+        tgt_lang: str = Form(..., description="Target language (name or DeepL code)"),
+        is_pro: bool = Form(False, description="Pro tier? Routes to api.deepl.com vs api-free.deepl.com"),
+        text: str = Form(None, description="Plain string OR JSON-encoded list of strings"),
+        file: UploadFile = File(None, description="Optional .srt / .vtt upload"),
+        response_format: str = Form("json", description="json / text / srt / vtt / lrc"),
+    ):
+        """Translate plain text or a subtitle file via DeepL.
+
+        Provide EITHER ``text`` OR ``file``.  Subtitle uploads are parsed
+        in-memory, translated in batches of 50 (DeepL's default), and
+        re-emitted in the requested ``response_format``.
+
+        The caller-supplied ``auth_key`` is forwarded to DeepL via the
+        ``Authorization: DeepL-Auth-Key`` header and is NEVER persisted
+        to disk on this server -- we bypass upstream's helper that
+        otherwise caches it in ``default_parameters.yaml``.
+        """
+        if (not text) and file is None:
+            raise HTTPException(400, "Provide either 'text' or 'file'")
+        if text and file is not None:
+            raise HTTPException(400, "Provide only one of 'text' or 'file'")
+
+        # Honour the public guide's promise that ``src_lang`` / ``tgt_lang``
+        # accept either DeepL's friendly name (``"English"``) or its
+        # short code (``"EN"`` / ``"EN-US"``).  Upstream's
+        # ``request_deepl_translate`` validates strictly against the
+        # friendly-name keys, so without this shim every code-form
+        # caller hits ``502 DeepL request failed: Source language EN is
+        # not supported``.  Pure API-layer normalisation.
+        from modules.translation.deepl_api import (
+            DEEPL_AVAILABLE_SOURCE_LANGS,
+            DEEPL_AVAILABLE_TARGET_LANGS,
+        )
+        src_lang = _normalise_deepl_lang(
+            src_lang, DEEPL_AVAILABLE_SOURCE_LANGS, "source",
+        )
+        tgt_lang = _normalise_deepl_lang(
+            tgt_lang, DEEPL_AVAILABLE_TARGET_LANGS, "target",
+        )
+
+        deepl = _get_deepl()
+
+        if text:
+            items = None
+            stripped = text.lstrip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                        items = parsed
+                except (ValueError, TypeError):
+                    items = None
+            if items is None:
+                items = [text]
+
+            try:
+                res = deepl.request_deepl_translate(auth_key, items, src_lang, tgt_lang, is_pro)
+            except Exception as exc:
+                raise HTTPException(502, f"DeepL request failed: {_redact_deepl_error(exc, auth_key)}")
+            outs = _normalise_deepl_results(res)
+            if len(outs) != len(items):
+                raise HTTPException(502, f"DeepL returned {len(outs)} items for {len(items)} inputs")
+
+            if response_format == "text":
+                return PlainTextResponse("\n".join(outs))
+            if len(items) == 1:
+                return {"text": outs[0]}
+            return {"texts": outs}
+
+        raw = await file.read()
+        segs = _parse_subtitle_bytes(file.filename or "", raw)
+        if not segs:
+            raise HTTPException(400, "No subtitle segments parsed from the uploaded file")
+
+        BATCH = 50
+        translated = []
+        try:
+            for i in range(0, len(segs), BATCH):
+                chunk = [s["text"] for s in segs[i:i + BATCH]]
+                res = deepl.request_deepl_translate(auth_key, chunk, src_lang, tgt_lang, is_pro)
+                translated.extend(_normalise_deepl_results(res))
+        except Exception as exc:
+            raise HTTPException(502, f"DeepL request failed: {_redact_deepl_error(exc, auth_key)}")
+        if len(translated) != len(segs):
+            raise HTTPException(502, f"DeepL returned {len(translated)} items for {len(segs)} segments")
+
+        for s, t in zip(segs, translated):
+            s["text"] = t
+        full_text = "\n".join(s["text"] for s in segs).strip()
+        if response_format == "srt":
+            return PlainTextResponse(_segments_to_srt(segs), media_type="text/plain")
+        if response_format == "vtt":
+            return PlainTextResponse(_segments_to_vtt(segs), media_type="text/vtt")
+        if response_format == "lrc":
+            return PlainTextResponse(_segments_to_lrc(segs), media_type="text/plain")
+        if response_format == "text":
+            return PlainTextResponse(full_text)
+        return {"text": full_text, "segments": segs}
 
     def run_api(whisper_inf, port=8000):
         global _whisper_inf
@@ -152,10 +1515,1225 @@ data:
         logger.info(f"OpenAI-compatible API starting on port {port}")
         uvicorn.run(api_app, host="0.0.0.0", port=port, log_level="info")
 
+    # ── Engine-level monkey-patches (batched routing, temperature fallback, auto prompt, post-processing) ──
+
+    # User-controllable runtime flags.  Controlled by the WebUI checkboxes
+    # (see ``_patch_gradio_ui``) or per-request via the API form fields.
+    # All three default ON; persisted to ``default_parameters.yaml`` under
+    # the ``_post_processing`` section so user choices survive Pod restarts.
+    _text_cleaning_enabled = True
+    _segment_merging_enabled = True
+    _batched_enabled = True
+
+    # Serialises every yaml read-modify-write inside this process so two
+    # Gradio change-callbacks (which run on Gradio's threadpool) can't
+    # interleave their ``open('w')`` -- ``load_yaml`` -- ``save_yaml``
+    # sequences against each other.  Without this, a rapid double-toggle
+    # was reproducibly causing one thread to ``load_yaml`` an empty file
+    # mid-truncate, get ``None`` back, then raise ``TypeError`` on
+    # ``params["_post_processing"] = ...`` and tear down the Gradio
+    # request handler (whose 500 also kicked the frontend WebSocket --
+    # which is why "Connection errored out" surfaces alongside the
+    # backend TypeError).  The lock only protects us against ourselves;
+    # upstream's ``cache_parameters`` (called from transcribe) writes
+    # the same file without sharing this lock, which is why every call
+    # site below ALSO does an explicit ``isinstance(params, dict)``
+    # bail-out -- best-effort defence against an external truncate
+    # racing our read.  When that bail-out fires, we simply skip this
+    # particular write; the next change event will retry.
+    _yaml_lock = threading.Lock()
+
+    # Default batch size for BatchedInferencePipeline.  16 is the value
+    # recommended in faster-whisper Discussion #1057 for GPU inference;
+    # callers can override per-request via the ``_batch_size`` kwarg or
+    # API form field.
+    _BATCHED_DEFAULT_BATCH_SIZE = 16
+
+    # Kwargs silently popped when routing to BatchedInferencePipeline.
+    # The Batched path either FORCES these internally or BYPASSES them
+    # entirely, so leaving them in kwargs would either be a no-op or
+    # raise a TypeError depending on faster-whisper version.  We strip
+    # them defensively and log at INFO so users (WebUI and API alike) can
+    # see in the logs that the yaml setting had no effect under Batched
+    # mode.
+    #
+    #   * condition_on_previous_text  -- forced False (chunks independent)
+    #   * prompt_reset_on_temperature -- moot without temperature fallback
+    #   * hallucination_silence_threshold -- needs in-chunk silences that
+    #     BatchedInferencePipeline's VAD has already cut out
+    #   * vad_filter / vad_parameters -- replaced by Batched VAD model
+    _BATCHED_DROPPED_KWARGS = frozenset({
+        "condition_on_previous_text",
+        "prompt_reset_on_temperature",
+        "hallucination_silence_threshold",
+        "vad_filter",
+        "vad_parameters",
+    })
+
+    _TEMP_STEPS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    def _build_temp_fallback(user_temp):
+        """Build fallback temperature list starting from user's chosen value."""
+        if isinstance(user_temp, (list, tuple)):
+            return list(user_temp)
+        user_temp = float(user_temp)
+        fallback = [t for t in _TEMP_STEPS if t >= user_temp - 0.01]
+        if not fallback or abs(fallback[0] - user_temp) > 0.01:
+            fallback.insert(0, user_temp)
+        return fallback
+
+    _CJK_RE = re.compile(
+        r'[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\u3040-\u309f'
+        r'\u30a0-\u30ff\uac00-\ud7af]'
+    )
+    _REPEAT_RE = re.compile(r'(.{4,80}?)\1{2,}')
+    _PHRASE_PUNCT_RE = re.compile(r'[\s,，.。!！?？;；:：、\-—]')
+    _ASCII_TO_FULLWIDTH = str.maketrans({
+        ',': '\uff0c', '?': '\uff1f', '!': '\uff01', ':': '\uff1a',
+    })
+
+    # Used by the merge logic to decide whether a segment "ends a thought".
+    # NOTE: ellipsis (U+2026 '…' or 2+ ASCII dots) is INTENTIONALLY excluded
+    # from the sentence-ending set -- in subtitle conventions it functions
+    # as a continuation marker (this line spills into the next).  Treating
+    # it as a sentence end caused 1.0.15 to leave broken-mid-sentence pairs
+    # like "...emotion in a..." / "nature such as his..." un-merged.
+    _SENT_END_CHARS = frozenset('.!?\u3002\uff01\uff1f')
+    _CLOSING_QUOTE_BRACKET_CHARS = frozenset(
+        '"\'\u201d\u2019\u300d\u300f\u3015\uff09)]}'
+    )
+
+    def _is_complete_thought(text):
+        """True iff ``text`` ends with sentence-ending punctuation that is
+        NOT an ellipsis.  Trailing closing quotes / brackets are peeled off
+        before the final-character check so that
+
+            He said, "Hello."     -> complete
+            He said, "Hello..."   -> NOT complete (continuation)
+            Hello…                -> NOT complete
+            We can                -> NOT complete
+        """
+        if not text:
+            return False
+        text = text.rstrip()
+        while text and text[-1] in _CLOSING_QUOTE_BRACKET_CHARS:
+            text = text[:-1].rstrip()
+        if not text:
+            return False
+        if text[-1] == '\u2026':
+            return False
+        if len(text) >= 2 and text[-1] == '.' and text[-2] == '.':
+            return False
+        return text[-1] in _SENT_END_CHARS
+
+    def _collapse_if_phrase(m):
+        """Only collapse repetitions that look like phrase-level loops (contain
+        whitespace or punctuation).  Intentional single-char/syllable repeats
+        like '啦啦啦啦' or 'hahaha' are left untouched."""
+        unit = m.group(1)
+        if _PHRASE_PUNCT_RE.search(unit):
+            return unit
+        return m.group(0)
+
+    def _clean_segment_text(text):
+        """Post-process a single segment's text: dedup loops + CJK punctuation."""
+        text = _REPEAT_RE.sub(_collapse_if_phrase, text)
+        if _CJK_RE.search(text):
+            text = text.translate(_ASCII_TO_FULLWIDTH)
+        return text
+
+    _MIN_SEG_DURATION = 2.0
+    _MIN_SEG_CHARS = 5
+    _MAX_MERGE_GAP = 1.0
+    # Hard caps to stop "incomplete" merges from cascading when Whisper loses
+    # its punctuation rhythm over a long stretch (the lower-case run-on
+    # paragraphs seen in 1.0.15 testing).  Without them, dozens of segments
+    # without periods would get glued into one unreadable monster.
+    _MAX_MERGED_DURATION = 30.0
+    _MAX_MERGED_CHARS = 300
+
+    def _merge_short_segments(segments):
+        """Merge short or sentence-incomplete segments into their neighbours.
+
+        A buffered segment is absorbed into the next one if ALL of:
+          1. (short OR incomplete)
+             - short      = duration < _MIN_SEG_DURATION OR chars < _MIN_SEG_CHARS
+             - incomplete = does not end with a sentence-ending punctuation
+                            (ellipsis is treated as continuation -> incomplete)
+          2. gap to the next segment < _MAX_MERGE_GAP
+          3. absorbing would not push the merged span past the hard caps
+             (_MAX_MERGED_DURATION / _MAX_MERGED_CHARS)
+
+        Rule (3) is what keeps things readable when Whisper occasionally
+        emits a long lower-case run-on across many segments.
+        """
+        buf = None
+        merge_count = 0
+        short_merges = 0
+        incomplete_merges = 0
+        cap_stops = 0
+        for seg in segments:
+            if buf is None:
+                buf = seg
+                continue
+
+            buf_text = buf.text.strip()
+            buf_short = (buf.end - buf.start < _MIN_SEG_DURATION
+                         or len(buf_text) < _MIN_SEG_CHARS)
+            buf_incomplete = not _is_complete_thought(buf_text)
+            gap_small = seg.start - buf.end < _MAX_MERGE_GAP
+
+            would_be_duration = seg.end - buf.start
+            would_be_chars = len(buf.text) + 1 + len(seg.text)
+            cap_ok = (would_be_duration <= _MAX_MERGED_DURATION
+                      and would_be_chars <= _MAX_MERGED_CHARS)
+
+            if (buf_short or buf_incomplete) and gap_small and cap_ok:
+                joiner = "" if _CJK_RE.search(buf.text + seg.text) else " "
+                buf.text = buf.text.rstrip() + joiner + seg.text.lstrip()
+                buf.end = seg.end
+                merge_count += 1
+                if buf_short:
+                    short_merges += 1
+                elif buf_incomplete:
+                    incomplete_merges += 1
+            else:
+                if (buf_short or buf_incomplete) and gap_small and not cap_ok:
+                    cap_stops += 1
+                yield buf
+                buf = seg
+
+        if buf is not None:
+            yield buf
+        if merge_count or cap_stops:
+            logger.info(
+                "Segment merge: %d total (%d short, %d incomplete), %d cap-stops",
+                merge_count, short_merges, incomplete_merges, cap_stops,
+            )
+        else:
+            logger.info("Segment merge: no merges performed")
+
+    _PROGRESS_LOG_EVERY = 25  # log every N segments produced by Whisper
+
+    def _text_clean_segments(segments):
+        """Generator: dedup loops + CJK punctuation fix per segment.
+
+        Also emits periodic ``Whisper progress`` log lines so a long
+        transcription is visible in ``kubectl logs`` even when the UI's
+        progress bar takes a while to start moving.
+        """
+        clean_count = 0
+        total = 0
+        dedup_count = 0
+        punct_count = 0
+        for seg in segments:
+            total += 1
+            if total % _PROGRESS_LOG_EVERY == 0:
+                logger.info("Whisper progress: %d segments produced so far", total)
+            try:
+                cleaned = seg.text
+                deduped = _REPEAT_RE.sub(_collapse_if_phrase, cleaned)
+                if deduped != cleaned:
+                    dedup_count += 1
+                    cleaned = deduped
+                if _CJK_RE.search(cleaned):
+                    puncted = cleaned.translate(_ASCII_TO_FULLWIDTH)
+                    if puncted != cleaned:
+                        punct_count += 1
+                        cleaned = puncted
+                if cleaned != seg.text:
+                    seg.text = cleaned
+                    clean_count += 1
+            except Exception as e:
+                logger.warning("Text cleaning failed, using original: %s", e)
+            yield seg
+        logger.info(
+            "Text clean: %d segments processed, %d dedup, %d punct-fix, %d total modified",
+            total, dedup_count, punct_count, clean_count,
+        )
+
+    def _patch_whisper_engine():
+        """Monkey-patch WhisperModel.transcribe so it:
+          1. Optionally routes to BatchedInferencePipeline (WhisperX-style
+             VAD Cut & Merge with parallel batch inference) when the
+             ``_batched_enabled`` global / ``_batched`` kwarg is True.
+          2. Builds a temperature fallback list from the single float WebUI
+             passes -- BUFFERED path only.  BatchedInferencePipeline uses a
+             single temperature value with no fallback.
+          3. Auto-injects an initial_prompt when language is known but none
+             was given (both paths).
+          4. Optionally chains text-cleaning + short-segment merge as a
+             streaming generator pipeline (both paths).  Segments flow out
+             one by one, so the WebUI's progress bar updates naturally.
+
+        Each runtime stage can be toggled independently:
+
+        * ``_batched`` (kwarg) or ``_batched_enabled`` (global, driven by
+          the WebUI checkbox): route to BatchedInferencePipeline for
+          WhisperX-style VAD chunking + parallel transcription.  Trades
+          temperature fallback / ``condition_on_previous_text`` /
+          ``hallucination_silence_threshold`` / ``vad_filter`` /
+          ``vad_parameters`` / ``prompt_reset_on_temperature`` (all
+          silently dropped under Batched -- see ``_BATCHED_DROPPED_KWARGS``)
+          for long-audio stability and ~3-5x throughput.
+        * ``_text_cleaning`` (kwarg) or ``_text_cleaning_enabled`` (global,
+          driven by the WebUI checkbox): per-segment dedup + CJK punctuation.
+        * ``_segment_merging`` (kwarg) or ``_segment_merging_enabled``
+          (global): merge short / sentence-incomplete segments into the
+          next one, subject to the 30s / 300char hard caps.
+
+        Per-call kwargs win over the globals when not ``None``.  When both
+        post-processing stages are disabled, raw faster-whisper segments
+        are streamed through unchanged.
+
+        ``_skip_pipeline=True`` is an internal short-circuit (e.g. the
+        API's pre-pass language detection) that bypasses BOTH the batched
+        routing AND post-processing regardless of the flags above -- the
+        cheap Buffered path is used so we don't pay the BatchedInferencePipeline
+        construction cost for a throwaway 30-second probe.
+        """
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            logger.warning("Cannot import faster_whisper; skipping engine patch")
+            return
+
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            _has_batched = True
+        except ImportError:
+            logger.warning(
+                "faster_whisper.BatchedInferencePipeline unavailable in this "
+                "version; Batched mode will fall back to Buffered transparently"
+            )
+            BatchedInferencePipeline = None
+            _has_batched = False
+
+        _orig_transcribe = WhisperModel.transcribe
+
+        # Single-slot cache for BatchedInferencePipeline.
+        #
+        # HISTORY: 1.0.16 first cut shipped a multi-entry dict cache
+        # keyed by ``id(model)``.  That LEAKED GPU memory and OOM'd on
+        # a 16GB GPU after ~5 transcriptions because:
+        #   1. Whisper-WebUI defaults ``WhisperParams.enable_offload``
+        #      to True, so ``self.offload()`` runs after every
+        #      transcription and does ``del self.model``.
+        #   2. The next transcription's ``update_model()`` then creates
+        #      a fresh ``WhisperModel`` -- new object, new ``id()``.
+        #   3. Our old dict cache HELD a strong reference to the prior
+        #      ``BatchedInferencePipeline``, which in turn held a
+        #      strong reference to the prior ``WhisperModel``.
+        #   4. ``del self.model`` therefore freed only one of two refs;
+        #      the model stayed alive in GPU memory.
+        #   5. ``torch.cuda.empty_cache()`` after ``del`` was a no-op
+        #      because the model was still referenced.
+        #   6. Each subsequent transcription added another ~3GB
+        #      large-v2 instance to GPU, accumulating until
+        #      ``cuMemoryAllocate failed res=2``.
+        #
+        # FIX: single-slot cache that EVICTS on model-id change and
+        # explicitly runs ``gc.collect()`` + ``torch.cuda.empty_cache()``
+        # to synchronously reclaim the old model's GPU memory BEFORE
+        # constructing the new pipeline.
+        #
+        # Cache-hit scenario (API flow, no offload between calls):
+        #   same ``id(model)`` across calls → reuse cached pipeline →
+        #   saves ~6s of Silero VAD warm-up per call.
+        #
+        # Cache-miss scenario (WebUI flow, offload after each call):
+        #   ``id(model)`` differs every time → evict + GC + create →
+        #   GPU footprint stays at 1 model + 1 pipeline.
+        _batched_cache = {}
+
+        def _get_or_create_batched(model):
+            key = id(model)
+
+            # Cache-hit fast path
+            if key in _batched_cache:
+                return _batched_cache[key]
+
+            # Cache-miss: evict any stale entry FIRST so the old
+            # pipeline's strong ref to the old model is dropped before
+            # we try to ``empty_cache``.  Without this ordering the
+            # ``empty_cache`` is a no-op because the model is still
+            # live via the cached pipeline.
+            if _batched_cache:
+                evicted_ids = list(_batched_cache.keys())
+                _batched_cache.clear()
+                try:
+                    import gc
+                    gc.collect()
+                    if _torch.cuda.is_available():
+                        _torch.cuda.empty_cache()
+                    logger.info(
+                        "BatchedInferencePipeline cache evicted (old "
+                        "ids=%s); ran gc + cuda.empty_cache to free GPU "
+                        "memory before constructing new pipeline",
+                        evicted_ids,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Cache eviction GC failed (non-fatal): %s", e,
+                    )
+
+            pipeline = BatchedInferencePipeline(model=model)
+            _batched_cache[key] = pipeline
+            logger.info(
+                "BatchedInferencePipeline created (model id=%s)", key,
+            )
+            return pipeline
+
+        def _patched_transcribe(self, audio, **kwargs):
+            skip_pipeline = kwargs.pop("_skip_pipeline", False)
+            text_clean_override = kwargs.pop("_text_cleaning", None)
+            seg_merge_override = kwargs.pop("_segment_merging", None)
+            batched_override = kwargs.pop("_batched", None)
+            batch_size_override = kwargs.pop("_batch_size", None)
+
+            # NOTE on transcribe-kwargs version compatibility:
+            # The defensive filter that drops kwargs the installed
+            # ``WhisperModel.transcribe`` doesn't recognise lives in the
+            # API layer (``_do_transcribe``) so it ONLY touches kwargs
+            # built from the API Form surface.  ``_patched_transcribe``
+            # here is also called from the Gradio UI path, where kwargs
+            # are constructed by upstream Whisper-WebUI's own code and
+            # are by definition matched to the bundled faster-whisper
+            # version -- we don't filter them, ensuring zero behavioural
+            # change for WebUI users.
+
+            # Auto initial_prompt injection works for both paths
+            if not kwargs.get("initial_prompt"):
+                lang = kwargs.get("language")
+                if lang and lang in _LANG_PROMPTS:
+                    kwargs["initial_prompt"] = _LANG_PROMPTS[lang]
+                    logger.debug("Auto-injected initial_prompt for language: %s", lang)
+
+            # Route decision: explicit kwarg > persisted global.  The
+            # internal short-circuit (language detection) always uses the
+            # cheap Buffered path so we don't construct a
+            # BatchedInferencePipeline for a throwaway probe.
+            use_batched = (
+                (batched_override if batched_override is not None
+                 else _batched_enabled)
+                and _has_batched
+                and not skip_pipeline
+            )
+
+            if not skip_pipeline:
+                _meta_set(
+                    batched_globally_enabled=bool(_batched_enabled),
+                    condition_on_previous_text_used=bool(
+                        kwargs.get("condition_on_previous_text", False)
+                    ),
+                    temperature_used=kwargs.get("temperature"),
+                )
+                logger.debug(
+                    "transcribe path decision: batched_override=%s, "
+                    "global=%s, has_batched_pipeline=%s -> use_batched=%s",
+                    batched_override, _batched_enabled, _has_batched,
+                    use_batched,
+                )
+
+            if use_batched:
+                # Batched path: WhisperX-style VAD Cut & Merge + parallel.
+                # Collapse temperature list to scalar (Batched uses a
+                # single value, no fallback).  Save the original list so
+                # we can restore it if we fall back to Buffered below.
+                orig_temp = kwargs.get("temperature")
+                if isinstance(orig_temp, (list, tuple)) and orig_temp:
+                    kwargs["temperature"] = float(orig_temp[0])
+                    logger.debug(
+                        "Batched mode: collapsed temperature list %s to scalar %s",
+                        list(orig_temp), kwargs["temperature"],
+                    )
+
+                # Drop kwargs the Batched path silently ignores so we can
+                # log it instead of leaving the user wondering why a yaml
+                # param has no effect.  Preserve them for the Buffered
+                # fallback path below.
+                dropped = {}
+                for k in _BATCHED_DROPPED_KWARGS:
+                    if k in kwargs:
+                        dropped[k] = kwargs.pop(k)
+                if dropped:
+                    logger.info(
+                        "Batched mode: silently dropped Buffered-only kwargs %s "
+                        "(forced/bypassed by BatchedInferencePipeline)",
+                        sorted(dropped.keys()),
+                    )
+                _meta_set(batched_dropped_kwargs=sorted(dropped.keys()))
+                # Pure thread-local write: refresh ``_meta.condition_on_previous_text_used``
+                # to reflect that Batched silently forces it to False
+                # regardless of what the caller requested.  Without this
+                # the diag report still shows the original ``True`` from
+                # the caller, even though the value is dropped before
+                # going to BatchedInferencePipeline.  No effect on
+                # behaviour (the kwarg is already popped above) nor on
+                # WebUI (WebUI doesn't read this thread-local).
+                if "condition_on_previous_text" in dropped:
+                    _meta_set(condition_on_previous_text_used=False)
+
+                kwargs.setdefault(
+                    "batch_size",
+                    batch_size_override or _BATCHED_DEFAULT_BATCH_SIZE,
+                )
+                _meta_set(
+                    batch_size_used=kwargs.get("batch_size"),
+                    temperature_used=kwargs.get("temperature"),
+                )
+
+                batched = _get_or_create_batched(self)
+                try:
+                    segments_gen, info = batched.transcribe(audio, **kwargs)
+                    logger.info(
+                        "Batched transcription started (batch_size=%s)",
+                        kwargs["batch_size"],
+                    )
+                    _meta_set(path="batched")
+                except TypeError as e:
+                    # Defensive: if a particular faster-whisper version's
+                    # BatchedInferencePipeline rejects an unknown kwarg
+                    # or chokes on a value type, fall through to Buffered
+                    # with the *original* (un-dropped) kwargs so behaviour
+                    # is at worst equivalent to the Buffered-only path.
+                    # We capture the full traceback into
+                    # ``batched_traceback`` (only surfaced when
+                    # _diag=true) so the next failure mode is
+                    # diagnosable without another round-trip.
+                    tb = traceback.format_exc()
+                    logger.warning(
+                        "Batched transcription rejected kwargs (%s); "
+                        "falling back to Buffered for this call", e,
+                    )
+                    _meta_set(
+                        path="batched_fallback_to_buffered",
+                        batched_typeerror=str(e),
+                        batched_traceback=tb,
+                    )
+                    kwargs.update(dropped)
+                    if isinstance(orig_temp, (list, tuple)) and orig_temp:
+                        kwargs["temperature"] = orig_temp
+                    kwargs.pop("batch_size", None)
+                    _meta_set(temperature_used=kwargs.get("temperature"))
+                    segments_gen, info = _orig_transcribe(self, audio, **kwargs)
+            else:
+                # Buffered path: existing 1.0.15 behaviour, intact.
+                temp = kwargs.get("temperature")
+                if temp is not None and isinstance(temp, (int, float)):
+                    kwargs["temperature"] = _build_temp_fallback(temp)
+                    logger.debug(
+                        "Buffered mode: temperature fallback %s -> %s",
+                        temp, kwargs["temperature"],
+                    )
+                _meta_set(
+                    path="buffered",
+                    temperature_used=kwargs.get("temperature"),
+                )
+                segments_gen, info = _orig_transcribe(self, audio, **kwargs)
+
+            if skip_pipeline:
+                return segments_gen, info
+
+            text_clean_on = (text_clean_override if text_clean_override is not None
+                             else _text_cleaning_enabled)
+            seg_merge_on = (seg_merge_override if seg_merge_override is not None
+                            else _segment_merging_enabled)
+            _meta_set(
+                text_cleaning_active=bool(text_clean_on),
+                segment_merging_active=bool(seg_merge_on),
+            )
+
+            pipeline = segments_gen
+            if text_clean_on:
+                pipeline = _text_clean_segments(pipeline)
+            else:
+                logger.info("Text cleaning disabled, segments will pass through unchanged")
+            if seg_merge_on:
+                pipeline = _merge_short_segments(pipeline)
+            else:
+                logger.info("Segment merging disabled, segments will pass through unchanged")
+
+            return pipeline, info
+
+        WhisperModel.transcribe = _patched_transcribe
+        logger.info(
+            "Whisper engine patched: batched routing (%s) + temperature fallback + "
+            "auto prompt + streaming post-processing (all toggleable)",
+            "available" if _has_batched else "unavailable, Buffered-only",
+        )
+
+    # ── Gradio UI patch: post-processing checkboxes ──
+
+    def _patch_gradio_ui():
+        """Inject three runtime checkboxes into the Advanced Parameters
+        section of each transcription tab (File / Youtube / Mic):
+
+          * Batched Inference -- WhisperX-style VAD Cut & Merge + parallel
+                                 batch transcription via
+                                 ``faster_whisper.BatchedInferencePipeline``.
+                                 Recommended for long audio (>10 min).
+          * Text Cleaning     -- dedup + CJK punctuation normalization
+          * Segment Merging   -- merge short/incomplete neighbouring segments
+
+        Each checkbox writes to the matching module-level global AND
+        persists the new value to ``default_parameters.yaml`` (see
+        ``_persist_post_processing_state``), so user choices survive Pod
+        restarts.  Must be called AFTER ``_load_post_processing_state``
+        (so the initial checkbox values reflect the persisted state) and
+        BEFORE App(args).
+
+        UX note: when Batched is ON, some Advanced Parameters silently
+        have no effect (see ``_BATCHED_DROPPED_KWARGS``).  We intentionally
+        do NOT grey them out -- toggling Batched mid-session would require
+        re-rendering the whole panel, which Gradio doesn't make easy.
+        Instead the engine logs at INFO which kwargs were dropped (see
+        the ``Batched mode: silently dropped Buffered-only kwargs`` line
+        emitted by ``_patched_transcribe``) so users investigating "this
+        setting did nothing" find the answer in ``kubectl logs`` without
+        having to flip the log level.  Document this in the user-facing
+        guide.
+
+        Persistence-after-refresh note: ``value=<bool>`` in a Gradio
+        component constructor is BAKED into the Blocks definition at
+        construction time and does NOT track the in-process global.
+        On browser refresh Gradio re-hydrates the page from the Blocks
+        initial state, so the checkbox would revert to the value that
+        was current AT SERVER STARTUP -- ignoring everything the user
+        changed since.  Gradio's documented workaround is to pass a
+        callable for ``value``; it gets called on every page load.
+        That's what the lambdas below are for: they let the checkbox's
+        initial state on a fresh browser reflect the yaml-persisted
+        global, not the snapshot taken at startup."""
+        try:
+            from modules.whisper.data_classes import WhisperParams
+            import gradio as gr
+        except ImportError:
+            logger.warning("Cannot import WhisperParams/gradio; skipping UI patch")
+            return
+
+        _orig_to_gradio = WhisperParams.to_gradio_inputs
+
+        @classmethod
+        def _patched_to_gradio(cls, defaults=None, only_advanced=True, **kwargs):
+            if only_advanced:
+                # NOTE: ``value=lambda: <global>`` (not ``value=<global>``)
+                # is essential here -- see the docstring "Persistence-after-
+                # refresh note".  Without the callable wrapper, a browser
+                # refresh would silently revert the checkbox to whatever
+                # the yaml said AT SERVER STARTUP, discarding every toggle
+                # the user made since.
+                cb_batched = gr.Checkbox(
+                    label="Batched Inference (WhisperX-style)",
+                    value=lambda: _batched_enabled,
+                    info="Use BatchedInferencePipeline: cut audio by VAD, "
+                         "transcribe chunks in parallel. Recommended for "
+                         "long audio (>10 min). Silently disables: temperature "
+                         "fallback, condition_on_previous_text, vad_filter / "
+                         "vad_parameters, hallucination_silence_threshold, "
+                         "prompt_reset_on_temperature.",
+                )
+                cb_text = gr.Checkbox(
+                    label="Text Cleaning",
+                    value=lambda: _text_cleaning_enabled,
+                    info="Deduplicate phrase loops & normalize CJK punctuation",
+                )
+                cb_merge = gr.Checkbox(
+                    label="Segment Merging",
+                    value=lambda: _segment_merging_enabled,
+                    info="Merge short or sentence-incomplete segments "
+                         "(capped at 30s / 300 chars per merged segment)",
+                )
+
+                # NOTE: callbacks MUST NOT raise.  Any uncaught
+                # exception here propagates back through Gradio's
+                # request handler, which logs a 500 AND tears down the
+                # frontend's WebSocket connection ("Connection errored
+                # out" toast).  Defence in depth: the persist function
+                # is already non-raising, but a stray TypeError from
+                # ``_persist_post_processing_state`` (e.g. a regression
+                # in the future) would still break the WebUI without
+                # this outer try/except.
+                def _toggle_batched(v):
+                    global _batched_enabled
+                    try:
+                        _batched_enabled = bool(v)
+                        logger.info("Batched Inference toggled: %s", _batched_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Batched toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
+
+                def _toggle_text(v):
+                    global _text_cleaning_enabled
+                    try:
+                        _text_cleaning_enabled = bool(v)
+                        logger.info("Text Cleaning toggled: %s", _text_cleaning_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Text Cleaning toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
+
+                def _toggle_merge(v):
+                    global _segment_merging_enabled
+                    try:
+                        _segment_merging_enabled = bool(v)
+                        logger.info("Segment Merging toggled: %s", _segment_merging_enabled)
+                        _persist_post_processing_state()
+                    except Exception as e:
+                        logger.warning(
+                            "Segment Merging toggle callback failed: %s "
+                            "(state in-memory may still have updated)", e,
+                        )
+
+                cb_batched.change(fn=_toggle_batched, inputs=[cb_batched])
+                cb_text.change(fn=_toggle_text, inputs=[cb_text])
+                cb_merge.change(fn=_toggle_merge, inputs=[cb_merge])
+
+            return _orig_to_gradio.__func__(cls, defaults=defaults,
+                                            only_advanced=only_advanced, **kwargs)
+
+        WhisperParams.to_gradio_inputs = _patched_to_gradio
+        logger.info(
+            "Gradio UI patched: Batched + Text Cleaning + Segment Merging "
+            "checkboxes added"
+        )
+
+    _PATCH_VERSION = 1
+
+    _QUALITY_OVERRIDES = {
+        "whisper": {
+            "condition_on_previous_text": False,
+            "hallucination_silence_threshold": 2,
+            "temperature": 0.2,
+        },
+        "vad": {
+            "vad_filter": True,
+            "min_silence_duration_ms": 500,
+            "speech_pad_ms": 400,
+        },
+    }
+
+    def _patch_webui_config():
+        """Version-aware config patcher.
+
+        Only writes _QUALITY_OVERRIDES keys on fresh install or version
+        upgrade.  On normal restart (version unchanged) does nothing,
+        so user customisations via the WebUI are fully preserved.
+        """
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning("Cannot import Whisper-WebUI paths; skipping config patch")
+            return
+
+        with _yaml_lock:
+            try:
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            except Exception:
+                logger.warning("Cannot load default_parameters.yaml; skipping config patch")
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict during config "
+                    "patch; skipping (will retry on next pod restart)",
+                    type(params).__name__,
+                )
+                return
+
+            current_ver = params.get("_patch_version", 0)
+            if current_ver >= _PATCH_VERSION:
+                logger.info(
+                    "Config patch version %s is current (>= %s), skipping",
+                    current_ver, _PATCH_VERSION,
+                )
+                return
+
+            logger.info(
+                "Upgrading config patch: %s -> %s", current_ver, _PATCH_VERSION
+            )
+
+            for section, overrides in _QUALITY_OVERRIDES.items():
+                if section not in params:
+                    params[section] = {}
+                for key, value in overrides.items():
+                    params[section][key] = value
+
+            params["_patch_version"] = _PATCH_VERSION
+
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info("Config patched to version %s", _PATCH_VERSION)
+            except Exception as e:
+                logger.warning(f"Failed to save patched config: {e}")
+
+    # ── Persistence for runtime checkbox state ──
+    #
+    # ``_text_cleaning_enabled`` / ``_segment_merging_enabled`` /
+    # ``_batched_enabled`` are mutated by the WebUI checkboxes (see
+    # ``_patch_gradio_ui``).  Without persistence those mutations would
+    # only live in-process and reset to the code defaults on every Pod
+    # restart, which is a surprising UX.
+    #
+    # The two helpers below mirror the conventions used by
+    # ``_patch_webui_config``:
+    #   * read on startup → restore the user's last choice
+    #   * write on every checkbox change → outlive Pod restarts
+    # The state is stored in its own top-level ``_post_processing`` section
+    # in ``default_parameters.yaml`` so we don't pollute Whisper-WebUI's
+    # native schema and don't conflict with ``_QUALITY_OVERRIDES``.
+    # (The section name is historical -- it now houses ``batched`` too.)
+
+    def _load_post_processing_state():
+        """Restore Batched / Text Cleaning / Segment Merging checkbox state
+        from ``default_parameters.yaml``.
+
+        Three paths handled here:
+
+        * FIRST install (section absent): seed all three keys with code
+          defaults so they're visible / editable in the yaml from day one.
+        * UPGRADE from 1.0.15 (section exists but missing ``batched``):
+          silently add the missing key with the code default
+          (``_batched_enabled = True``) and save back to yaml.  Users
+          upgrading inherit Batched=ON without manual intervention.
+        * NORMAL restart (all keys present): apply persisted values to
+          the in-process globals, no writes.
+
+        Falls back to code defaults (all True) when the file is
+        unreadable.  Individual keys having a non-bool value are
+        tolerated (the corresponding global keeps its default).
+        """
+        global _text_cleaning_enabled, _segment_merging_enabled, _batched_enabled
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning(
+                "Cannot import Whisper-WebUI paths; "
+                "post-processing state will use code defaults (all True)"
+            )
+            return
+        with _yaml_lock:
+            try:
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            except Exception as e:
+                logger.warning(
+                    "Cannot load default_parameters.yaml for post-proc state: %s; "
+                    "using code defaults", e,
+                )
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict at startup; "
+                    "using code defaults (all True) for this run",
+                    type(params).__name__,
+                )
+                return
+
+            pp = params.get("_post_processing")
+
+            if pp is None:
+                # First-install path: seed the section so it's visible
+                # to admins inspecting the yaml.  Defaults match the
+                # code-level globals.
+                params["_post_processing"] = {
+                    "batched": _batched_enabled,
+                    "text_cleaning": _text_cleaning_enabled,
+                    "segment_merging": _segment_merging_enabled,
+                }
+                try:
+                    save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                    logger.info(
+                        "Post-processing section absent; seeded defaults to yaml: "
+                        "batched=%s, text_cleaning=%s, segment_merging=%s",
+                        _batched_enabled, _text_cleaning_enabled,
+                        _segment_merging_enabled,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to seed _post_processing defaults to yaml: %s; "
+                        "code defaults still in effect for this run", e,
+                    )
+                return
+
+            # Apply persisted values to globals
+            b = pp.get("batched")
+            tc = pp.get("text_cleaning")
+            sm = pp.get("segment_merging")
+            if isinstance(b, bool):
+                _batched_enabled = b
+            if isinstance(tc, bool):
+                _text_cleaning_enabled = tc
+            if isinstance(sm, bool):
+                _segment_merging_enabled = sm
+
+            # Upgrade path: section exists but is missing a key we now
+            # manage.  E.g. pre-1.0.16 yaml lacks ``batched`` -- seed
+            # it with the current default so the yaml accurately
+            # reflects the runtime state, and on the next checkbox
+            # toggle the whole dict is consistent.
+            missing = []
+            if "batched" not in pp:
+                pp["batched"] = _batched_enabled
+                missing.append(f"batched={_batched_enabled}")
+            if "text_cleaning" not in pp:
+                pp["text_cleaning"] = _text_cleaning_enabled
+                missing.append(f"text_cleaning={_text_cleaning_enabled}")
+            if "segment_merging" not in pp:
+                pp["segment_merging"] = _segment_merging_enabled
+                missing.append(f"segment_merging={_segment_merging_enabled}")
+            if missing:
+                try:
+                    save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                    logger.info(
+                        "Post-processing schema migrated: seeded missing keys %s",
+                        ", ".join(missing),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to seed missing _post_processing keys: %s; "
+                        "code defaults still in effect for this run", e,
+                    )
+
+        logger.info(
+            "Post-processing state loaded: batched=%s, text_cleaning=%s, "
+            "segment_merging=%s",
+            _batched_enabled, _text_cleaning_enabled, _segment_merging_enabled,
+        )
+
+    def _persist_post_processing_state():
+        """Write current Batched / Text Cleaning / Segment Merging globals
+        to ``default_parameters.yaml``.  Called from the checkbox change
+        handlers; never raises, just warns on failure so a transient
+        write error never breaks the WebUI.
+
+        Concurrency-safe via ``_yaml_lock``: rapid double-toggles used
+        to trigger ``load_yaml`` returning ``None`` mid-truncate from a
+        sibling persist call.  Now serialised against itself.  Still
+        defends ``isinstance(params, dict)`` so an external truncate
+        (e.g. upstream's ``cache_parameters`` running concurrently with
+        a transcribe) just causes us to skip this write rather than
+        clobber the yaml with a single-key dict.
+        """
+        try:
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml, save_yaml
+        except ImportError:
+            logger.warning(
+                "Cannot import Whisper-WebUI paths; "
+                "post-processing state NOT persisted (in-memory only)"
+            )
+            return
+        with _yaml_lock:
+            try:
+                params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+            except Exception as e:
+                logger.warning(
+                    "Cannot load default_parameters.yaml: %s; "
+                    "post-processing state NOT persisted", e,
+                )
+                return
+            if not isinstance(params, dict):
+                logger.warning(
+                    "load_yaml returned %s instead of dict (likely racing "
+                    "with another writer); skipping this persist, next "
+                    "change event will retry",
+                    type(params).__name__,
+                )
+                return
+            params["_post_processing"] = {
+                "batched": _batched_enabled,
+                "text_cleaning": _text_cleaning_enabled,
+                "segment_merging": _segment_merging_enabled,
+            }
+            try:
+                save_yaml(params, DEFAULT_PARAMETERS_CONFIG_PATH)
+                logger.info(
+                    "Post-processing state persisted: batched=%s, "
+                    "text_cleaning=%s, segment_merging=%s",
+                    _batched_enabled, _text_cleaning_enabled,
+                    _segment_merging_enabled,
+                )
+            except Exception as e:
+                logger.warning("Failed to persist post-processing state: %s", e)
+
+    # ── Browser-refresh persistence: rehydrate UI from yaml on every page load ──
+    #
+    # The Gradio limitation: ``gr.Xxx(value=<literal>)`` bakes the value
+    # into the Blocks structure at construction time.  Browser refresh
+    # makes Gradio re-send those baked literals, so the UI reverts to
+    # whatever yaml said AT App.__init__ time.  Vanilla Whisper-WebUI has
+    # this limitation too -- ``cache_parameters`` writes user choices to
+    # yaml on every transcription, but those writes don't surface until
+    # the next Pod restart, which is surprising to anyone who expects
+    # "yaml is the live source of truth".
+    #
+    # Fix: register a ``demo.load(...)`` event.  Gradio fires this on
+    # every page load (including browser refresh) and lets us push fresh
+    # ``gr.update(value=...)`` payloads to the components.  We mirror
+    # ``App.create_pipeline_inputs``'s construction order -- coupling
+    # us to upstream's layout, but giving us a single hook for the
+    # entire pipeline panel (Model / Lang / Format / Advanced / VAD /
+    # Diarization / BGM) instead of patching each ``to_gradio_inputs``
+    # individually.
+    #
+    # NOTE: per-component change-callbacks are intentionally NOT added
+    # here.  Vanilla persists via ``cache_parameters`` on transcribe;
+    # any UI tweaks the user makes BEFORE clicking transcribe are
+    # ephemeral by design, and adding a write-on-change handler to
+    # every component would risk write-storms for sliders being dragged.
+
+    def _patch_app_persistence():
+        """Patch App.create_pipeline_inputs so that, immediately after
+        the original returns its component list, we register a
+        ``self.app.load(...)`` event that re-reads
+        ``default_parameters.yaml`` on every page load and pushes the
+        fresh values onto the same component list.
+
+        Must run AFTER ``_patch_gradio_ui`` (so our 3 checkboxes are in
+        place -- though they're not in this load handler's outputs
+        because they already use ``value=lambda: <global>`` for the
+        same effect) and BEFORE ``App(args)`` (so the monkey-patch is
+        active when ``App.launch`` calls ``create_pipeline_inputs``).
+
+        Coupling note: the value list MUST stay in the same order as
+        ``create_pipeline_inputs`` builds its outputs (see
+        https://github.com/jhj0517/Whisper-WebUI/blob/master/app.py and
+        each ``to_gradio_inputs`` classmethod in data_classes.py).  If
+        upstream re-orders a field, the load handler will silently
+        misalign value-to-component pairs.  The length check below
+        catches a total mismatch and falls back to a pass-through
+        (``gr.update()`` no-op) so a broken refresh degrades to "stale
+        values" instead of "wrong values".
+        """
+        try:
+            from app import App
+            from modules.utils.paths import DEFAULT_PARAMETERS_CONFIG_PATH
+            from modules.utils.files_manager import load_yaml
+            from modules.utils.constants import AUTOMATIC_DETECTION
+            import gradio as gr
+        except ImportError:
+            logger.warning(
+                "Cannot import App / paths / gradio; skipping refresh-"
+                "persistence patch (browser refresh will revert UI to "
+                "construction-time defaults)"
+            )
+            return
+
+        _orig_create_pipeline_inputs = App.create_pipeline_inputs
+
+        def _build_values_from_yaml():
+            """Mirror create_pipeline_inputs construction order.  Returns
+            a list of ``gr.update(value=...)`` payloads aligned with
+            pipeline_inputs + [dd_file_format, cb_timestamp]; ``None``
+            in yaml becomes ``gr.update()`` (no-op) so we don't clobber
+            a usable default with ``None``.
+
+            Holds ``_yaml_lock`` only for the actual ``load_yaml`` call --
+            we don't want to block transcribe-time persists for the
+            duration of building a 50-element value list, and a stale
+            read here is fine (the next refresh re-reads).
+            """
+            with _yaml_lock:
+                try:
+                    params = load_yaml(DEFAULT_PARAMETERS_CONFIG_PATH)
+                except Exception as e:
+                    logger.warning("Page load: failed to reload yaml: %s", e)
+                    return None
+            if not isinstance(params, dict):
+                logger.warning(
+                    "Page load: yaml load returned %s instead of dict "
+                    "(likely racing with cache_parameters write); "
+                    "passing through no-op so components keep their "
+                    "construction-time values",
+                    type(params).__name__,
+                )
+                return None
+
+            whisper_p = params.get("whisper", {}) or {}
+            vad_p = params.get("vad", {}) or {}
+            diar_p = params.get("diarization", {}) or {}
+            uvr_p = params.get("bgm_separation", {}) or {}
+
+            # Language: yaml stores AUTOMATIC_DETECTION.unwrap() as a
+            # plain string; the UI dropdown uses the sentinel object.
+            lang_yaml = whisper_p.get("lang")
+            try:
+                auto_str = AUTOMATIC_DETECTION.unwrap()
+            except Exception:
+                auto_str = "Automatic Detection"
+            if lang_yaml == auto_str:
+                lang_val = AUTOMATIC_DETECTION
+            else:
+                lang_val = lang_yaml
+
+            values = [
+                whisper_p.get("model_size"),
+                lang_val,
+                whisper_p.get("is_translate"),
+            ]
+
+            # WhisperParams.to_gradio_inputs(only_advanced=True) order
+            # (faster_whisper branch -- our deployment):
+            #   beam_size, log_prob_threshold, no_speech_threshold,
+            #   compute_type, best_of, patience,
+            #   condition_on_previous_text, prompt_reset_on_temperature,
+            #   initial_prompt, temperature, compression_ratio_threshold,
+            #   length_penalty, repetition_penalty, no_repeat_ngram_size,
+            #   prefix, suppress_blank, suppress_tokens,
+            #   max_initial_timestamp, word_timestamps,
+            #   prepend_punctuations, append_punctuations,
+            #   max_new_tokens, chunk_length,
+            #   hallucination_silence_threshold, hotwords,
+            #   language_detection_threshold, language_detection_segments,
+            #   batch_size (insanely_fast_whisper, invisible for faster),
+            #   enable_offload
+            values += [
+                whisper_p.get("beam_size"),
+                whisper_p.get("log_prob_threshold"),
+                whisper_p.get("no_speech_threshold"),
+                whisper_p.get("compute_type"),
+                whisper_p.get("best_of"),
+                whisper_p.get("patience"),
+                whisper_p.get("condition_on_previous_text"),
+                whisper_p.get("prompt_reset_on_temperature"),
+                whisper_p.get("initial_prompt"),
+                whisper_p.get("temperature"),
+                whisper_p.get("compression_ratio_threshold"),
+                whisper_p.get("length_penalty"),
+                whisper_p.get("repetition_penalty"),
+                whisper_p.get("no_repeat_ngram_size"),
+                whisper_p.get("prefix"),
+                whisper_p.get("suppress_blank"),
+                whisper_p.get("suppress_tokens"),
+                whisper_p.get("max_initial_timestamp"),
+                whisper_p.get("word_timestamps"),
+                whisper_p.get("prepend_punctuations"),
+                whisper_p.get("append_punctuations"),
+                whisper_p.get("max_new_tokens"),
+                whisper_p.get("chunk_length"),
+                whisper_p.get("hallucination_silence_threshold"),
+                whisper_p.get("hotwords"),
+                whisper_p.get("language_detection_threshold"),
+                whisper_p.get("language_detection_segments"),
+                whisper_p.get("batch_size"),
+                whisper_p.get("enable_offload"),
+            ]
+
+            # VadParams.to_gradio_inputs order
+            values += [
+                vad_p.get("vad_filter"),
+                vad_p.get("threshold"),
+                vad_p.get("min_speech_duration_ms"),
+                vad_p.get("max_speech_duration_s"),
+                vad_p.get("min_silence_duration_ms"),
+                vad_p.get("speech_pad_ms"),
+            ]
+
+            # DiarizationParams.to_gradio_inputs order
+            # NOTE: upstream reads ``defaults.get("device", device)`` for
+            # the Device dropdown but stores ``diarization_device`` in
+            # yaml -- a known upstream quirk.  We mirror the behaviour:
+            # ``device`` key absent → ``None`` → ``gr.update()`` no-op,
+            # leaving the construction-time auto-detected device intact.
+            values += [
+                diar_p.get("is_diarize"),
+                diar_p.get("device"),
+                diar_p.get("hf_token"),
+                diar_p.get("enable_offload"),
+            ]
+
+            # BGMSeparationParams.to_gradio_input order (same "device"
+            # quirk as diarization).
+            values += [
+                uvr_p.get("is_separate_bgm"),
+                uvr_p.get("uvr_model_size"),
+                uvr_p.get("device"),
+                uvr_p.get("segment_size"),
+                uvr_p.get("save_file"),
+                uvr_p.get("enable_offload"),
+            ]
+
+            # Trailing: dd_file_format, cb_timestamp (created outside
+            # the Advanced accordion in create_pipeline_inputs).
+            values += [
+                whisper_p.get("file_format"),
+                whisper_p.get("add_timestamp"),
+            ]
+
+            return [
+                gr.update(value=v) if v is not None else gr.update()
+                for v in values
+            ]
+
+        def _patched_create_pipeline_inputs(self):
+            pipeline_inputs, dd_file_format, cb_timestamp = (
+                _orig_create_pipeline_inputs(self)
+            )
+
+            outputs = list(pipeline_inputs) + [dd_file_format, cb_timestamp]
+
+            def _reload():
+                # Outer try/except is the LAST line of defence: if
+                # anything in here raises, Gradio renders every output
+                # component as a red "错误" / "Error" badge AND drops the
+                # frontend WebSocket connection ("Connection errored
+                # out" toast), forcing the user into a full reload that
+                # often loops because demo.load fires again on reload.
+                # Returning a list of no-ops is always safe.
+                try:
+                    v = _build_values_from_yaml()
+                    if v is None:
+                        return [gr.update() for _ in outputs]
+                    if len(v) != len(outputs):
+                        logger.warning(
+                            "Page-load refresh: yaml-values count (%d) does "
+                            "not match outputs count (%d); skipping to avoid "
+                            "value-to-component misalignment.  This usually "
+                            "means upstream re-ordered to_gradio_inputs; check "
+                            "data_classes.py against the order documented in "
+                            "_patch_app_persistence.",
+                            len(v), len(outputs),
+                        )
+                        return [gr.update() for _ in outputs]
+                    return v
+                except Exception as e:
+                    logger.exception(
+                        "Page-load refresh callback crashed: %s; "
+                        "returning no-ops so UI keeps construction-time values",
+                        e,
+                    )
+                    return [gr.update() for _ in outputs]
+
+            self.app.load(fn=_reload, outputs=outputs)
+            logger.info(
+                "Registered page-load refresh for %d pipeline components",
+                len(outputs),
+            )
+            return pipeline_inputs, dd_file_format, cb_timestamp
+
+        App.create_pipeline_inputs = _patched_create_pipeline_inputs
+        logger.info(
+            "App persistence patched: demo.load() will rehydrate UI from "
+            "yaml on every browser refresh"
+        )
+
     if __name__ == "__main__":
         from app import App, parser as app_parser
 
         args = app_parser.parse_args()
+
+        _patch_webui_config()
+        _load_post_processing_state()
+        _patch_whisper_engine()
+        _patch_gradio_ui()
+        _patch_app_persistence()
+
         app_instance = App(args)
 
         api_thread = threading.Thread(
