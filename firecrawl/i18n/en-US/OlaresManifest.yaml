@@ -20,3 +20,19 @@ spec:
     - Reliability first: designed to get the data you need - no matter how hard it is
     - Actions: click, scroll, input, wait and more before extracting data
     - Batching (New): scrape thousands of URLs at the same time with a new async endpoint.
+  upgradeDescription: |
+    Upgrade to Firecrawl v2.9.0: https://github.com/firecrawl/firecrawl/releases/tag/v2.9.0
+
+    Config optimized:
+    **Critical bug fix**
+    - **Playwright service connectivity restored:** the shared `firecrawl-config` ConfigMap was leaking `PORT: "3002"` into the playwright-service container via `envFrom`, causing the playwright app to listen on **3002** instead of the expected **3000**. Worker requests to `playwright-svc:3000` would silently fail with `other side closed` and waterfall to the fetch engine on every scrape. The deployment now sets `PORT=3000` explicitly to override the ConfigMap value. After upgrade, `kubectl logs deploy/playwright-service` should print `Server is running on port 3000` (not 3002).
+
+    **Data persistence**
+    - **nuq-postgres now persists data:** added a `hostPath` volume under `appData/<release>/nuq-postgres` and an init container (`init-permissions`) that creates the data directory, `chown 999:999`, and `chmod 700` so the postgres process can write to it. Before this change every nuq-postgres restart wiped all NuQ tasks, crawl progress, and pg_cron job history. Strategy switched to `Recreate` to prevent two PG instances racing on the same directory during upgrades.
+
+    **Reliability**
+    - **Liveness / readiness probes added** to `firecrawl-api`, `worker`, `nuq-worker`, `nuq-postgres`, and `playwright-service`:
+      - `firecrawl-api`, `playwright-service`: TCP probes on the service port.
+      - `nuq-postgres`: `pg_isready` exec probes.
+      - `worker`, `nuq-worker`: `pgrep` liveness probes against the main Node process.
+    - Stuck or crashed containers are now automatically restarted by Kubernetes instead of silently hanging.
