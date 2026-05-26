@@ -1,0 +1,265 @@
+# Patches the cloned NemoClaw Dockerfile before `nemoclaw onboard --from`.
+# Script is embedded inline (Olares hydration has no Helm .Files.Get).
+# Canonical: files/patch-nemoclaw-dockerfile.py — run scripts/embed-build-patch.py after edits.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemoclaw-build-patch
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nemoclaw
+data:
+  patch-nemoclaw-dockerfile.py: |
+    #!/usr/bin/env python3
+    """Force exact OpenClaw version in NemoClaw sandbox Dockerfile (build-time pin).
+    
+    Canonical copy: files/patch-nemoclaw-dockerfile.py
+    Embedded in templates/configmap-build-patch.yaml (Olares has no Helm .Files.Get).
+    Re-embed after edits: python3 scripts/embed-build-patch.py
+    
+    Olares chart hydration parses brace+dollar patterns as template syntax — this file
+    uses chr() for shell dollars and string concat only (no f-strings, no brace literals).
+    """
+    import re
+    import sys
+    
+    MARKER = "nemoclaw-chart: openclaw build pin"
+    D = chr(36)
+    LBR = chr(123)
+    RBR = chr(125)
+    
+    
+    def usage():
+        print(
+            "usage: patch-nemoclaw-dockerfile.py <Dockerfile> [openclaw-version]",
+            file=sys.stderr,
+        )
+        return 2
+    
+    
+    def awk_print_field2():
+        return LBR + "print " + D + "2" + RBR
+    
+    
+    def normalize_newlines(text):
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+    
+    
+    def build_new_block(build_ver):
+        awk = awk_print_field2()
+        lines = [
+            " CUR_VER=" + D + "(openclaw --version 2>/dev/null | awk '" + awk + "' || echo \"0.0.0\"); \\",
+            ' if [ "' + D + 'CUR_VER" = "' + build_ver + '" ]; then \\',
+            ' echo "INFO: OpenClaw ' + D + 'CUR_VER matches chart build pin ' + build_ver + " (" + MARKER + ')"; \\',
+            " else \\",
+            ' echo "INFO: Chart build pin ' + build_ver + ": replacing OpenClaw " + D + "CUR_VER -> " + build_ver + " (" + MARKER + ')"; \\',
+            " rm -rf /usr/local/lib/node_modules/openclaw /usr/local/bin/openclaw; \\",
+            ' npm install -g --no-audit --no-fund --no-progress "openclaw@' + build_ver + '"; \\',
+            " fi; \\",
+        ]
+        return "\n".join(line + "\n" for line in lines)
+    
+    
+    def _ws():
+        return r"[ \t]*"
+    
+    
+    def _openclaw_upgrade_tail(d):
+        w = _ws()
+        return [
+            w + r"rm -rf /usr/local/lib/node_modules/openclaw /usr/local/bin/openclaw; \\",
+            w
+            + r"npm install -g --no-audit --no-fund --no-progress \"openclaw@"
+            + d
+            + re.escape(LBR)
+            + "MIN_VER"
+            + re.escape(RBR)
+            + r"\"; \\",
+            w + r"fi; \\",
+        ]
+    
+    
+    def _openclaw_upgrade_core(d, awk):
+        w = _ws()
+        return [
+            w + r"CUR_VER=" + d + r"\(openclaw --version 2>/dev/null \| awk '" + awk + r"' \|\| echo \"0\.0\.0\"\); \\",
+            w
+            + r"if \[ \""
+            + d
+            + r"\(printf '%s\\n%s' \""
+            + d
+            + r"MIN_VER\" \""
+            + d
+            + r"CUR_VER\" \| sort -V \| head -n1\)\" = \""
+            + d
+            + r"MIN_VER\" \]; then \\",
+            w + r"echo \"INFO: OpenClaw " + d + r"CUR_VER is current \(>= " + d + r"MIN_VER\), no upgrade needed\"; \\",
+            w + r"else \\",
+            w
+            + r"echo \"INFO: Base image has OpenClaw "
+            + d
+            + r"CUR_VER, upgrading to "
+            + d
+            + r"MIN_VER \(minimum required\)\"; \\",
+        ]
+    
+    
+    def _compile_upgrade_block(include_min_ver):
+        d = re.escape(D)
+        awk = re.escape(LBR + "print " + D + "2" + RBR)
+        w = _ws()
+        head = _openclaw_upgrade_core(d, awk)
+        tail = _openclaw_upgrade_tail(d)
+        prefix = ""
+        if include_min_ver:
+            prefix = (
+                w
+                + r"MIN_VER="
+                + d
+                + r"\(grep -m 1 'min_openclaw_version'[^\n]*\); \\\n"
+                + w
+                + r"\[ -n \""
+                + d
+                + r"MIN_VER\" \] \|\| \{[^\n]*\}; \\\n"
+            )
+        body = "\n".join(head) + r"(?:[^\n]*\n)*?" + "\n".join(tail)
+        return re.compile(prefix + body, re.MULTILINE)
+    
+    
+    def upstream_patterns():
+        return [
+            _compile_upgrade_block(include_min_ver=True),
+            _compile_upgrade_block(include_min_ver=False),
+        ]
+    
+    
+    def fallback_anchor_pattern():
+        d = re.escape(D)
+        w = _ws()
+        return re.compile(
+            w
+            + r"MIN_VER="
+            + d
+            + r"\(grep -m 1 'min_openclaw_version'.*?"
+            + w
+            + r"fi; \\\n"
+            + r"(?="
+            + w
+            + r"# Pre-install the codex-acp)",
+            re.DOTALL,
+        )
+    
+    
+    def chart_prev_pattern():
+        d = re.escape(D)
+        awk = re.escape(LBR + "print " + D + "2" + RBR)
+        esc_marker = re.escape(MARKER)
+        w = _ws()
+        parts = [
+            w + r"CUR_VER=" + d + r"\(openclaw --version 2>/dev/null \| awk '" + awk + r"' \|\| echo \"0\.0\.0\"\); \\",
+            w + r'if \[ "' + d + r'CUR_VER" = "[0-9][0-9.]*" \]; then \\',
+            w + r'echo "INFO: OpenClaw ' + d + r'CUR_VER matches chart build pin [0-9][0-9.]* \(' + esc_marker + r"\)[^\"]*\"; \\",
+            w + r"else \\",
+            w
+            + r'echo "INFO: Chart build pin [0-9][0-9.]*: replacing OpenClaw '
+            + d
+            + r'CUR_VER -> [0-9][0-9.]* \('
+            + esc_marker
+            + r"\)[^\"]*\"; \\",
+            w + r"rm -rf /usr/local/lib/node_modules/openclaw /usr/local/bin/openclaw; \\",
+            w + r'npm install -g --no-audit --no-fund --no-progress "openclaw@[0-9][0-9.]*"; \\',
+            w + r"fi; \\",
+        ]
+        return re.compile("\n".join(parts), re.MULTILINE)
+    
+    
+    def apply_first_match(out, patterns, new_block):
+        for pat in patterns:
+            if pat.search(out):
+                return pat.sub(lambda _: new_block, out, count=1), pat.pattern[:80]
+        return None, None
+    
+    
+    def debug_snippet(src):
+        for needle in ("min_openclaw_version", "CUR_VER=" + D + "(openclaw"):
+            idx = src.find(needle)
+            if idx >= 0:
+                start = max(0, idx - 80)
+                end = min(len(src), idx + 400)
+                return needle, src[start:end]
+        return None, src[:500]
+    
+    
+    def main(argv=None):
+        argv = argv if argv is not None else sys.argv
+        if len(argv) < 2:
+            sys.exit(usage())
+    
+        dockerfile = argv[1]
+        build_ver = (argv[2] if len(argv) > 2 else "").strip()
+    
+        with open(dockerfile, encoding="utf-8") as f:
+            src = normalize_newlines(f.read())
+    
+        has_patch4 = "rcf_patch.py" in src
+    
+        if not build_ver:
+            if has_patch4:
+                build_ver = "2026.4.24"
+                print(
+                    "[patch-dockerfile] NEMOCLAW_OPENCLAW_BUILD_VERSION unset; "
+                    "Dockerfile has Patch 4 -> default build pin " + build_ver
+                )
+            else:
+                print(
+                    "[patch-dockerfile] no Patch 4 and no build version; "
+                    "leaving upstream OpenClaw install logic unchanged"
+                )
+                sys.exit(0)
+    
+        new_block = build_new_block(build_ver)
+    
+        if MARKER in src:
+            m = re.search(
+                r"Chart build pin ([0-9][0-9.]*): replacing OpenClaw",
+                src,
+            )
+            if m and m.group(1) == build_ver:
+                print("[patch-dockerfile] already pinned to " + build_ver + " (" + MARKER + ")")
+                sys.exit(0)
+            print("[patch-dockerfile] updating chart build pin -> " + build_ver)
+    
+        patterns = [chart_prev_pattern()] + upstream_patterns() + [fallback_anchor_pattern()]
+        out, matched = apply_first_match(src, patterns, new_block)
+        if out is None:
+            needle, snippet = debug_snippet(src)
+            print(
+                "[patch-dockerfile] ERROR: OpenClaw install block not found in " + dockerfile,
+                file=sys.stderr,
+            )
+            if needle:
+                print(
+                    "[patch-dockerfile] DEBUG: found "
+                    + needle
+                    + " but no pattern matched; snippet:\n"
+                    + snippet,
+                    file=sys.stderr,
+                )
+            sys.exit(1)
+    
+        with open(dockerfile, "w", encoding="utf-8", newline="\n") as f:
+            f.write(out)
+        print(
+            "[patch-dockerfile] applied build pin "
+            + build_ver
+            + " to "
+            + dockerfile
+            + " ("
+            + MARKER
+            + ")"
+        )
+        return 0
+    
+    
+    if __name__ == "__main__":
+        sys.exit(main() or 0)

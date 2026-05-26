@@ -6,7 +6,7 @@ metadata:
   description: NVIDIA NemoClaw - AI Coding Agent with Sandbox Isolation
   appid: nemoclaw
   title: NemoClaw
-  version: 1.0.11
+  version: 1.0.12
   categories:
   - Developer Tools
   - Productivity_v112
@@ -47,10 +47,16 @@ spec:
     - Docker-in-Docker sandbox for isolated execution.
     - OpenAI-compatible LLM endpoints (incl. Dynamo) via env configuration.
 
+  upgradeDescription: |
+    Upgrade Olares chart **1.0.12** — sandbox OpenClaw runtime **2026.5.20** (from 2026.5.7).
+
+    **OpenClaw**
+    - Default **NEMOCLAW_OPENCLAW_VERSION** is **2026.5.20**. After onboard completes, the chart runs `npm install -g openclaw@2026.5.20` inside the sandbox and restarts the gateway so CLI, Web UI, and channel sidecars pick up the new binary.
+    - **Build-time vs runtime pin:** **NEMOCLAW_OPENCLAW_BUILD_VERSION** (default `2026.4.24`, Patch 4 / NemoClaw v0.0.38 Dockerfile) is now separate from the runtime pin. Fresh installs keep a tested build pin while still upgrading to 2026.5.20 after install.
   developer: NVIDIA
   website: https://github.com/NVIDIA/NemoClaw
   sourceCode: https://github.com/NVIDIA/NemoClaw
-  submitter: harveyff
+  submitter: olares
   locale:
   - en-US
   - zh-CN
@@ -163,8 +169,29 @@ envs:
     required: false
     applyOnChange: true
     editable: true
-    default: "2026.5.7"
-    description: "Pin the OpenClaw version inside the sandbox. Chart v1.0.27 defaults to `2026.5.7` so first-time installs ship a tested release out of the box (NemoClaw blueprint v0.0.37 still floors at 2026.4.24, which carries upstream issue #3145 TUI duplicate-message + channel sidecar fetch retry bugs). On change (or first deploy when this differs from the in-sandbox version), chart runs `npm install -g openclaw@<ver>` inside the sandbox, writes /sandbox/.openclaw-pinned-marker, and restarts the gateway so the new binary is picked up by both gateway LAUNCH and channel sidecars; sticky via /workspace/.nemoclaw-openclaw-pin. Set to empty to fall back to whatever NemoClaw bakes (the marker is torn down + gateway restarted on next bridge tick). Available versions: `npm view openclaw versions --json` (sandbox shell)."
+    default: "2026.5.20"
+    description: "Pin the OpenClaw version inside the sandbox (runtime). Chart v1.0.13 defaults to `2026.5.20`. After onboard, chart runs `npm install -g openclaw@<ver>` inside the sandbox and restarts the gateway. **Build-time** pin is separate — see NEMOCLAW_OPENCLAW_BUILD_VERSION (keep `2026.4.24` for NemoClaw v0.0.38 Patch 4)."
+  - envName: NEMOCLAW_OPENCLAW_BUILD_VERSION
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "2026.4.24"
+    description: "OpenClaw version forced during sandbox **Docker build** (Patch 4 / rcf_patch.py compatibility). Default `2026.4.24` matches NemoClaw v0.0.38. Independent of NEMOCLAW_OPENCLAW_VERSION (runtime upgrade after install). When NEMOCLAW_INSTALL_TAG drops Patch 4 (v0.0.39+ main), set this empty to use upstream Dockerfile logic. Bump together when upgrading NemoClaw tags."
+  - envName: NEMOCLAW_SANDBOX_IMAGE
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "beclab/nvidia-nemoclaw-sandbox-base:23bb570"
+    description: "Sandbox **base** image (multi-arch amd64+arm64). Pre-pulled at [5a/5] and aliased to `ghcr.io/nvidia/nemoclaw/sandbox-base:latest` so NemoClaw v0.0.38 onboard uses it as Dockerfile `BASE_IMAGE` without pulling ghcr.io."
+  - envName: NEMOCLAW_SANDBOX_IMAGE_DIGEST
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional `sha256:…` digest for NEMOCLAW_SANDBOX_IMAGE so a repushed tag cannot silently change the baked OpenClaw. Example: `sha256:b3d832b596ab6b7184a9dcb4ae93337ca32851a4f93b00765cc12de26baa3a9a` (official blueprint digest). After rebuilding your fork base, update digest here."
   - envName: NEMOCLAW_POLICY_TIER
     type: string
     required: false
@@ -266,7 +293,7 @@ envs:
     required: false
     applyOnChange: true
     editable: true
-    default: "beclab/hys2023-openshell-cluster:v1.16"
+    default: "beclab/harveyff-openshell-cluster:v1.17"
     description: "Image nemoclaw onboard pulls for OpenShell gateway cluster. Default points at the beclab custom fork (policy disabled at source, direct egress — no MITM proxy). NemoClaw's onboard.ts forcibly sets OPENSHELL_CLUSTER_IMAGE=ghcr.io/nvidia/openshell/cluster:<NEMOCLAW_OPENSHELL_VERSION> before spawning `openshell gateway start`, so env-var overrides don't survive. Workaround: after pulling this image, the chart aliases it via `docker tag` to that exact ghcr ref; openshell's ensure_image() inspects locally, finds the alias, and never pulls upstream. Override to ghcr.io/nvidia/openshell/cluster:<tag> to use the upstream copy verbatim."
   - envName: NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR
     type: string
@@ -296,13 +323,27 @@ envs:
     editable: true
     default: "v0.0.36"
     description: "OpenShell CLI release tag installed by NVIDIA/OpenShell install.sh. Must satisfy NemoClaw's MIN_VERSION..MAX_VERSION (currently 0.0.36). Bump this together with NEMOCLAW_OPENSHELL_CLUSTER_IMAGE."
+  - envName: NEMOCLAW_OPENSHELL_CLI_URL_ARM
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional arm64 OpenShell CLI URL override. When empty on arm64, chart appends `-arm` to NEMOCLAW_OPENSHELL_CLI_URL (e.g. `…/openshell-20264302050-arm`). Set only when using a non-standard mirror path."
+  - envName: NEMOCLAW_OPENSHELL_SANDBOX_URL_ARM
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    default: ""
+    description: "Optional arm64 openshell-sandbox URL override. When empty on arm64, chart appends `-arm` to NEMOCLAW_OPENSHELL_SANDBOX_URL (e.g. `…/openshell-sandbox-20264302050-arm`). Set only when using a non-standard mirror path."
   - envName: NEMOCLAW_INSTALL_TAG
     type: string
     required: false
     applyOnChange: true
     editable: true
     default: "v0.0.38"
-    description: "NemoClaw git ref to clone (branch/tag, not SHA). v0.0.38 is the last pre-glibc-regression tag (pins OpenShell 0.0.36 musl). v0.0.39+ needs glibc ≥ 2.38 and only works with NEMOCLAW_OPENSHELL_GATEWAY_IMAGE override + glibc-2.36-rebuilt cluster image."
+    description: "NemoClaw git ref to clone (branch/tag, not SHA). v0.0.38 is the last pre-glibc-regression tag (pins OpenShell 0.0.36 musl). v0.0.39+ needs glibc ≥ 2.38 and only works with NEMOCLAW_OPENSHELL_GATEWAY_IMAGE override + glibc-2.36-rebuilt cluster image. When upgrading: if the new tag removes Dockerfile Patch 4, clear NEMOCLAW_OPENCLAW_BUILD_VERSION; if Patch 4 remains, align BUILD_VERSION with that tag's tested OpenClaw."
   - envName: NEMOCLAW_INSTALL_HOMEBREW
     type: string
     required: false

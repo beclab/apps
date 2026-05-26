@@ -1,21 +1,4 @@
 # Patches sandbox ~/.openclaw/openclaw.json:
-#   patch_origins.py            -> gateway.trustedProxies (reverse-proxy 403) + controlUi.allowedOrigins
-#   patch_inference_baseurl.py  -> models.providers.inference.baseUrl (see below)
-#
-# Why patch_inference_baseurl.py exists:
-# During nemoclaw [3/8] onboard the installer records inference provider with
-#   models.providers.inference.baseUrl = https://inference.local/v1
-# (OpenShell's internal reverse-proxy alias). That host, however, is NOT
-# resolvable from inside the my-assistant pod's netns on at least one known
-# Olares node layout (getent hosts inference.local -> NXDOMAIN), so the
-# gateway then fails every chat turn with:
-#   [model-fallback/decision] reason=timeout detail=Connection error
-#   Embedded agent failed before reply: LLM request failed: network connection error
-# TUI-vs-WebUI was asymmetric only because TUI in some setups picks a
-# non-`inference/` model (OpenShell local provider) while WebUI always hits
-# `inference/<model>`. We force baseUrl back to the URL the user actually
-# typed (NEMOCLAW_ENDPOINT_URL), which is what nemoclaw.sh probes in preflight
-# (/models 200) and therefore the one we already know is reachable.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -86,23 +69,6 @@ data:
             print("skip", path, e)
   patch_inference_baseurl.py: |
     # Rewrite models.providers.inference.baseUrl so WebUI turns that route
-    # through `inference/<model>` reach the reachable OpenAI-compatible
-    # endpoint instead of the unresolvable https://inference.local alias.
-    #
-    # Inputs (env):
-    #   NEMOCLAW_ENDPOINT_URL   required; same value the operator typed in
-    #                           OlaresManifest (already probed by preflight).
-    #                           Must end in /v1; if missing we auto-append
-    #                           (matches the preflight auto-correct in
-    #                           deployment.yaml).
-    #
-    # Behavior:
-    #   - Only rewrites if the stored baseUrl equals the inference.local
-    #     alias (or its /v1 form) OR is empty/missing. We never overwrite
-    #     a baseUrl the user has already hand-picked to something else.
-    #   - Prints 'patched <path> inference.baseUrl=<url>' on mutation so
-    #     sandbox-ensure-gateway's SHA256 diff flips _cfg_changed=1 and
-    #     forces a gateway restart (see configmap-sandbox-bridge.yaml).
     import json, os, glob
 
     raw = os.environ.get("NEMOCLAW_ENDPOINT_URL", "").strip()
