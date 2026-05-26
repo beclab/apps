@@ -1,40 +1,23 @@
 # Nemoclaw init-prefetch image — contents under /prefetch/ are copied at pod start to
 # /workspace/.nemoclaw-prefetch/ on the nemoclaw workspace PVC (see deployment init-prefetch).
 # skill-env then installs each known artifact from /workspace/.nemoclaw-prefetch/ into
-# the sandbox. Current contents:
-#   busybox, micro, rg, fd          -> sandbox ~/.local/bin/<name>     (single-file static)
-#   olares-cli (+ .version)         -> sandbox /usr/local/bin/olares-cli  (Olares CLI,
-#                                     linux/amd64 ELF from cdn.olares.com; installed as
-#                                     root so every user in the sandbox can invoke it)
-#   go.tar.gz                       -> sandbox /sandbox/.local/go/     (full Go toolchain:
-#                                     `go`, `gofmt`, src/, pkg/ — linux/amd64 glibc build
-#                                     from go.dev, bypasses brew/ghcr.io entirely)
-#   homebrew.tar.gz                 -> sandbox /sandbox/.linuxbrew/Homebrew (Homebrew tree
-#                                     with portable-ruby pre-vendored)
+# the sandbox. Per-arch ELF/toolchain (micro/rg/fd/go/olares-cli/homebrew) — build one
+# image per platform, then publish a multi-arch manifest under a single tag.
 #
-# Why ship Homebrew + Go + olares-cli prebuilt: baking a ready-to-use tree skips both the
-# initial `git clone` / `brew vendor-install ruby` OCI-blob fetch and the go.dev / cdn.olares.com
-# HTTPS fetches on every cold boot. It also dodges corporate MITM proxies that break
-# `brew install go` / `brew install gogcli` / `curl https://cdn.olares.com/...` with
-# `curl: (60) SSL certificate problem`. Source compilation of individual brew formulae
-# still happens at install time but only needs gcc, which skill-env apt-installs in-sandbox.
-#
-# gog (gogcli) is intentionally NOT shipped in this image. Users install it in-sandbox
-# via `openclaw config --section skills` -> brew install steipete/tap/gog so version,
-# auth flow, and OAuth callback host stay under their control.
-#
-# Build (linux/amd64 only; sandbox image is glibc amd64):
+# Build amd64 (from repo copy with amd ARG defaults below):
 #   docker build --platform linux/amd64 \
 #     -t beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-amd \
 #     -f docker/prefetch/Dockerfile docker/prefetch
+# Build arm64 (use arm ARGs — see Desktop/log Dockerfile or swap MICRO_ARCH/RG_TRIPLE/…):
+#   docker build --platform linux/arm64 \
+#     -t beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-arm \
+#     -f docker/prefetch/Dockerfile docker/prefetch
+# Publish manifest (chart pins the unified tag without -amd/-arm suffix):
+#   docker buildx imagetools create -t beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli \
+#     beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-amd \
+#     beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-arm
 #
-# Push:
-#   docker push beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-amd
-#
-# Image ref is pinned in templates/deployment.yaml (init-prefetch). Rebuild, push, bump tag there.
-# The `-amd` suffix is intentional — this image is linux/amd64 only (see OlaresManifest.yaml
-# supportArch). Adding arm64 would require publishing a matching -arm suffix and teaching
-# deployment.yaml to pick the right one per node arch.
+# Image ref is pinned in templates/deployment.yaml (init-prefetch). Rebuild, push manifest, bump tag there.
 
 # Versions for the static-binary fetch stage
 ARG MICRO_VERSION=2.0.13

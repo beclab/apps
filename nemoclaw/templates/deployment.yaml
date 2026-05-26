@@ -1,7 +1,4 @@
 # NemoClaw deployment: workspace + Docker-in-Docker sidecar.
-# Ported from https://github.com/NVIDIA/NemoClaw/blob/main/k8s/nemoclaw-k8s.yaml
-# Workspace container runs the official NemoClaw installer, then stays alive for
-# terminal access. DinD sidecar provides sandbox isolation for code execution.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,15 +56,8 @@ spec:
             runAsUser: 0
 
         # Prefetch image is pinned here (not values.yaml). Bump tag when rebuilding docker/prefetch.
-        # Ships static utilities (busybox for `vi`, micro, ripgrep, fd), a baked Homebrew
-        # tree with portable-ruby pre-vendored, and a prebuilt Go toolchain (go.tar.gz /
-        # go.version) — so `go` is available in the sandbox without relying on brew /
-        # ghcr.io / go.dev reachability at runtime. Speeds up cold-start and sidesteps
-        # corporate MITM proxies that break TLS to ghcr.io. gog (gogcli) is intentionally
-        # NOT shipped here — users install it via `openclaw config --section skills`
-        # inside the sandbox so they control version + auth.
         - name: init-prefetch
-          image: "beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli-amd"
+          image: "beclab/harveyff-nemoclaw-prefetch:2026.5.10-olares-cli"
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c"]
           args:
@@ -84,10 +74,7 @@ spec:
                   chmod 755 /workspace/.nemoclaw-prefetch/$f 2>/dev/null || true
                 fi
               done
-              # Bulk perms refresh: a+rX ensures every dir is traversable and every regular
-              # file readable so the bridge (running as root in main pod) and skill-env (as
-              # sandbox uid) both see the artifacts. -X (capital X) only adds +x where some
-              # execute bit was already set, so it does NOT make plain data files executable.
+              # Bulk perms: a+rX on prefetch tree for bridge + skill-env readers.
               chmod -R a+rX /workspace/.nemoclaw-prefetch 2>/dev/null || true
               echo "[init-prefetch] staged /workspace/.nemoclaw-prefetch:"
               ls -l /workspace/.nemoclaw-prefetch/ || true
@@ -125,15 +112,15 @@ spec:
               export PATH="/home/node/.local/bin:$PATH"
 
               echo "[1/5] Installing system packages..."
-              # Always run apt: container root FS (including /usr/lib where socat's libwrap.so.0
-              # lives) is ephemeral, but /home/node is a hostPath. Relying on a persisted binary
-              # copy breaks on pod restart because its dynamic deps aren't on the new root FS.
-              # Remove any stale copies under $PATH that might shadow freshly-installed system bins.
               rm -f /home/node/.local/bin/socat /home/node/.local/bin/docker /home/node/.local/bin/curl 2>/dev/null || true
-                apt-get update -qq
+              echo "[1/5]   apt-get update (debian mirrors)..."
+              apt-get update -qq
+              echo "[1/5]   apt-get install docker.io socat curl python3 git libwrap0 libz3-4..."
+              echo "[1/5]   (docker.io is large — often 2–5 min on cold boot; not stuck if you see this line)"
               # libz3-4: OpenShell CLI links libz3.so (missing -> openshell fails at dynamic link).
               apt-get install -y -qq docker.io socat curl python3 git libwrap0 libz3-4 >/dev/null 2>&1 || \
                 apt-get install -y -qq docker.io socat curl python3 git libz3-4 >/dev/null 2>&1
+              echo "[1/5]   system packages ready"
               # Verify socat actually loads (catches any residual dynamic-linker issues early).
               if ! socat -V >/dev/null 2>&1; then
                 echo "ERROR: socat failed runtime check after install:" >&2
@@ -141,31 +128,99 @@ spec:
                 exit 1
               fi
 
+              _nemoclaw_cpu_arch() {
+                case "$(uname -m 2>/dev/null)" in
+                  aarch64|arm64) echo arm64 ;;
+                  x86_64|amd64)  echo amd64 ;;
+                  *) echo "$(uname -m 2>/dev/null)" ;;
+                esac
+              }
+
+              _nemoclaw_elf_cpu_arch() {
+                local bin="${1:-}"
+                [ -f "$bin" ] || return 1
+                if file -b "$bin" 2>/dev/null | grep -qiE 'aarch64|ARM'; then
+                  echo arm64
+                elif file -b "$bin" 2>/dev/null | grep -qiE 'x86-64|x86_64|Intel 80386'; then
+                  echo amd64
+                else
+                  echo unknown
+                fi
+              }
+
+              _nemoclaw_verify_elf_arch() {
+                local bin="$1" want="$2" label="$3"
+                local got
+                got=$(_nemoclaw_elf_cpu_arch "$bin")
+                if [ "$got" = unknown ]; then
+                  echo "[openshell-arch] WARN: cannot detect ELF arch for $label; proceeding"
+                  return 0
+                fi
+                if [ "$got" != "$want" ]; then
+                  echo "[openshell-arch] ERROR: $label is ${got} ELF but node is ${want} — refusing wrong-arch CDN binary"
+                  return 1
+                fi
+                return 0
+              }
+
+              # On arm64, append "-arm" to the base CDN path (same pattern as prefetch -amd/-arm tags).
+              # NEMOCLAW_OPENSHELL_*_URL_ARM overrides when set.
+              _nemoclaw_cdn_url_for_arch() {
+                local base_url="${1:-}" override_url="${2:-}"
+                if [ -n "$override_url" ]; then
+                  echo "$override_url"
+                  return 0
+                fi
+                [ -n "$base_url" ] || return 0
+                if [ "$(_nemoclaw_cpu_arch)" != arm64 ]; then
+                  echo "$base_url"
+                  return 0
+                fi
+                case "$base_url" in
+                  *-arm|*-arm\?*) echo "$base_url" ;;
+                  *\?*)
+                    local path="${base_url%%\?*}"
+                    local qs="${base_url#*\?}"
+                    echo "${path}-arm?${qs}"
+                    ;;
+                  *) echo "${base_url}-arm" ;;
+                esac
+              }
+
+              _nemoclaw_resolve_openshell_sandbox_url() {
+                _nemoclaw_cdn_url_for_arch \
+                  "${NEMOCLAW_OPENSHELL_SANDBOX_URL:-}" \
+                  "${NEMOCLAW_OPENSHELL_SANDBOX_URL_ARM:-}"
+              }
+
+              _nemoclaw_resolve_openshell_cli_url() {
+                _nemoclaw_cdn_url_for_arch \
+                  "${NEMOCLAW_OPENSHELL_CLI_URL:-}" \
+                  "${NEMOCLAW_OPENSHELL_CLI_URL_ARM:-}"
+              }
+
               echo "[2/5] Installing OpenShell CLI..."
               # Pin to NemoClaw's MAX_OPENSHELL_VERSION (see scripts/install-openshell.sh in NVIDIA/NemoClaw).
-              # Without this pin, install.sh resolves /releases/latest and may install a version above NemoClaw's
-              # validated max, causing onboard to fail with "openshell <ver> is above the maximum supported".
               OPENSHELL_PIN="${NEMOCLAW_OPENSHELL_VERSION:-v0.0.36}"
               OPENSHELL_PIN_NUM="${OPENSHELL_PIN#v}"
-              # Custom-build override: when NEMOCLAW_OPENSHELL_CLI_URL is non-empty (chart default
-              # points at Olares CDN), download the binary directly instead of running NVIDIA's
-              # install.sh. Needed for forks that patch CLI-side behaviour (relax policy TLD
-              # wildcard validation, disable SSRF private-net block, retarget default image
-              # refs) — install.sh has no "use my binary" hook, so we bypass it entirely.
-              # Set NEMOCLAW_OPENSHELL_CLI_URL="" via Olares UI to fall back to upstream install.sh.
-              install_openshell() {
+                install_openshell() {
                 mkdir -p /home/node/.local/bin
                 rm -f /home/node/.local/bin/openshell
-                _cli_url="${NEMOCLAW_OPENSHELL_CLI_URL:-}"
+                _cli_url="$(_nemoclaw_resolve_openshell_cli_url)"
                 if [ -n "$_cli_url" ]; then
                   echo "  downloading openshell CLI from $_cli_url"
                   if curl -fLsS -o /home/node/.local/bin/openshell.new "$_cli_url"; then
+                    if ! _nemoclaw_verify_elf_arch /home/node/.local/bin/openshell.new "$(_nemoclaw_cpu_arch)" "openshell CLI"; then
+                      rm -f /home/node/.local/bin/openshell.new
+                      echo "  WARN: CDN openshell CLI wrong arch for $(_nemoclaw_cpu_arch); falling back to NVIDIA install.sh" >&2
+                    else
                     _cli_sz=$(stat -c %s /home/node/.local/bin/openshell.new 2>/dev/null || echo '?')
                     _cli_sha=$(sha256sum /home/node/.local/bin/openshell.new 2>/dev/null | awk '{print $1}')
                     echo "  downloaded $_cli_sz bytes, sha256=$_cli_sha"
                     chmod +x /home/node/.local/bin/openshell.new
                     mv /home/node/.local/bin/openshell.new /home/node/.local/bin/openshell
                     return 0
+                    fi
                   fi
                   echo "  WARN: curl from $_cli_url failed; falling back to NVIDIA install.sh" >&2
                   rm -f /home/node/.local/bin/openshell.new
@@ -174,11 +229,24 @@ spec:
                   | OPENSHELL_VERSION="$OPENSHELL_PIN" OPENSHELL_INSTALL_DIR=/home/node/.local/bin sh
               }
               # With a custom URL the binary's --version may match or drift; pin-based skip only
-              # applies to the stock install.sh path. Reinstall every pod boot when the URL is
-              # set so CDN updates take effect without manual wipe of /home/node/.local/bin.
               if [ -n "${NEMOCLAW_OPENSHELL_CLI_URL:-}" ]; then
-                echo "  OpenShell CLI custom URL in effect — reinstalling every pod boot"
-                install_openshell
+                _cli_sha_file=/workspace/.nemoclaw-openshell-cli.sha256
+                _cli_skip=0
+                if [ -x /home/node/.local/bin/openshell ] && [ -f "$_cli_sha_file" ]; then
+                  _cli_cur=$(sha256sum /home/node/.local/bin/openshell 2>/dev/null | awk '{print $1}')
+                  _cli_saved=$(cat "$_cli_sha_file" 2>/dev/null | tr -d '\r\n ')
+                  if [ -n "$_cli_cur" ] && [ "$_cli_cur" = "$_cli_saved" ]; then
+                    echo "  OpenShell CLI custom URL cached (sha256=$_cli_cur); skipping re-download"
+                    _cli_skip=1
+                  fi
+                fi
+                if [ "$_cli_skip" != "1" ]; then
+                  echo "  OpenShell CLI custom URL in effect — installing (CDN update or first boot)"
+                  install_openshell
+                  if [ -x /home/node/.local/bin/openshell ]; then
+                    sha256sum /home/node/.local/bin/openshell 2>/dev/null | awk '{print $1}' > "$_cli_sha_file" 2>/dev/null || true
+                  fi
+                fi
               elif command -v openshell &>/dev/null; then
                 INSTALLED_OS_VER="$(openshell --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
                 if [ "$INSTALLED_OS_VER" = "$OPENSHELL_PIN_NUM" ]; then
@@ -192,10 +260,6 @@ spec:
               fi
 
               # Prefer image-baked /usr/local/bin/openshell (pinned, known-good) when
-              # ~/.local/bin/openshell is missing OR is a broken stub — CDN partial writes
-              # and failed custom-url installs have produced binaries that report version
-              # 0.0.0; operators then hit `openshell policy show` (wrong — use policy get)
-              # or invoke the stub by mistake while /usr/local/bin/openshell is 0.0.36.
               if [ -x /home/node/.local/bin/openshell ]; then
                 _os_loc_ver="$(/home/node/.local/bin/openshell --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
                 if [ "$_os_loc_ver" = "0.0.0" ] || [ -z "$_os_loc_ver" ]; then
@@ -206,9 +270,6 @@ spec:
               export PATH="/usr/local/bin:/usr/local/sbin:${PATH}"
 
               # Legacy socat proxy (pod :8000 -> DYNAMO_HOST). Kept for compatibility with older
-              # NemoClaw custom providers that expected `host.openshell.internal:8000`. Skipped
-              # automatically when DYNAMO_HOST is empty — modern setup goes via OpenShell's
-              # inference.local route and doesn't need this.
               if [ -n "${DYNAMO_HOST:-}" ]; then
                 echo "[3/5] Starting socat proxy 127.0.0.1:8000 -> ${DYNAMO_HOST} (legacy)"
               socat TCP-LISTEN:8000,fork,reuseaddr TCP:$DYNAMO_HOST &
@@ -227,13 +288,6 @@ spec:
               echo "Docker ready"
 
               # --- ghcr sandbox-base docker-pull shim (DISABLED) ---
-              # Previously intercepted `docker pull ghcr.io/nvidia/nemoclaw/sandbox-base:latest` so
-              # a custom NEMOCLAW_SANDBOX_IMAGE was not overwritten by onboard. Disabled while waiting
-              # for upstream NemoClaw/OpenClaw alignment (e.g. Dockerfile Patch 4 vs OpenClaw version).
-              # Re-enable: restore the if-block + set NEMOCLAW_INTERCEPT_GHCR_SANDBOX_PULL default to 1.
-              # if [ "${NEMOCLAW_INTERCEPT_GHCR_SANDBOX_PULL:-0}" != "0" ] && [ -n "${NEMOCLAW_SANDBOX_IMAGE:-}" ]; then
-              #   ... docker shim install under /opt/nemoclaw-docker-shim + PATH prepend ...
-              # fi
               echo "[4b/5] ghcr sandbox-base docker shim skipped (disabled in chart; upstream pull behaviour)"
 
               # Shared per-image puller for [5a/5] first-install preflight and [6/6-pre] gateway
@@ -299,6 +353,119 @@ spec:
                 return 1
               }
 
+              # Install/bootstrap helpers — must be defined before [5a/5] pre-pull and [5b/5].
+              _nemoclaw_source_dir() {
+                for d in /home/node/.nemoclaw/source /root/.nemoclaw/source; do
+                  [ -d "$d" ] && [ -f "$d/Dockerfile" ] && echo "$d" && return 0
+                done
+                return 1
+              }
+
+              _nemoclaw_resolved_sandbox_image() {
+                local img="${NEMOCLAW_SANDBOX_IMAGE:-beclab/nvidia-nemoclaw-sandbox-base:23bb570}"
+                local digest="${NEMOCLAW_SANDBOX_IMAGE_DIGEST:-}"
+                case "$digest" in
+                  "") echo "$img" ;;
+                  sha256:*) echo "${img%%@*}"@"$digest" ;;
+                  *) echo "${img%%@*}@sha256:${digest}" ;;
+                esac
+              }
+
+              _nemoclaw_patch_source_dockerfile() {
+                local src="${1:-}"
+                [ -n "$src" ] && [ -f "$src/Dockerfile" ] || {
+                  echo "[5b/5|build-pin] ERROR: no Dockerfile under ${src:-<unset>}" >&2
+                  return 1
+                }
+                if [ ! -r /opt/nemoclaw/patch-nemoclaw-dockerfile.py ]; then
+                  echo "[5b/5|build-pin] ERROR: patch-nemoclaw-dockerfile.py not mounted" >&2
+                  return 1
+                fi
+                python3 /opt/nemoclaw/patch-nemoclaw-dockerfile.py \
+                  "$src/Dockerfile" "${NEMOCLAW_OPENCLAW_BUILD_VERSION:-2026.4.24}"
+              }
+
+              _nemoclaw_chart_bootstrap_cli() {
+                local src="/home/node/.nemoclaw/source"
+                local tag="${NEMOCLAW_INSTALL_TAG:-v0.0.38}"
+                local tag_sentinel="/workspace/.nemoclaw-install-tag"
+                if [ -f "$tag_sentinel" ] && [ "$(cat "$tag_sentinel" 2>/dev/null)" != "$tag" ]; then
+                  echo "[5b/5|bootstrap] NEMOCLAW_INSTALL_TAG changed ($(cat "$tag_sentinel" 2>/dev/null) -> ${tag}); re-cloning"
+                  rm -rf "$src"
+                fi
+                if command -v nemoclaw >/dev/null 2>&1 && [ -f "$src/Dockerfile" ]; then
+                  _nemoclaw_patch_source_dockerfile "$src" || return 1
+                  printf '%s\n' "$tag" > "$tag_sentinel" 2>/dev/null || true
+                  return 0
+                fi
+                command -v git >/dev/null 2>&1 || {
+                  echo "[5b/5|bootstrap] ERROR: git required to clone NemoClaw ${tag}" >&2
+                  return 1
+                }
+                echo "[5b/5|bootstrap] cloning NemoClaw ${tag} (chart path; Dockerfile patched before sandbox build)"
+                rm -rf "$src"
+                mkdir -p "$(dirname "$src")"
+                if ! git clone --depth 1 --branch "$tag" https://github.com/NVIDIA/NemoClaw.git "$src"; then
+                  echo "[5b/5|bootstrap] ERROR: git clone NemoClaw ${tag} failed" >&2
+                  return 1
+                fi
+                _nemoclaw_patch_source_dockerfile "$src" || return 1
+                if ! (cd "$src" && npm install --ignore-scripts && npm run --if-present build:cli); then
+                  echo "[5b/5|bootstrap] ERROR: npm build:cli failed" >&2
+                  return 1
+                fi
+                if ! (cd "$src/nemoclaw" && npm install --ignore-scripts && npm run build); then
+                  echo "[5b/5|bootstrap] ERROR: nemoclaw plugin build failed" >&2
+                  return 1
+                fi
+                if ! (cd "$src" && npm link); then
+                  echo "[5b/5|bootstrap] ERROR: npm link failed" >&2
+                  return 1
+                fi
+                if [ -x "$src/scripts/install-openshell.sh" ]; then
+                  _bootstrap_os_ver="$(openshell --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+                  if [ "$_bootstrap_os_ver" = "${OPENSHELL_PIN_NUM:-0.0.36}" ]; then
+                    echo "[5b/5|bootstrap] openshell ${_bootstrap_os_ver} already on PATH; skipping install-openshell.sh"
+                  else
+                    bash "$src/scripts/install-openshell.sh" || {
+                      echo "[5b/5|bootstrap] WARN: install-openshell.sh failed (onboard may retry)" >&2
+                    }
+                  fi
+                fi
+                export PATH="/home/node/.local/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+                command -v nemoclaw >/dev/null 2>&1 || {
+                  echo "[5b/5|bootstrap] ERROR: nemoclaw CLI not on PATH after npm link" >&2
+                  return 1
+                }
+                echo "[5b/5|bootstrap] nemoclaw CLI ready: $(nemoclaw --version 2>/dev/null | head -1)"
+                printf '%s\n' "$tag" > "$tag_sentinel" 2>/dev/null || true
+              }
+
+              _nemoclaw_preflight_sandbox_base() {
+                local img="$(_nemoclaw_resolved_sandbox_image)"
+                local build_ver="${NEMOCLAW_OPENCLAW_BUILD_VERSION:-2026.4.24}"
+                local src
+                src="$(_nemoclaw_source_dir || true)"
+                if [ -z "$src" ] || ! grep -q 'rcf_patch.py' "$src/Dockerfile" 2>/dev/null; then
+                  return 0
+                fi
+                if ! docker image inspect "$img" >/dev/null 2>&1; then
+                  echo "[5b/5|build-pin] sandbox-base not cached yet; will pull $img before build"
+                  return 0
+                fi
+                local base_ver
+                base_ver="$(docker run --rm "$img" openclaw --version 2>/dev/null | awk '{print $2}' | tr -d '\r\n ')"
+                if [ -z "$base_ver" ]; then
+                  echo "[5b/5|build-pin] WARN: could not read openclaw --version from $img"
+                  return 0
+                fi
+                if [ "$base_ver" != "$build_ver" ]; then
+                  echo "[5b/5|build-pin] sandbox-base $img has OpenClaw ${base_ver}; Dockerfile will force ${build_ver} at build (NEMOCLAW_OPENCLAW_BUILD_VERSION)"
+                else
+                  echo "[5b/5|build-pin] sandbox-base OpenClaw ${base_ver} matches build pin"
+                fi
+              }
+
               SANDBOX_FILTER="${NEMOCLAW_SANDBOX_NAME:-my-assistant}"
 
               if [ -n "${CHAT_UI_URL:-}" ]; then
@@ -308,84 +475,38 @@ spec:
                 echo "CHAT_UI_URL unset — set app env or Olares domain.webtui (entrance name webtui); else web UI allowlist may default to http://127.0.0.1:18789"
               fi
 
-              # Chat ingress :18790 (Service :18789). Sandbox now runs as a k3s pod inside
-              # the `openshell-cluster-nemoclaw` Docker container (OpenShell >= 0.0.36), not
-              # as a sibling Docker container. We therefore:
-              #   1) wait for `my-assistant` pod to be Running via cluster-container kubectl
-              #   2) ensure `openclaw gateway` is listening on sandbox :18789 (HOME=/sandbox so
-              #      it picks up NemoClaw-provisioned providers + model, not root defaults)
-              #   3) relay pod :18790 -> sandbox :18789 via `docker exec … kubectl exec … node` pipe
+              # Chat ingress :18790 (Service :18789) via k3s sandbox pod in cluster container.
               CHAT_PUBLISH=18790
               CLUSTER_CTR="${NEMOCLAW_CLUSTER_CTR:-openshell-cluster-nemoclaw}"
               SANDBOX_NS="${NEMOCLAW_SANDBOX_NS:-openshell}"
               export CLUSTER_CTR SBX=${SANDBOX_FILTER} NS=${SANDBOX_NS}
 
-              # cold-start reset is deferred until AFTER [5b/5] onboard (see block after
-              # /workspace/.nemoclaw-installed handling). Running it in parallel with onboard
-              # caused a false "sandbox not reachable within 15m" while my-assistant was not
-              # created yet.
-
               (
                 start_placeholder_18790() {
                   # Readiness/startup probes gate on .nemoclaw-cli-ready (see below).
-                  # .nemoclaw-chat-relay-ready is the WebUI-relay-up signal -- kept
-                  # as an observability touchpoint but no longer gates Pod Ready.
                   rm -f /workspace/.nemoclaw-cli-ready 2>/dev/null || true
                   rm -f /workspace/.nemoclaw-chat-relay-ready 2>/dev/null || true
-                  # Kill BOTH the old socat placeholder (TCP-LISTEN) AND the newer
-                  # install-ui python server. start_relay_18790 uses the same
-                  # pattern pair, so moving between placeholder / relay / new
-                  # placeholder never leaves a stale listener on :${CHAT_PUBLISH}.
                   pkill -f "LISTEN:${CHAT_PUBLISH}" 2>/dev/null || true
                   pkill -f "install-ui.py --port ${CHAT_PUBLISH}" 2>/dev/null || true
                   sleep 1
-                  # DISABLED: python install-progress page. See large commented
-                  # block at end of this function + configmap-install-ui.yaml.
-                  # Reinstated when re-enabling the WebUI install-progress gate.
-                  #
-                  # Current behaviour: socat placeholder that returns a minimal
-                  # HTTP/1.1 503 for every inbound connection until the sandbox
-                  # gateway is healthy and start_relay_18790 takes over :${CHAT_PUBLISH}.
-                  # This is the original pre-install-ui behaviour.
                   printf '%s\n' '#!/bin/bash' 'read -t 25 -r _ || true' \
                     "printf 'HTTP/1.1 503 Service Unavailable\\r\\nContent-Type: text/plain; charset=utf-8\\r\\nConnection: close\\r\\nContent-Length: 0\\r\\n\\r\\n'" \
                     > /tmp/nemoclaw-chat-503.sh
                   chmod +x /tmp/nemoclaw-chat-503.sh
                   socat TCP-LISTEN:${CHAT_PUBLISH},fork,reuseaddr,bind=0.0.0.0 EXEC:/tmp/nemoclaw-chat-503.sh 2>/dev/null &
                   echo "[chat-ui-bridge] :${CHAT_PUBLISH} 503 placeholder up (install-progress UI disabled)"
-
-                  # ---- DISABLED: python install-progress page ----
-                  # Re-enable by replacing the socat block above with:
-                  #   if command -v python3 >/dev/null 2>&1 && [ -r /opt/nemoclaw/install-ui.py ]; then
-                  #     nohup python3 /opt/nemoclaw/install-ui.py --port "${CHAT_PUBLISH}" --bind 0.0.0.0 \
-                  #       >>/tmp/nemoclaw-install-ui.log 2>&1 &
-                  #     echo "[chat-ui-bridge] :${CHAT_PUBLISH} install-progress UI up (python install-ui.py; see /tmp/nemoclaw-install-ui.log)"
-                  #   else
-                  #     # ...socat 503 fallback (as above)...
-                  #   fi
-                  # and also re-enable the install-ui.py volumeMount + the
-                  # nemoclaw-install-ui ConfigMap volume in this Deployment.
                 }
                 pod_running() {
                   docker exec "$CLUSTER_CTR" kubectl -n "$NS" get pod "$SBX" \
                     -o jsonpath='{.status.phase}' 2>/dev/null | grep -q '^Running$'
                 }
+                agent_container_running() {
+                  docker exec "$CLUSTER_CTR" kubectl -n "$NS" get pod "$SBX" \
+                    -o 'jsonpath={.status.containerStatuses[?(@.name=="agent")].state.running.startedAt}' 2>/dev/null \
+                    | grep -q .
+                }
                 gateway_listening() {
                   # Probe gateway from the agent container by TCP-connecting to
-                  # 127.0.0.1:18789 via nsenter into the user/sandbox netns
-                  # first (chart v1.7.10+ launches the gateway there) and
-                  # falling back to agent netns for cold starts. We use TCP
-                  # probe instead of `openclaw gateway health` because the
-                  # health CLI authenticates with auth.token from openclaw.json
-                  # while the gateway runs with `--auth none --allow-unconfigured`
-                  # so the WS handshake hangs until the CLI 10s timeout.
-                  # Verified in chart v1.7.11 production (E-1 diagnostic): TCP
-                  # probe in user netns returns OK in <100ms while
-                  # `openclaw gateway health` times out at 10s. Without this
-                  # change, the bridge main loop would treat a perfectly
-                  # healthy gateway as not-yet-ready and never write
-                  # /workspace/.nemoclaw-cli-ready, leaving the WebUI on the
-                  # install-progress placeholder forever.
                   docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- sh -c '
                     _agent=$(readlink /proc/self/ns/net 2>/dev/null)
                     _pick=""
@@ -406,9 +527,6 @@ spec:
                 }
                 start_relay_18790() {
                   # Take :${CHAT_PUBLISH} away from both the old socat 503
-                  # placeholder AND the python install-ui page. Without the
-                  # python pkill, the SO_REUSEADDR bind below would race the
-                  # still-listening install-ui and socat would silently lose.
                   pkill -f "LISTEN:${CHAT_PUBLISH}" 2>/dev/null || true
                   pkill -f "install-ui.py --port ${CHAT_PUBLISH}" 2>/dev/null || true
                   sleep 1
@@ -422,15 +540,10 @@ spec:
                   : > /workspace/.nemoclaw-chat-relay-ready
                 }
                 # OAuth callback relay: pod :18788 -> sandbox :8080.
-                # Listens permanently; the sandbox side is only actually answered while `gog auth add --listen-addr 0.0.0.0:8080` is running.
-                # ingress-weui.yaml's `location = /oauth2/callback` routes to Service nemoclaw:8080 -> this pod port.
                 start_relay_oauth() {
                   pkill -f "LISTEN:${OAUTH_PUBLISH}" 2>/dev/null || true
                       sleep 1
                   # NOTE: do NOT use `,stderr` in the EXEC address here. Unlike the chat tunnel
-                  # (WebSocket framing tolerates a stderr preamble), the OAuth relay carries a
-                  # vanilla HTTP/1.1 request; any kubectl/node diagnostic bytes merged into the
-                  # data stream cause curl to fail with "Received HTTP/0.9 when not allowed".
                   socat TCP-LISTEN:${OAUTH_PUBLISH},fork,reuseaddr,bind=0.0.0.0 \
                     "EXEC:/opt/nemoclaw/sandbox-tunnel.sh 8080" 2>&1 | \
                     while read -r ln; do echo "[oauth-bridge] tunnel: $ln"; done &
@@ -438,13 +551,6 @@ spec:
                 }
                 OAUTH_PUBLISH=18788
                 # Opportunistic brew backfill: if cold-reset's one-shot staging was skipped
-                # (sandbox not ready in 60s, install toggle off, clone hiccup, …) we can still
-                # push the workspace-cached Homebrew tree into the sandbox once it's reachable.
-                # Safe to call repeatedly — no-ops when brew already present.
-                # Idempotent permission fix: tar extraction runs as root in the agent container,
-                # so even after a successful sync the Homebrew tree can end up root-owned and
-                # Homebrew's first runtime mkdir (var/homebrew/locks) fails as `sandbox`.
-                # We call this every loop; it is a no-op once ownership is correct.
                 fix_brew_perms() {
                   docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
                     sh -c '
@@ -457,6 +563,14 @@ spec:
                                /sandbox/.local/var/homebrew/locks
                       chown -R sandbox:sandbox /sandbox/.linuxbrew /sandbox/.local 2>/dev/null || true
                       chmod -R u+rwX /sandbox/.linuxbrew 2>/dev/null || true
+                      if ! pgrep -f "[b]rew vendor-install" >/dev/null 2>&1; then
+                        for _ld in /sandbox/.linuxbrew/var/homebrew/locks \
+                                   /sandbox/.linuxbrew/Homebrew/var/homebrew/locks \
+                                   /sandbox/.local/var/homebrew/locks; do
+                          [ -d "$_ld" ] || continue
+                          find "$_ld" -maxdepth 1 -type f -delete 2>/dev/null || true
+                        done
+                      fi
                     ' >/dev/null 2>&1 || true
                 }
                 ensure_brew_in_sandbox() {
@@ -491,12 +605,6 @@ spec:
                                  "$BREW_REPO/Library/Homebrew/vendor/portable-ruby" \
                                  "$BINDIR/../var/homebrew/locks" 2>/dev/null || true
                         # Wrapper (not symlink) pins HOMEBREW_PREFIX so openclaw
-                        # skill runners (which sanitize env) cannot trick brew
-                        # into using /sandbox/.local as prefix, which would
-                        # EACCES on vendor-install-ruby flock in .local/var/...
-                        # Built via printf-per-line to survive YAML block
-                        # scalar indentation (heredoc body would need to sit
-                        # at column 0 and that terminates the scalar).
                         rm -f "$BINDIR/brew" 2>/dev/null || true
                         {
                           printf "%s\n" "#!/bin/sh"
@@ -524,37 +632,13 @@ spec:
                   fix_brew_perms
                 }
                 # Fallback runners for cold-reset's one-shot subshells. If cold-reset timed out
-                # (e.g. 5a/5 ghcr.io layer retries pushed sandbox readiness past 15min), the chat
-                # bridge picks up the slack the first time it sees the sandbox pod Running. Both
-                # paths are guarded by sentinel files on /workspace so they only fire once per
-                # bootstrap. Both underlying scripts are themselves idempotent.
-                #
-                # Race avoidance (chart v1.7.21+): In the typical case BOTH paths are eligible
-                # to install skill-env on a fresh pod. chat-ui-bridge enters its loop ~30-60s
-                # before cold-reset (cold-reset waits for the sandbox pod to actually exist,
-                # which only happens partway through onboard). chat-ui-bridge therefore wins
-                # the race almost always and writes /workspace/.nemoclaw-skillenv-installed +
-                # the version stamp. Cold-reset now mirrors the bridge's three-stage check
-                # (sentinel exists + version stamp matches SKILLENV_EXPECTED_VERSION) and
-                # early-exits when bridge already finished, saving ~3-5min of duplicated
-                # apt update + apt install + gcc check + dotfile wiring per pod boot.
                 ensure_skill_env_installed() {
-                  # Three-stage guard:
                   #   1. Fast path: host-side sentinel says we already did this pod.
-                  #   2. Verify /usr/bin/gcc survives in the sandbox (rootfs is
-                  #      ephemeral; pod restarts wipe the shim while /workspace
-                  #      keeps the sentinel, so we must re-verify).
-                  #   3. Version gate: /workspace/.nemoclaw-skillenv-version must
-                  #      match SKILLENV_EXPECTED_VERSION. Bump this (and the stamp
-                  #      in sandbox-install-skill-env.sh) whenever skill-env logic
-                  #      changes in a way existing pods must pick up.
                   local reason=""
                   local _got_ver=""
-                  # MUST match the printf stamp at the end of sandbox-install-skill-env.sh
-                  # (configmap-sandbox-bridge.yaml). If these drift, the bridge logs
                   # "skill-env version mismatch" and re-runs the full installer on every
                   # loop tick (~10s) — looks like a random restart / flapping readiness.
-                  local SKILLENV_EXPECTED_VERSION="2026-05-11-interactive-npm-proxy-v1"
+                  local SKILLENV_EXPECTED_VERSION="2026-05-23-gog-brew-wrap-v2"
                   if [ -f /workspace/.nemoclaw-skillenv-installed ]; then
                     if [ "${NEMOCLAW_SKILL_INSTALL_GCC:-1}" = "1" ] && \
                        ! docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
@@ -600,10 +684,7 @@ spec:
                     : > /workspace/.nemoclaw-skillenv-installed
                   else
                     sed "s/^/[chat-ui-bridge:skill-env] /" "$_bridge_sk" 2>/dev/null || cat "$_bridge_sk"
-                    # LOUD banner — otherwise this failure is easy to miss in the bridge tail,
                     # and users only see its symptom later ("gog install fails: Install Clang").
-                    # Duplicate on stderr so `kubectl logs -c nemoclaw --tail=200` surfaces it
-                    # even when routed through the sidecar log shipper.
                     {
                       echo ""
                       echo "================================================================"
@@ -621,42 +702,10 @@ spec:
                 }
                 # Manage the gog shim's lifecycle to track the gogcli Cellar binary's
                 # lifecycle. Runs every loop iteration (cheap: a couple of kubectl exec
-                # probes) so the user's mental model holds:
-                #   - before they `openclaw config --section skills` -> install gogcli,
-                #     `gog` is "command not found" (no shim, nothing pre-installed);
-                #   - after install, the shim auto-appears so openclaw agents (which
-                #     strip GOG_* env + force XDG=/tmp/.config) can still reach the
-                #     keyring stored under /sandbox/.config/gogcli;
-                #   - after `brew uninstall gogcli`, the shim auto-disappears so users
-                #     don't see a phantom `gog` binary that just FATALs.
-                # The shim is installed at TWO paths — both must contain a regular
-                # file with the v2 magic header for the loop to consider state OK:
-                #   1. /sandbox/.linuxbrew/Homebrew/bin/gog
-                #      Replaces brew's natural symlink to Cellar. This is the path
-                #      that ACTUALLY wins in sandbox-user PATH (because `brew shellenv`
-                #      prepends /sandbox/.linuxbrew/Homebrew/bin and that always lands
-                #      ahead of /usr/local/bin in the resulting PATH). Without this,
-                #      openclaw skill spawns inherit sandbox-user PATH, walk past
-                #      /usr/local/bin/gog, and hit the brew symlink first -> bypass
-                #      the shim entirely -> XDG/GOG_KEYRING_PASSWORD never injected
-                #      -> agent reports "需要设置 Google 账户认证".
-                #   2. /usr/local/bin/gog
-                #      Defensive secondary install for environments where PATH order
-                #      differs (e.g. sub-shells that don't run `brew shellenv`, or
-                #      future image layers that move /sandbox/.linuxbrew off PATH).
-                # Trade-off for path #1: `brew reinstall gogcli` will conflict with
-                # our regular file at link time (brew expects to write a symlink
-                # there). The reconcile loop self-heals within ~30s after such a
-                # reinstall by removing the shim, letting brew finish, and then
-                # re-installing the shim. End-user impact: a single-loop hiccup
-                # window where the agent might bypass the shim, which is acceptable
-                # given how rare a reinstall is.
                 ensure_gog_shim_in_sandbox() {
                   # Shim must run even when NEMOCLAW_INSTALL_HOMEBREW=0 (brew optional; gogcli may exist).
                   local _kx="docker exec $CLUSTER_CTR kubectl -n $NS exec $SBX -c agent --"
                   # sandbox-ensure-gateway runs clamp from /sandbox/.nemoclaw — the agent image
-                  # has no /opt/nemoclaw mount (only the nemoclaw workspace pod does). Push every
-                  # loop so openclaw.json env.vars stays in sync (XDG_CONFIG_HOME for WebUI gog).
                   docker exec -i "$CLUSTER_CTR" kubectl -n "$NS" exec -i "$SBX" -c agent -- \
                     sh -c 'mkdir -p /sandbox/.nemoclaw && cat > /sandbox/.nemoclaw/clamp-openclaw-config.py && chmod 0644 /sandbox/.nemoclaw/clamp-openclaw-config.py' \
                     < /opt/nemoclaw/clamp-openclaw-config.py 2>/dev/null || true
@@ -679,12 +728,8 @@ spec:
                     exit 1
                   ' 2>/dev/null || true)
                   # Probe 2: primary shim lives at /sandbox/.local/bin/gog (writable, beats
-                  # brew symlink at Homebrew/bin/gog in PATH). Early-exit only when that
-                  # file exists, is not a symlink, and carries the current magic header.
                   local _shim_state
                   # Magic header compared literally: any version mismatch (e.g. pre-v17
-                  # shim still sitting in the sandbox after a chart bump) forces
-                  # reconcile so callers always get the current shim body.
                   _shim_state=$($_kx sh -c '
                     a=0
                     f=/sandbox/.local/bin/gog
@@ -724,274 +769,25 @@ spec:
                   docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
                     /sandbox/.nemoclaw-reconcile-gog-shim.sh 2>&1 | grep -E "^\[gog-shim\]" || true
                 }
-                # Pin OpenClaw to a specific upstream version inside the sandbox.
-                # The NemoClaw blueprint sets `min_openclaw_version: 2026.4.24` (latest tag
-                # v0.0.37), so onboard bakes 2026.4.24 into the sandbox image regardless of
-                # newer OpenClaw releases shipped on npm. When the user wants a fix that landed
-                # in a later OpenClaw (e.g. NemoClaw issue #3145 — "TUI shows each message
-                # twice + out-of-order" — likely improved by 2026.4.26 dedupe + 2026.5.x WS-ping
-                # fixes), they can set olaresEnv.NEMOCLAW_OPENCLAW_VERSION="2026.5.2" and we
-                # `npm install -g openclaw@<ver>` inside the sandbox + restart the gateway.
-                #
-                # Idempotent + sticky: a sentinel /workspace/.nemoclaw-openclaw-pin remembers
-                # the version we last applied; we only re-install when env value changes (or
-                # sandbox lost the binary on rebuild). Empty env = no-op (use whatever NemoClaw
-                # baked).
-                #
-                # Failure modes (all logged, none fatal — the pre-baked OpenClaw still works):
-                #   * npm install permission denied (sandbox /usr/local read-only on landlock)
-                #   * registry network error / version not on npm
-                #   * gateway refuses to restart (covered by sandbox-ensure-gateway loop)
                 ensure_openclaw_version_in_sandbox() {
-                  local _want="${NEMOCLAW_OPENCLAW_VERSION:-}"
-                  # Throttle "noop" status logs to once-per-N-ticks (default every 12th call,
-                  # ~3min on a 15s loop). State stored on /tmp -- per-pod, NOT hostPath, so
-                  # logs reset on pod restart (which is when the user wants to see them).
-                  local _tick_file=/tmp/nemoclaw-openclaw-pin-tick
-                  local _tick=0
-                  if [ -f "$_tick_file" ]; then
-                    _tick=$(cat "$_tick_file" 2>/dev/null || echo 0)
-                  fi
-                  _tick=$((_tick + 1))
-                  printf "%d" "$_tick" > "$_tick_file" 2>/dev/null || true
-                  local _verbose=0
-                  if [ "$_tick" -le 2 ] || [ $((_tick % 12)) -eq 0 ]; then
-                    _verbose=1
-                  fi
-                  if [ -z "$_want" ]; then
-                    # Env cleared by user (or never set): tear down the pin marker so the
-                    # gateway LAUNCH falls back to the system /usr/local/bin/openclaw on
-                    # the next restart. We leave /sandbox/.local/bin/openclaw in place
-                    # (npm-installed once, harmless on disk) so re-pinning to the same
-                    # version skips the network round-trip.
-                    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
-                      sh -c 'test -f /sandbox/.openclaw-pinned-marker && rm -f /sandbox/.openclaw-pinned-marker && echo "[openclaw-pin] removed pin marker (env cleared)" || true' \
-                      2>/dev/null | sed 's/^/[chat-ui-bridge:openclaw-pin] /'
-                    rm -f /workspace/.nemoclaw-openclaw-pin 2>/dev/null || true
-                    if [ "$_verbose" = "1" ]; then
-                      echo "[chat-ui-bridge:openclaw-pin] NEMOCLAW_OPENCLAW_VERSION env unset -> using whatever NemoClaw baked into the sandbox; pin helper is a no-op"
-                    fi
-                    return 0
-                  fi
-                  # Strip leading 'v' for consistent comparison (`openclaw --version` may print "v...").
-                  _want="${_want#v}"
-                  # Sticky sentinel on hostPath; format `<version>` (single line).
-                  local _sentinel=/workspace/.nemoclaw-openclaw-pin
-                  local _have=""
-                  if [ -f "$_sentinel" ]; then
-                    _have=$(head -1 "$_sentinel" 2>/dev/null | tr -d '\r\n ')
-                  fi
-                  # Re-verify in-sandbox version: pod restarts wipe rootfs (sentinel survives on
-                  # /workspace, so without this re-check we would skip a re-install the user
-                  # actually needs).
-                  # Force a known PATH so we don't depend on `kubectl exec`'s default
-                  # (which inherits the container's USER+env -- can vary across openshell
-                  # versions and skip /usr/local/bin if the agent container's entrypoint did
-                  # not re-export PATH for non-login shells).
-                  local _kx="docker exec $CLUSTER_CTR kubectl -n $NS exec $SBX -c agent --"
-                  local _live
-                  _live=$($_kx env PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/sandbox/.local/bin:/sandbox/.linuxbrew/Homebrew/bin:/sandbox/.linuxbrew/bin" sh -c 'openclaw --version 2>/dev/null | head -1 | awk "{for(i=1;i<=NF;i++) if (\$i ~ /^v?[0-9]+\\.[0-9]+\\./) {print \$i; exit}}" | tr -d "v"' 2>/dev/null | tr -d '\r\n ')
-                  if [ -n "$_live" ] && [ "$_live" = "$_want" ]; then
-                    if [ "$_have" != "$_want" ]; then
-                      mkdir -p /workspace 2>/dev/null
-                      printf "%s\n" "$_want" > "$_sentinel"
-                    fi
-                    if [ "$_verbose" = "1" ]; then
-                      echo "[chat-ui-bridge:openclaw-pin] live sandbox openclaw=${_live} matches NEMOCLAW_OPENCLAW_VERSION=${_want} (sentinel=${_have:-<absent>}); no action"
-                    fi
-                    return 0
-                  fi
-                  echo "[chat-ui-bridge:openclaw-pin] DRIFT: live sandbox openclaw=${_live:-<unknown>} vs NEMOCLAW_OPENCLAW_VERSION=${_want}; pinning via npm install -g openclaw@${_want}"
-                  # Try root install first (works when sandbox kubectl-exec lands as root);
-                  # fall back to user-prefix /sandbox/.local install + symlink. Both paths
-                  # eventually surface a binary on PATH (system /usr/local/bin/openclaw or
-                  # /sandbox/.local/bin/openclaw).
-                  #
-                  # Hardened pipeline (chart v1.7.22+): the previous implementation just ran
-                  # `npm install -g openclaw@$VER` in place. That is unsafe for OpenClaw's
-                  # bundled-output layout (esbuild emits hashed chunks like
-                  # dist/dispatch-Dw_9PM8V.js + dist/runtime-plugins-BuhvuqB5.js where every
-                  # release ships a different hash pair). npm only unlinks files listed in
-                  # the OLD package's package.json files[] field; if a partial install
-                  # writes the new dispatch-XXX.js but bails before runtime-plugins-YYY.js
-                  # lands (network blip, signal, dpkg/landlock denial) we end up with the
-                  # new dispatch chunk importing a runtime-plugins chunk that never made
-                  # it to disk. Even worse: a SUCCESSFUL second install on top of that
-                  # state can leave the OLD dispatch-Dw_9PM8V.js orphaned in dist/ next to
-                  # the NEW dispatch-8E8vi2HV.js, and node ESM resolver may pick the wrong
-                  # one depending on package.json exports map. Symptom user reported on
-                  # chart v1.7.20+v1.7.21 with NEMOCLAW_OPENCLAW_VERSION=2026.5.7:
-                  #   Error [ERR_MODULE_NOT_FOUND]: Cannot find module
-                  #   '/usr/local/lib/node_modules/openclaw/dist/runtime-plugins-BuhvuqB5.js'
-                  #   imported from .../dispatch-Dw_9PM8V.js
-                  # while `openclaw --version` reported 2026.5.7 and the dist directory
-                  # actually contained dispatch-8E8vi2HV.js + runtime-plugins-QyLdUr8j.js
-                  # (a complete second pair). New TUI processes still resolved to the
-                  # orphaned old dispatch and exploded.
-                  # Hardening:
-                  #   * rm -rf BOTH the system module dir AND the npm cache before install
-                  #     so npm can't see-stale + skip-as-already-current. We cover all
-                  #     three install prefixes (system /usr/local, sandbox-user /sandbox/.local,
-                  #     and the legacy npm-config-prefix /tmp/npm-global written by user-
-                  #     issued `openclaw update` runs) so a single helper invocation always
-                  #     converges to a single install location.
-                  #   * --force flag so npm overwrites even when its internal heuristics
-                  #     decide the package is already current.
-                  #   * Post-install sanity check: spawn `openclaw --version` AND a node
-                  #     module-resolve probe through `require('module').createRequire(...)`
-                  #     so we exercise the dispatch -> runtime-plugins import graph at
-                  #     pin time. If either fails, we leave the sentinel + marker absent
-                  #     and the next bridge tick retries automatically.
-                  # NOTE: capture exit status BEFORE piping to sed (pipefail is not on by default
-                  # in this bash subshell, so `if cmd | sed` would always observe sed's rc=0 and
-                  # mark every install as successful — verified by walking through this bridge
-                  # subshell's `set +e` semantics during the v1.7.x debugging cycle).
-                  local _ok=0
-                  # Never redirect this docker+kubectl pipeline to a host log file. Olares wraps
-                  # the executable as `environment` (seen in user logs: "environment: line NNN:
-                  # \"/tmp/...\" or \"/workspace/...\": No such file or directory") — the wrapper
-                  # cannot open those paths for append/redir in the bridge subshell, so the
-                  # whole pin aborts before npm runs and the sandbox stays on 2026.4.24.
-                  # Capture stdout+stderr in bash memory instead; $? still reflects the inner
-                  # sh -c exit status.
-                  local _log_capture=""
-                  _log_capture=$($_kx sh -c "
-                      set -e
-                      VER=\"${_want}\"
-                      # --no-fund/--no-audit: silence non-essential network calls; --prefer-online: avoid stale cache.
-                      # --force: ensure npm overwrites even when it thinks the package is already at \$VER (defends against the orphaned-chunk bug above).
-                      install_flags='--no-fund --no-audit --prefer-online --force'
-                      # Cover all three places a previous install might have left orphaned chunks behind.
-                      cleanup_targets='/usr/local/lib/node_modules/openclaw /sandbox/.local/lib/node_modules/openclaw /tmp/npm-global/lib/node_modules/openclaw'
-                      npm cache clean --force >/dev/null 2>&1 || true
-                      if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-                        for d in \$cleanup_targets; do sudo rm -rf \"\$d\" 2>/dev/null || true; done
-                        sudo npm install -g \$install_flags \"openclaw@\$VER\" 2>&1
-                      elif [ -w /usr/local/lib ]; then
-                        for d in \$cleanup_targets; do rm -rf \"\$d\" 2>/dev/null || true; done
-                        npm install -g \$install_flags \"openclaw@\$VER\" 2>&1
-                      else
-                        echo '[openclaw-pin] system /usr/local not writable; falling back to /sandbox/.local prefix'
-                        rm -rf /sandbox/.local/lib/node_modules/openclaw /tmp/npm-global/lib/node_modules/openclaw 2>/dev/null || true
-                        mkdir -p /sandbox/.local
-                        NPM_CONFIG_PREFIX=/sandbox/.local \
-                          npm install -g \$install_flags \"openclaw@\$VER\" 2>&1
-                        # Best-effort override of system shim so PATH order does not matter.
-                        ln -sf /sandbox/.local/bin/openclaw /usr/local/bin/openclaw 2>/dev/null \
-                          || echo '[openclaw-pin] note: cannot symlink /usr/local/bin/openclaw (read-only); /sandbox/.local/bin/openclaw must come first in gateway PATH for it to win'
-                      fi
-                      # ---- Post-install sanity check ----
-                      # 1. Binary version round-trip (catches missing entry-point chunk).
-                      _ver_out=\$(openclaw --version 2>&1 | head -1) || _ver_out='<exec failed>'
-                      echo \"[openclaw-pin] post-install: \$_ver_out\"
-                      case \"\$_ver_out\" in
-                        *\"\$VER\"*) ;;
-                        *)
-                          echo \"[openclaw-pin] FAIL: --version output does not contain \$VER (got: \$_ver_out)\"
-                          exit 11
-                          ;;
-                      esac
-                      # 2. Module-resolve probe: ask node to require.resolve('openclaw') from a
-                      # createRequire rooted at the install prefix; this dereferences the
-                      # package.json + exports map AND statically validates that the dispatch
-                      # entry chunk and its imports exist on disk. Cheap (no network).
-                      _probe=\"const Module=require('module');const r=Module.createRequire('/usr/local/lib/node_modules/openclaw/');try{const p=r.resolve('openclaw');console.log('[openclaw-pin] resolve OK:',p);}catch(e){if(e&&e.code==='MODULE_NOT_FOUND'){const r2=Module.createRequire('/sandbox/.local/lib/node_modules/openclaw/');try{const p=r2.resolve('openclaw');console.log('[openclaw-pin] resolve OK:',p);}catch(e2){console.error('[openclaw-pin] resolve FAIL:',e2&&e2.message);process.exit(12);}}else{console.error('[openclaw-pin] resolve FAIL:',e&&e.message);process.exit(12);}}\"
-                      node -e \"\$_probe\"
-                    " 2>&1) && _ok=1
-                  printf '%s\n' "$_log_capture" | sed 's/^/[chat-ui-bridge:openclaw-pin] /'
-                  if [ "$_ok" = "1" ]; then
-                    mkdir -p /workspace 2>/dev/null
-                    printf "%s\n" "$_want" > "$_sentinel"
-                    # Place the in-sandbox pin marker that sandbox-ensure-gateway.sh's
-                    # LAUNCH consumes to switch the gateway binary to the user-prefix
-                    # install. Without this marker the gateway keeps running the
-                    # pre-baked /usr/local/bin/openclaw (because the default PATH puts
-                    # /usr/local/bin before /sandbox/.local/bin) and `openclaw --version`
-                    # in the sandbox keeps showing the old number even though npm
-                    # installed the new one to /sandbox/.local. Idempotent: same marker
-                    # body on every successful pin, ignored when env cleared (above).
-                    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
-                      sh -c "printf '%s\n' '${_want}' > /sandbox/.openclaw-pinned-marker && chown sandbox:sandbox /sandbox/.openclaw-pinned-marker 2>/dev/null; ls -l /sandbox/.openclaw-pinned-marker 2>&1" \
-                      2>&1 | sed 's/^/[chat-ui-bridge:openclaw-pin] marker: /'
-                    # Force gateway restart so it re-execs the new binary.
-                    #
-                    # The previous implementation just called sandbox-ensure-gateway.sh
-                    # and trusted it to handle the restart. That works for the cold-
-                    # start case but is a NO-OP when a stale gateway is running --
-                    # ensure-gateway.sh has an `if _health_via_netns; then exit 0` short
-                    # circuit (configmap-sandbox-bridge.yaml line ~403) that explicitly
-                    # avoids killing healthy-on-TCP gateway processes (originally added
-                    # to prevent unkillable cross-userns duplicate accumulation post
-                    # chart v1.7.10). Net effect: NEMOCLAW_OPENCLAW_VERSION drift was
-                    # detected, npm reinstalled the new binary, but the long-running
-                    # gateway (still running the pre-baked 2026.4.24) was never killed
-                    # so WebUI's left-corner version sticker stayed at 2026.4.24 and
-                    # any new gateway-spawned subprocess loaded the still-mapped old
-                    # dist files.
-                    # Fix (chart v1.7.22+): pkill the gateway HERE from agent root --
-                    # which can signal across the openshell userns boundary because
-                    # this exec lands as agent-container root, not sandbox user.
-                    # Then call ensure-gateway.sh; with no listener, it falls through
-                    # the TCP-healthy short-circuit and runs the LAUNCH path with the
-                    # newly-pinned binary path.
-                    echo "[chat-ui-bridge:openclaw-pin] killing existing gateway from agent root so new binary launches"
-                    docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
-                      sh -c '
-                        pkill -9 -f "openclaw[- ]gateway" 2>/dev/null
-                        sleep 1
-                        pgrep -fa "openclaw[- ]gateway" 2>/dev/null && echo "[openclaw-pin] WARN: gateway still alive after pkill -9" || echo "[openclaw-pin] gateway gone"
-                      ' 2>&1 | sed 's/^/[chat-ui-bridge:openclaw-pin] /'
-                    echo "[chat-ui-bridge:openclaw-pin] forcing gateway restart so the new openclaw takes effect"
-                    while IFS= read -r ln || [ -n "$ln" ]; do
-                      echo "[chat-ui-bridge] $ln"
-                    done < <(sh /opt/nemoclaw/sandbox-ensure-gateway.sh 2>&1)
-                  else
-                    echo "[chat-ui-bridge:openclaw-pin] WARN: openclaw upgrade to ${_want} did NOT pass post-install verify; sandbox keeps the pre-baked version. Sentinel + pin marker NOT written -- next bridge tick (~10s) will retry."
-                    echo "[chat-ui-bridge:openclaw-pin]      Common causes: (1) npm registry transient 5xx, (2) /usr/local/lib has a read-only landlock layer that swallowed write errors, (3) version $_want unpublished from npm, (4) network egress policy blocks registry.npmjs.org."
-                  fi
+                  NEMOCLAW_PIN_LOG_PREFIX="[chat-ui-bridge:openclaw-pin]" \
+                  NEMOCLAW_PIN_RESTART_GATEWAY=1 \
+                    sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh
+                }
+                _nemoclaw_openclaw_pin_ready() {
+                  sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh --check-only 2>/dev/null
                 }
                 # DISABLED: permanent install-ui probe responder on pod :18791.
-                # Keeps the auth_request gate in ingress-weui.yaml :8081 happy
-                # (200 = cli ready, 403 = installing). Re-enable together with:
-                #   - ingress-weui.yaml :8081 gate block (currently commented)
-                #   - the nemoclaw Service probe port 18791 (commented below)
-                #   - the install-ui.py volumeMount + ConfigMap volume
-                #   - start_placeholder_18790's python branch (commented above)
-                #
-                # start_probe_responder_18791() {
-                #   pkill -f "install-ui.py --port 18791" 2>/dev/null || true
-                #   sleep 1
-                #   if command -v python3 >/dev/null 2>&1 && [ -r /opt/nemoclaw/install-ui.py ]; then
-                #     nohup python3 /opt/nemoclaw/install-ui.py --port 18791 --bind 0.0.0.0 \
-                #       >>/tmp/nemoclaw-probe-ui.log 2>&1 &
-                #     echo "[chat-ui-bridge] :18791 permanent probe-responder up (terminal-gate source of truth; see /tmp/nemoclaw-probe-ui.log)"
-                #   else
-                #     echo "[chat-ui-bridge] WARN: python3 or install-ui.py unavailable; :18791 probe-responder NOT started -- terminal-gate will show fallback page"
-                #   fi
-                # }
                 start_placeholder_18790
                 # start_probe_responder_18791  # DISABLED — see block above.
                 echo "[chat-ui-bridge] watching k3s pod ${NS}/${SBX} (Service :18789 -> pod :${CHAT_PUBLISH})"
                 while true; do
-                  if ! pod_running; then
+                  if ! pod_running || ! agent_container_running; then
                     sleep 5
                     continue
                   fi
-                  # ----- Pre-Ready phase (fast): only the bare minimum required to mark the
                   # Pod Ready (= TUI works + WebUI relay can connect). Anything that takes
-                  # 30s+ on a fresh install gets deferred to the post-Ready phase below so
-                  # the Pod doesnt sit NotReady while skills setup churns.
-                  # Brew clone is fast when the sandbox already has /sandbox/.linuxbrew/
-                  # Homebrew (typical case after onboard) — ~5s for a `brew --version` check.
                   ensure_brew_in_sandbox
-                  # OpenClaw version pin: when NEMOCLAW_OPENCLAW_VERSION drifts from the
-                  # in-sandbox version, this runs `npm install -g openclaw@<ver>` (~30-60s
-                  # on first install, ~2s no-op after). It MUST run before gateway_listening
-                  # so a version bump triggers the gateway restart inside the same loop tick
-                  # (the LAUNCH path consumes /sandbox/.openclaw-pinned-marker which the
-                  # helper writes only on success). Sentinel-guarded via /workspace/.nemoclaw-
-                  # openclaw-pin; idempotent.
-                  ensure_openclaw_version_in_sandbox || true
                   if ! gateway_listening; then
                     sh /opt/nemoclaw/sandbox-ensure-gateway.sh 2>&1 | \
                       while read -r ln; do echo "[chat-ui-bridge] $ln"; done
@@ -1000,37 +796,31 @@ spec:
                       continue
                     fi
                   fi
-                  # Mark Pod Ready the moment openclaw gateway in sandbox is healthy.
-                  # TUI (openclaw CLI via docker exec into sandbox) is usable NOW --
-                  # it does not depend on the chat-ui-bridge :18790 relay below.
-                  # WebUI brings up the relay in ~1-2s after this line and writes
-                  # .nemoclaw-chat-relay-ready separately; upstream health monitors
-                  # that care about WebUI specifically can gate on that file instead.
+                  if [ ! -f /workspace/.nemoclaw-installed ]; then
+                    sleep 10
+                    continue
+                  fi
+                  if ! _nemoclaw_openclaw_pin_ready; then
+                    rm -f /workspace/.nemoclaw-cli-ready 2>/dev/null || true
+                    ensure_openclaw_version_in_sandbox || true
+                    sleep 5
+                    continue
+                  fi
                   if [ ! -f /workspace/.nemoclaw-cli-ready ]; then
                     mkdir -p /workspace 2>/dev/null || true
                     : > /workspace/.nemoclaw-cli-ready
-                    echo "[chat-ui-bridge] gateway healthy; Pod can now signal Ready (TUI usable)"
+                    echo "[chat-ui-bridge] openclaw ${NEMOCLAW_OPENCLAW_VERSION:-runtime} pinned + gateway healthy; Pod Ready"
                   fi
                   start_relay_18790
                   start_relay_oauth
-                  # ----- Post-Ready phase (slow, idempotent, sentinel-guarded): runs AFTER
-                  # the Pod is signalled Ready (chart v1.7.21+). On a fresh install these
-                  # take ~3-5min combined (mostly skill-env apt update + apt install
-                  # ca-certificates + gcc presence check); without the reorder the Pod
-                  # sat NotReady that whole time even though gateway + TUI + WebUI relay
-                  # were already up. skill-env produces gcc/g++/dotfiles/CA bundle/Go +
-                  # gog-keyring file — needed by ADVANCED skills (gogcli source builds,
-                  # brew install of gcc-built formulas) but NOT by basic chat. After
-                  # the first iteration both functions early-exit fast (sentinel +
-                  # version stamp match).
                   ensure_skill_env_installed
-                  # Track gogcli (un)install in the sandbox: shim appears when user runs
-                  # `openclaw config --section skills` -> brew install gogcli, vanishes
-                  # on uninstall. Cheap (two kubectl-exec probes); reconciles every loop.
-                  # Function self-prefixes its output (`[chat-ui-bridge:gog-shim] ...`),
-                  # no outer pipe wrap needed.
                   ensure_gog_shim_in_sandbox || true
-                  while pod_running && gateway_listening; do sleep 30; done
+                  while pod_running && gateway_listening; do
+                    if ! sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh --check-only 2>/dev/null; then
+                      ensure_openclaw_version_in_sandbox || true
+                    fi
+                    sleep 30
+                  done
                   echo "[chat-ui-bridge] sandbox gateway dropped (pod_running=$(pod_running && echo y || echo n) gw=$(gateway_listening && echo y || echo n)); resetting"
                   pkill -f "LISTEN:${OAUTH_PUBLISH}" 2>/dev/null || true
                   start_placeholder_18790
@@ -1060,11 +850,7 @@ spec:
                 done
               ) &
 
-              # Inbox sync: user drops files into hostPath `{{ .Values.userspace.appData }}/openclaw-config/inbox/`
               # (visible here at /openclaw-config/inbox/); loop pushes them into sandbox /sandbox/inbox/.
-              # k3s pod spec is owned by OpenShell control plane, so we cannot add a volumeMount to it directly —
-              # sync via `docker cp` + `kubectl cp` is the closest thing to a shared PVC we get.
-              # Files are auto-chmod 600 in sandbox. Remove from host inbox after import; mtime gates re-sync.
               (
                 INBOX_DIR=/openclaw-config/inbox
                 STATE_DIR=/openclaw-config/.inbox-state
@@ -1077,8 +863,6 @@ spec:
                     continue
                   fi
                   # chown/chmod so the non-root `sandbox` user inside the pod can read the inbox.
-                  # kubectl exec defaults to the image USER (root), so without this, files would be root:root
-                  # chmod 600 and invisible to the sandbox user (who actually runs `gog auth credentials ...`).
                   docker exec "$CLUSTER_CTR" kubectl -n "$NS" exec "$SBX" -c agent -- \
                     sh -c "mkdir -p ${SBX_INBOX} && chown sandbox:sandbox ${SBX_INBOX} && chmod 700 ${SBX_INBOX}" 2>/dev/null || true
                   find "${INBOX_DIR}" -maxdepth 8 -type f 2>/dev/null | while read -r src; do
@@ -1108,10 +892,6 @@ spec:
               ) &
 
               # Marker lives on hostPath (/workspace) but the real `nemoclaw` / `openshell` binaries
-              # live under /usr/local/bin which is ephemeral. If the container FS was reset but marker
-              # survived, the wrapper at /home/node/.local/bin/nemoclaw (also hostPath) still exists but
-              # points to the now-missing /usr/local/bin/nemoclaw. Detect + invalidate the marker so the
-              # installer reruns cleanly.
               if [ -f /workspace/.nemoclaw-installed ] && [ ! -x /usr/local/bin/nemoclaw ]; then
                 echo "[5/5] marker present but /usr/local/bin/nemoclaw missing — container FS was reset; re-running installer"
                 rm -f /workspace/.nemoclaw-installed
@@ -1120,10 +900,6 @@ spec:
 
               if [ ! -f /workspace/.nemoclaw-installed ]; then
                 # Preflight: NemoClaw's non-interactive onboard will curl-validate the endpoint
-                # (Responses API + Chat Completions). If any of provider/url/model are empty we
-                # refuse to continue — the installer would otherwise hang, spew validation errors,
-                # or silently fall back to NVIDIA Endpoints and demand NVIDIA_API_KEY. Failing
-                # fast here gives the user a clear "go fill these in Olares UI" signal.
                 MISSING=""
                 [ -z "${NEMOCLAW_PROVIDER:-}" ]     && MISSING="$MISSING NEMOCLAW_PROVIDER"
                 [ -z "${NEMOCLAW_ENDPOINT_URL:-}" ] && MISSING="$MISSING NEMOCLAW_ENDPOINT_URL"
@@ -1141,6 +917,9 @@ spec:
                   sleep 30
                   exit 1
                 fi
+                echo "[preflight] node cpu arch=$(_nemoclaw_cpu_arch)"
+                echo "[preflight] openshell CLI CDN=$(_nemoclaw_resolve_openshell_cli_url)"
+                echo "[preflight] openshell-sandbox CDN=$(_nemoclaw_resolve_openshell_sandbox_url)"
                 echo "[preflight] LLM env snapshot: NEMOCLAW_PROVIDER=${NEMOCLAW_PROVIDER} NEMOCLAW_MODEL=${NEMOCLAW_MODEL}"
                 echo "[preflight] NEMOCLAW_ENDPOINT_URL=${NEMOCLAW_ENDPOINT_URL}"
                 if [ -z "${COMPATIBLE_API_KEY:-}" ] || [ "${COMPATIBLE_API_KEY}" = "unused" ]; then
@@ -1150,11 +929,6 @@ spec:
                 fi
 
                 # Smoke-test the endpoint *before* calling nemoclaw.sh so users get a crisp error
-                # instead of onboard's multi-line curl dump. A 200 from /models proves it speaks
-                # the OpenAI-compatible shape; 404/405 usually means the user gave us the host root
-                # without the /v1 suffix (very common with Ollama: http://host vs http://host/v1).
-                # Auto-normalise by retrying with /v1 appended; if that works, rewrite the env so
-                # nemoclaw.sh sees the corrected URL too.
                 probe_endpoint() {
                   curl -sS -o /dev/null -w '%{http_code}' -m 10 \
                     -H "Authorization: Bearer ${COMPATIBLE_API_KEY:-unused}" \
@@ -1232,9 +1006,9 @@ spec:
                 # Onboard [2/8] starts this image; without a pre-pull, failures look like an
                 # infinite "Still starting gateway cluster…" loop.
                 if [ "${NEMOCLAW_PREFLIGHT_CLUSTER_PULL:-1}" = "1" ]; then
-                  CLUSTER_IMG="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE:-beclab/hys2023-openshell-cluster:v1.16}"
+                  CLUSTER_IMG="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE:-beclab/harveyff-openshell-cluster:v1.17}"
                   CLUSTER_IMG_MIRROR="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR:-}"
-                  SANDBOX_IMG="${NEMOCLAW_SANDBOX_IMAGE:-beclab/hys2023-nvidia-nemoclaw-sandbox-base:20260427}"
+                  SANDBOX_IMG="$(_nemoclaw_resolved_sandbox_image)"
                   SANDBOX_IMG_MIRROR="${NEMOCLAW_SANDBOX_IMAGE_MIRROR:-}"
                   NODE_IMG="${NEMOCLAW_SANDBOX_NODE_IMAGE:-node:22-slim}"
                   NODE_IMG_MIRROR="${NEMOCLAW_SANDBOX_NODE_IMAGE_MIRROR:-}"
@@ -1243,11 +1017,6 @@ spec:
                   # order when NEMOCLAW_PREFER_MIRROR=1; logs to per-image files below).
 
                   # Parallelize the three pulls. Sequentially they can easily cost 2–3 minutes on
-                  # a cold node because each image is large and ghcr.io blob CDN is bursty; docker
-                  # daemon already parallelizes layer downloads within one `pull`, but between
-                  # separate pulls it serialises. Running them in background and `wait`ing lets
-                  # the daemon interleave layer fetches across all three images for close to
-                  # max(3) ≈ wall time of the single largest pull.
                   PLOG_DIR=/tmp/nemoclaw-pull
                   mkdir -p "$PLOG_DIR"
                   PLOG_CLUSTER="$PLOG_DIR/cluster.log"
@@ -1261,10 +1030,7 @@ spec:
                   echo "[5a/5]   node-base:   $NODE_IMG${NODE_IMG_MIRROR:+ (mirror: $NODE_IMG_MIRROR)}"
                   [ "${NEMOCLAW_PREFER_MIRROR:-0}" = "1" ] && echo "[5a/5]   NEMOCLAW_PREFER_MIRROR=1 (mirror tried first)"
 
-                  # Why background + wait + per-image exit files (instead of `wait -n` or
-                  # `$?`): dash/ash (k3s image's /bin/sh on some platforms) doesn't support
                   # `wait -n` and loses per-job exit status after the first wait. Writing an
-                  # explicit .rc file is portable.
                   _nemoclaw_pull_image "$CLUSTER_IMG" "$CLUSTER_IMG_MIRROR" "5a/5:cluster" "$PLOG_CLUSTER" \
                     > "$PLOG_DIR/cluster.out" 2>&1; echo $? > "$PLOG_DIR/cluster.rc" &
                   PID_CLUSTER=$!
@@ -1308,26 +1074,19 @@ spec:
                   rm -rf "$PLOG_DIR" 2>/dev/null || true
 
                   # ----- Inject custom openshell-sandbox into cluster image (if URL set) -----
-                  # openshell-sandbox (the L7 proxy / policy enforcer that runs as PID 1 in
-                  # each sandbox pod) lives at /opt/openshell/bin in the CLUSTER image and is
-                  # bind-mounted into every sandbox via the `openshell-supervisor-bin` ro
-                  # volume — it is NOT in the sandbox-base image. To swap it, layer our
-                  # binary on top of CLUSTER_IMG with a 3-line Dockerfile. Done BEFORE the
-                  # docker-tag alias below so the aliased ref also carries the patched binary.
-                  # Also hot-patches a running cluster container (pod restart path) so future
-                  # sandbox launches inside that cluster pick up the new enforcer. Existing
-                  # sandbox pods keep the OLD binary in memory as PID 1 until the user runs
-                  # `openshell sandbox recreate my-assistant` (or deletes the pod).
-                  # Set NEMOCLAW_OPENSHELL_SANDBOX_URL="" via Olares UI to skip injection.
-                  _sbx_url="${NEMOCLAW_OPENSHELL_SANDBOX_URL:-}"
+                  _sbx_url="$(_nemoclaw_resolve_openshell_sandbox_url)"
                   if [ -n "$_sbx_url" ] && docker image inspect "$CLUSTER_IMG" >/dev/null 2>&1; then
                     _sbx_stage=/tmp/nemoclaw-sandbox-bin
                     rm -rf "$_sbx_stage" && mkdir -p "$_sbx_stage"
                     echo "[5a.5/5] downloading custom openshell-sandbox from $_sbx_url"
                     if curl -fLsS -o "$_sbx_stage/openshell-sandbox" "$_sbx_url"; then
+                      if ! _nemoclaw_verify_elf_arch "$_sbx_stage/openshell-sandbox" "$(_nemoclaw_cpu_arch)" "openshell-sandbox"; then
+                        echo "[5a.5/5] ERROR: refusing to layer wrong-arch openshell-sandbox from $_sbx_url" >&2
+                        rm -rf "$_sbx_stage"
+                      else
                       _sbx_sz=$(stat -c %s "$_sbx_stage/openshell-sandbox" 2>/dev/null || echo '?')
                       _sbx_sha=$(sha256sum "$_sbx_stage/openshell-sandbox" 2>/dev/null | awk '{print $1}')
-                      echo "[5a.5/5] downloaded $_sbx_sz bytes, sha256=$_sbx_sha"
+                      echo "[5a.5/5] downloaded $_sbx_sz bytes, sha256=$_sbx_sha ($(file -b "$_sbx_stage/openshell-sandbox" 2>/dev/null | head -1))"
                       chmod +x "$_sbx_stage/openshell-sandbox"
                       # Build Dockerfile with printf so every line stays within the YAML block
                       # scalar's indent (heredocs that start at column 0 silently terminate the
@@ -1340,13 +1099,12 @@ spec:
                         echo "[5a.5/5] WARN: docker build to layer openshell-sandbox onto $CLUSTER_IMG failed; stock enforcer in use" >&2
                       fi
                       # Hot-patch a running cluster container (pod restart path). New sandbox
-                      # pods in this cluster will bind-mount the new binary; existing ones
-                      # keep the old PID-1 in memory until user recreates the sandbox.
                       if docker inspect "$CLUSTER_CTR" >/dev/null 2>&1; then
                         if docker cp "$_sbx_stage/openshell-sandbox" "$CLUSTER_CTR:/opt/openshell/bin/openshell-sandbox" 2>/dev/null; then
                           docker exec "$CLUSTER_CTR" chmod 0755 /opt/openshell/bin/openshell-sandbox 2>/dev/null || true
                           echo "[5a.5/5] hot-patched running $CLUSTER_CTR (existing sandboxes need 'openshell sandbox recreate' to load new enforcer)"
                         fi
+                      fi
                       fi
                     else
                       echo "[5a.5/5] WARN: curl from $_sbx_url failed; stock openshell-sandbox (from $CLUSTER_IMG) in use" >&2
@@ -1356,15 +1114,6 @@ spec:
                   # ----- end openshell-sandbox injection -----
 
                   # ----- Alias cluster image to the ghcr ref NemoClaw hardcodes -----
-                  # NemoClaw's onboard.ts (L3592-3603, getGatewayStartEnv) FORCE-SETS
-                  # OPENSHELL_CLUSTER_IMAGE=ghcr.io/nvidia/openshell/cluster:<openshell-ver>
-                  # before it spawns `openshell gateway start`, OVERRIDING any value we
-                  # export from the pod env. Downstream, openshell's ensure_image() does
-                  #   1. docker.inspect_image(image_ref)  → Ok → return without pulling
-                  #   2. only on not-found fall through to docker pull
-                  # So the bullet-proof fix is to pre-alias our locally-cached CLUSTER_IMG
-                  # under the exact ref nemoclaw will pin. inspect succeeds, NO upstream pull.
-                  # Safe no-op when CLUSTER_IMG already IS that ref (upstream image in use).
                   OPENSHELL_CLI_REF="ghcr.io/nvidia/openshell/cluster:${OPENSHELL_PIN_NUM}"
                   if [ "$CLUSTER_IMG" != "$OPENSHELL_CLI_REF" ] \
                        && docker image inspect "$CLUSTER_IMG" >/dev/null 2>&1; then
@@ -1374,28 +1123,25 @@ spec:
                       echo "[5a/5] WARN: docker tag $CLUSTER_IMG -> $OPENSHELL_CLI_REF failed; nemoclaw onboard will pull upstream ghcr image"
                     fi
                   fi
-                  # ----- Alias sandbox-base -> ghcr.io/nvidia/nemoclaw/sandbox-base:latest (DISABLED) -----
-                  # Was: docker tag $SANDBOX_IMG to ghcr ref so Dockerfile FROM hits local cache before onboard.
-                  # Disabled with the [4b/5] shim while waiting for official updates; onboard will pull/pin ghcr.
-                  # SBX_UPSTREAM_ALIAS="ghcr.io/nvidia/nemoclaw/sandbox-base:latest"
-                  # if [ "$SANDBOX_IMG" != "$SBX_UPSTREAM_ALIAS" ] && docker image inspect "$SANDBOX_IMG" >/dev/null 2>&1; then
-                  #   docker tag "$SANDBOX_IMG" "$SBX_UPSTREAM_ALIAS" 2>/dev/null || true
-                  # fi
-                  echo "[5a/5] sandbox-base -> ghcr retag skipped (disabled in chart)"
+                  # Alias beclab sandbox-base -> ghcr ref NemoClaw Dockerfile uses as BASE_IMAGE.
+                  SANDBOX_GHCR_REF="ghcr.io/nvidia/nemoclaw/sandbox-base:latest"
+                  if [ "$SANDBOX_IMG" != "$SANDBOX_GHCR_REF" ] \
+                       && docker image inspect "$SANDBOX_IMG" >/dev/null 2>&1; then
+                    if docker tag "$SANDBOX_IMG" "$SANDBOX_GHCR_REF" 2>/dev/null; then
+                      echo "[5a/5] aliased $SANDBOX_IMG -> $SANDBOX_GHCR_REF (onboard Dockerfile BASE_IMAGE)"
+                    else
+                      echo "[5a/5] WARN: docker tag $SANDBOX_IMG -> $SANDBOX_GHCR_REF failed; onboard will pull upstream ghcr base"
+                    fi
+                  fi
+                  # Marker for [6/6-pre]: skip redundant force-pull + sandbox re-layer when
+                  # this boot already pulled and layered the cluster image (~1-3 min saved).
+                  _5a_marker=/workspace/.nemoclaw-5a-prep-marker
+                  _5a_img_id=$(docker image inspect "$CLUSTER_IMG" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d[0] or {}).get("Id","") if d else "")' 2>/dev/null || true)
+                  printf '%s\n' "${CLUSTER_IMG}|${_sbx_url:-}|${_5a_img_id}" > "$_5a_marker" 2>/dev/null || true
                 fi
                 # NemoClaw installer (nemoclaw.sh) shells out to `nemoclaw onboard` which has
-                # 8 stages, any of which can fail on a cold, flaky network: ghcr.io blob CDN,
-                # docker.io auth TLS, openshell binary download, etc. A single curl|bash
-                # attempt leaves the install half-done and the chart can't recover until the
-                # user manually runs `nemoclaw onboard --resume`. Instead, retry the
-                # first-time install up to 3x; if nemoclaw CLI is present after the first
-                # failure, switch to `nemoclaw onboard --resume` for subsequent attempts so
-                # we skip already-completed stages. The sentinel
-                # /workspace/.nemoclaw-installed is ONLY written after a fully green onboard.
                 echo "[5b/5] Running NemoClaw installer (to change CHAT_UI_URL later: clear app data / remove .nemoclaw-installed and reinstall)"
                 # Pin NemoClaw to v0.0.38 — last tag whose install-openshell.sh pins
-                # OpenShell 0.0.36 (musl static, no glibc-2.39 dep). v0.0.39+ ships
-                # *-linux-gnu gateway/sandbox binaries that can't run on bookworm.
                 NEMOCLAW_PINNED_TAG="${NEMOCLAW_INSTALL_TAG:-v0.0.38}"
                 export NEMOCLAW_INSTALL_TAG="$NEMOCLAW_PINNED_TAG"
                 echo "[5b/5] NemoClaw install ref pinned to: $NEMOCLAW_PINNED_TAG (override via olaresEnv NEMOCLAW_INSTALL_TAG)"
@@ -1404,23 +1150,11 @@ spec:
                 echo "[5b/5] NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH=${NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH}"
                 echo "[5b/5] Inference for installer: provider=${NEMOCLAW_PROVIDER} model=${NEMOCLAW_MODEL}"
                 echo "[5b/5] NEMOCLAW_ENDPOINT_URL=${NEMOCLAW_ENDPOINT_URL}"
+                echo "[5b/5] NEMOCLAW_OPENCLAW_BUILD_VERSION=${NEMOCLAW_OPENCLAW_BUILD_VERSION:-2026.4.24} (Docker build pin; independent of runtime NEMOCLAW_OPENCLAW_VERSION)"
+                echo "[5b/5] NEMOCLAW_SANDBOX_IMAGE=$(_nemoclaw_resolved_sandbox_image)${NEMOCLAW_SANDBOX_IMAGE_DIGEST:+ (digest pinned)}"
                 echo "[5b/5] NEMOCLAW_OPENCLAW_INFERENCE_API=${NEMOCLAW_OPENCLAW_INFERENCE_API:-<unset>} (post-onboard gateway loop may rewrite openclaw.json if set)"
 
-                # Locate the persistent clone that install.sh leaves behind (needed for the
-                # --from fallback on retries). install.sh clones to ~/.nemoclaw/source whether
-                # it runs as `node` or `root`; pick whichever exists + has a Dockerfile.
-                _nemoclaw_source_dir() {
-                  for d in /home/node/.nemoclaw/source /root/.nemoclaw/source; do
-                    [ -d "$d" ] && [ -f "$d/Dockerfile" ] && echo "$d" && return 0
-                  done
-                  return 1
-                }
-
                 # --- Custom openshell-gateway override (only needed when pin ≥ v0.0.39) ---
-                # On v0.0.38 this whole block is dormant (GATEWAY_OVERRIDE_IMAGE empty,
-                # stage/apply return 0). Re-enable by setting NEMOCLAW_OPENSHELL_GATEWAY_IMAGE
-                # to a fork-built image (e.g. hys2023/openshell-gateway:v1.16) whose
-                # ENTRYPOINT is a glibc-2.36-compatible openshell-gateway binary.
                 GATEWAY_OVERRIDE_IMAGE="${NEMOCLAW_OPENSHELL_GATEWAY_IMAGE:-}"
                 GATEWAY_OVERRIDE_BIN_HINT="${NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH:-}"
                 GATEWAY_OVERRIDE_STAGE=/home/node/.nemoclaw-staging
@@ -1505,8 +1239,6 @@ spec:
                     echo "[5b/5|gw-override] WARN: no path overlaid — neither /usr/local/bin nor /home/node/.local/bin was writable" >&2
                   fi
                   # Quick proof-of-life: dump the highest GLIBC symbol required by the binary
-                  # at the canonical /usr/local/bin location (if present) so the operator can
-                  # spot-check that the hys2023 fork really is glibc-2.36-compatible.
                   if [ -f /usr/local/bin/openshell-gateway ]; then
                     _gw_max_glibc=$(strings /usr/local/bin/openshell-gateway 2>/dev/null \
                                     | grep -oE 'GLIBC_[0-9]+\.[0-9]+' \
@@ -1514,7 +1246,6 @@ spec:
                     echo "[5b/5|gw-override] /usr/local/bin/openshell-gateway highest GLIBC symbol: ${_gw_max_glibc:-<none>}"
                   fi
 
-                  # printf (not heredoc) so the YAML literal block never sees column-0 lines.
                   printf '%s\n' \
                     '#!/bin/sh' \
                     '# Auto-generated by nemoclaw chart 5b/5 gw-override: announce glibc 2.39' \
@@ -1555,67 +1286,57 @@ spec:
                   export NEMOCLAW_SKIP_GLIBC_CHECK=1
                 }
 
-                # Stage once; the apply_custom_gateway call at the top of each retry
-                # iteration re-overlays the binary after nemoclaw.sh re-installs the upstream.
+                # Stage once; apply_custom_gateway re-overlays after install-openshell.sh in bootstrap.
                 stage_custom_gateway || echo "[5b/5|gw-override] staging failed; will fall back to upstream gateway"
 
                 onboard_ok=0
+                export NEMOCLAW_ONBOARD_OK_THIS_BOOT=0
                 : > /tmp/nemoclaw-onboard.log
                 echo "[5b/5] onboard transcript -> /tmp/nemoclaw-onboard.log (kubectl exec deploy/nemoclaw -c nemoclaw -- tail -200 /tmp/nemoclaw-onboard.log)"
                 for onboard_attempt in 1 2 3; do
                   echo "[5b/5] ----- onboard attempt ${onboard_attempt}/3 (LLM: ${NEMOCLAW_PROVIDER} @ ${NEMOCLAW_ENDPOINT_URL} model=${NEMOCLAW_MODEL}) -----"
-                  # Re-overlay every attempt: attempt 1's install-openshell.sh would overwrite us.
                   apply_custom_gateway
-                  if [ "$onboard_attempt" = "1" ] || ! command -v nemoclaw >/dev/null 2>&1; then
-                    echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw.sh installer (NEMOCLAW_INSTALL_TAG=$NEMOCLAW_PINNED_TAG)"
-                    curl -fsSL https://nvidia.com/nemoclaw.sh 2>&1 | tee -a /tmp/nemoclaw-onboard.log | bash 2>&1 | tee -a /tmp/nemoclaw-onboard.log
-                    _nem_pipe_rc="${PIPESTATUS[2]}"
-                    if [ "$_nem_pipe_rc" = "0" ]; then
-                      onboard_ok=1
-                      echo "[5b/5] nemoclaw.sh + onboard finished OK on attempt $onboard_attempt (see /tmp/nemoclaw-onboard.log)"
-                      break
-                    fi
-                    echo "[5b/5] nemoclaw.sh pipeline exit rc=${_nem_pipe_rc}; tail -30 /tmp/nemoclaw-onboard.log:"
-                    tail -30 /tmp/nemoclaw-onboard.log 2>/dev/null | sed 's#^#[5b/5|onboard] #' || echo "[5b/5] (no log file yet)"
-                  else
-                    # Retry via the installed CLI. Always pass --from pointing at the clone so the
-                    # sandbox build context gets copied wholesale (skip node_modules/.git/.venv/
-                    # __pycache__) instead of going through stageOptimizedSandboxBuildContext(),
-                    # which in NemoClaw v0.0.27 silently drops scripts/generate-openclaw-config.py
-                    # (and any future files upstream adds to the Dockerfile without updating the
-                    # allow-list in src/lib/sandbox-build-context.ts).
-                    ONBOARD_FROM_FLAG=""
-                    NEMOCLAW_SRC_DIR="$(_nemoclaw_source_dir || true)"
-                    if [ -n "$NEMOCLAW_SRC_DIR" ]; then
-                      ONBOARD_FROM_FLAG="--from $NEMOCLAW_SRC_DIR/Dockerfile"
-                      echo "[5b/5] onboard attempt $onboard_attempt: using --from $NEMOCLAW_SRC_DIR/Dockerfile (full build context, bypasses optimised stager)"
-                    fi
-                    # nemoclaw.sh (attempt 1) starts an onboard session *without* --from.  A follow-up
-                    # `nemoclaw onboard --resume --from …` is then rejected: "Session was started without
-                    # --from; add --from … to resume it."  So retries must run a *fresh* onboard with
-                    # `--from` only (no --resume) once the clone exists under ~/.nemoclaw/source.
-                    if [ -n "$ONBOARD_FROM_FLAG" ]; then
-                      echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw onboard ${ONBOARD_FROM_FLAG} (fresh; no --resume)"
-                      # shellcheck disable=SC2086
-                      nemoclaw onboard ${ONBOARD_FROM_FLAG} 2>&1 | tee -a /tmp/nemoclaw-onboard.log
-                    else
-                      echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw onboard --resume (no Dockerfile clone found)"
-                      nemoclaw onboard --resume 2>&1 | tee -a /tmp/nemoclaw-onboard.log
-                    fi
-                    _nem_pipe_rc="${PIPESTATUS[0]}"
-                    if [ "$_nem_pipe_rc" = "0" ]; then
-                      onboard_ok=1
-                      echo "[5b/5] nemoclaw onboard CLI exit 0 on attempt $onboard_attempt"
-                      break
-                    fi
-                    echo "[5b/5] nemoclaw onboard CLI exit rc=${_nem_pipe_rc}; tail -30 /tmp/nemoclaw-onboard.log:"
-                    tail -30 /tmp/nemoclaw-onboard.log 2>/dev/null | sed 's#^#[5b/5|onboard] #' || true
+                  if ! _nemoclaw_chart_bootstrap_cli; then
+                    echo "[5b/5] onboard attempt $onboard_attempt: CLI bootstrap failed"
+                    echo "[5b/5] nemoclaw.sh fallback skipped (would run onboard before Dockerfile patch)"
+                    sleep 30
+                    continue
                   fi
-                  echo "[5b/5] onboard attempt $onboard_attempt failed; sleeping 30s before retry (common causes: ghcr.io or docker.io TLS handshake timeout, git clone --branch ref not found, network egress blip, upstream build-context regression)"
+                  NEMOCLAW_SRC_DIR="$(_nemoclaw_source_dir || true)"
+                  if [ -z "$NEMOCLAW_SRC_DIR" ]; then
+                    echo "[5b/5] onboard attempt $onboard_attempt: no cloned source after bootstrap"
+                    sleep 30
+                    continue
+                  fi
+                  _nemoclaw_preflight_sandbox_base || true
+                  echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw onboard --from $NEMOCLAW_SRC_DIR/Dockerfile --fresh"
+                  nemoclaw onboard --from "$NEMOCLAW_SRC_DIR/Dockerfile" --fresh \
+                    2>&1 | tee -a /tmp/nemoclaw-onboard.log
+                  _nem_pipe_rc="${PIPESTATUS[0]}"
+                  if [ "$_nem_pipe_rc" = "0" ]; then
+                    onboard_ok=1
+                    echo "[5b/5] nemoclaw onboard exit 0 on attempt $onboard_attempt"
+                    break
+                  fi
+                  echo "[5b/5] nemoclaw onboard exit rc=${_nem_pipe_rc}; tail -30 /tmp/nemoclaw-onboard.log:"
+                  tail -30 /tmp/nemoclaw-onboard.log 2>/dev/null | sed 's#^#[5b/5|onboard] #' || true
+                  echo "[5b/5] onboard attempt $onboard_attempt failed; sleeping 30s before retry (common causes: ghcr.io or docker.io TLS handshake timeout, git clone --branch ref not found, network egress blip, upstream build-context regression, Patch 4 / openclaw build pin mismatch)"
                   sleep 30
                 done
                 if [ "$onboard_ok" = "1" ]; then
+                export NEMOCLAW_ONBOARD_OK_THIS_BOOT=1
                 touch /workspace/.nemoclaw-installed
+                echo "[5b/5] onboard complete; upgrading runtime openclaw to ${NEMOCLAW_OPENCLAW_VERSION:-2026.5.20} (parallel with policy-tier / gateway start)"
+                (
+                  for _pin_wait in $(seq 1 90); do
+                    docker exec "$CLUSTER_CTR" kubectl -n "$NS" get pod "$SBX" \
+                      -o jsonpath='{.status.phase}' 2>/dev/null | grep -q '^Running$' && break
+                    sleep 2
+                  done
+                  NEMOCLAW_PIN_LOG_PREFIX="[5b/5|openclaw-pin]" \
+                  NEMOCLAW_PIN_RESTART_GATEWAY=1 \
+                    sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh 2>&1 || true
+                ) &
                 else
                   echo "============================================================"
                   echo "WARN: NemoClaw onboard failed 3 times. NOT writing /workspace/.nemoclaw-installed,"
@@ -1633,18 +1354,16 @@ spec:
                 echo "[5/5] NemoClaw already installed, skipping installer"
               fi
 
-              # Openshell network presets (discord/slack/telegram/...) are normally applied at
               # onboard step [8/8]. When /workspace/.nemoclaw-installed exists the installer
-              # skips the whole onboard — including [8/8] — so NEMOCLAW_POLICY_TIER=open in the
-              # Deployment env never reaches openshell unless we reconcile here. Without the
-              # discord preset, iptables blocks gateway.discord.gg even when NO_PROXY bypasses
-              # the HTTP MITM; OpenClaw then hangs between [gateway] starting... and HTTP bind.
-              # Idempotent: `nemoclaw <sandbox> policy-add <preset> --yes` exits non-zero when
-              # the preset is already applied — we treat that as success.
               (
                 _pol_mode="${NEMOCLAW_POLICY_MODE:-suggested}"
                 if [ "$_pol_mode" = "skip" ]; then
                   echo "[policy-tier] NEMOCLAW_POLICY_MODE=skip — skipping preset reconcile"
+                  exit 0
+                fi
+                if [ "${NEMOCLAW_ONBOARD_OK_THIS_BOOT:-0}" = "1" ] \
+                   && [ "${NEMOCLAW_POLICY_RECONCILE_AFTER_ONBOARD:-0}" != "1" ]; then
+                  echo "[policy-tier] fresh onboard applied tier presets at [8/8]; skipping duplicate reconcile (~30-60s saved)"
                   exit 0
                 fi
                 _pol_tier="${NEMOCLAW_POLICY_TIER:-open}"
@@ -1689,7 +1408,6 @@ spec:
                 done
               ) &
 
-              # One-shot cold-start reset (DEFERRED until after [5b/5] so we do not race onboard:
               # my-assistant only appears once onboard has progressed far enough.)
               (
                 for _ci in $(seq 1 90); do
@@ -1715,24 +1433,7 @@ spec:
                     sleep 2
                   done
                   if docker exec "$CLUSTER_CTR" kubectl -n "$SANDBOX_NS" get pod "${SANDBOX_FILTER}" >/dev/null 2>&1; then
-                    # Do NOT stop the gateway here by default (chart v1.0.11+).
                     #
-                    # cold-reset runs after onboard, but chat-ui-bridge may already have
-                    # started the real gateway (possibly pinned OpenClaw, agent netns for
-                    # Discord, TLS/proxy env injected). The old block always ran
-                    # `openclaw gateway stop` as soon as the sandbox pod appeared. In
-                    # production this sent SIGTERM to a healthy gateway ~4 minutes after
-                    # Discord had started:
-                    #   [gateway] signal SIGTERM received
-                    #   [ws] webchat disconnected code=1012 reason=service restart
-                    # causing Channels to flip back to startup-not-ready even though the
-                    # agent-netns Discord path was correct.
-                    #
-                    # We previously tried to stop only when .nemoclaw-cli-ready was
-                    # absent, but that is still a race: bridge can have a working relay
-                    # and channel startup in progress while the sentinel is not yet
-                    # visible to this one-shot subshell. Make the destructive stop
-                    # opt-in instead; sandbox-ensure-gateway is the lifecycle owner.
                     _cold_stop_gateway="${NEMOCLAW_COLD_RESET_STOP_GATEWAY:-0}"
                     echo "[cold-reset] normalising /sandbox ownership to sandbox:sandbox (stop_gateway=${_cold_stop_gateway})"
                     docker exec "$CLUSTER_CTR" kubectl -n "$SANDBOX_NS" exec "${SANDBOX_FILTER}" -c agent -- \
@@ -1794,12 +1495,6 @@ spec:
 
                         mkdir -p "$BINDIR"
                         # Wrapper (NOT symlink) so brew always resolves its
-                        # prefix to /sandbox/.linuxbrew, even when called from
-                        # env-sanitized openclaw skill runners. See the matching
-                        # block in configmap-sandbox-bridge.yaml for the full
-                        # rationale (vendor-install-ruby EACCES under .local/).
-                        # printf-per-line form is required so the outer YAML
-                        # block scalar indentation stays consistent.
                         rm -f "$BINDIR/brew" 2>/dev/null || true
                         {
                           printf "%s\n" "#!/bin/sh"
@@ -1880,35 +1575,31 @@ spec:
                     fi
 
                     # Early-exit when chat-ui-bridge already installed skill-env at the
-                    # expected version (chart v1.7.21+). Both paths share the sentinel
-                    # /workspace/.nemoclaw-skillenv-installed + version stamp at
-                    # /workspace/.nemoclaw-skillenv-version (written by sandbox-install-
-                    # skill-env.sh) + the same SKILLENV_EXPECTED_VERSION constant. The
-                    # comment block at line ~498 promises "Both paths are guarded by
-                    # sentinel files on /workspace so they only fire once per bootstrap"
-                    # — that promise was historically only true for the chat-ui-bridge
-                    # side; cold-reset just re-ran sandbox-install-skill-env.sh blindly,
-                    # which on a typical fresh install runs ~3-5min AFTER bridge already
-                    # finished the same install (because cold-reset spends 30s+ waiting
-                    # for the sandbox pod to exist while bridge polls every ~10s).
-                    # Without this guard, the two paths serialize on dpkg lock + repeat
-                    # apt update + apt install ca-certificates + gcc-presence check +
-                    # dotfile wiring, doubling pod-Ready time.
-                    # Keep the install path here as a fallback: if bridge somehow failed
-                    # before reaching ensure_skill_env_installed (subshell crashed,
-                    # gog-shim install bailed, etc.) the sentinel will be absent and the
-                    # full install runs as before. SKILLENV_EXPECTED_VERSION MUST stay
-                    # in lockstep with deployment.yaml ensure_skill_env_installed AND
-                    # the printf stamp at the end of sandbox-install-skill-env.sh
-                    # (configmap-sandbox-bridge.yaml).
                     _cold_skip_skillenv=0
                     if [ -f /workspace/.nemoclaw-skillenv-installed ]; then
                       _cold_have_v=$(docker exec "$CLUSTER_CTR" kubectl -n "$SANDBOX_NS" exec "${SANDBOX_FILTER}" -c agent -- \
                         /bin/sh -c "cat /workspace/.nemoclaw-skillenv-version 2>/dev/null" 2>/dev/null \
                         | tr -d '\r\n' || true)
-                      _cold_want_v="2026-05-11-interactive-npm-proxy-v1"
+                      _cold_want_v="2026-05-23-gog-brew-wrap-v2"
                       if [ "$_cold_have_v" = "$_cold_want_v" ]; then
                         echo "[cold-reset] skill-env already at expected version $_cold_have_v (chat-ui-bridge sentinel match); skipping ~3-5min reinstall"
+                        _cold_skip_skillenv=1
+                      fi
+                    fi
+                    if [ "$_cold_skip_skillenv" = "0" ] && docker exec "$CLUSTER_CTR" kubectl -n "$SANDBOX_NS" exec "${SANDBOX_FILTER}" -c agent -- \
+                      test -f /workspace/.nemoclaw-skillenv-install.lock >/dev/null 2>&1; then
+                      echo "[cold-reset] skill-env install in progress (bridge lock); skipping duplicate run"
+                      _cold_skip_skillenv=1
+                    fi
+
+                    if [ "$_cold_skip_skillenv" = "0" ] && [ -n "${NEMOCLAW_OPENCLAW_VERSION:-}" ]; then
+                      _cold_pin_want="${NEMOCLAW_OPENCLAW_VERSION#v}"
+                      _cold_pin_have=""
+                      if [ -f /workspace/.nemoclaw-openclaw-pin ]; then
+                        _cold_pin_have=$(head -1 /workspace/.nemoclaw-openclaw-pin 2>/dev/null | tr -d '\r\n ')
+                      fi
+                      if [ "$_cold_pin_have" != "$_cold_pin_want" ]; then
+                        echo "[cold-reset] deferring skill-env until openclaw runtime pin reaches ${_cold_pin_want} (have=${_cold_pin_have:-<none>}; bridge will pin first)"
                         _cold_skip_skillenv=1
                       fi
                     fi
@@ -1966,11 +1657,23 @@ spec:
               fi
               OPENSHELL_PIN="${NEMOCLAW_OPENSHELL_VERSION:-v0.0.36}"
               OPENSHELL_PIN_NUM="${OPENSHELL_PIN#v}"
-              CLUSTER_IMG="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE:-beclab/hys2023-openshell-cluster:v1.16}"
+              CLUSTER_IMG="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE:-beclab/harveyff-openshell-cluster:v1.17}"
               CLUSTER_IMG_MIRROR="${NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR:-}"
               OPENSHELL_CLI_REF="ghcr.io/nvidia/openshell/cluster:${OPENSHELL_PIN_NUM}"
               _gw_did_pull=0
-              if [ "${NEMOCLAW_PREFLIGHT_CLUSTER_PULL:-1}" = "1" ]; then
+              _sbx_url="$(_nemoclaw_resolve_openshell_sandbox_url)"
+              _skip_6_pre_pull=0
+              _5a_marker=/workspace/.nemoclaw-5a-prep-marker
+              _5a_img_id=$(docker image inspect "$CLUSTER_IMG" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print((d[0] or {}).get("Id","") if d else "")' 2>/dev/null || true)
+              _5a_key="${CLUSTER_IMG}|${_sbx_url}|${_5a_img_id}"
+              if [ -f "$_5a_marker" ] \
+                   && [ "$(cat "$_5a_marker" 2>/dev/null | tr -d '\r\n')" = "$_5a_key" ] \
+                   && docker image inspect "$CLUSTER_IMG" >/dev/null 2>&1 \
+                   && [ "${NEMOCLAW_GATEWAY_RECREATE:-0}" != "1" ]; then
+                echo "[6/6-pre] [5a/5] pre-pull still fresh; skipping force refresh + sandbox re-layer"
+                _skip_6_pre_pull=1
+              fi
+              if [ "${NEMOCLAW_PREFLIGHT_CLUSTER_PULL:-1}" = "1" ] && [ "$_skip_6_pre_pull" != "1" ]; then
                 _gw_prep_log=/tmp/nemoclaw-gateway-cluster-pull.log
                 echo "[6/6-pre] refreshing cluster image $CLUSTER_IMG before gateway start"
                 : > "$_gw_prep_log"
@@ -1996,14 +1699,21 @@ spec:
                 else
                   echo "[6/6-pre] cluster image + ghcr ref already present locally"
                 fi
+              elif [ "$_skip_6_pre_pull" = "1" ]; then
+                if [ "$CLUSTER_IMG" != "$OPENSHELL_CLI_REF" ] \
+                     && docker image inspect "$CLUSTER_IMG" >/dev/null 2>&1 \
+                     && ! docker image inspect "$OPENSHELL_CLI_REF" >/dev/null 2>&1; then
+                  docker tag "$CLUSTER_IMG" "$OPENSHELL_CLI_REF" 2>/dev/null || true
+                  echo "[6/6-pre] aliased $CLUSTER_IMG -> $OPENSHELL_CLI_REF (5a cache hit)"
+                fi
               fi
-              _sbx_url="${NEMOCLAW_OPENSHELL_SANDBOX_URL:-}"
               # Re-layer CDN openshell-sandbox only after a fresh pull.
               if [ "$_gw_did_pull" = "1" ] && [ -n "$_sbx_url" ] && docker image inspect "$CLUSTER_IMG" >/dev/null 2>&1; then
                 _sbx_stage=/tmp/nemoclaw-sandbox-bin-gateway
                 rm -rf "$_sbx_stage" && mkdir -p "$_sbx_stage"
                 echo "[6/6-pre] layering openshell-sandbox from $_sbx_url onto $CLUSTER_IMG"
                 if curl -fLsS -o "$_sbx_stage/openshell-sandbox" "$_sbx_url"; then
+                  if _nemoclaw_verify_elf_arch "$_sbx_stage/openshell-sandbox" "$(_nemoclaw_cpu_arch)" "openshell-sandbox"; then
                   chmod +x "$_sbx_stage/openshell-sandbox"
                   printf 'FROM %s\nCOPY --chown=root:root openshell-sandbox /opt/openshell/bin/openshell-sandbox\nRUN chmod 0755 /opt/openshell/bin/openshell-sandbox\n' \
                     "$CLUSTER_IMG" > "$_sbx_stage/Dockerfile"
@@ -2017,6 +1727,9 @@ spec:
                       docker exec "$CLUSTER_CTR" chmod 0755 /opt/openshell/bin/openshell-sandbox 2>/dev/null || true
                       echo "[6/6-pre] hot-patched $CLUSTER_CTR (pre-gateway)"
                     fi
+                  fi
+                  else
+                    echo "[6/6-pre] ERROR: wrong-arch openshell-sandbox from $_sbx_url — skipped overlay on $(_nemoclaw_cpu_arch)" >&2
                   fi
                 else
                   echo "[6/6-pre] WARN: curl sandbox binary from $_sbx_url failed" >&2
@@ -2064,8 +1777,21 @@ spec:
               ) &
 
               set -e
+              if [ -f /workspace/.nemoclaw-installed ] && [ -n "${NEMOCLAW_OPENCLAW_VERSION:-}" ]; then
+                if ! sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh --check-only 2>/dev/null; then
+                  echo "[6/6] waiting for runtime openclaw ${NEMOCLAW_OPENCLAW_VERSION} before declaring ready..."
+                  for _pin_ready in $(seq 1 120); do
+                    if NEMOCLAW_PIN_LOG_PREFIX="[6/6|openclaw-pin]" \
+                       NEMOCLAW_PIN_RESTART_GATEWAY=1 \
+                       sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh 2>&1; then
+                      break
+                    fi
+                    sleep 2
+                  done
+                fi
+              fi
               if [ -f /workspace/.nemoclaw-installed ]; then
-                echo "NemoClaw ready (onboard sentinel present)."
+                echo "NemoClaw ready (onboard sentinel present; runtime openclaw ${NEMOCLAW_OPENCLAW_VERSION:-<build pin>})."
               else
                 echo "WARN: NemoClaw gateway is up but onboard did NOT complete — /workspace/.nemoclaw-installed missing."
                 echo "WARN: Fix the [5b/5] error above, then run: kubectl exec -it deploy/nemoclaw -c nemoclaw -- nemoclaw onboard --resume"
@@ -2084,10 +1810,6 @@ spec:
               value: "{{ .Values.olaresEnv.DYNAMO_HOST | default "" }}"
             - name: NEMOCLAW_NON_INTERACTIVE
               value: "1"
-            # LLM provider/endpoint/model come from Olares UI — no baked-in shared defaults, since
-            # NemoClaw onboard curl-validates the endpoint (Responses + Chat Completions APIs) and
-            # every installer has their own backend. The chart's entrypoint fails fast with a clear
-            # message if any of these are empty (see the preflight block in the install script).
             - name: NEMOCLAW_PROVIDER
               value: "{{ .Values.olaresEnv.NEMOCLAW_PROVIDER | default "custom" }}"
             - name: NEMOCLAW_ENDPOINT_URL
@@ -2104,32 +1826,10 @@ spec:
               value: "unused"
             - name: NEMOCLAW_SANDBOX_NAME
               value: "my-assistant"
-            # Policy tier governs the network presets baked into the sandbox at onboard
-            # time. Default `open` because the chart-deployed sandbox is intended for
-            # full plugin/skill use (slack/discord/telegram/jira/outlook etc.) — the
-            # restricted/balanced tiers leave most messaging-channel hosts blocked at
-            # the iptables layer, which silently breaks `openclaw extensions add` for
-            # those channels even after fixing NO_PROXY (the connection itself is
-            # rejected by the sandbox before npm/curl ever sees a proxy decision).
-            # Override via Helm value `olaresEnv.NEMOCLAW_POLICY_TIER` (valid:
-            # restricted | balanced | open). Was inadvertently dropped in the
-            # 2026-05-08 "upgrade app 2.0.6" commit — restored here.
             - name: NEMOCLAW_POLICY_TIER
               value: "{{ .Values.olaresEnv.NEMOCLAW_POLICY_TIER | default "open" }}"
-            # NEMOCLAW_POLICY_MODE (per docs.nvidia.com/nemoclaw):
-            #   suggested (default) — additive: apply tier defaults + keep previously
-            #     `policy-add`'d presets. This is what we want for normal upgrades.
-            #   custom — pair with NEMOCLAW_POLICY_PRESETS to make an explicit list
-            #     authoritative (anything not in the list is removed).
-            #   skip — leaves applied set untouched and does NOT apply tier defaults.
-            # Default flipped from "skip" to "suggested" so NEMOCLAW_POLICY_TIER=open
-            # actually downloads tier presets at onboard time. Override to "skip" via
-            # olaresEnv.NEMOCLAW_POLICY_MODE if an operator wants to freeze a manually
-            # curated policy set across re-onboards.
             - name: NEMOCLAW_POLICY_MODE
               value: "{{ .Values.olaresEnv.NEMOCLAW_POLICY_MODE | default "suggested" }}"
-            # Optional: max polls (2s sleep each) waiting for k3s sandbox pod before tier
-            # preset reconcile (default 180 ~= 6m). Increase on very slow clusters.
             - name: NEMOCLAW_POLICY_RECONCILE_WAIT_ITER
               value: "{{ .Values.olaresEnv.NEMOCLAW_POLICY_RECONCILE_WAIT_ITER | default "" }}"
             - name: NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE
@@ -2142,20 +1842,16 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_GATEWAY_SCHEME | default "http" }}"
             - name: NEMOCLAW_GATEWAY_RECREATE
               value: "{{ .Values.olaresEnv.NEMOCLAW_GATEWAY_RECREATE | default "0" }}"
-            # Optional OpenClaw client tuning: when non-empty, nemoclaw rewrites
-            # /sandbox/.openclaw/openclaw.json models.providers.inference.api on every gateway ensure loop.
-            # Leave empty to keep whatever OpenClaw wrote during onboard. Some inference stacks only work with
-            # `openai-completions` vs `openai-chat-completions`; mismatches often surface as generic network errors.
             - name: NEMOCLAW_OPENCLAW_INFERENCE_API
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_INFERENCE_API | default "" }}"
-            # OpenClaw agents.defaults.timeoutSeconds cap on each ensure-gateway rewrite (default 300 in script).
-            # Set to 600-1200+ for large local models that exceed 5min first-token / generation (else logs show
-            # reason=timeout and UI shows generic "network connection error").
             - name: NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT | default "" }}"
             # Pin OpenClaw inside the sandbox; empty falls back to the NemoClaw-baked version.
             - name: NEMOCLAW_OPENCLAW_VERSION
-              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.5.7" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.5.20" }}"
+            # Build-time OpenClaw pin (Dockerfile Patch 4 / rcf_patch.py). Not the runtime pin above.
+            - name: NEMOCLAW_OPENCLAW_BUILD_VERSION
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_BUILD_VERSION | default "2026.4.24" }}"
             # Optional manual sandbox HTTP egress proxy override.
             - name: NEMOCLAW_SANDBOX_HTTP_PROXY
               value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_HTTP_PROXY | default "" }}"
@@ -2169,25 +1865,24 @@ spec:
             - name: NEMOCLAW_GATEWAY_NODE_OPTIONS
               value: "{{ .Values.olaresEnv.NEMOCLAW_GATEWAY_NODE_OPTIONS | default "--dns-result-order=ipv4first --network-family-autoselection-attempt-timeout=5000" }}"
             - name: NEMOCLAW_OPENSHELL_CLUSTER_IMAGE
-              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE | default "beclab/hys2023-openshell-cluster:v1.16" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE | default "beclab/harveyff-openshell-cluster:v1.17" }}"
             - name: NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE_MIRROR | default "" }}"
             # Custom OpenShell binaries; set empty to use upstream defaults.
             - name: NEMOCLAW_OPENSHELL_CLI_URL
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLI_URL | default "https://cdn.olares.com/nemoclaw/openshell-20264302050" }}"
+            - name: NEMOCLAW_OPENSHELL_CLI_URL_ARM
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLI_URL_ARM | default "" }}"
             - name: NEMOCLAW_OPENSHELL_SANDBOX_URL
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_SANDBOX_URL | default "https://cdn.olares.com/nemoclaw/openshell-sandbox-20264302050" }}"
+            - name: NEMOCLAW_OPENSHELL_SANDBOX_URL_ARM
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_SANDBOX_URL_ARM | default "" }}"
             # Glibc-2.36-compat openshell-gateway image (e.g. hys2023/openshell-gateway:v1.16).
             # Only relevant when NEMOCLAW_INSTALL_TAG ≥ v0.0.39; empty / no-op on v0.0.38.
             - name: NEMOCLAW_OPENSHELL_GATEWAY_IMAGE
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_IMAGE | default "" }}"
             # Optional explicit path to openshell-gateway inside NEMOCLAW_OPENSHELL_GATEWAY_IMAGE.
             # When empty the chart tries (in order):
-            #   /usr/local/bin/openshell-gateway
-            #   /opt/openshell/bin/openshell-gateway
-            #   /usr/bin/openshell-gateway
-            #   /openshell-gateway
-            # Set if your fork installs the binary at a non-standard path.
             - name: NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_BIN_PATH | default "" }}"
             # "0" disables nemoclaw's compat-container fallback (broken under DinD).
@@ -2196,45 +1891,32 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_GATEWAY_CONTAINER_PATCH | default "0" }}"
             # Force OpenShell to use the custom cluster image.
             - name: OPENSHELL_CLUSTER_IMAGE
-              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE | default "beclab/hys2023-openshell-cluster:v1.16" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENSHELL_CLUSTER_IMAGE | default "beclab/harveyff-openshell-cluster:v1.17" }}"
             # Sandbox base image and optional mirror.
             - name: NEMOCLAW_SANDBOX_IMAGE
-              value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_IMAGE | default "beclab/hys2023-nvidia-nemoclaw-sandbox-base:20260427" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_IMAGE | default "beclab/nvidia-nemoclaw-sandbox-base:23bb570" }}"
+            - name: NEMOCLAW_SANDBOX_IMAGE_DIGEST
+              value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_IMAGE_DIGEST | default "" }}"
             - name: NEMOCLAW_SANDBOX_IMAGE_MIRROR
               value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_IMAGE_MIRROR | default "" }}"
             # Optional sandbox-base pull interception; currently disabled by default.
             - name: NEMOCLAW_INTERCEPT_GHCR_SANDBOX_PULL
               value: "{{ .Values.olaresEnv.NEMOCLAW_INTERCEPT_GHCR_SANDBOX_PULL | default "0" }}"
             # sandbox builder base: nemoclaw's sandbox Dockerfile has `FROM node:22-slim@sha256:…`
-            # as its builder stage. onboard [6/8] pulls this from docker.io and the docker.io auth
-            # endpoint is the most common cause of "TLS handshake timeout" failures on onboard.
-            # Override NEMOCLAW_SANDBOX_NODE_IMAGE for a private registry, or set a MIRROR like
-            # docker.m.daocloud.io/library/node:22-slim for a CN-friendly pull path.
             - name: NEMOCLAW_SANDBOX_NODE_IMAGE
               value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_NODE_IMAGE | default "node:22-slim" }}"
             - name: NEMOCLAW_SANDBOX_NODE_IMAGE_MIRROR
               value: "{{ .Values.olaresEnv.NEMOCLAW_SANDBOX_NODE_IMAGE_MIRROR | default "" }}"
             # Pre-install Homebrew gcc in the sandbox during skill-env bootstrap. gogcli has no
             # official linux-x86_64 bottle, so `openclaw config --section skills` falls back to
-            # building from source, which fails with "Install Clang or run `brew install gcc`"
-            # unless a C toolchain is already present. Set to 0 if a prebuilt bottle or system
-            # clang becomes available, to shave ~5 min + ~800MB off the first-run bootstrap.
             - name: NEMOCLAW_SKILL_INSTALL_GCC
               value: "{{ .Values.olaresEnv.NEMOCLAW_SKILL_INSTALL_GCC | default "1" }}"
             # Reserved (currently no-op): optional host path to a prefetched `gog` binary.
-            # We intentionally do NOT preinstall gog from the prefetch image right now; the user
-            # installs it manually via `openclaw config --section skills` / Homebrew.
-            #
-            # If you later re-enable "prefetched gog" in templates/configmap-sandbox-bridge.yaml,
-            # set this to a host path containing the gog binary and skill-env will copy it into
-            # the sandbox as ~/.local/bin/gog.
             - name: NEMOCLAW_PREFETCH_GOG_PATH
               value: "{{ .Values.olaresEnv.NEMOCLAW_PREFETCH_GOG_PATH | default "" }}"
             - name: NEMOCLAW_PREFLIGHT_CLUSTER_PULL
               value: "{{ .Values.olaresEnv.NEMOCLAW_PREFLIGHT_CLUSTER_PULL | default "1" }}"
             # When 1, the 5a/5 block tries the *_MIRROR variants before upstream ghcr.io / docker.io.
-            # In regions where ghcr.io is effectively blocked, this avoids 90s of 3-attempt retries
-            # per image before the mirror fallback kicks in.
             - name: NEMOCLAW_PREFER_MIRROR
               value: "{{ .Values.olaresEnv.NEMOCLAW_PREFER_MIRROR | default "0" }}"
             - name: NEMOCLAW_OPENSHELL_VERSION
@@ -2250,8 +1932,6 @@ spec:
             - name: NEMOCLAW_COLD_RESET_SANDBOX_WAIT_ITER
               value: "{{ .Values.olaresEnv.NEMOCLAW_COLD_RESET_SANDBOX_WAIT_ITER | default "" }}"
             # Safety valve only. Default 0: cold-reset never stops a running gateway;
-            # sandbox-ensure-gateway owns lifecycle. Set 1 only for manual recovery from
-            # a known-bad pre-ready gateway.
             - name: NEMOCLAW_COLD_RESET_STOP_GATEWAY
               value: "{{ .Values.olaresEnv.NEMOCLAW_COLD_RESET_STOP_GATEWAY | default "0" }}"
             # Optional git URL for cloning Homebrew/brew inside the sandbox (default: GitHub). Use an
@@ -2267,10 +1947,6 @@ spec:
             - name: NEMOCLAW_GOPROXY
               value: "{{ .Values.olaresEnv.NEMOCLAW_GOPROXY | default "https://goproxy.cn,direct" }}"
             # Disable TLS verification for git / curl / wget / npm / pip inside the
-            # sandbox. Required on corporate / hotel networks that MITM ghcr.io and
-            # github.com with a self-signed root we have no way to trust
-            # ("curl: (60) SSL certificate problem: self-signed certificate").
-            # Set to "0" on networks that don't rewrite TLS.
             - name: NEMOCLAW_SKILL_INSECURE_TLS
               value: "{{ .Values.olaresEnv.NEMOCLAW_SKILL_INSECURE_TLS | default "1" }}"
             - name: CHAT_UI_URL
@@ -2280,11 +1956,6 @@ spec:
             - name: OPENCLAW_TRUSTED_PROXIES
               value: "{{ .Values.olaresEnv.OPENCLAW_TRUSTED_PROXIES | default "" }}"
             # gog (Google Workspace CLI) keyring: use `file` backend so `gog auth add`
-            # persists OAuth tokens non-interactively inside the sandbox. The password
-            # comes from the `nemoclaw-gog-keyring` Secret — first install generates a
-            # fresh randAlphaNum 8; subsequent `helm upgrade` re-reads the Secret so
-            # already-encrypted keyrings stay readable. User can pin with olaresEnv
-            # GOG_KEYRING_PASSWORD (takes precedence, rotates the Secret on reconcile).
             - name: ALLOW_EXTERNAL_DIR_ACCESS
               value: "{{ .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS | default "false" }}"
             - name: GOG_KEYRING_BACKEND
@@ -2295,37 +1966,6 @@ spec:
                   name: nemoclaw-gog-keyring
                   key: password
             # NOTE: there is intentionally NO olaresEnv knob for the gog OAuth
-            # redirect host. ingress-weui.yaml's `location = /oauth2/callback`
-            # is host-agnostic, but the only externally reachable hostname for
-            # this chart is the entrance `webtui` (CHAT_UI_URL host) — Olares
-            # binds Google's redirect URI there and nowhere else. The bridge
-            # script (sandbox-install-skill-env.sh) derives the value from
-            # CHAT_UI_URL and pre-exports NEMOCLAW_GOG_OAUTH_REDIRECT_HOST in
-            # the sandbox shell, so users can run:
-            #   gog auth add ... --redirect-host "$NEMOCLAW_GOG_OAUTH_REDIRECT_HOST"
-            # without typing the dynamic per-user Olares hostname.
-          # readinessProbe gates Service endpoints on
-          # /workspace/.nemoclaw-cli-ready -- the sentinel chat-ui-bridge
-          # writes once `openclaw gateway health` in the sandbox reports OK
-          # (sandbox image build + skill-env + homebrew + olares-cli staging
-          # + gateway bring-up all complete). So Service `nemoclaw` has NO
-          # endpoints during the install window; ingress-weui :8080 (WebUI)
-          # returns 502 to the browser until the sandbox is actually ready
-          # -- users cannot accidentally open a half-baked UI that would
-          # then error out on the first chat.
-          #
-          # :8081 (CLI terminal) is pass-through to the terminal Service
-          # and does NOT depend on this probe, so it stays reachable the
-          # whole time.
-          #
-          # startupProbe is intentionally DISABLED. With it enabled, kubelet
-          # logs a "Startup probe failed" Warning event every periodSeconds
-          # and -- once failureThreshold is exhausted -- will RESTART the
-          # container, which on a slow network (first-time OCI pull inside
-          # DinD) would kill the install mid-flight and trigger a retry
-          # loop. We trade off "noisy Unhealthy event spam" for "install
-          # completes once, reliably". See git history for the previous
-          # configuration if you want to bring it back.
           readinessProbe:
             exec:
               command:
@@ -2333,27 +1973,13 @@ spec:
                 - -c
                 - test -f /workspace/.nemoclaw-cli-ready
             # Give the very first probe a generous initial delay so we do
-            # not flood the event log with "Readiness probe failed" for the
-            # first ~5 min of cold-boot (when we know the sentinel cannot
-            # possibly exist yet).
             initialDelaySeconds: 300
             periodSeconds: 30
             timeoutSeconds: 5
             # No success/fail threshold other than 1 — either the sentinel
-            # file exists or it does not; there is nothing flappy about
-            # `test -f`.
             successThreshold: 1
             failureThreshold: 1
           # startupProbe:
-          #   exec:
-          #     command:
-          #       - sh
-          #       - -c
-          #       - test -f /workspace/.nemoclaw-cli-ready
-          #   initialDelaySeconds: 60
-          #   periodSeconds: 30
-          #   timeoutSeconds: 5
-          #   failureThreshold: 80
           resources:
             limits:
               cpu: "4"
@@ -2378,14 +2004,11 @@ spec:
               mountPath: /opt/nemoclaw/patch_inference_baseurl.py
               subPath: patch_inference_baseurl.py
               readOnly: true
+            - name: build-patch-script
+              mountPath: /opt/nemoclaw/patch-nemoclaw-dockerfile.py
+              subPath: patch-nemoclaw-dockerfile.py
+              readOnly: true
             # DISABLED: install-progress HTTP page on :18790 (and probe
-            # responder on :18791). Re-enable together with the matching
-            # volume under `volumes:` further down, plus the disabled gate
-            # in ingress-weui.yaml and start_placeholder_18790/start_probe_responder_18791.
-            # - name: install-ui-script
-            #   mountPath: /opt/nemoclaw/install-ui.py
-            #   subPath: install-ui.py
-            #   readOnly: true
             - name: sandbox-bridge-scripts
               mountPath: /opt/nemoclaw/sandbox-ensure-gateway.sh
               subPath: sandbox-ensure-gateway.sh
@@ -2409,6 +2032,16 @@ spec:
             - name: sandbox-bridge-scripts
               mountPath: /opt/nemoclaw/gog-shim-reconcile.sh
               subPath: gog-shim-reconcile.sh
+            - name: sandbox-bridge-scripts
+              mountPath: /opt/nemoclaw/brew-local-wrapper.sh
+              subPath: brew-local-wrapper.sh
+            - name: sandbox-bridge-scripts
+              mountPath: /opt/nemoclaw/pin-openclaw-in-sandbox.sh
+              subPath: pin-openclaw-in-sandbox.sh
+              readOnly: true
+            - name: sandbox-bridge-scripts
+              mountPath: /opt/nemoclaw/patch-openclaw-gog-skill.py
+              subPath: patch-openclaw-gog-skill.py
               readOnly: true
             - name: openclaw-config
               mountPath: /openclaw-config
@@ -2425,29 +2058,6 @@ spec:
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
-          # Wrap dockerd with stale-pidfile cleanup (chart v1.7.19+).
-          # /var/run is an emptyDir, but emptyDirs are backed by
-          # /var/lib/kubelet/pods/<uid>/volumes/kubernetes.io~empty-dir/<vol>/
-          # on the node disk and survive a node reboot. After a host reboot or
-          # any dirty dockerd shutdown (OOM kill / kubelet `kill -9` across
-          # pod restart) the previous boot's /var/run/docker.pid +
-          # /var/run/docker/containerd/containerd.pid remain. dockerd's
-          # startup-time pidfile check reads the old PID, finds that PID
-          # still alive in the new container's PID namespace -- almost always
-          # PID 1 == the new entrypoint itself -- and refuses to start with:
-          #   "failed to start daemon, ensure docker is not running or delete
-          #    /var/run/docker.pid: process with PID 1 is still running"
-          # Result: the whole nemoclaw Pod stays CrashLoopBackOff after a
-          # node reboot until an operator manually `kubectl exec`s into the
-          # dind container and `rm`s the pidfile (or the volume is wiped).
-          # The docker-library upstream `dockerd-entrypoint.sh` does this
-          # cleanup automatically, but we override `command:` to invoke
-          # dockerd directly (skipping TLS-cert-dir setup we don't need),
-          # which bypassed the entrypoint cleanup. Replicating just the
-          # pidfile rm here keeps the existing `--host=unix:...` invocation
-          # while restoring reboot safety. Safe even when a healthy dockerd
-          # is somehow already running -- kubelet would not have started a
-          # new container if the old one were still alive.
           command:
             - /bin/sh
             - -c
@@ -2504,15 +2114,14 @@ spec:
                 path: patch_origins.py
               - key: patch_inference_baseurl.py
                 path: patch_inference_baseurl.py
+        - name: build-patch-script
+          configMap:
+            name: nemoclaw-build-patch
+            defaultMode: 493
+            items:
+              - key: patch-nemoclaw-dockerfile.py
+                path: patch-nemoclaw-dockerfile.py
         # DISABLED: install-ui ConfigMap volume. Paired with the commented
-        # volumeMount above and chat-ui-bridge's disabled python branch.
-        # - name: install-ui-script
-        #   configMap:
-        #     name: nemoclaw-install-ui
-        #     defaultMode: 493
-        #     items:
-        #       - key: install-ui.py
-        #         path: install-ui.py
         - name: sandbox-bridge-scripts
           configMap:
             name: nemoclaw-sandbox-bridge
@@ -2530,6 +2139,12 @@ spec:
                 path: clamp-openclaw-config.py
               - key: gog-shim-reconcile.sh
                 path: gog-shim-reconcile.sh
+              - key: brew-local-wrapper.sh
+                path: brew-local-wrapper.sh
+              - key: pin-openclaw-in-sandbox.sh
+                path: pin-openclaw-in-sandbox.sh
+              - key: patch-openclaw-gog-skill.py
+                path: patch-openclaw-gog-skill.py
         - name: openclaw-config
           hostPath:
             path: "{{ .Values.userspace.appData }}/openclaw-config"
@@ -2560,16 +2175,9 @@ spec:
       port: 18789
       targetPort: 18790
     # gog Google OAuth callback: ingress-weui's `/oauth2/callback` proxies here; pod :18788
-    # tunnels to sandbox :8080 via docker+kubectl+node (see start_relay_oauth in Deployment).
-    # `gog auth add --listen-addr 0.0.0.0:8080 --redirect-host https://<app-host>/oauth2/callback`.
     - name: oauth
       port: 18788
       targetPort: 18788
     # DISABLED: permanent install-ui probe responder port. Paired with
-    # the disabled ingress-weui :8081 auth_request gate and
-    # start_probe_responder_18791 in chat-ui-bridge. Uncomment together.
-    # - name: probe
-    #   port: 18791
-    #   targetPort: 18791
   selector:
     io.kompose.service: nemoclaw
