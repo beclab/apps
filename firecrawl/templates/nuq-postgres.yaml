@@ -8,6 +8,8 @@ metadata:
     app: nuq-postgres
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: nuq-postgres
@@ -16,9 +18,26 @@ spec:
       labels:
         app: nuq-postgres
     spec:
+      initContainers:
+        - name: init-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /var/lib/postgresql/data..."
+              mkdir -p /var/lib/postgresql/data
+              chown -R 999:999 /var/lib/postgresql/data
+              chmod 700 /var/lib/postgresql/data
+          volumeMounts:
+            - name: nuq-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          securityContext:
+            runAsUser: 0
       containers:
         - name: nuq-postgres
-          image: "docker.io/beclab/firecrawl-nuq-postgres:v2.8.0"
+          image: "docker.io/beclab/firecrawl-nuq-postgres:v2.9.0"
           env:
             - name: POSTGRES_USER
               value: "postgres"
@@ -26,15 +45,57 @@ spec:
               value: "postgres"
             - name: POSTGRES_DB
               value: "postgres"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
           ports:
             - containerPort: 5432
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - postgres
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - postgres
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
           resources:
             requests:
-              cpu: 100m
-              memory: 20Mi
+              cpu: 200m
+              memory: 256Mi
             limits:
-              cpu: 500m
-              memory: 500Mi
+              cpu: 2
+              memory: 2Gi
+          volumeMounts:
+            - name: nuq-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: nuq-data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appData }}/nuq-postgres
+              {{- else }}
+            path: {{ .Values.userspace.appData }}/{{ .Release.Name }}/nuq-postgres
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appData }}/{{ .Release.Name }}/nuq-postgres
+            {{- end }}
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
