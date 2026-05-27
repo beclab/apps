@@ -28,6 +28,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
+  minReadySeconds: 10
   selector:
     matchLabels:
       io.kompose.service: chromium
@@ -43,35 +44,86 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: chromium
     spec:
+      {{- $isOlaresOne := and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+      {{- $homepage := "https://www.google.com" }}
+      {{- if and .Values.olaresEnv .Values.olaresEnv.CHROME_HOMEPAGE }}
+      {{- $homepage = .Values.olaresEnv.CHROME_HOMEPAGE }}
+      {{- end }}
       containers:
-        - env:
-            - name: CHROME_CLI
-              value: https://www.linuxserver.io/
-            - name: PGID
-              value: "1000"
+        - name: chromium
+          image: "docker.io/beclab/harveyff-chromium:1e736296-ls34"
+          {{- if $isOlaresOne }}
+          securityContext:
+            privileged: true
+          {{- end }}
+          env:
             - name: PUID
+              value: "1000"
+            - name: PGID
               value: "1000"
             - name: TZ
               value: Etc/UTC
+            - name: DeviceName
+              value: {{ .Values.deviceName }}
+            {{- if $isOlaresOne }}
+            - name: CHROME_CLI
+              value: "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --use-gl=egl --enable-features=UseOzonePlatform,VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization,ReduceAcceptLanguageHeader {{ $homepage }}"
+            - name: DRINODE
+              value: /dev/dri/renderD128
+            - name: DRI_NODE
+              value: /dev/dri/renderD128
+            - name: LIBVA_DRIVER_NAME
+              value: iHD
+            {{- else }}
+            - name: CHROME_CLI
+              value: {{ $homepage | quote }}
             - name: CHROME_FLAGS
               value: '--enable-features=ReduceAcceptLanguageHeader'
-          image: "docker.io/beclab/aboveos-kldtks-chromium:version-e3efdad3-cn"
-          name: chromium
+            {{- end }}
           resources:
             requests:
-              cpu: 0.5
-              memory: 256Mi
+              cpu: "500m"
+              memory: 1Gi
             limits:
-              cpu: 1
-              memory: 512Mi
+              cpu: "2"
+              memory: 6Gi
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
+              protocol: TCP
             - containerPort: 3001
+            {{- if $isOlaresOne }}
+            - containerPort: 8082
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
           volumeMounts:
             - mountPath: /config
               name: config
-            # - name: chromium-claim0
-            #   mountPath: /config
+            - mountPath: /dev/shm
+              name: dshm
+            {{- if $isOlaresOne }}
+            - mountPath: /dev/dri
+              name: dev-dri
+            {{- end }}
       restartPolicy: Always
       volumes:
         - name: config
@@ -86,9 +138,15 @@ spec:
             {{- else }}
             path: {{ .Values.userspace.appCache }}/chromium/config
             {{- end }}
-        # - name: chromium-claim0
-        #   persistentVolumeClaim:
-        #     claimName: chromium-claim0
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        {{- if $isOlaresOne }}
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+        {{- end }}
 status: {}
 ---
 apiVersion: v1
@@ -103,6 +161,7 @@ metadata:
   name: chromium
   namespace: {{ .Release.Namespace }}
 spec:
+  type: NodePort
   ports:
     - name: "3000"
       port: 3000
@@ -110,6 +169,7 @@ spec:
     - name: "3001"
       port: 3001
       targetPort: 3001
+      nodePort: 30001
   selector:
     io.kompose.service: chromium
 status:
