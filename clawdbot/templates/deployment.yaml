@@ -30,7 +30,7 @@ spec:
 
       initContainers:
         - name: init-install-brew
-          image: "beclab/harveyff-openclaw-brew-base:2026.4.18"
+          image: "beclab/harveyff-openclaw-brew-base:2026.5.27-cli"
           securityContext:
             runAsUser: 0
           command: ["/bin/bash", "-c"]
@@ -107,9 +107,10 @@ spec:
 
       containers:
         # Workspace container: stable shell environment for terminal sessions.
-        # Gateway restarts do NOT affect this container or its exec sessions.
-        # Mirrors the openclaw-cli service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.4.21"
+        # Gateway crashes do NOT affect this container, so users can always
+        # `kubectl exec` in to fix config / inspect logs even when gateway
+        # is broken. Mirrors the openclaw-cli service from docker-compose.
+        - image: "beclab/openclaw-openclaw:2026.5.26"
           name: clawdbot
           command: ["sleep", "infinity"]
           env:
@@ -174,10 +175,16 @@ spec:
               name: openclaw-bin
               subPath: openclaw
               readOnly: true
+            # Helper script: `restart-gateway` writes a sentinel into the
+            # shared volume below to trigger gateway-only restart.
+            - mountPath: /usr/local/bin/restart-gateway
+              name: gateway-ipc
+              subPath: restart-gateway
+              readOnly: true
             - mountPath: /usr/local/bin/docker
               name: docker-cli-bin
               subPath: docker
-              readOnly: true              
+              readOnly: true
             - mountPath: /home/linuxbrew
               name: brew-volume
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -194,21 +201,17 @@ spec:
               drop:
                 - ALL
 
-        # Gateway sidecar: runs the OpenClaw gateway process independently.
-        # Can restart without affecting the workspace container or terminal sessions.
-        # Mirrors the openclaw-gateway service from the official docker-compose.yml.
-        - image: "beclab/openclaw-openclaw:2026.4.21"
+        # Gateway sidecar: runs the OpenClaw gateway as a CHILD of a
+        # bash wrapper (Hermes-style). The wrapper watches a sentinel
+        # file at /home/node/.openclaw/.gateway-restart-requested; when
+        # clawdbot's `restart-gateway` helper touches it, the wrapper
+        # SIGTERMs node and respawns it in-place (no container restart,
+        # no kubelet event, ~3s downtime). The same sentinel also
+        # short-circuits the 30s post-crash backoff so operators can
+        # immediately retry after fixing a bad config.
+        - image: "beclab/openclaw-openclaw:2026.5.26"
           name: gateway
-          command:
-            [
-              "node",
-              "dist/index.js",
-              "gateway",
-              "--bind",
-              "lan",
-              "--port",
-              "18789",
-            ]
+          command: ["/bin/bash", "/usr/local/bin/gateway-entrypoint.sh"]
           ports:
             - containerPort: 18789
           env:
@@ -226,6 +229,11 @@ spec:
               value: "tcp://localhost:2375"
             - name: NODE_OPTIONS
               value: "--max-old-space-size=5120"
+            # Force supervised-respawn path inside gateway code: SIGUSR1 /
+            # config-set restart -> process.exit(0). Avoids the silent
+            # config wipe in openclaw issue #79947.
+            - name: OPENCLAW_SYSTEMD_UNIT
+              value: "openclaw-gateway.service"
             - name: PATH
               value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: CUSTOM_API_KEY
@@ -237,7 +245,6 @@ spec:
               value: "file"
             - name: GOG_KEYRING_PASSWORD
               value: {{ index $oe "GOG_KEYRING_PASSWORD" | default "olares" | quote }}
-          # Startup: brew Python on volume. Readiness: OpenClaw /readyz (HTTP). No liveness — avoids kubelet restarts on slow/ flaky healthz.
           startupProbe:
             exec:
               command:
@@ -273,6 +280,10 @@ spec:
               name: docker-cli-bin
               subPath: docker
               readOnly: true
+            - mountPath: /usr/local/bin/gateway-entrypoint.sh
+              name: gateway-ipc
+              subPath: gateway-entrypoint.sh
+              readOnly: true
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
@@ -306,7 +317,7 @@ spec:
               DOCKERD_PID=$!
               until docker info >/dev/null 2>&1; do sleep 1; done
               echo "[dind] dockerd ready, pre-pulling sandbox image..."
-              docker pull beclab/harveyff-openclaw-sandbox-common:2026.4.7 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
+              docker pull beclab/harveyff-openclaw-sandbox-common:2026.5.27 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
               wait $DOCKERD_PID
           ports:
             - containerPort: 2375
@@ -381,6 +392,14 @@ spec:
         - name: openclaw-bin
           configMap:
             name: clawdbot-openclaw-bin
+            defaultMode: 0755
+        # Wrapper script (restart-gateway) + gateway entrypoint that
+        # implement Hermes-style sentinel-file gateway restart. The
+        # sentinel lives under /home/node/.openclaw which both containers
+        # already mount via the app-data-config hostPath volume.
+        - name: gateway-ipc
+          configMap:
+            name: clawdbot-gateway-ipc
             defaultMode: 0755
         {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
         - name: olares-home-dir
