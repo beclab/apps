@@ -5,7 +5,15 @@ spec:
   fullDescription: |
     **Nous Research 打造的自我进化型 AI Agent。** 它是唯一一个内置学习闭环的 Agent：从经验中生成技能、在使用中自我改进、可检索自己过往的对话，并在多次会话中不断加深对你的理解。在 $5 VPS、GPU 集群或无服务器基础设施上运行，成本几乎为零。它不绑定到您的笔记本电脑 — 从 Telegram 与它交谈，它在云 VM 上工作。
 
-    使用任何您想要的模型 — [Nous Portal](https://portal.nousresearch.com)、[OpenRouter](https://openrouter.ai)（200+ 模型）、[NVIDIA NIM](https://build.nvidia.com)（Nemotron）、[Xiaomi MiMo](https://platform.xiaomimimo.com)、[z.ai/GLM](https://z.ai)、[Kimi/Moonshot](https://platform.moonshot.ai)、[MiniMax](https://www.minimax.io)、[Hugging Face](https://huggingface.co)、AWS Bedrock、Azure AI Foundry、LM Studio、GMI Cloud、OpenAI（含通过 Codex OAuth 的 GPT-5.5），或您自己的推理端点。切换只需 `hermes model` — 无需代码更改，无锁定。
+    **使用提示**
+    网关重启
+    - 运行 `restart-gateway` 即可重启网关并加载最新配置（`hermes gateway restart` 在容器化部署中无法工作）。
+
+    存储
+    - 所有Hermes状态——配置、API密钥、会话（SQLite + FTS5）、技能、记忆、定时任务、日志、检查点——均存储于`/opt/data`（`HERMES_HOME`）。无需外部数据库。该目录通过主机卷在Pod重启和升级时持久化保留。
+
+    首次设置
+    - 打开`Hermes CLI`入口并运行`hermes setup`以启动交互式向导。它会将API密钥、模型提供商和通道令牌写入`/opt/data`。
 
     **核心功能**
     - 全新 React/Ink 终端 UI：多行编辑、斜杠命令补全、固定输入框、流式输出、状态栏带逐回合计时器与 git 分支、亮色主题、OSC-52 剪贴板。
@@ -21,28 +29,10 @@ spec:
     - 安全加固：默认开启敏感信息脱敏；关闭 MCP OAuth 与 auth.json 的 TOCTOU 时间窗；浏览器工具云元数据 SSRF 防护；各平台精细化白名单；`.env` / `auth.json` / `state.db` 强制 `0600`。
     - 已本地化为 7 种语言（中文 / 日本語 / Deutsch / Español / Français / Українська / Türkçe），Dashboard 已支持中文。
 
-    **使用提示**
-    存储
-    - 所有Hermes状态——配置、API密钥、会话（SQLite + FTS5）、技能、记忆、定时任务、日志、检查点——均存储于`/opt/data`（`HERMES_HOME`）。无需外部数据库。该目录通过主机卷在Pod重启和升级时持久化保留。
-
-    首次设置
-    - 打开`Hermes CLI`入口并运行`hermes setup`以启动交互式向导。它会将API密钥、模型提供商和通道令牌写入`/opt/data`。
-
-    网关重启
-    - `hermes gateway restart` 在容器化部署中无法正常工作。使用`touch /opt/data/.gateway-restart-requested`可终止正在运行的网关，加载最新配置，并在约5秒内重新上线。同一哨兵机制还会绕过崩溃后的30秒回退窗口。
   upgradeDescription: |
-    将 Hermes Agent 从 0.13.0(2026.5.7) 升级到 0.14.0(2026.5.16)
-
-    **主要变更**
-    - **原生 Windows 支持（早期 Beta）** — 提供完整 PowerShell 安装器；无需 WSL，可在 cmd.exe/PowerShell 下直接运行（原生 PTY，基于 taskkill 的进程管理，自动安装 MinGit 等）
-    - **官方 PyPI 包** — 现在可通过 pip install hermes-agent 官方安装（发布包内置 Ink TUI 和 shell 启动器）；无需 clone/git/shell 脚本
-    - **极大提升冷启动速度（提升约19秒）** — 技能懒加载，重型依赖延迟加载，模型优先使用磁盘缓存查找，并行检查；hermes tools 启动时间从 14 秒降至不到 1.5 秒
-    - **浏览器工具提速180倍** — browser_console 评估请求改为通过管理进程的持久 CDP WebSocket 路由，不再为每次请求启动新 DevTools 会话
-    - **hermes proxy** — OpenAI 兼容本地代理，可将仅支持 OAuth 的订阅（Claude Pro、ChatGPT Pro、SuperGrok）以 OpenAI 兼容接口暴露，供 Codex、Aider、Cline、VS Code Continue 使用
-    - **跨会话 Claude 1 小时输入缓存** — 通过 Anthropic、OpenRouter、Nous Portal 共享前缀缓存，加快恢复会话速度并降低重复请求成本
-    - **新增 2 个消息平台与 MS Graph/Teams 基础** — 支持 LINE 和 SimpleX Chat 作为一等适配器（总计支持 22 个平台）；Microsoft Graph 授权/ Webhook 监听与 Teams 管道支持（可读写 Teams）
-    - **Agent 运行时增强** — /handoffnow 可实时转交会话（消息、工具历史和上下文完整保留）；x_search 作为一等受控工具；vision_analyze 支持原始像素输入给视觉模型；computer_use 重构为面向 Provider 的 cua-driver 实现
-    - **开发体验与安全增强** — 每次 write_file/patch 都赋能 LSP 语义诊断；每回合文件变动校验尾注，防止无声覆盖或写入丢失；新增供应链升级审计工具；阻止 sudo -S 暴力破解与危险调用
-    - **生态系统与技能扩展** — 新增 9 个可选技能（Hyperliquid 永续/现货、Yahoo 财经、统一 EVM 多链、OSINT、轮询/爬取 RSS-GitHub 等）；Brave Search（免费额度）和 DuckDuckGo 支持网络搜索；Zed ACP 注册表集成 uvx；Hugging Face Skills Hub 默认可信入口
-
-    完整发布说明请见：https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16    
+    **配置优化**
+    - Hermes Gateway 的 OpenAI 兼容 API 现已作为仅限内部的入口暴露（默认关闭）——可在应用设置中切换 `API_SERVER_ENABLED` 并设置 `HERMES_API_SERVER_KEY`，以便 Hermes Workspace / Open WebUI 等前端挂载。
+    - 注入持久 Linuxbrew 工具链，用户可用 `brew install` 扩展运行环境，安装的工具在升级后依然保留。
+    - 自动分发（stage）`olares-cli`（具体用法见文档）。
+    - Hermes venv 下已内置 `python3`，脚本技能可直接用其及相关依赖环境运行。
+    - 已修正 `HOME`，使支持 HOME 路径的 CLI 工具在不同容器之间共用配置。  

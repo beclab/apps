@@ -6,7 +6,7 @@ metadata:
   description: The agent that grows with you
   appid: hermesagent
   title: Hermes Agent
-  version: 1.3.4
+  version: 1.3.8
   categories:
   - Productivity_v112
   - Developer Tools
@@ -25,12 +25,27 @@ entrances:
   icon: https://app.cdn.olares.com/appstore/hermesagent/icon.png
   openMethod: window
   authLevel: private
+- name: api
+  host: hermesgateway
+  port: 8642
+  title: Hermes Gateway API
+  icon: https://app.cdn.olares.com/appstore/hermesagent/icon.png
+  invisible: true
+  authLevel: internal
 spec:
   versionName: '0.14.0'
   fullDescription: |
     **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
-    Use any model you want — [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai) (200+ models), [NVIDIA NIM](https://build.nvidia.com) (Nemotron), [Xiaomi MiMo](https://platform.xiaomimimo.com), [z.ai/GLM](https://z.ai), [Kimi/Moonshot](https://platform.moonshot.ai), [MiniMax](https://www.minimax.io), [Hugging Face](https://huggingface.co), AWS Bedrock, Azure AI Foundry, LM Studio, GMI Cloud, OpenAI (incl. GPT-5.5 over Codex OAuth), or your own endpoint. Switch with `hermes model` — no code changes, no lock-in.
+    **Tips**
+    Gateway Restart
+    - Run `restart-gateway` to reload the gateway and pick up the latest config (`hermes gateway restart` does NOT work in containerized deployments).
+
+    Storage
+    - All Hermes state — config, API keys, sessions (SQLite + FTS5), skills, memories, cron, logs, checkpoints — lives in `/opt/data` (`HERMES_HOME`). No external database is required. The directory is persisted across pod restarts and upgrades by the host volume.
+
+    First-time Setup
+    - Open the `Hermes CLI` entrance and run `hermes setup` to launch the interactive wizard. It writes API keys, model providers, and channel tokens into `/opt/data`.
 
     **Key Features**
     - Real Terminal UI: a full React/Ink rewrite with multiline editing, slash-command autocomplete, sticky composer, live streaming, status bar with per-turn stopwatch and git branch, light-theme preset, and OSC-52 clipboard support.
@@ -46,31 +61,13 @@ spec:
     - Security hardened: secret redaction ON by default, MCP OAuth + auth.json TOCTOU windows closed, browser cloud-metadata SSRF floor, per-platform allowlists, `0600` perms on `.env` / `auth.json` / `state.db`.
     - Localized into 7 languages (中文 / 日本語 / Deutsch / Español / Français / Українська / Türkçe) plus a Chinese dashboard.
 
-    **Tips**
-    Storage
-    - All Hermes state — config, API keys, sessions (SQLite + FTS5), skills, memories, cron, logs, checkpoints — lives in `/opt/data` (`HERMES_HOME`). No external database is required. The directory is persisted across pod restarts and upgrades by the host volume.
-
-    First-time Setup
-    - Open the `Hermes CLI` entrance and run `hermes setup` to launch the interactive wizard. It writes API keys, model providers, and channel tokens into `/opt/data`.
-
-    Gateway Restart
-    - `hermes gateway restart` does NOT work in containerized deployments. Using `touch /opt/data/.gateway-restart-requested` to tears down the running gateway, picks up the latest config, and is back online within ~5 seconds. The same sentinel also short-circuits the post-crash 30-second backoff window.
   upgradeDescription: |
-    Upgrade Hermes Agent from 0.13.0(2026.5.7) to 0.14.0(2026.5.16)
-
-    **Key Changes**
-    - **Native Windows support (early beta)**​ — Full PowerShell installer; runs on cmd.exe/ PowerShell without WSL​ (native PTY, taskkill-based process mgmt, MinGit auto-install, etc.)
-    - **Real PyPI package** — pip install hermes-agentis now the official install path (wheel ships Ink TUI bundle + shell launcher); no clone/git/shell script needed
-    - **Massive cold-start cut (~19s off launch)** — Lazy skill imports, deferred heavy deps, disk-cache-first model lookups, parallelized checks; hermes toolsdrops 14s → <1.5s
-    - **180× faster browser tooling** — browser_consoleevaluations routed through the supervisor's persistent CDP WebSocket​ instead of spawning a fresh DevTools session per call
-    - **hermes proxy** — OpenAI-compatible local proxy​ — Exposes OAuth-only subscriptions (Claude Pro, ChatGPT Pro, SuperGrok) as an OpenAI-compatible endpoint​ for Codex / Aider / Cline / VS Code Continue
-    - **Cross-session 1-hour Claude prompt cache** — Prefix cache shared across sessions via Anthropic / OpenRouter / Nous Portal for fast resume and lower repeat-run cost
-    - **2 new messaging platforms + MS Graph/Teams foundation** — LINE & SimpleX Chat as first-class adapters (22 platforms total); Microsoft Graph auth/webhook listener + Teams pipeline (read & post to Teams)
-    - **Agent runtime upgrades** — /handoffnow transfers the live session​ (messages + tool history + context preserved); x_searchas a first-class gated tool; vision_analyzepasses raw pixels to vision-capable models; computer_userefactored to a provider-agnostic cua-driver backend
-    - **Dev-experience safety & diagnostics** — LSP semantic diagnostics​ on every write_file/patch; per-turn file-mutation verifier footer​ catches silent overwrite/lost-write bugs; supply-chain advisory checker scans every install/upgrade; sudo -Sbrute-force blocked​ + dangerous invocation classification
-    - **Ecosystem & skills expansion** — 9 new optional skills (Hyperliquid perp/spot, Yahoo Finance, unified EVM multichain, OSINT, watchers/RSS-GitHub polling via cron, etc.); Brave Search (free tier) & DuckDuckGo as web-search backends; Zed ACP Registry integration via uvx; Hugging Face Skills Hub as a default trusted tap
-
-    Full release note at: https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.16
+    **Configuration optimization**
+    - Exposed the Hermes Gateway OpenAI-compatible API as an internal-only entrance (off by default) — toggle `API_SERVER_ENABLED` and set `HERMES_API_SERVER_KEY` in app settings to let Hermes Workspace / Open WebUI attach.
+    - Injected a persistent Linuxbrew toolchain so users can extend the runtime with `brew install` and the additions survive upgrades.
+    - Auto-staged `olares-cli` (see docs for usage).
+    - Injected the Hermes venv `python3` so skill scripts run with their deps available.
+    - Aligned `HOME` so HOME-respecting CLIs share config across containers.
 
   developer: Nous Research
   website: https://hermes-agent.nousresearch.com
@@ -85,7 +82,7 @@ spec:
     url: https://github.com/NousResearch/hermes-agent/blob/main/LICENSE
   requiredMemory: 2Gi
   limitedMemory: 14Gi
-  requiredDisk: 500Mi
+  requiredDisk: 5Gi
   limitedDisk: 20Gi
   requiredCpu: 1
   limitedCpu: 6
@@ -119,3 +116,17 @@ envs:
     editable: true
     default: "false"
     description: "Allow Hermes to access External directory on Olares"
+  - envName: API_SERVER_ENABLED
+    type: bool
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "false"
+    description: "Enable the OpenAI-compatible API server on port 8642 (for Hermes Workspace / Open WebUI integration). When true, API_SERVER_KEY must also be set."
+  - envName: HERMES_API_SERVER_KEY
+    type: password
+    required: false
+    applyOnChange: true
+    editable: true
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{8,}$'
+    description: "Auth token for the OpenAI-compatible API server. Required when API_SERVER_ENABLED is true. Must be at least 8 characters and contain only letters, numbers, and common symbols. Pass the same value as HERMES_API_TOKEN on the client side."
