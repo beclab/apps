@@ -1,36 +1,11 @@
-# Hermes Agent on Olares
-#
-# Pod layout:
-#   - One Deployment, three runtime containers + one busybox init container.
-#   - Init `init-chmod-data`: chowns the persistent /opt/data hostPath to
-#     hermes (uid/gid 10000) before any runtime container starts.
-#   - `gateway`     : long-lived messaging-platform gateway + cron scheduler,
-#                     wrapped in a 30s restart loop so a missing .env doesn't
-#                     crash-loop the pod (gateway exits clean when no platforms
-#                     are configured — see release notes for v0.13).
-#   - `dashboard`   : web UI on :9119 (the only HTTP port this app exposes by
-#                     default; surfaces sessions, models, skills, plugins,
-#                     kanban, cron, curator). Reads SQLite + skills + memories
-#                     from /opt/data shared with the other containers.
-#   - `hermesagent` : interactive workspace (sleep infinity). The terminal
-#                     entrance kubectl-execs into this container so users can
-#                     run `hermes setup` / `hermes` / `hermes config set`.
-#
-# Data lifecycle:
-#   - /opt/data is the SINGLE SOURCE OF TRUTH. All containers share it via
-#     hostPath app-data-home (userspace.appData/home).
-#   - SQLite (state.db, WAL+SHM), config.yaml, .env, SOUL.md, skills/,
-#     memories/, sessions/, cron/, logs/, checkpoints/ all live there.
-#   - No external database. No Redis. No PostgreSQL. The hostPath survives
-#     pod recreation and chart upgrades.
-#
-# Identity:
-#   - All runtime containers run as hermes (uid 10000) via pod-scope
-#     securityContext.runAsUser. This guarantees `kubectl exec` from the
-#     terminal entrance also attaches as hermes — without it, K8s exec
-#     defaults to the image USER (root, since the upstream Dockerfile has
-#     no USER directive), and TUI-written files would land as root:root,
-#     unreadable by the gateway/dashboard sidecars.
+# Hermes Agent on Olares.
+# 3 runtime containers (gateway / dashboard / hermesagent workspace) + init
+# containers, all sharing /opt/data (hostPath app-data-home) as the single
+# source of truth: SQLite, config.yaml, .env, SOUL.md, skills/, memories/, etc.
+# No external DB. All containers run as hermes (uid/gid 10000) via pod-scope
+# securityContext so `kubectl exec` from the terminal entrance also attaches
+# as hermes (otherwise exec uses the image USER root and writes root-owned
+# files the sidecars can't read).
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,57 +27,17 @@ spec:
         io.kompose.service: hermesagent
         bytetrade.io/terminal: hermesagent
     spec:
-      # Share PID namespace across the workspace, gateway, and dashboard
-      # containers (1.3.1+). Without this, each container scans its own
-      # /proc when answering "is the gateway running?" — the workspace's
-      # `hermes gateway status` and the dashboard's "GATEWAY STATUS"
-      # indicator both falsely report STOPPED because they can't see the
-      # sidecar's `hermes gateway run` process. With shared PID namespace,
-      # all three containers see the same processes and upstream's PID-
-      # scanning status checks Just Work.
-      #
-      # Trade-offs we've already mitigated:
-      #   - PID 1 becomes the K8s `pause` container instead of tini. The
-      #     sidecar's gateway wrapper still installs a SIGTERM trap, so
-      #     pod terminate / `kubectl rollout restart` shuts down cleanly.
-      #   - Containers can `kill` each other's PIDs. All three containers
-      #     run as the same user (uid 10000), in the same Olares app,
-      #     under the same trust boundary — there is no isolation to
-      #     leak. The shim installed by the workspace container guards
-      #     the only destructive raw CLI paths (`hermes gateway
-      #     run/restart/install/stop`) so an over-eager user can't
-      #     accidentally fight the sidecar.
-      #   - Dashboard's "Restart Gateway" button now actually kills the
-      #     sidecar gateway, after which the wrapper auto-restarts it
-      #     within HERMES_GATEWAY_RESTART_DELAY_SECONDS (default 30s).
-      #     Faster path is still `touch /opt/data/.gateway-restart-requested`.
-      shareProcessNamespace: true
-
-      # All runtime containers run as the hermes user (uid/gid 10000) baked
-      # into the upstream image. This keeps a SINGLE identity across the
-      # gateway sidecar, the dashboard sidecar, the workspace TUI container,
-      # AND any `kubectl exec` session opened from the terminal entrance —
-      # so every file written into /opt/data (config.yaml, .env, state.db,
-      # session WAL, skills/, memories/, ...) is owned by hermes:hermes
-      # and visible to all three containers.
-      #
-      # If we relied on the image entrypoint's `gosu hermes` drop alone,
-      # `kubectl exec` would still attach as root (kubectl exec uses the
-      # image USER, not the runtime PID 1 user — Dockerfile has no USER).
-      # That root-vs-hermes split was the cause of "NO SESSIONS YET" on
-      # the dashboard + "Permission denied: '/opt/data/config.yaml'" in
-      # the gateway log. RunAsUser at the pod scope closes that gap.
+      # Pod-scope hermes identity (10000) for all containers AND kubectl exec.
+      # Without it, exec attaches as the image USER (root) and writes
+      # root-owned files into /opt/data that the sidecars can't read.
       securityContext:
         runAsUser: 10000
         runAsGroup: 10000
         fsGroup: 10000
 
       initContainers:
-        # Bootstrap /opt/data with hermes ownership BEFORE any runtime
-        # container starts. We run this as root (overrides the pod-scope
-        # runAsUser:10000) because the volume may be created by the host as
-        # root on first install. Once chowned, all subsequent containers
-        # can write without elevated privileges.
+        # Chown /opt/data to hermes (10000) before runtime starts. Runs as
+        # root since the hostPath may be created root-owned on first install.
         - name: init-chmod-data
           image: "beclab/aboveos-busybox:1.37.0"
           securityContext:
@@ -121,59 +56,109 @@ spec:
             - mountPath: /opt/data
               name: app-data-home
 
+        # Materialize Linuxbrew base + stage olares-cli + python3 shim
+        # onto the brew-volume hostPath. Idempotent on .brew-base-build.
+        - name: init-install-brew
+          image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              if [ ! -d /brew-staging/.linuxbrew ]; then
+                echo "[init-brew] FATAL: /brew-staging/.linuxbrew missing"
+                exit 1
+              fi
+              mkdir -p /home/linuxbrew/.linuxbrew
+              if cmp -s /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build 2>/dev/null; then
+                echo "[init-brew] brew base up to date"
+              else
+                echo "[init-brew] materializing brew base..."
+                cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
+              fi
+
+              # Stage olares-cli into brew bin.
+              OLARES_CLI=""
+              for p in /usr/local/bin/olares-cli /brew-staging/.linuxbrew/bin/olares-cli /opt/olares-cli/olares-cli /olares-cli; do
+                [ -x "$p" ] && OLARES_CLI="$p" && break
+              done
+              [ -z "$OLARES_CLI" ] && OLARES_CLI="$(command -v olares-cli 2>/dev/null || find / -maxdepth 5 -type f -name olares-cli -perm -u+x 2>/dev/null | head -1)"
+              if [ -n "$OLARES_CLI" ]; then
+                install -m 0755 "$OLARES_CLI" /home/linuxbrew/.linuxbrew/bin/olares-cli
+              else
+                echo "[init-brew] WARN: olares-cli not found"
+              fi
+
+              # python3 shim -> hermes venv.
+              printf '#!/bin/sh\nexec /opt/hermes/.venv/bin/python3 "$@"\n' > /cli-bin/python3
+              chmod 0755 /cli-bin/python3
+
+              # restart-gateway: touch sentinel + wait (cross-container restart).
+              printf '#!/bin/sh\nset -eu\nS="${HERMES_GATEWAY_RESTART_SENTINEL:-/opt/data/.gateway-restart-requested}"\ntouch "$S"\necho "[restart-gateway] sentinel touched at $S, waiting ~6s for gateway to come back..."\nsleep 6\necho "[restart-gateway] done"\n' > /cli-bin/restart-gateway
+              chmod 0755 /cli-bin/restart-gateway
+
+              chown -R 10000:10000 /home/linuxbrew || true
+              echo "[init-brew] done"
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /cli-bin
+              name: cli-bin
+
+        # Flatten the olares-* skills baked into the brew-base image
+        # (/skills-staging) into $HERMES_HOME/skills. Per-dir refresh so hermes's
+        # own bundled categories are never touched; skipped if the image has no
+        # /skills-staging. Needs the skills-enabled brew-base tag.
+        - name: init-skills
+          image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              if [ ! -d /skills-staging ]; then
+                echo "[init-skills] /skills-staging not in image; skipping (rebuild brew-base with skills to enable)"
+                exit 0
+              fi
+              mkdir -p /opt/data/skills
+              chown 10000:10000 /opt/data/skills || true
+              for d in /skills-staging/*/; do
+                name="$(basename "$d")"
+                rm -rf "/opt/data/skills/$name"
+                cp -a "$d" "/opt/data/skills/$name"
+                chown -R 10000:10000 "/opt/data/skills/$name"
+              done
+              echo "[init-skills] Olares skills flattened into /opt/data/skills:"
+              ls -1 /skills-staging
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
       containers:
-        # Gateway sidecar: long-lived messaging gateway + (optional) OpenAI-compat API.
+        # Gateway sidecar: messaging gateway + (optional) OpenAI-compat API.
         #
-        # Why the wrapper loop:
-        #   - `hermes gateway run` exits cleanly when /opt/data/.env has no
-        #     messaging-platform tokens configured (Telegram/Discord/Slack/...).
-        #     Without the loop, K8s sees PID 1 exit, restarts the container,
-        #     it exits again, and the pod ends up in CrashLoopBackOff —
-        #     locking out dashboard + workspace too.
-        #   - With the loop, the gateway auto-restarts every 30s. As soon as
-        #     the user runs `hermes setup` (in the Hermes CLI entrance) or
-        #     edits /opt/data/.env from the dashboard, the next iteration
-        #     picks up the new config — no manual restart needed.
-        #   - The image's tini + docker/entrypoint.sh still run as the
-        #     container ENTRYPOINT, so /opt/data bootstrap (mkdir, .env /
-        #     config.yaml / SOUL.md seeding, skills_sync.py) happens once
-        #     per container start. The entrypoint's root-only branch
-        #     (usermod / chown / `gosu hermes`) is now skipped because the
-        #     pod-level securityContext.runAsUser:10000 already starts this
-        #     container as the hermes user.
-        #   - This mirrors the upstream systemd unit (Restart=always
-        #     RestartSec=5 RestartMaxDelaySec=300) installed by
-        #     `hermes gateway install`. See hermes_cli/gateway.py:2070.
+        # Wrapper loop: `hermes gateway run` exits clean when no platform
+        # tokens are configured; without the loop PID 1 exits and the pod
+        # crash-loops. The loop auto-restarts every 30s so `hermes setup` /
+        # .env edits get picked up. The image entrypoint (tini + bootstrap)
+        # still runs first each start.
         #
-        # Sentinel-file restart mechanism (1.3.0+):
-        #   `hermes gateway restart` from the workspace TUI does NOT work in
-        #   K8s because PID namespaces are container-local — that command
-        #   silently falls back to running a duplicate gateway in the
-        #   workspace shell, which then races the sidecar for messaging-
-        #   platform tokens (e.g. duplicate Discord replies). To give users
-        #   a usable cross-container restart trigger, this wrapper polls for
-        #   /opt/data/.gateway-restart-requested. Operator workflow:
+        # Sentinel restart: `hermes gateway restart` from the TUI can't reach
+        # this container (PID namespaces are container-local), so the wrapper
+        # polls /opt/data/.gateway-restart-requested. `touch` it from any
+        # container on /opt/data to restart the gateway (short delay), also
+        # honored during the post-crash backoff.
         #
-        #       # from any container that mounts /opt/data (workspace TUI,
-        #       # dashboard's embedded chat tab, etc.):
-        #       touch /opt/data/.gateway-restart-requested
-        #
-        #   Within ${HERMES_GATEWAY_SENTINEL_POLL_SECONDS:-2} seconds the
-        #   watcher in this wrapper:
-        #     1. deletes the sentinel (so the next iteration starts clean),
-        #     2. SIGTERMs the running `hermes gateway run` child,
-        #     3. flags this as an operator-requested restart (so the wrapper
-        #        uses the short SENTINEL restart delay instead of the long
-        #        crash-loop backoff).
-        #
-        #   Same sentinel is also honored DURING the post-crash sleep, so
-        #   operators can shorten a long backoff window by touching the file.
-        #
-        # `hermes gateway run` does NOT bind any TCP port by default — the
-        # OpenAI-compatible API server is opt-in (set API_SERVER_HOST and
-        # API_SERVER_KEY in /opt/data/.env). So we probe the data dir on
-        # disk instead of a TCP port to avoid wedging the pod when the API
-        # server is intentionally disabled.
+        # No TCP port is bound by default (API server is opt-in), so the
+        # probes test the data dir on disk instead of a port.
         - name: gateway
           image: "beclab/nousresearch-hermes-agent:v2026.5.16"
           imagePullPolicy: IfNotPresent
@@ -188,11 +173,11 @@ spec:
               SENTINEL_DELAY="${HERMES_GATEWAY_SENTINEL_RESTART_DELAY_SECONDS:-3}"
               FLAG="/tmp/.gateway-wrapper-sentinel-fired"
 
-              # Trap SIGTERM so a `kubectl rollout restart` / pod delete tears
-              # down the inner gateway + watcher promptly instead of waiting
-              # on the outer sleep.
+              # Trap SIGTERM so pod delete tears down inner gateway + watcher
+              # promptly instead of waiting on the outer sleep.
               cleanup() {
                 echo "[gateway-wrapper] SIGTERM received, exiting"
+                [ -n "${stub:-}"    ] && kill -TERM "$stub"    2>/dev/null || true
                 [ -n "${watcher:-}" ] && kill -TERM "$watcher" 2>/dev/null || true
                 [ -n "${child:-}"   ] && kill -TERM "$child"   2>/dev/null || true
                 exit 0
@@ -202,13 +187,63 @@ spec:
               # Clear any stale sentinel/flag left over from a crashed wrapper
               rm -f "$SENTINEL" "$FLAG" 2>/dev/null || true
 
+              # When the API server is disabled, bind :8642 with a stub that
+              # serves /health + /health/detailed from gateway_state.json (so
+              # the dashboard's GATEWAY_HEALTH_URL probe can detect liveness
+              # cross-container) and returns 503 for everything else.
+              if [ "${API_SERVER_ENABLED:-false}" != "true" ]; then
+                echo "[gateway-wrapper] API server disabled, starting health-relay stub on :8642"
+                python3 -c '
+              import http.server, json, os
+              STATE_PATH = os.environ.get("HERMES_HOME", "/opt/data") + "/gateway_state.json"
+              DISABLED = {"error": "Core API services are currently disabled. Please enable them by setting API_SERVER_ENABLED=true."}
+              DISABLED_BODY = json.dumps(DISABLED).encode()
+              def read_state():
+                try:
+                  with open(STATE_PATH, "r") as f:
+                    return json.load(f)
+                except Exception:
+                  return {}
+              class H(http.server.BaseHTTPRequestHandler):
+                def _send(self, code, body):
+                  self.send_response(code)
+                  self.send_header("Content-Type", "application/json")
+                  self.send_header("Content-Length", str(len(body)))
+                  self.end_headers()
+                  self.wfile.write(body)
+                def do_GET(self):
+                  path = self.path.split("?",1)[0].rstrip("/") or "/"
+                  if path == "/health":
+                    self._send(200, json.dumps({"status":"ok","platform":"hermes-agent"}).encode())
+                  elif path == "/health/detailed":
+                    rt = read_state()
+                    payload = {
+                      "status": "ok",
+                      "platform": "hermes-agent",
+                      "gateway_state": rt.get("gateway_state"),
+                      "platforms": rt.get("platforms", {}),
+                      "active_agents": rt.get("active_agents", 0),
+                      "exit_reason": rt.get("exit_reason"),
+                      "updated_at": rt.get("updated_at"),
+                      "pid": rt.get("pid"),
+                    }
+                    self._send(200, json.dumps(payload).encode())
+                  else:
+                    self._send(503, DISABLED_BODY)
+                do_POST = do_PUT = do_DELETE = do_PATCH = lambda s: s._send(503, DISABLED_BODY)
+                def log_message(self, *a): pass
+              http.server.HTTPServer(("0.0.0.0", 8642), H).serve_forever()
+              ' &
+                stub=$!
+              fi
+
               while :; do
                 echo "[gateway-wrapper] starting hermes gateway run (HERMES_HOME=${HERMES_HOME})"
                 hermes gateway run &
                 child=$!
 
-                # Background watcher: polls the sentinel; on touch, kills the
-                # child and records WHY (so the main loop picks the short delay).
+                # Watcher: polls the sentinel; on touch kills the child and
+                # records why (so the main loop picks the short delay).
                 (
                   while kill -0 "$child" 2>/dev/null; do
                     if [ -f "$SENTINEL" ]; then
@@ -240,9 +275,7 @@ spec:
                 fi
                 echo "[gateway-wrapper] gateway ${reason}; sleeping ${delay}s before restart"
 
-                # Sleep, but allow the sentinel to short-circuit the backoff
-                # (so operators don't have to wait through a 30s crash backoff
-                # after fixing config).
+                # Sleep, but let the sentinel short-circuit the backoff.
                 end_ts=$(( $(date +%s) + delay ))
                 while [ "$(date +%s)" -lt "$end_ts" ]; do
                   if [ -f "$SENTINEL" ]; then
@@ -258,17 +291,44 @@ spec:
               containerPort: 8642
               protocol: TCP
           env:
+            # HOME on /opt/data so HOME-respecting CLIs persist + share config.
+            - name: HOME
+              value: /opt/data
             - name: HERMES_HOME
               value: /opt/data
             - name: HERMES_GATEWAY_RESTART_DELAY_SECONDS
               value: "30"
-            # Sentinel-file restart (see comment above on the wrapper).
             - name: HERMES_GATEWAY_RESTART_SENTINEL
               value: "/opt/data/.gateway-restart-requested"
             - name: HERMES_GATEWAY_SENTINEL_POLL_SECONDS
               value: "2"
             - name: HERMES_GATEWAY_SENTINEL_RESTART_DELAY_SECONDS
               value: "3"
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: PATH
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            # olares-cli config/data — absolute (hermes rewrites HOME for
+            # tool subprocesses, so HOME alone isn't enough).
+            - name: OLARES_CLI_HOME
+              value: /opt/data/.olares-cli
+            - name: OLARES_CLI_DATA_DIR
+              value: /opt/data/.olares-cli/data
+            # API server: binds 0.0.0.0:8642 only when enabled AND key set
+            # (fail-closed — no key means no unauthenticated bind).
+            {{- $oe := .Values.olaresEnv | default dict }}
+            {{- $apiEnabled := eq (toString (index $oe "API_SERVER_ENABLED")) "true" }}
+            {{- $apiKey := index $oe "HERMES_API_SERVER_KEY" | default "" }}
+            {{- if and $apiEnabled $apiKey }}
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: "0.0.0.0"
+            - name: API_SERVER_KEY
+              value: {{ $apiKey | quote }}
+            {{- end }}
           startupProbe:
             exec:
               command: ["/bin/sh", "-c", "test -d /opt/data"]
@@ -291,6 +351,16 @@ spec:
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /usr/local/bin/python3
+              name: cli-bin
+              subPath: python3
+              readOnly: true
+            - mountPath: /usr/local/bin/restart-gateway
+              name: cli-bin
+              subPath: restart-gateway
+              readOnly: true
             - mountPath: /dev/shm
               name: dshm
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -305,19 +375,9 @@ spec:
             allowPrivilegeEscalation: false
 
         # Dashboard sidecar: web UI on 9119, reads gateway health on localhost.
-        #
-        # Flag rationale:
-        #   --host 0.0.0.0  K8s service must reach us on the pod IP, not loopback.
-        #   --insecure      Required to allow binding to non-localhost (the flag
-        #                   is a safety gate against accidentally exposing API
-        #                   keys on a host network — that risk doesn't apply
-        #                   here because the only way in is via the Olares
-        #                   ingress, which auth-gates with Olares SSO).
-        #   --no-open       Don't try to xdg-open a browser inside the container.
-        #   --tui           Expose the in-browser Chat tab (embedded `hermes
-        #                   --tui` over PTY/WebSocket). This lets Olares users
-        #                   chat with the agent directly from the dashboard
-        #                   without ever opening the CLI terminal entrance.
+        # Flags: --host 0.0.0.0 (reachable via pod IP), --insecure (allow
+        # non-localhost bind; safe behind Olares SSO ingress), --no-open
+        # (no browser in container), --tui (in-browser Chat tab).
         - name: dashboard
           image: "beclab/nousresearch-hermes-agent:v2026.5.16"
           imagePullPolicy: IfNotPresent
@@ -333,8 +393,21 @@ spec:
               containerPort: 9119
               protocol: TCP
           env:
+            - name: HOME
+              value: /opt/data
             - name: GATEWAY_HEALTH_URL
               value: "http://localhost:8642"
+            # Match gateway PATH so dashboard-side `hermes ...` sees brew.
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: PATH
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: OLARES_CLI_HOME
+              value: /opt/data/.olares-cli
+            - name: OLARES_CLI_DATA_DIR
+              value: /opt/data/.olares-cli/data
           startupProbe:
             tcpSocket:
               port: 9119
@@ -357,25 +430,23 @@ spec:
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /usr/local/bin/python3
+              name: cli-bin
+              subPath: python3
+              readOnly: true
+            - mountPath: /usr/local/bin/restart-gateway
+              name: cli-bin
+              subPath: restart-gateway
+              readOnly: true
           securityContext:
             allowPrivilegeEscalation: false
 
-        # Workspace container for TUI: kept alive so the terminal entrance can
-        # `kubectl exec` into it and run `hermes setup` / `hermes` / etc.
-        #
-        # We deliberately set `args` (not `command`) — that lets the image's
-        # tini + docker/entrypoint.sh run first, do its /opt/data bootstrap
-        # (mkdir, .env / config.yaml / SOUL.md seeding, skills_sync.py), and
-        # then `exec "$@"` into `sleep infinity` because `sleep` is on PATH.
-        # The entrypoint's root-only branch (usermod / chown / `gosu hermes`)
-        # is skipped because the pod-scope securityContext.runAsUser:10000
-        # already starts this container as hermes.
-        #
-        # - HERMES_HOME points at the shared /opt/data volume (same as the
-        #   gateway/dashboard containers) so the TUI sees the same config,
-        #   sessions, skills and memories.
-        # - PATH prepends /opt/hermes/.venv/bin so `hermes` is on PATH without
-        #   needing to `source activate` the venv first.
+        # Workspace container for the TUI: `sleep infinity` so the terminal
+        # entrance can `kubectl exec` in and run `hermes setup` / `hermes`.
+        # `args` (not `command`) lets the image entrypoint bootstrap /opt/data
+        # first, then exec into sleep. HERMES_HOME + PATH match the sidecars.
         - name: hermesagent
           image: "beclab/nousresearch-hermes-agent:v2026.5.16"
           imagePullPolicy: IfNotPresent
@@ -383,10 +454,20 @@ spec:
           env:
             - name: TERM
               value: xterm-256color
+            - name: HOME
+              value: /opt/data
             - name: HERMES_HOME
               value: /opt/data
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
             - name: PATH
-              value: "/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: OLARES_CLI_HOME
+              value: /opt/data/.olares-cli
+            - name: OLARES_CLI_DATA_DIR
+              value: /opt/data/.olares-cli/data
           resources:
             limits:
               cpu: "1"
@@ -397,6 +478,16 @@ spec:
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /usr/local/bin/python3
+              name: cli-bin
+              subPath: python3
+              readOnly: true
+            - mountPath: /usr/local/bin/restart-gateway
+              name: cli-bin
+              subPath: restart-gateway
+              readOnly: true
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
@@ -414,6 +505,12 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/home"
             type: DirectoryOrCreate
+        - name: brew-volume
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/brew"
+            type: DirectoryOrCreate
+        - name: cli-bin
+          emptyDir: {}
         - name: dshm
           emptyDir:
             medium: Memory
@@ -431,13 +528,6 @@ spec:
             type: DirectoryOrCreate
         {{- end }}
 ---
-# Only the dashboard is exposed as a Service. The gateway sidecar does NOT
-# bind a TCP port by default — its OpenAI-compatible API server is opt-in
-# (set API_SERVER_HOST + API_SERVER_KEY in /opt/data/.env). We don't ship a
-# gateway Service because there is no matching `entrances:` entry in
-# OlaresManifest.yaml; users who enable the API server can talk to it from
-# inside the pod via http://localhost:8642 (the workspace and dashboard
-# sidecars already do this).
 apiVersion: v1
 kind: Service
 metadata:
@@ -450,5 +540,23 @@ spec:
     - name: "9119"
       port: 9119
       targetPort: 9119
+  selector:
+    io.kompose.service: hermesagent
+---
+# Gateway OpenAI-compatible API service. The gateway only binds when the API
+# key is set, but the Service is always created so the `api` entrance has a
+# stable DNS target.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: hermesagent
+  name: hermesgateway
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "8642"
+      port: 8642
+      targetPort: 8642
   selector:
     io.kompose.service: hermesagent
