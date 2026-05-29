@@ -4,6 +4,8 @@
 {{- $speachesDomainENV := split "," .Values.domain.speaches -}}
 {{- $speachesDomain := index $speachesDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $speachesDomain "$1" -}}
+{{- $defaultChatUrl := printf "http://d54536a50.shared.%s/v1" $topDomain -}}
+{{- $userChatUrl := index $env "CHAT_COMPLETION_BASE_URL" | default "" | trim -}}
 
 ---
 apiVersion: apps/v1
@@ -115,7 +117,7 @@ spec:
                   || echo "WARN: failed to install misaki[zh] - Chinese voices will fall back to espeak cmn"
               fi
               python3 << 'PATCH_EOF'
-              import pathlib, json, os
+              import pathlib, json, os, re
               patched = []
 
               # whisper-1 alias: configurable via SPEACHES_WHISPER_MODEL env var
@@ -154,6 +156,60 @@ spec:
               if s != o:
                   f.write_text(s)
                   patched.append('audio_chat.py')
+
+              # audio_chat.py: graceful models.list() for the LLM model dropdown.
+              # Regex body-replace (robust to upstream formatting: one-line vs multi-line
+              # AsyncOpenAI args, presence/absence of max_retries, the NOTE comment, etc.).
+              # On any failure (unreachable / bad URL / malformed /v1/models response) it
+              # returns a gray hint dropdown instead of raising a red error.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
+              s = f.read_text()
+              o = s
+              new_llm_fn = (
+                  '    async def update_chat_model_dropdown() -> gr.Dropdown:\n'
+                  '        import httpx\n'
+                  '        _hint = gr.Dropdown(\n'
+                  '            choices=[],\n'
+                  '            label="Chat Model",\n'
+                  '            value=None,\n'
+                  '            info="Could not load chat models. Check CHAT_COMPLETION_BASE_URL in the app environment variables (an OpenAI-compatible endpoint ending in /v1), then switch to another tab and back.",\n'
+                  '        )\n'
+                  '        try:\n'
+                  '            openai_client = AsyncOpenAI(\n'
+                  '                base_url=config.chat_completion_base_url,\n'
+                  '                api_key=config.chat_completion_api_key.get_secret_value(),\n'
+                  '                max_retries=0,\n'
+                  '                timeout=httpx.Timeout(10.0),\n'
+                  '            )\n'
+                  '            models = (await openai_client.models.list()).data\n'
+                  '            model_ids: list[str] = [model.id for model in models]\n'
+                  '        except Exception:\n'
+                  '            logger.exception("Audio Chat: failed to load LLM models (url=%s)", config.chat_completion_base_url)\n'
+                  '            return _hint\n'
+                  '        if not model_ids:\n'
+                  '            return gr.Dropdown(\n'
+                  '                choices=[],\n'
+                  '                label="Chat Model",\n'
+                  '                value=None,\n'
+                  '                info="The LLM endpoint is reachable but returned no models. Make sure at least one model is available, then switch to another tab and back.",\n'
+                  '            )\n'
+                  '        return gr.Dropdown(\n'
+                  '            choices=model_ids,\n'
+                  '            label="Chat Model",\n'
+                  '            value=model_ids[0],\n'
+                  '        )'
+              )
+              _llm_pat = re.compile(
+                  r'    async def update_chat_model_dropdown\(\) -> gr\.Dropdown:.*?(?=\n+    with gr\.Tab\(label="Audio Chat"\))',
+                  re.DOTALL,
+              )
+              if _llm_pat.search(s):
+                  s = _llm_pat.sub(lambda _m: new_llm_fn, s, count=1)
+              else:
+                  print('WARN: update_chat_model_dropdown not found - LLM dropdown NOT patched', flush=True)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('audio_chat.py (LLM dropdown error handling)')
 
               # Write mic-fix JS (delays submit click while mic upload is pending)
               mic_fix_head = (
@@ -323,25 +379,29 @@ spec:
             - name: LOOPBACK_HOST_URL
               value: "http://localhost:8000"
             - name: CHAT_COMPLETION_BASE_URL
-              value: "http://d54536a50.shared.{{ $topDomain }}/v1"
+              {{- if $userChatUrl }}
+              value: {{ $userChatUrl | quote }}
+              {{- else }}
+              value: {{ $defaultChatUrl | quote }}
+              {{- end }}
           ports:
             - containerPort: 8000
               protocol: TCP
           resources:
             {{- if $speachesGpu }}
             limits:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 18Gi
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 6Gi
             {{- else }}
             limits:
-              cpu: "8"
-              memory: 8Gi
+              cpu: "4"
+              memory: 12Gi
             requests:
               cpu: 500m
-              memory: 2Gi
+              memory: 4Gi
             {{- end }}
           volumeMounts:
             - name: speaches-hf-cache
