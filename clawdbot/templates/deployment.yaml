@@ -30,7 +30,7 @@ spec:
 
       initContainers:
         - name: init-install-brew
-          image: "beclab/harveyff-openclaw-brew-base:2026.5.27-cli"
+          image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
           securityContext:
             runAsUser: 0
           command: ["/bin/bash", "-c"]
@@ -97,6 +97,40 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+        # Flatten the olares-* skills baked into the brew-base image
+        # (/skills-staging) into OpenClaw's managed skills dir
+        # (~/.openclaw/skills = /home/node/.openclaw/skills). Runs after
+        # init-chmod-data (dir exists + owned 1000). Per-dir refresh so any
+        # user/bundled skills are never touched; skipped if the image has no
+        # /skills-staging.
+        - name: init-skills
+          image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              if [ ! -d /skills-staging ]; then
+                echo "[init-skills] /skills-staging not in image; skipping"
+                exit 0
+              fi
+              mkdir -p /home/node/.openclaw/skills
+              for d in /skills-staging/*/; do
+                name="$(basename "$d")"
+                rm -rf "/home/node/.openclaw/skills/$name"
+                cp -a "$d" "/home/node/.openclaw/skills/$name"
+                chown -R 1000:1000 "/home/node/.openclaw/skills/$name"
+              done
+              echo "[init-skills] Olares skills flattened into /home/node/.openclaw/skills:"
+              ls -1 /skills-staging
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: app-data-config
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
         - name: init-docker-cli
           image: "docker.io/beclab/docker:29.3.0-dind"
           command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
@@ -129,7 +163,7 @@ spec:
             - name: DOCKER_HOST
               value: "tcp://localhost:2375"
             - name: PATH
-              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin"
             - name: CUSTOM_API_KEY
               value: "YOUR_CUSTOM_API_KEY"
             - name: OLLAMA_API_KEY
@@ -235,7 +269,7 @@ spec:
             - name: OPENCLAW_SYSTEMD_UNIT
               value: "openclaw-gateway.service"
             - name: PATH
-              value: "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin"
             - name: CUSTOM_API_KEY
               value: "YOUR_CUSTOM_API_KEY"
             - name: OLLAMA_API_KEY
