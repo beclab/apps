@@ -1,0 +1,88 @@
+{{- $penpotMcpWsDomainENV := split  ","  .Values.domain.penpotMcpWs -}}
+{{- $penpotMcpWsDomain := index $penpotMcpWsDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: penpot-mcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: penpot-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: penpot-mcp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: penpot-mcp
+    spec:
+      containers:
+        - name: penpot-mcp
+          image: "node:22-alpine"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              corepack enable
+              corepack prepare pnpm@10.18.0 --activate
+              npm i -g @penpot/mcp@2.14.1
+              PKG_DIR="$(npm root -g)/@penpot/mcp"
+
+              # pnpm >=10 blocks dependency build scripts by default and pnpm 11
+              # fails the install entirely (the package has no .npmrc/workspace
+              # settings, so we inject one). Allow all builds so the
+              # non-interactive container install can complete.
+              WS_YAML="$PKG_DIR/pnpm-workspace.yaml"
+              if [ -f "$WS_YAML" ]; then
+                if ! grep -q '^dangerouslyAllowAllBuilds' "$WS_YAML"; then
+                  printf '\ndangerouslyAllowAllBuilds: true\n' >> "$WS_YAML"
+                fi
+              else
+                printf 'dangerouslyAllowAllBuilds: true\n' > "$WS_YAML"
+              fi
+              echo "----- pnpm-workspace.yaml -----"
+              cat "$WS_YAML"
+              echo "-------------------------------"
+
+              VITE_CFG="$PKG_DIR/packages/plugin/vite.config.ts"
+              if [ -f "$VITE_CFG" ]; then
+                sed -i 's/allowedHosts: \[\]/allowedHosts: true/g' "$VITE_CFG"
+                echo "----- patched vite.config.ts -----"
+                grep allowedHosts "$VITE_CFG" || true
+                echo "----------------------------------"
+              else
+                echo "WARN: vite.config.ts not found at $VITE_CFG"
+              fi
+              exec penpot-mcp
+          env:
+            - name: PENPOT_MCP_SERVER_HOST
+              value: "0.0.0.0"
+            - name: PENPOT_MCP_PLUGIN_SERVER_HOST
+              value: "0.0.0.0"
+            - name: WS_URI
+              value: "wss://{{ $penpotMcpWsDomain }}"
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=1536"
+          ports:
+            - name: plugin
+              containerPort: 4400
+              protocol: TCP
+            - name: mcp-http
+              containerPort: 4401
+              protocol: TCP
+            - name: mcp-ws
+              containerPort: 4402
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
