@@ -1,6 +1,8 @@
 {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 {{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
 {{- $ollamaclientDomain := index $ollamaclientDomainENV "_0" -}}
+{{- $hfService := .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE | default "https://huggingface.co" -}}
+{{- $hfEndpoint := $hfService | trimSuffix "/" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -26,7 +28,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: "docker.io/beclab/harveyff-olares-ollama:v0.1.19-fix3"
+          image: "docker.io/beclab/harveyff-olares-ollama:v0.1.21"
           env:
             - name: PGID
               value: "1000"
@@ -45,8 +47,6 @@ spec:
               value: "http://ollama.ollamagemma431a4budq4kxlv2s-shared:11434"
             - name: APP_URL
               value: "https://{{ $ollamaclientDomain }}"
-            - name: OLLAMA_NOPRUNE
-              value: "1"
             - name: HF_REPO
               valueFrom:
                 configMapKeyRef:
@@ -57,11 +57,13 @@ spec:
                 configMapKeyRef:
                   name: ollama-env
                   key: HF_FILE
-            - name: HF_ENDPOINT
+            - name: HF_MMPROJ_FILE
               valueFrom:
                 configMapKeyRef:
                   name: ollama-env
-                  key: HF_ENDPOINT
+                  key: HF_MMPROJ_FILE
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
             - name: HF_TOKEN
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
             - name: GGUF_DIR
@@ -84,16 +86,21 @@ spec:
                 configMapKeyRef:
                   name: ollama-env
                   key: OLLAMA_CONTEXT_LENGTH
-            - name: OLLAMA_REPEAT_PENALTY
+            - name: OLLAMA_THINKING
               valueFrom:
                 configMapKeyRef:
                   name: ollama-env
-                  key: OLLAMA_REPEAT_PENALTY
-            - name: OLLAMA_REPEAT_LAST_N
+                  key: OLLAMA_THINKING
+            - name: GGUF_REUSE_IF_UNCHANGED
               valueFrom:
                 configMapKeyRef:
                   name: ollama-env
-                  key: OLLAMA_REPEAT_LAST_N
+                  key: GGUF_REUSE_IF_UNCHANGED
+            - name: GGUF_CLEANUP_SOURCE
+              valueFrom:
+                configMapKeyRef:
+                  name: ollama-env
+                  key: GGUF_CLEANUP_SOURCE
           resources:
             requests:
               cpu: 300m
