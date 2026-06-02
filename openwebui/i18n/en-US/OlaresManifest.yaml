@@ -38,67 +38,48 @@ spec:
 
     - Continuous Updates: We are committed to improving Open WebUI with regular updates, fixes, and new features.
   upgradeDescription: |
-    Upgrade Open WebUI to **v0.9.5** (chart **1.0.28**).
+    Upgrade Open WebUI to **v0.9.6** (chart **1.0.30**).
 
     Packaged (Olares chart)
-    - **CPU-only image:** this chart now ships the standard CPU image only. GPU annotations and the `-cuda` image variant have been removed; the deployment runs the non-GPU build regardless of node configuration.
-    - **DB backup before upgrade (default on):** **`ENABLE_WEBUI_DB_BACKUP`** defaults to **`true`**. On each new chart version, if `webui.db` exists and `data/backups/webui_chart_<chart-version>.db` is missing, the init container copies it once before the app starts. Same chart version restarts never duplicate that file. Set it to **`false`** before a rollout if you want **no** backup that time.
-    - **Schema migration:** v0.9.3 introduces database schema changes; the bundled backup is strongly recommended before rolling out. Multi-worker or load-balanced deployments must be updated together — rolling updates are not supported.
-    - **After upgrade:** Keep **`true`** for backups on future chart bumps, or **`false`** to stop until you turn it on again.
-    - **Helm only:** `backupWebuiDb.enabled` (chart default `false`); set `true` when you want the backup init.
+    - **Official image & persistent session key (default on):** this chart now uses the official `openwebui/open-webui` image, and **`ENABLE_WEBUI_SECRET_KEY_PERSIST`** defaults to **`true`**, persisting the WebUI secret key to `data/.webui_secret_key` on the appData volume (via `WEBUI_SECRET_KEY_FILE`) so logins survive restarts and future upgrades. Set it to **`false`** under Settings → Application → environment variables if you instead want every restart to regenerate the key and sign all users out. Because the key is initialized on this upgrade, you will be signed out once and need to log in again.
+    - **DB backup before upgrade (default on):** **`ENABLE_WEBUI_DB_BACKUP`** defaults to **`true`**. On each new chart version, before the app starts, if `webui.db` exists and `data/backups/webui_chart_<chart-version>.db` is not there yet, the init container copies it once (same appData volume). Same chart version restarts never duplicate that file. To **skip** backup for a rollout, set **`ENABLE_WEBUI_DB_BACKUP`** to **`false`** under Settings → Application → environment variables **before** upgrading.
+    - **Schema migration:** v0.9.6 includes database schema changes; the bundled backup is strongly recommended before rolling out. Multi-worker or load-balanced deployments must be updated together — rolling updates are not supported. Migrations are now resilient and skip tables/indexes/columns that already exist.
+    - **After upgrade:** Leave **`true`** to keep automatic backups on future chart bumps, or set **`false`** if you do not want further backups until you enable it again.
+    - **Helm without Olares UI:** use `backupWebuiDb.enabled` (defaults `false` in chart values); set `true` only when you want the backup init.
     - **Existing data:** Your database file under appData is kept; Open WebUI upgrades its schema automatically on startup.
 
-    Open WebUI v0.9.3 → v0.9.5 — main changes
+    Open WebUI v0.9.5 → v0.9.6 — main changes
 
-    **Security hardening (v0.9.5)**
-    - **Redirect-based SSRF protection:** outbound HTTP requests (web fetch, image loading, OAuth discovery, tool servers, code interpreter) now block 3xx redirects by default via **`AIOHTTP_CLIENT_ALLOW_REDIRECTS`**, closing redirect paths into RFC 1918, loopback, and cloud-metadata endpoints.
-    - **Iframe CSP:** admins can set **`IFRAME_CSP`** to constrain srcdoc iframes used by Artifacts, tool embeds, file previews, and citation modals.
-    - **URL parser hardening:** validation rejects backslash/tab/CR/LF characters that caused urllib vs aiohttp host disagreement (parser-confusion SSRF bypass).
-    - **Profile image MIME allowlist:** data-URI profile images are restricted to PNG/JPEG/GIF/WEBP (configurable via `PROFILE_IMAGE_ALLOWED_MIME_TYPES`) with `X-Content-Type-Options: nosniff`, blocking stored-XSS via SVG.
-    - **Permission tightening:** public sharing for skills and calendars is gated by dedicated permissions; tool source-code updates require `workspace.tools`/`workspace.tools_import`; channel message edits/deletes and pin actions enforce ownership and write access; feedback `user_id` spoofing is blocked.
-    - **Read-only model params:** the per-model endpoint strips `params` (including system prompts) for callers without write access.
-    - **Image generation URL validation:** generated image URLs go through `validate_url()` before fetching.
+    **Security & access control (v0.9.6)**
+    - **Security advisory:** this release bundles multiple security and access-control fixes; updating production deployments promptly is recommended.
+    - **Cross-user data protection:** retrieval collections, knowledge-base search, chat file attachments, model knowledge files, and `image_url` file references now enforce per-file/per-knowledge access checks, blocking exfiltration of other users' files.
+    - **Tool server enforcement:** the inline tool-server permission is now enforced on chat-completion requests, and API-key endpoint allow-lists match the routed path directly.
+    - **SSRF & path hardening:** DNS-rebinding protection for outbound fetches, Playwright web-loader URL gating, OAuth profile-picture redirect control, terminal-proxy and cache-file path-traversal fixes, and collection-name validation.
+    - **Script-injection fixes:** Mermaid diagrams and model profile images are sanitized/validated before display; cross-origin iframe embeds can only drive chat input when explicitly opted in.
+    - **Reduced public exposure:** `/api/config` no longer leaks several feature flags to anonymous callers; system-prompt skip and code-interpreter permission bypasses are closed.
 
-    **New & improved features (v0.9.3 → v0.9.5)**
-    - **Granular markdown rendering (0.9.5):** user and assistant Markdown rendering can be disabled independently from Interface settings.
-    - **Channel streaming and tools (0.9.5):** mentioning a model in a Channel now streams responses and supports the full chat pipeline (function calling, web search, image gen, user/MCP tools, filters, RAG).
-    - **Terminal proxy headers (0.9.5):** admins can inject custom response headers via **`TERMINAL_PROXY_HEADERS`** (JSON).
-    - **Voice Mode mute (0.9.3):** dedicated mute toggle with **M** shortcut and auto-unmute after assistant playback.
-    - **Faster prompt and chat history loading (0.9.3):** accessible prompts/tags load in a single query; chat history maps load from normalized records.
-    - **Delete from conversation menu / Scroll to Top (0.9.3):** new chat-menu actions for faster cleanup and navigation.
-    - **Unified model unload (0.9.3):** admins can unload running models from the model selector; Ollama and llama.cpp show loaded-state indicators.
-    - **Playground controls panel (0.9.3):** per-run controls (temperature, etc.) without changing model defaults.
-    - **Calendar creation flow (0.9.3):** dedicated modal and sidebar quick-add.
-    - **`USER_GROUPS` prompt variable (0.9.3):** system/template prompts can adapt to the caller's group memberships.
-    - **Brave LLM Context web search (0.9.3):** new provider with configurable context token budget.
-    - **Dynamic header template variables (0.9.3):** chat/message/user variables for connection and tool-server headers.
-    - **MCP OAuth server URL (0.9.3):** separate OAuth server URL for tool servers with split auth endpoints.
-    - **Assistant response editing & continuation (0.9.3):** edit reasoning blocks, tool calls, and text, then continue generation with full context.
-    - **Replaceable tool embeds (0.9.3):** Pipes/Tools can overwrite previous rich-UI embeds via a `replace` flag.
+    **New & improved features**
+    - **Smart directory sync for knowledge bases:** sync a local directory into a KB in one action; only added/modified files upload, removed files are cleaned up, with structure mirrored and per-file progress. New companion tool `oikb` syncs from local dirs, GitHub, S3, Confluence, and 40+ sources.
+    - **Knowledge base folders & file renaming:** organize KB files into nested folders with breadcrumb navigation, and rename files in place.
+    - **Filesystem tool for knowledge bases:** new built-in tool (enabled via **`ENABLE_KB_EXEC`**) lets models browse KBs with `ls`, `cat`, `grep`, `find`, `head`, `tail`, `sed`, and pipes.
+    - **Emoji picker** in the rich-text toolbar, **per-chat skills toggle** from the Integrations menu, and **access preview** so admins can see which models/KBs/tools a user or group can reach.
+    - **New backends:** Valkey vector database (**`VALKEY_URL`**), Linkup web search provider, Azure AI Foundry v1 with Entra ID, and wildcard (`*`) OAuth role mapping with optional **`OAUTH_AUTO_REDIRECT`** to SSO.
+    - **MinerU file-type config (`MINERU_FILE_EXTENSIONS`)**, legacy `.doc` extraction, configurable MCP connect timeout (**`MCP_INITIALIZE_TIMEOUT`**), and a profile-image size cap (**`PROFILE_IMAGE_MAX_DATA_URI_SIZE`**).
 
-    **Performance & UI**
-    - **Health probes (0.9.3):** `/health` and readiness avoid blocking DB calls, reducing false unready transitions under DB pressure.
-    - **Memory queries (0.9.3):** per-user memory lookups and deletions are now indexed.
-    - **Function dependency installs (0.9.3):** skipped when already preinstalled and unchanged, cutting first-load delays.
-    - **Rich text composer (0.9.3):** toolbar refresh deferred to next animation frame; less typing jank.
-    - **Chat scroll on load (0.9.4):** opening a conversation now reliably scrolls to the bottom (fixes a 0.9.2 `content-visibility` regression).
+    **Performance**
+    - **Faster initial page loads, tool-enabled completions, and web search:** the config endpoint drops an unnecessary user-count query, referenced tools are batch-fetched, and SearXNG/Google PSE/Brave/Serper/Serpstack searches use non-blocking calls.
+    - **Lighter Ollama connections** via a shared connection pool, fewer redundant Redis model-list writes, and cheaper websocket disconnect cleanup on large deployments.
 
     **Reliability & fixes (selected)**
-    - **Notes (0.9.5):** create/open no longer fails with a TypeError on `is_pinned`.
-    - **Legacy chat history self-healing (0.9.5):** broken parent-link graphs are detected and backfilled from embedded JSON.
-    - **Filter selector reactivity (0.9.5):** model filter checkboxes derive state reactively from the current filter list.
-    - **Background code execution (0.9.3):** no longer hangs when switching tabs/conversations; fails fast with a clear timeout.
-    - **Direct-connection task generation (0.9.3):** title/tags/follow-up/emoji/query endpoints work with direct-connection models.
-    - **MCP cleanup (0.9.3):** successful native MCP tool calls no longer get replaced by a 500 during cleanup.
-    - **Streaming markdown (0.9.3):** forced final parse on completion prevents stale/partial output.
-    - **Imported chats (0.9.3):** ChatGPT imports carry proper model/timestamp metadata and surface in Admin Analytics.
-    - **Windows + PostgreSQL (0.9.3):** psycopg async uses a compatible event loop instead of Proactor.
-    - **PDF previews (0.9.3):** text layer restored for selection and find-in-page.
-    - **STT (0.9.3):** transcription is non-blocking; chunked STT limits worker concurrency without an external engine.
-    - **Translations:** Chinese, Catalan, Filipino, Korean (0.9.3) and Portuguese (Brazil) (0.9.5) updated.
+    - **Web search reliability:** default loader fetches content again; the new **`USER_AGENT`** variable (set by this chart) avoids bot-detection blocks; Firecrawl and Kagi search fixed.
+    - **Chat recovery:** corrupted message graphs from failed regenerations now open and self-repair; imported chats with missing folders appear correctly.
+    - **ComfyUI image generation/editing** works again, including private/internal endpoints; image generation tolerates non-standard response headers.
+    - **MCP tool servers** stay connected (OAuth sessions no longer wrongly refreshed) and discover advertised OAuth scopes.
+    - **Knowledge search on PostgreSQL** handles very large documents; non-UTF-8 text/CSV uploads and null bytes in nested data are handled gracefully.
+    - **Startup on non-Unicode consoles** (e.g. Windows) no longer crashes; database health checks recover after transient errors; first-admin signup after a reset is unblocked.
 
     **Changed**
-    - **Signout uses POST (0.9.3):** custom clients/integrations must update logout calls.
-    - **Removed unauthenticated retrieval status endpoint (0.9.5):** `GET /api/v1/retrieval/` removed as dead code.
+    - **Tool-call iteration cap renamed:** **`CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`** replaces `CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES` (kept as fallback); default raised 30 → 256, with `-1` for unlimited.
+    - **`WEBUI_SECRET_KEY` hard requirement:** unsupported start methods (e.g. invoking uvicorn directly) refuse to start without it. Supported start methods used by this image set it automatically, so this chart is unaffected.
 
-    Full release notes: https://github.com/open-webui/open-webui/releases/tag/v0.9.5
+    Full release notes: https://github.com/open-webui/open-webui/releases/tag/v0.9.6
