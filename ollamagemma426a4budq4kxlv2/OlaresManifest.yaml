@@ -5,10 +5,10 @@ apiVersion: 'v2'
 metadata:
   name: ollamagemma426a4budq4kxlv2
   icon: https://app.cdn.olares.com/appstore/llm/ollama/llm/gemma3-27B.png
-  description: Gemma 4 26B-A4B, Unsloth UD-Q4_K_XL GGUF, Ollama.
+  description: "Gemma4 26B A4B MoE (Unsloth Dynamic UD-Q4_K_XL) multimodal local inference"
   appid: ollamagemma426a4budq4kxlv2
-  title: Gemma4 26B A4B UD-Q4 (Ollama)
-  version: '1.0.6'
+  title: Gemma4 26B A4B UD-XL (Ollama)
+  version: '1.0.9'
   categories:
     - AI
 sharedEntrances:
@@ -32,19 +32,22 @@ spec:
   fullDescription: |
     **IMPORTANT NOTE**
     This is a shared app. Once installed by the Olares Admin, all users in the cluster can use it through reference app.
+    User traffic goes through the proxy to Ollama.
 
     **MODEL**
-    Gemma 4 26B-A4B is a mixture-of-experts instruction-tuned model from Google DeepMind. This chart downloads **gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf** from [unsloth/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF), registers it in Ollama as **gemma4:26b-a4b-it-ud-q4_K_XL**, and exposes the same Olares Ollama proxy flow as Qwen3.5 UD-Q4 charts.
+    Uses Unsloth Dynamic quant from `unsloth/gemma-4-26B-A4B-it-GGUF` (`gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf` + `mmproj-F16.gguf`).
+    Mixed-precision UD quantization preserves quality near Q5_K_M while keeping decode throughput close to standard Q4_K_M, with full vision (mmproj) retained.
+    Uses the GGUF embedded chat template (single-step files-API create) for reliable tool calling and image input. Thinking is enabled by default (OLLAMA_THINKING=""); clients can disable it per request for faster agent/tool loops.
 
-    - Format: GGUF (text-only; vision/image input is not included to maximize context length and throughput)
+    Gemma 4 26B-A4B is a mixture-of-experts instruction-tuned multimodal model from Google DeepMind: 26B total parameters with only ~4B activated per token.
+
+    - Format: GGUF + mmproj (text + image)
     - Quantization: UD-Q4_K_XL (Unsloth Dynamic 2.0)
-    - Context: 131072 (configured via Modelfile / Ollama env; reduce if VRAM-constrained)
-    - Backend: Ollama 0.20.5
+    - Context: 131072 (reduce if VRAM-constrained)
+    - Backend: Ollama 0.30.0
 
   upgradeDescription: |
-    Upgrade Ollama runtime image to 0.23.2 (beclab/ollama-ollama).
-
-    Upgrade Olares API proxy image to beclab/harveyff-olares-ollama:v0.1.19-fix3.
+    Thinking enabled by default; clients can disable it per request. Vision support via `mmproj-F16.gguf`, with tool calling. Proxy v0.1.21, Ollama 0.30.0. Context 131072, KV cache q8_0.
 
   developer: Google (base) / Unsloth (GGUF)
   website: https://ai.google.dev/gemma
@@ -58,9 +61,9 @@ spec:
 
   {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
   limitedCpu: 6200m
-  requiredCpu: 150m
+  requiredCpu: 500m
   requiredDisk: 50Mi
-  limitedDisk: 60Gi
+  limitedDisk: 80Gi
   limitedMemory: 40Gi
   requiredMemory: 4200Mi
   requiredGpu: 23Gi
@@ -83,7 +86,6 @@ spec:
   - name: ollamagemma426a4budq4kxlv2
 permission:
   appData: true
-  appCache: true
   userData:
     - Home/Ollama
 options:
@@ -109,6 +111,12 @@ options:
   {{- end }}
 {{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 envs:
+  - envName: KEEP_ALIVE
+    required: true
+    type: bool
+    editable: true
+    applyOnChange: true
+    default: "false"
   - envName: OLARES_USER_HUGGINGFACE_TOKEN
     required: false
     applyOnChange: true
@@ -119,10 +127,4 @@ envs:
     applyOnChange: true
     valueFrom:
       envName: OLARES_USER_HUGGINGFACE_SERVICE
-  - envName: KEEP_ALIVE
-    required: false
-    type: bool
-    editable: true
-    applyOnChange: true
-    default: "false"
 {{- end }}
