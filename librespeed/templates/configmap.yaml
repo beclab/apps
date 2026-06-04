@@ -1,0 +1,213 @@
+{{- /*
+  Resolve this app's user-facing Olares domain (e.g. librespeed.<user>.olares.cn)
+  so the default servers.json `Local` entry can use the protocol-relative form
+  `//<domain>/`. That form is REQUIRED here for two independent reasons:
+  1. The v6.1.0 frontend filters out servers whose ping probe failed, AND only
+     keeps "//..." entries as a defensive fallback when they didn't ping. An
+     empty `"server": ""` satisfies neither and gets silently hidden.
+  2. The browser then substitutes `https:` (or `http:` for plain) at runtime,
+     which works on whatever scheme the user opened the page with.
+*/}}
+{{- $domainDict := .Values.domain | default dict -}}
+{{- $librespeedDomain := index (split "," ($domainDict.librespeed | default "")) "_0" -}}
+{{- /* olares_id = 2nd label of e.g. 9c3cd6cd.<olares_id>.olares.cn */ -}}
+{{- $domainParts := splitList "." $librespeedDomain -}}
+{{- $localDotServer := "" -}}
+{{- $localDashServer := "" -}}
+{{- if and (ge (len $domainParts) 4) (eq (index $domainParts 2) "olares") -}}
+{{- $olaresId := index $domainParts 1 -}}
+{{- $localDotServer = printf "http://%s.%s.olares.local/" (index $domainParts 0) $olaresId -}}
+{{- $localDashServer = printf "http://%s-%s-olares.local/" (index $domainParts 0) $olaresId -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: librespeed-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: librespeed
+data:
+  # ---------------------------------------------------------------------------
+  # This ConfigMap holds only the STATIC, infrastructure-level settings for
+  # LibreSpeed. The user-tunable ones (MODE, TELEMETRY, PASSWORD, GDPR_EMAIL,
+  # IPINFO_APIKEY) live in OlaresManifest.yaml::envs and are injected as
+  # `env:` entries directly on the container by templates/librespeed.yaml.
+  # That way users can change them in the Olares UI and applyOnChange:true
+  # rolls the pod automatically.
+  # ---------------------------------------------------------------------------
+
+  # UI / branding
+  TITLE: "LibreSpeed"
+  TAGLINE: "No Flash, No Java, No Websockets, No Bullsh*t"
+  USE_NEW_DESIGN: "true"
+
+  # Web server
+  WEBPORT: "{{ .Values.port | default 8080 }}"
+
+  # Telemetry hardening (kept on regardless of TELEMETRY toggle):
+  # obfuscate result IDs so /results/<id> is not enumerable.
+  ENABLE_ID_OBFUSCATION: "true"
+  REDACT_IP_ADDRESSES: "false"
+
+  # PostgreSQL backend wired to the Olares postgres middleware
+  DB_TYPE: "postgresql"
+  DB_HOSTNAME: "{{ .Values.postgres.host }}"
+  DB_PORT: "{{ .Values.postgres.port }}"
+  DB_NAME: "{{ .Values.postgres.databases.librespeeddb }}"
+  DB_USERNAME: "{{ .Values.postgres.username }}"
+  DB_PASSWORD: "{{ .Values.postgres.password }}"
+
+  # ipinfo.io / GeoIP lookup
+  # We always keep ipinfo enabled so the offline GeoIP DB is consulted. If the
+  # user fills IPINFO_APIKEY in the Olares env editor, distance measurement is
+  # additionally enabled (the API key is injected separately as a container env).
+  DISABLE_IPINFO: "false"
+  DISTANCE: "km"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: librespeed-init-sql
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: librespeed
+data:
+  schema.sql: |
+    -- LibreSpeed telemetry schema (idempotent variant of results/telemetry_postgresql.sql).
+    -- Safe to re-run on every pod start; pre-existing data is left untouched.
+    CREATE TABLE IF NOT EXISTS speedtest_users (
+        id           serial PRIMARY KEY,
+        "timestamp"  timestamp without time zone DEFAULT now() NOT NULL,
+        ip           text NOT NULL,
+        ispinfo      text,
+        extra        text,
+        ua           text NOT NULL,
+        lang         text NOT NULL,
+        dl           text,
+        ul           text,
+        ping         text,
+        jitter       text,
+        log          text
+    );
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: librespeed-defaults
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: librespeed
+data:
+  # Default content of /servers.json (used by `MODE=dual`).
+  # An init container copies this file to the persistent appData volume ONLY
+  # on first install (i.e. when no servers.json exists there yet). After that
+  # the user is free to edit appData/librespeed/servers.json in the Files app
+  # (or via SSH); restarts and helm upgrades will respect the edited file.
+  #
+  # Server list format (see https://github.com/librespeed/speedtest/blob/master/doc_docker.md):
+  #   {
+  #     "name":     friendly name shown in the UI dropdown,
+  #     "server":   protocol+host of the remote test point. Empty string means
+  #                 "this server". Use "//host/" for protocol-agnostic, or
+  #                 "https://host/" to force HTTPS.
+  #     "dlURL":    relative path of the download endpoint   (garbage.php)
+  #     "ulURL":    relative path of the upload   endpoint   (empty.php)
+  #     "pingURL":  relative path of the ping     endpoint   (empty.php)
+  #     "getIpURL": relative path of the IP/ISP   endpoint   (getIP.php)
+  #   }
+  #
+  # The two public test points below (sponsored by Sharktech, taken from the
+  # upstream list at https://librespeed.org/backend-servers/servers.php) are
+  # verified to return `Access-Control-Allow-Origin: *` on all three endpoints,
+  # so the browser can XHR them cross-origin without errors. To remove them
+  # or add your own, edit /Data/librespeed/servers.json and restart librespeed.
+  servers.json: |
+    [
+      {
+        "name": "Local (this Olares)",
+        "server": "//{{ $librespeedDomain }}/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php"
+      }{{- if $localDotServer }},
+      {
+        "name": "Local (this Olares .local domain)",
+        "server": "{{ $localDotServer }}",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php"
+      }{{- end }}{{- if $localDashServer }},
+      {
+        "name": "Local (this Olares dash .local domain)",
+        "server": "{{ $localDashServer }}",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php"
+      }{{- end }},
+      {
+        "name": "Los Angeles, USA",
+        "server": "https://laxspeed.sharktech.net/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "Sharktech",
+        "sponsorURL": "https://sharktech.net"
+      },
+      {
+        "name": "Amsterdam, Netherlands",
+        "server": "https://amsspeed.sharktech.net/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "Sharktech",
+        "sponsorURL": "https://sharktech.net"
+      },
+      {
+        "name": "Chicago, USA (Sharktech)",
+        "server": "https://chispeed.sharktech.net/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "Sharktech",
+        "sponsorURL": "https://sharktech.net"
+      },
+      {
+        "name": "Denver, USA (Sharktech)",
+        "server": "https://denspeed.sharktech.net/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "Sharktech",
+        "sponsorURL": "https://sharktech.net"
+      },
+      {
+        "name": "Las Vegas, USA (Sharktech)",
+        "server": "https://lasspeed.sharktech.net/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "Sharktech",
+        "sponsorURL": "https://sharktech.net"
+      },
+      {
+        "name": "Volzhsky, Russia (PowerNet)",
+        "server": "https://speedtest.powernet.com.ru/",
+        "dlURL": "backend/garbage.php",
+        "ulURL": "backend/empty.php",
+        "pingURL": "backend/empty.php",
+        "getIpURL": "backend/getIP.php",
+        "sponsorName": "PowerNet",
+        "sponsorURL": "https://powernet.com.ru/"
+      }
+    ]
