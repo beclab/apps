@@ -1,0 +1,294 @@
+{{- /*
+  Same domain resolution as configmap.yaml so the init container can write a
+  single-entry, Local-only servers.json when MODE=standalone (otherwise the
+  dropdown stays on screen showing whatever's in the persistent list, which
+  contradicts the semantic of "standalone = local only").
+*/}}
+{{- $domainDict := .Values.domain | default dict -}}
+{{- $librespeedDomain := index (split "," ($domainDict.librespeed | default "")) "_0" -}}
+{{- /* olares_id = 2nd label of e.g. 9c3cd6cd.<olares_id>.olares.cn */ -}}
+{{- $domainParts := splitList "." $librespeedDomain -}}
+{{- $localDotServer := "" -}}
+{{- $localDashServer := "" -}}
+{{- if and (ge (len $domainParts) 4) (eq (index $domainParts 2) "olares") -}}
+{{- $olaresId := index $domainParts 1 -}}
+{{- $localDotServer = printf "http://%s.%s.olares.local/" (index $domainParts 0) $olaresId -}}
+{{- $localDashServer = printf "http://%s-%s-olares.local/" (index $domainParts 0) $olaresId -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: librespeed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: librespeed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: librespeed
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: librespeed
+    spec:
+      initContainers:
+        - name: init-postgres
+          image: "docker.io/aboveos/postgres:16.0-alpine3.18"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - "-c"
+          args:
+            - |
+              set -e
+              echo "Waiting for PostgreSQL at $PGHOST:$PGPORT..."
+              until psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "SELECT 1" >/dev/null 2>&1; do
+                printf '.'
+                sleep 2
+              done
+              echo
+              echo "PostgreSQL is up. Applying LibreSpeed schema..."
+              psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" \
+                   -v ON_ERROR_STOP=1 -f /init/schema.sql
+              echo "Schema applied."
+          env:
+            - name: PGHOST
+              value: "{{ .Values.postgres.host }}"
+            - name: PGPORT
+              value: "{{ .Values.postgres.port }}"
+            - name: PGUSER
+              value: "{{ .Values.postgres.username }}"
+            - name: PGPASSWORD
+              value: "{{ .Values.postgres.password }}"
+            - name: PGDATABASE
+              value: "{{ .Values.postgres.databases.librespeeddb }}"
+          volumeMounts:
+            - name: librespeed-init-sql
+              mountPath: /init
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+        - name: init-servers-json
+          image: "docker.io/beclab/harveyff-utils-jq:v0.0.1"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - "-c"
+          args:
+            - |
+              set -e
+
+              # /data      = persistent appData (user's full edited list)
+              # /defaults  = chart-shipped defaults (ConfigMap)
+              # /effective = emptyDir; what actually gets mounted at /servers.json
+              #              in the main container
+
+              # 1) First-time seeding: persistent file only created if absent.
+              #    User edits are NEVER overwritten on subsequent restarts.
+              if [ ! -f /data/servers.json ]; then
+                echo "First-time setup: copying default servers.json into appData."
+                cp /defaults/servers.json /data/servers.json
+              else
+                echo "Existing servers.json found in appData, leaving user edits intact."
+              fi
+
+              # 2) Render the EFFECTIVE list based on the runtime MODE.
+              #    - standalone: ignore persistent file, write single Local entry.
+              #                  UI sees servers.length === 1 and hides the dropdown.
+              #    - frontend  : strip out any entry that points back to THIS Olares
+              #                  (server == "//<our-domain>/", "" or "/"). Frontend
+              #                  mode has no local PHP backend, so a Local entry
+              #                  would always fail. User-added remote entries that
+              #                  point elsewhere are preserved untouched.
+              #    - dual      : copy persistent file as-is (respects user edits,
+              #                  including deliberate deletion of the Local entry).
+              #    - backend   : UI is not served in this mode, copy is harmless.
+              case "${MODE:-dual}" in
+                standalone)
+                  echo "MODE=standalone -> writing single-entry effective list (Local only)."
+                  cat > /effective/servers.json <<EOF
+              [
+                {
+                  "name":     "Local (this Olares)",
+                  "server":   "//${LIBRESPEED_DOMAIN}/",
+                  "dlURL":    "backend/garbage.php",
+                  "ulURL":    "backend/empty.php",
+                  "pingURL":  "backend/empty.php",
+                  "getIpURL": "backend/getIP.php"
+                }{{- if $localDotServer }},
+                {
+                  "name":     "Local (olares.local)",
+                  "server":   "{{ $localDotServer }}",
+                  "dlURL":    "backend/garbage.php",
+                  "ulURL":    "backend/empty.php",
+                  "pingURL":  "backend/empty.php",
+                  "getIpURL": "backend/getIP.php"
+                }{{- end }}{{- if $localDashServer }},
+                {
+                  "name":     "Local (dash olares.local)",
+                  "server":   "{{ $localDashServer }}",
+                  "dlURL":    "backend/garbage.php",
+                  "ulURL":    "backend/empty.php",
+                  "pingURL":  "backend/empty.php",
+                  "getIpURL": "backend/getIP.php"
+                }{{- end }}
+              ]
+              EOF
+                  ;;
+                frontend)
+                  if [ -n "$LIBRESPEED_DOMAIN" ]; then
+                    LOCAL_URL="//${LIBRESPEED_DOMAIN}/"
+                    echo "MODE=frontend -> filtering out Local entries (main, olares.local dot/dash, '' or '/')."
+                    jq --arg local "$LOCAL_URL" \
+                       --arg localDot "${LIBRESPEED_LOCAL_DOT:-}" \
+                       --arg localDash "${LIBRESPEED_LOCAL_DASH:-}" \
+                       '[ .[] | select(
+                         (.server // "") != $local and
+                         (.server // "") != "" and
+                         (.server // "") != "/" and
+                         (if $localDot != "" then (.server // "") != $localDot else true end) and
+                         (if $localDash != "" then (.server // "") != $localDash else true end)
+                       ) ]' \
+                       /data/servers.json > /effective/servers.json
+                  else
+                    echo "MODE=frontend but LIBRESPEED_DOMAIN is empty; copying persistent list as-is."
+                    cp /data/servers.json /effective/servers.json
+                  fi
+                  ;;
+                *)
+                  echo "MODE=${MODE:-dual} -> using user-edited persistent servers.json as effective list."
+                  cp /data/servers.json /effective/servers.json
+                  ;;
+              esac
+
+              echo "----- effective servers.json (MODE=${MODE:-dual}) -----"
+              cat /effective/servers.json
+          env:
+            - name: MODE
+              value: "{{ (.Values.olaresEnv | default dict).MODE | default "dual" }}"
+            - name: LIBRESPEED_DOMAIN
+              value: "{{ $librespeedDomain }}"
+            - name: LIBRESPEED_LOCAL_DOT
+              value: "{{ $localDotServer }}"
+            - name: LIBRESPEED_LOCAL_DASH
+              value: "{{ $localDashServer }}"
+          volumeMounts:
+            - name: librespeed-data
+              mountPath: /data
+            - name: librespeed-defaults
+              mountPath: /defaults
+            - name: librespeed-effective
+              mountPath: /effective
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: librespeed
+          image: "docker.io/beclab/librespeed-speedtest:6.1.0"
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: librespeed-env
+          env:
+            # The five settings below are user-editable from the Olares env
+            # editor (see OlaresManifest.envs). All have `applyOnChange: true`,
+            # so changing any of them in the UI rolls the pod automatically.
+            - name: MODE
+              value: "{{ (.Values.olaresEnv | default dict).MODE | default "dual" }}"
+            - name: TELEMETRY
+              value: "{{ (.Values.olaresEnv | default dict).TELEMETRY | default "true" }}"
+            - name: PASSWORD
+              value: "{{ (.Values.olaresEnv | default dict).PASSWORD | default "" }}"
+            - name: GDPR_EMAIL
+              value: "{{ (.Values.olaresEnv | default dict).GDPR_EMAIL | default "" }}"
+            - name: IPINFO_APIKEY
+              value: "{{ (.Values.olaresEnv | default dict).IPINFO_APIKEY | default "" }}"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 8080 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ .Values.port | default 8080 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 150m
+              memory: 256Mi
+            limits:
+              cpu: 1200m
+              memory: 1Gi
+          ports:
+            - name: http
+              containerPort: {{ .Values.port | default 8080 }}
+              protocol: TCP
+          volumeMounts:
+            # The MODE-aware servers.json rendered by init-servers-json into
+            # the librespeed-effective emptyDir. The user's full persistent
+            # list lives at librespeed-data:/data/servers.json (untouched).
+            - name: librespeed-effective
+              mountPath: /servers.json
+              subPath: servers.json
+              readOnly: true
+      restartPolicy: Always
+      volumes:
+        - name: librespeed-init-sql
+          configMap:
+            name: librespeed-init-sql
+            items:
+              - key: schema.sql
+                path: schema.sql
+            defaultMode: 420
+        - name: librespeed-defaults
+          configMap:
+            name: librespeed-defaults
+            items:
+              - key: servers.json
+                path: servers.json
+            defaultMode: 420
+        - name: librespeed-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: librespeed-effective
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: librespeed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: librespeed
+spec:
+  ports:
+    - name: "{{ .Values.port | default 8080 }}"
+      port: {{ .Values.port | default 8080 }}
+      targetPort: {{ .Values.port | default 8080 }}
+      protocol: TCP
+  selector:
+    io.kompose.service: librespeed
+status:
+  loadBalancer: {}
