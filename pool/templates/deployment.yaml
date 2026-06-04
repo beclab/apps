@@ -1,0 +1,286 @@
+# Pool CLI on Olares
+#
+# Modes (Olares env USE_LOCAL_LLM):
+#   - false: Poolside Cloud / tenant via POOLSIDE_API_* (default)
+#   - true:  Local Ollama via POOLSIDE_STANDALONE_BASE_URL (see docs.ollama.com/integrations/pool)
+#
+# Optional DinD (ENABLE_DIND, default true): privileged beclab/docker sidecar +
+# docker CLI in the pool container via DOCKER_HOST=tcp://localhost:2375.
+# The dind sidecar also mounts app-data-home at /opt/data so pool's sandbox
+# feature can bind-mount the workspace into task containers correctly.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: pool
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: pool
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: pool
+        bytetrade.io/terminal: pool
+    spec:
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        - name: init-chmod-data
+          image: "beclab/ubuntu:24.04"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: USE_LOCAL_LLM
+              value: "{{ .Values.olaresEnv.USE_LOCAL_LLM }}"
+            - name: POOL_MODEL
+              value: "{{ .Values.olaresEnv.POOL_MODEL }}"
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/data/.config/poolside /opt/data/work /opt/data/.local/bin
+              chown -R 1000:1000 /opt/data
+              chmod -R 0755 /opt/data
+
+              if [ "${USE_LOCAL_LLM}" = "true" ]; then
+                cat > /opt/data/.local/bin/pool-local << 'WRAPPER'
+              #!/bin/sh
+              # Start pool against local Ollama (POOLSIDE_STANDALONE_BASE_URL must be set).
+              set -e
+              if [ -z "${POOLSIDE_STANDALONE_BASE_URL:-}" ]; then
+                echo "POOLSIDE_STANDALONE_BASE_URL is not set. Enable USE_LOCAL_LLM in app settings or export the URL." >&2
+                exit 1
+              fi
+              export POOLSIDE_API_KEY="${POOLSIDE_API_KEY:-ollama}"
+              # `pool exec` (and acp/config/...) take NO --model flag; they read the
+              # default model from pool.json (written by init below). Only the bare
+              # interactive session accepts -m, so inject it there only.
+              case "${1:-}" in
+                -v|--version|-h|--help)
+                  exec pool "$@"
+                  ;;
+                ""|-*)
+                  if [ -n "${POOL_MODEL:-}" ]; then
+                    exec pool --model "${POOL_MODEL}" "$@"
+                  fi
+                  exec pool "$@"
+                  ;;
+                *)
+                  exec pool "$@"
+                  ;;
+              esac
+              WRAPPER
+                chmod 0755 /opt/data/.local/bin/pool-local
+                chown 1000:1000 /opt/data/.local/bin/pool-local
+                echo "[init-chmod-data] installed pool-local helper"
+              fi
+
+              echo "[init-chmod-data] /opt/data owned by 1000:1000"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
+          resources: {}
+          volumeMounts:
+            - mountPath: /docker-cli
+              name: docker-cli-bin
+        {{- end }}
+
+      containers:
+        - name: pool
+          image: "beclab/harveyff-pool:v1.0.6"
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/data/work
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: TERM
+              value: xterm-256color
+            - name: HOME
+              value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
+            - name: PATH
+              value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: PIP_BREAK_SYSTEM_PACKAGES
+              value: "1"
+            - name: USE_LOCAL_LLM
+              value: "{{ .Values.olaresEnv.USE_LOCAL_LLM }}"
+            - name: POOL_MODEL
+              value: "{{ .Values.olaresEnv.POOL_MODEL }}"
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.USE_LOCAL_LLM) "true" }}
+            - name: POOLSIDE_STANDALONE_BASE_URL
+              value: {{ .Values.olaresEnv.POOLSIDE_STANDALONE_BASE_URL | default (printf "http://ollama.ollama-%s:11434/v1" .Values.admin) | quote }}
+            - name: POOLSIDE_API_KEY
+              value: {{ .Values.olaresEnv.POOLSIDE_API_KEY | default "ollama" | quote }}
+            {{- else }}
+            - name: POOLSIDE_API_URL
+              value: "{{ .Values.olaresEnv.POOLSIDE_API_URL }}"
+            - name: POOLSIDE_API_KEY
+              value: "{{ .Values.olaresEnv.POOLSIDE_API_KEY }}"
+            - name: POOLSIDE_TOKEN
+              value: "{{ .Values.olaresEnv.POOLSIDE_TOKEN }}"
+            {{- end }}
+          command:
+            - sleep
+            - infinity
+          {{- if eq (toString .Values.olaresEnv.USE_LOCAL_LLM) "true" }}
+          # `pool exec` always requests the built-in default model
+          # `poolside/laguna-m.1` and offers no way to override it in standalone
+          # mode. So on startup we alias POOL_MODEL to that name in Ollama via the
+          # native /api/copy endpoint — then exec/interactive transparently use the
+          # local model with no per-command flags. (Best-effort, never blocks.)
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    {
+                      [ "${USE_LOCAL_LLM}" = "true" ] || exit 0
+                      [ -n "${POOL_MODEL}" ] || exit 0
+                      [ -n "${POOLSIDE_STANDALONE_BASE_URL}" ] || exit 0
+                      base="${POOLSIDE_STANDALONE_BASE_URL%/v1}"
+                      i=0
+                      while [ "$i" -lt 15 ]; do
+                        if curl -fsS "${base}/api/copy" \
+                             -H 'Content-Type: application/json' \
+                             -d "{\"source\":\"${POOL_MODEL}\",\"destination\":\"poolside/laguna-m.1\"}" \
+                             >/dev/null 2>&1; then
+                          echo "[postStart] aliased ${POOL_MODEL} -> poolside/laguna-m.1"
+                          break
+                        fi
+                        i=$((i+1)); sleep 2
+                      done
+                    } >/tmp/pool-alias.log 2>&1 || true
+          {{- end }}
+          resources:
+            limits:
+              cpu: "8"
+              memory: 24Gi
+            requests:
+              cpu: 200m
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - mountPath: /usr/local/bin/docker
+              name: docker-cli-bin
+              subPath: docker
+              readOnly: true
+            {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-dind
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /var/lib/docker
+              name: dind-storage
+            # Share the workspace at the SAME path so pool's sandbox bind-mounts
+            # (e.g. -v /opt/data/work:/work) resolve correctly inside dockerd.
+            - mountPath: /opt/data
+              name: app-data-home
+        {{- end }}
+
+      restartPolicy: Always
+      volumes:
+        - name: app-data-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/home"
+            type: DirectoryOrCreate
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
+            type: DirectoryOrCreate
+        {{- end }}
