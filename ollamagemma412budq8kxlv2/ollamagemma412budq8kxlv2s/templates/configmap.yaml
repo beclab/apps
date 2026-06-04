@@ -1,0 +1,38 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $hfService := .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE | default "https://huggingface.co" }}
+{{- $hfEndpoint := $hfService | trimSuffix "/" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-env
+  namespace: "{{ .Release.Namespace }}"
+data:
+  PGID: "1000"
+  PUID: "1000"
+  TZ: "Etc/UTC"
+  OLLAMA_ORIGINS: "*"
+  MODEL_NAME: "gemma4:12b-it-ud-q8_K_XL"
+  HF_REPO: "unsloth/gemma-4-12b-it-GGUF"
+  HF_FILE: "gemma-4-12b-it-UD-Q8_K_XL.gguf"
+  HF_MMPROJ_FILE: "mmproj-F16.gguf"
+  HF_ENDPOINT: "{{ $hfEndpoint }}"
+  GGUF_DIR: "/models"
+  GGUF_PARAMS: '{"repeat_penalty": 1, "temperature": 1, "top_k": 64, "top_p": 0.95}'
+  # Left empty on purpose: keeps the proxy on the single-step files-API create so the
+  # mmproj projector stays attached; the GGUF's embedded chat template is used (tools + vision).
+  GGUF_TEMPLATE_NAME: ""
+  OLLAMA_CONTEXT_LENGTH: "131072"
+  OLLAMA_NUM_PARALLEL: "1"
+  OLLAMA_FLASH_ATTENTION: "1"
+  # MUST stay q8_0 (not f16) with flash attention on: f16 KV + flash-attn hits a
+  # llama.cpp Gemma vision bug (ggml-org/llama.cpp#14888) where image input spams
+  # repeated <unused49> tokens once KV > ~1024. q8_0 takes a different fattn kernel
+  # path and keeps vision working (also halves KV memory).
+  OLLAMA_KV_CACHE_TYPE: "q8_0"
+  OLLAMA_THINKING: ""
+  GGUF_REUSE_IF_UNCHANGED: "true"
+  # Keep the source GGUF on disk so config changes (e.g. context length) that
+  # rebuild the Ollama model reuse the local file instead of re-downloading.
+  GGUF_CLEANUP_SOURCE: "false"
+{{- end }}
