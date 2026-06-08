@@ -1,0 +1,127 @@
+# Patches sandbox ~/.openclaw/openclaw.json:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemoclaw-patch-origins
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: nemoclaw
+data:
+  patch_origins.py: |
+    import json, os, glob
+
+    def merge_trusted():
+        out = ["127.0.0.1", "::1"]
+        extra = os.environ.get("OPENCLAW_TRUSTED_PROXIES", "").strip()
+        if extra:
+            out.extend([x.strip() for x in extra.split(",") if x.strip()])
+        seen, uniq = set(), []
+        for x in out:
+            if x not in seen:
+                seen.add(x)
+                uniq.append(x)
+        return uniq
+
+    trusted_list = merge_trusted()
+    csv = os.environ.get("ORIGIN_CSV", "").strip()
+    origins = [x.strip() for x in csv.split(",") if x.strip()]
+
+    paths = []
+    # NemoClaw sandbox pod: canonical config path (workspace / clamp also target this).
+    for p in ("/sandbox/.openclaw/openclaw.json",):
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+    paths.extend(glob.glob("/home/*/.openclaw/openclaw.json"))
+    for p in ("/root/.openclaw/openclaw.json", "/home/node/.openclaw/openclaw.json"):
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            g = d.setdefault("gateway", {})
+            changed = False
+
+            tp = g.get("trustedProxies")
+            if not isinstance(tp, list):
+                tp = []
+                g["trustedProxies"] = tp
+            for ip in trusted_list:
+                if ip not in tp:
+                    tp.append(ip)
+                    changed = True
+
+            if origins:
+                c = g.setdefault("controlUi", {})
+                a = c.setdefault("allowedOrigins", [])
+                for o in origins:
+                    if o not in a:
+                        a.append(o)
+                        changed = True
+
+            if changed:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(d, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                print("patched", path)
+        except Exception as e:
+            print("skip", path, e)
+  patch_inference_baseurl.py: |
+    # Rewrite models.providers.inference.baseUrl so WebUI turns that route
+    import json, os, glob
+
+    raw = os.environ.get("NEMOCLAW_ENDPOINT_URL", "").strip()
+    if not raw:
+        print("skip patch_inference_baseurl: NEMOCLAW_ENDPOINT_URL unset")
+        raise SystemExit(0)
+    # Normalize to /v1 suffix (NemoClaw gateway calls `${baseUrl}/chat/completions`).
+    if raw.endswith("/v1") or raw.endswith("/v1/"):
+        target = raw.rstrip("/")
+    else:
+        target = raw.rstrip("/") + "/v1"
+
+    # baseUrls we are willing to overwrite: anything pointing at the
+    # OpenShell internal alias that may not resolve, or empty.
+    stale_hosts = {
+        "https://inference.local/v1",
+        "https://inference.local/v1/",
+        "http://inference.local/v1",
+        "http://inference.local/v1/",
+        "https://inference.local",
+        "http://inference.local",
+        "",
+    }
+
+    paths = []
+    for p in ("/sandbox/.openclaw/openclaw.json",):
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+    paths.extend(glob.glob("/home/*/.openclaw/openclaw.json"))
+    for p in ("/root/.openclaw/openclaw.json", "/home/node/.openclaw/openclaw.json"):
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            m = d.setdefault("models", {})
+            # Preserve merge semantics NemoClaw onboard already uses.
+            m.setdefault("mode", "merge")
+            provs = m.setdefault("providers", {})
+            inf = provs.setdefault("inference", {})
+            cur = (inf.get("baseUrl") or "").strip()
+            # Only touch when stored value is the unresolvable alias or empty.
+            if cur in stale_hosts and cur != target:
+                inf["baseUrl"] = target
+                inf.setdefault("apiKey", "unused")
+                inf.setdefault("api", "openai-completions")
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(d, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                print("patched", path, "inference.baseUrl=" + target)
+            else:
+                print("noop", path, "inference.baseUrl=" + (cur or "<unset>"))
+        except Exception as e:
+            print("skip", path, e)

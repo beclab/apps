@@ -1,11 +1,11 @@
-olaresManifest.version: "0.10.0"
+olaresManifest.version: "0.11.0"
 olaresManifest.type: app
 metadata:
   name: firecrawl
   description: Empower your AI apps with clean data from any website
   icon: https://app.cdn.olares.com/appstore/firecrawl/icon.png
   appid: firecrawl
-  version: "1.0.13"
+  version: "1.0.21"
   title: Firecrawl
   categories:
     - Utilities_v112
@@ -15,20 +15,8 @@ permission:
   appCache: true
   userData:
     - Home
-  sysData:
-    - dataType: legacy_ollama
-      appName: ollama
-      svc: ollama
-      port: 11434
-      group: api.ollama
-      version: v2
-      ops:
-        - All
-  provider:
-    - appName: ollama
-      providerName: ollamaclient
 spec:
-  versionName: "2.4.0"
+  versionName: "2.9.0"
   featuredImage: https://app.cdn.olares.com/appstore/firecrawl/1.webp
   promoteImage:
     - https://app.cdn.olares.com/appstore/firecrawl/1.webp
@@ -36,16 +24,16 @@ spec:
     - https://app.cdn.olares.com/appstore/firecrawl/3.webp
     - https://app.cdn.olares.com/appstore/firecrawl/4.webp
   fullDescription: |
-    # Overview
+    **Overview**
     Firecrawl is an API service that takes a URL, crawls it, and converts it into clean markdown or structured data. We crawl all accessible subpages and give you clean data for each. No sitemap required.
 
-    # Features
+    **Features**
     - Scrape: scrapes a URL and get its content in LLM-ready format (markdown, structured data via LLM Extract, screenshot, html)
     - Crawl: scrapes all the URLs of a web page and return content in LLM-ready format
     - Map: input a website and get all the website urls - extremely fast
     - Extract: get structured data from single page, multiple pages or entire websites with AI.
 
-    # Powerful Capabilities
+    **Powerful Capabilities**
     - LLM-ready formats: markdown, structured data, screenshot, HTML, links, metadata
     - The hard stuff: proxies, anti-bot mechanisms, dynamic content (js-rendered), output parsing, orchestration
     - Customizability: exclude tags, crawl behind auth walls with custom headers, max crawl depth, etc...
@@ -53,6 +41,32 @@ spec:
     - Reliability first: designed to get the data you need - no matter how hard it is
     - Actions: click, scroll, input, wait and more before extracting data
     - Batching (New): scrape thousands of URLs at the same time with a new async endpoint.
+  upgradeDescription: |
+    Upgrade to Firecrawl v2.9.0: https://github.com/firecrawl/firecrawl/releases/tag/v2.9.0
+
+    Config optimized:
+    **Critical bug fix**
+    - **Playwright service connectivity restored:** the shared `firecrawl-config` ConfigMap was leaking `PORT: "3002"` into the playwright-service container via `envFrom`, causing the playwright app to listen on **3002** instead of the expected **3000**. Worker requests to `playwright-svc:3000` would silently fail with `other side closed` and waterfall to the fetch engine on every scrape. The deployment now sets `PORT=3000` explicitly to override the ConfigMap value. After upgrade, `kubectl logs deploy/playwright-service` should print `Server is running on port 3000` (not 3002).
+
+    **Data persistence**
+    - **nuq-postgres now persists data:** added a `hostPath` volume under `appData/<release>/nuq-postgres` and an init container (`init-permissions`) that creates the data directory, `chown 999:999`, and `chmod 700` so the postgres process can write to it. Before this change every nuq-postgres restart wiped all NuQ tasks, crawl progress, and pg_cron job history. Strategy switched to `Recreate` to prevent two PG instances racing on the same directory during upgrades.
+
+    **Reliability**
+    - **Liveness / readiness probes added** to `firecrawl-api`, `worker`, `nuq-worker`, `nuq-postgres`, and `playwright-service`:
+      - `firecrawl-api`, `playwright-service`: TCP probes on the service port.
+      - `nuq-postgres`: `pg_isready` exec probes.
+      - `worker`, `nuq-worker`: `pgrep` liveness probes against the main Node process.
+    - Stuck or crashed containers are now automatically restarted by Kubernetes instead of silently hanging.
+
+    **Ollama is now optional**
+    - **Removed the hard dependency on `ollamav2`** and the `ollamaclient` provider permission. Firecrawl no longer requires Ollama to be installed first; only the AI-powered features (`/scrape` with `formats: ["json"]`, `/extract`, `/agent`, image alt-text generation) need an LLM.
+    - **LLM endpoints are now user-configurable** via the app settings (matching the Karakeep pattern). The following envs are exposed as optional, editable fields:
+      - `OPENAI_API_KEY` — for OpenAI or any OpenAI-compatible cloud provider.
+      - `OPENAI_BASE_URL` — base URL of an OpenAI-compatible API (leave empty to use the OpenAI default).
+      - `OLLAMA_BASE_URL` — URL of a local/remote Ollama instance, e.g. `http://ollama.ollama-<admin-user>:11434`.
+      - `MODEL_NAME` — text/chat model name, e.g. `llama3.2:latest` or `gpt-4o-mini`.
+    - **Existing users**: if you previously relied on the bundled admin Ollama, set `OLLAMA_BASE_URL` to `http://ollama.ollama-<admin-user>:11434` and `MODEL_NAME` to `llama3.2:latest` after upgrade. Pure scrape / crawl / map / search / batch workflows now work without any LLM configured.
+
   developer: Firecrawl, Inc
   website: https://www.firecrawl.dev/
   sourceCode: https://github.com/mendableai/firecrawl
@@ -60,12 +74,12 @@ spec:
   locale:
     - en-US
     - zh-CN
-  requiredMemory: 3Gi
-  limitedMemory: 8Gi
+  requiredMemory: 4Gi
+  limitedMemory: 16Gi
   requiredDisk: 128Mi
   limitedDisk: 2Gi
-  requiredCpu: 2
-  limitedCpu: 8
+  requiredCpu: 1
+  limitedCpu: 14
   doc: https://docs.firecrawl.dev/
   license:
     - text: AGPL-3.0
@@ -79,10 +93,32 @@ options:
   dependencies:
     - name: olares
       type: system
-      version: ">=1.11.1-0"
-    - name: ollamav2
-      type: application
-      version: ">=1.0.3"
+      version: ">=1.12.5-0"
+envs:
+  - envName: OPENAI_API_KEY
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "API key for OpenAI or any OpenAI-compatible provider. Required for AI features (JSON format scrape, /extract, /agent) when using OpenAI; leave empty when using Ollama."
+  - envName: OPENAI_BASE_URL
+    type: url
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Base URL of an OpenAI-compatible API (e.g. https://api.openai.com/v1 or a self-hosted proxy). Leave empty to use OpenAI's default endpoint."
+  - envName: OLLAMA_BASE_URL
+    type: url
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Base URL of an Ollama instance, e.g. http://ollama.ollama-<admin-user>:11434. Set this to enable local LLM-powered features without OpenAI."
+  - envName: MODEL_NAME
+    type: string
+    required: false
+    applyOnChange: true
+    editable: true
+    description: "Text/chat model used for LLM extraction (e.g. llama3.2:latest for Ollama, gpt-4o-mini for OpenAI)."
 entrances:
   - authLevel: internal
     host: firecrawl-api

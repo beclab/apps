@@ -1,12 +1,12 @@
 ---
-olaresManifest.version: '0.10.0'
+olaresManifest.version: '0.11.0'
 olaresManifest.type: app
 metadata:
   name: deerflowv2
   description: DeerFlow 2.0 is an open-source super agent harness for deep research.
   icon: https://app.cdn.olares.com/appstore/deerflow/icon.png
   appid: deerflowv2
-  version: '1.0.0'
+  version: '1.0.4'
   title: DeerFlow 2.0
   categories:
     - Productivity_v112
@@ -24,8 +24,13 @@ permission:
   appCache: true
   userData:
     - Home
+middleware:
+  postgres:
+    username: deerflow
+    databases:
+      - name: deerflow
 spec:
-  versionName: '2.0.0'
+  versionName: '2.0.7'
   featuredImage: https://app.cdn.olares.com/appstore/deerflow/1.webp
   promoteImage:
     - https://app.cdn.olares.com/appstore/deerflow/1.webp
@@ -33,39 +38,59 @@ spec:
     - https://app.cdn.olares.com/appstore/deerflow/3.webp
   fullDescription: |
     DeerFlow 2.0 (Deep Exploration and Efficient Research Flow) is an open-source super agent harness that coordinates sub-agents, memory, and sandboxes for complex AI tasks. Built on LangGraph and LangChain, it is a ground-up rewrite of the original DeerFlow framework.
-    Key Features
-    Core Capabilities
+    
+    **Key Features**
+    **Core Capabilities**
     - Super Agent Harness
-      * Coordinates sub-agents for parallel task execution
-      * Sandbox-based code execution (Docker or local)
-      * Persistent long-term memory across conversations
-      * Extensible skills system (Markdown-based workflows)
+      - Coordinates sub-agents for parallel task execution
+      - Sandbox-based code execution (Docker or local)
+      - Persistent long-term memory across conversations
+      - Extensible skills system (Markdown-based workflows)
     - LLM Integration
-      * Supports integration of most models through litellm and LangChain
-      * Support for open source models like Qwen, DeepSeek, etc.
-      * OpenAI-compatible API interface
-      * Multi-model support with thinking/vision capabilities
-    Tools and MCP Integrations
+      - Supports integration of most models through litellm and LangChain
+      - Support for open source models like Qwen, DeepSeek, etc.
+      - OpenAI-compatible API interface
+      - Multi-model support with thinking/vision capabilities
+    
+    **Tools and MCP Integrations**
     - Search and Retrieval
-      * Web search via Tavily, Brave Search and more
-      * Crawling with Jina
-      * Advanced content extraction
+      - Web search via Tavily, Brave Search and more
+      - Crawling with Jina
+      - Advanced content extraction
     - MCP Seamless Integration
-      * Expand capabilities for private domain access, knowledge graph, web browsing and more
-      * Facilitates integration of diverse research tools and methodologies
-    Human Collaboration
+      - Expand capabilities for private domain access, knowledge graph, web browsing and more
+      - Facilitates integration of diverse research tools and methodologies
+    
+    **Human Collaboration**
     - Human-in-the-loop
-      * Supports interactive modification of research plans using natural language
-      * Supports auto-acceptance of research plans
+      - Supports interactive modification of research plans using natural language
+      - Supports auto-acceptance of research plans
     - Report Post-Editing
-      * Supports Notion-like block editing
-      * Allows AI refinements, including AI-assisted polishing, sentence shortening, and expansion
-      * Powered by tiptap
-    Content Creation
+      - Supports Notion-like block editing
+      - Allows AI refinements, including AI-assisted polishing, sentence shortening, and expansion
+      - Powered by tiptap
+    
+    **Content Creation**
     - Skills-based Workflows
-      * Research reports, slide decks, web pages, and image generation
-      * Custom skills for specialized workflows
-      * Podcast script generation and audio synthesis
+      - Research reports, slide decks, web pages, and image generation
+      - Custom skills for specialized workflows
+      - Podcast script generation and audio synthesis
+  upgradeDescription: |
+    **Migrate legacy conversations (one-time, optional)** — if you used DeerFlow before this upgrade, your old chat history was kept in a local SQLite file (`<appData>/deerflowv2/deer-flow/checkpoints.db`) which the new PostgreSQL backend does not read. To bring those conversations into the new sidebar:
+    
+    1. Finish the upgrade and open the app, complete `/setup` to create the admin account (remember the email).
+    2. Open **Control Hub** → **Olares** → **Terminal**, then run the bundled migration script — replace `<EMAIL>` with the admin email you just created in step 1 (namespace is auto-detected):
+
+       kubectl exec -it -n $(kubectl get pods -A -l app=deerflowv2-backend -o jsonpath='{.items[0].metadata.namespace}') deploy/deerflowv2-backend -c gateway -- sh /migrate/migrate_legacy_sqlite.sh <EMAIL>
+       
+    3. Refresh the browser — old conversations appear in the admin sidebar.
+    
+    The script is idempotent and opens the SQLite file read-only, so it is safe to re-run. Attachments are not migrated (chat content only). Skip this step entirely on a clean install.
+
+    Adds a PostgreSQL database backend (provisioned automatically by the Olares `middleware.postgres`) and a built-in account / authentication system. After upgrade, open the app and follow the `/setup` page to create the first admin account. Fixes "Cross-site auth request denied" 403 on `/setup` by injecting `GATEWAY_CORS_ORIGINS` (rendered from the Olares-injected entrance domain) into the backend so the CSRF middleware uses an explicit allowlist instead of reconstructing the origin from proxy headers.
+
+    Exposes subagent turn / timeout limits as environment variables on `deerflowv2-env-config`, so operators can fix `Recursion limit reached` errors without rebuilding the image. Each subagent has two knobs: `*_MAX_TURNS` (max LLM ↔ tool roundtrips before LangGraph aborts the run with `GraphRecursionError`) and `*_TIMEOUT_SECONDS` (wall-clock cap; should be ≥ `MAX_TURNS × seconds_per_turn`). Tune `GENERAL_PURPOSE_*` for the deep-research subagent (default `500` / `7200`), `BASH_*` for the shell subagent (`300` / `1800`), and `DEFAULT_*` (`200` / `1800`) only kicks in for custom subagents you declare under `subagents.custom_agents` in `config.yaml`. Symptom → action: `Recursion limit reached` → raise `*_MAX_TURNS`; subagent aborts with "timed out" → raise `*_TIMEOUT_SECONDS`; weak / heavily quantized models usually need higher limits. Edit the ConfigMap and restart the backend deployment to apply.
+
   developer: Bytedance Inc.
   website: https://deerflow.tech
   sourceCode: https://github.com/bytedance/deer-flow
@@ -79,7 +104,7 @@ spec:
       url: https://github.com/bytedance/deer-flow?tab=MIT-1-ov-file
   requiredMemory: 1Gi
   limitedMemory: 5Gi
-  requiredDisk: 2Gi
+  requiredDisk: 512Mi
   limitedDisk: 50Gi
   requiredCpu: 0.2
   limitedCpu: 4

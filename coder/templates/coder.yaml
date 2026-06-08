@@ -1,3 +1,6 @@
+{{- $coderDomainENV := split "," .Values.domain.coder -}}
+{{- $coderDomain := index $coderDomainENV "_0" -}}
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,7 +28,13 @@ spec:
           env:
             - name: DOCKER_TLS_CERTDIR
               value: ""
-          command: ["dockerd", "--host", "tcp://0.0.0.0:2375", "--host", "unix:///var/run/docker.sock"]
+          command:
+            - "dockerd"
+            - "--host"
+            - "tcp://0.0.0.0:2375"
+            - "--host"
+            - "unix:///var/run/docker.sock"
+            - "--mtu=1450"
           ports:
             - containerPort: 2375
           volumeMounts:
@@ -39,7 +48,7 @@ spec:
               cpu: 1000m
               memory: 1Gi
         - name: coder
-          image: "docker.io/beclab/coder-coder:v2.31.5"
+          image: "docker.io/beclab/coder-coder:v2.31.9"
           env:
             - name: DOCKER_HOST
               value: "tcp://localhost:2375"
@@ -48,7 +57,11 @@ spec:
             - name: CODER_HTTP_ADDRESS
               value: "0.0.0.0:7080"
             - name: CODER_ACCESS_URL
-              value: "http://coder.{{ .Release.Namespace }}.svc.cluster.local:7080"
+              value: "https://{{ $coderDomain }}"
+            - name: CODER_WILDCARD_ACCESS_URL
+              value: "*.{{ $coderDomain }}"
+            - name: ANTHROPIC_API_KEY
+              value: '{{ .Values.olaresEnv.ANTHROPIC_API_KEY }}'
           ports:
             - containerPort: 7080
               protocol: TCP
@@ -96,7 +109,17 @@ spec:
             {{- end }}
             type: DirectoryOrCreate
         - name: dind-storage
-          emptyDir: {}
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appData }}/dind-storage
+              {{- else }}
+            path: {{ .Values.userspace.appData }}/coder/dind-storage
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appData }}/coder/dind-storage
+            {{- end }}
+            type: DirectoryOrCreate
 
 ---
 apiVersion: v1

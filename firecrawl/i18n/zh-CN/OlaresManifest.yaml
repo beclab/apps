@@ -4,16 +4,16 @@ metadata:
 
 spec:
   fullDescription: |
-    # 应用概览
+    **应用概览**
     Firecrawl 是一款 API 服务，可通过输入 URL 自动爬取网页并转换为 ‌LLM 就绪的 Markdown 或结构化数据‌。无需预存站点地图，即可抓取目标网站所有可访问子页面，并为每个页面提供清洗后的标准化数据。
 
-    #‌ 核心功能‌
+    **核心功能‌**
     ‌- 单页抓取‌：提取指定 URL 内容，输出 Markdown、结构化数据（LLM Extract）、截图或 HTML
     ‌- 全网爬取‌：自动爬取网页内所有链接，返回标准化内容（LLM 就绪格式）
     ‌- 站点地图‌：极速生成网站完整 URL 列表
     ‌- 智能提取‌：通过 AI 从单页/多页/整站提取结构化数据
     ‌
-    # 核心技术能力‌
+    **核心技术能力‌**
     ‌- 多模态格式‌：Markdown、结构化数据、截图（PNG/JPEG）、HTML、链接、元数据
     ‌- 文件解析‌：支持 PDF、Word文档、图片等非网页内容解析
     ‌- 反爬对抗‌：自动处理代理、反爬机制（验证码、JS 动态渲染）
@@ -22,3 +22,28 @@ spec:
     ‌- 批量处理（新增功能）‌：通过异步接口同时抓取数千个 URL
     ‌- 可靠性优先设计‌：针对高难度爬取场景（动态加载、反爬策略）优化
 
+  upgradeDescription: |
+    升级至 Firecrawl v2.9.0: https://github.com/firecrawl/firecrawl/releases/tag/v2.9.0
+    
+    配置优化：
+    **关键 Bug 修复**
+    - **恢复 Playwright 服务连通性：** 共享的 `firecrawl-config` ConfigMap 通过 `envFrom` 把 `PORT: "3002"` 泄漏给了 playwright-service 容器，导致 playwright 应用监听在 **3002** 端口而不是预期的 **3000**。worker 调用 `playwright-svc:3000` 时会静默失败并报 `other side closed`，每次抓取都会瀑布降级到 fetch 引擎。本次升级在 playwright-service deployment 显式设置 `PORT=3000` 覆盖 ConfigMap 的值。升级后 `kubectl logs deploy/playwright-service` 应打印 `Server is running on port 3000`（而不是 3002）。
+
+    **数据持久化**
+    - **nuq-postgres 现在持久化任务数据：** 新增 `hostPath` 卷挂载到 `appData/<release>/nuq-postgres`，并加了 `init-permissions` 初始化容器（创建数据目录、`chown 999:999`、`chmod 700`）让 postgres 进程有权写入。在此之前，nuq-postgres 每次重启都会丢失所有 NuQ 任务、crawl 进度和 pg_cron 历史。同时 `strategy` 改为 `Recreate` 防止升级时两个 PG 实例同时操作同一份数据。
+
+    **可靠性**
+    - **为以下 deployment 增加 Liveness / Readiness 探针：** `firecrawl-api`、`worker`、`nuq-worker`、`nuq-postgres`、`playwright-service`：
+      - `firecrawl-api`、`playwright-service`：使用 TCP 端口探针。
+      - `nuq-postgres`：使用 `pg_isready` exec 探针。
+      - `worker`、`nuq-worker`：使用 `pgrep` 探针检测主 Node 进程。
+    - 卡死或崩溃的容器现在会被 Kubernetes 自动重启，不再静默挂起。
+
+    **Ollama 不再是硬依赖**
+    - **移除了对 `ollamav2` 的强制依赖**和 `ollamaclient` provider 权限。Firecrawl 不再需要先装 Ollama 才能安装；只有需要 AI 抽取功能（`/scrape` 的 `formats: ["json"]`、`/extract`、`/agent`、图片 alt 自动生成）时才需要 LLM。
+    - **LLM 端点改为用户可配置**（与 Karakeep 保持一致风格）。以下环境变量已暴露为可选、可编辑字段：
+      - `OPENAI_API_KEY` —— OpenAI 或任何 OpenAI 兼容服务的 API Key。
+      - `OPENAI_BASE_URL` —— OpenAI 兼容 API 的 Base URL（留空走 OpenAI 默认端点）。
+      - `OLLAMA_BASE_URL` —— 本地/远程 Ollama 地址，例如 `http://ollama.ollama-<admin 用户名>:11434`。
+      - `MODEL_NAME` —— 文本/对话模型名，例如 `llama3.2:latest` 或 `gpt-4o-mini`。
+    - **存量用户**：升级前如果依赖了管理员 Ollama，请在应用设置里把 `OLLAMA_BASE_URL` 填为 `http://ollama.ollama-<admin 用户名>:11434`，并把 `MODEL_NAME` 填为 `llama3.2:latest`。纯爬取（scrape / crawl / map / search / batch）场景现在不配 LLM 也能正常工作。

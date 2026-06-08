@@ -1,0 +1,128 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clawdbot-gateway-ipc
+  namespace: "{{ .Release.Namespace }}"
+data:
+  # PID 1 of the gateway container. Implements the same sentinel-file
+  # restart pattern as terminus-apps/hermesagent: the gateway runs as a
+  # CHILD of this wrapper, so a restart re-spawns the child in-place
+  # without exiting the container (avoids kubelet container-restart
+  # events, image revalidation, and CrashLoopBackOff exponential backoff).
+  #
+  # Operator workflow from any container that mounts app-data-config:
+  #     touch /home/node/.openclaw/.gateway-restart-requested
+  # Within OPENCLAW_GATEWAY_SENTINEL_POLL_SECONDS (default 2s) the
+  # watcher kills the child and the outer loop respawns it after a short
+  # SENTINEL_DELAY. The same sentinel also short-circuits the long
+  # post-crash backoff so an operator can immediately retry after fixing
+  # a bad config.
+  gateway-entrypoint.sh: |
+    #!/usr/bin/env bash
+    set -u
+
+    RETRY_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY_SECONDS:-30}"
+    SENTINEL="${OPENCLAW_GATEWAY_RESTART_SENTINEL:-/home/node/.openclaw/.gateway-restart-requested}"
+    POLL="${OPENCLAW_GATEWAY_SENTINEL_POLL_SECONDS:-2}"
+    SENTINEL_DELAY="${OPENCLAW_GATEWAY_SENTINEL_RESTART_DELAY_SECONDS:-3}"
+    FLAG="/tmp/.gateway-wrapper-sentinel-fired"
+
+    cleanup() {
+      echo "[gateway-wrapper] SIGTERM received, exiting"
+      [ -n "${watcher:-}" ] && kill -TERM "$watcher" 2>/dev/null || true
+      [ -n "${child:-}"   ] && kill -TERM "$child"   2>/dev/null || true
+      exit 0
+    }
+    trap cleanup TERM INT
+
+    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
+    rm -f "$SENTINEL" "$FLAG" 2>/dev/null || true
+
+    cd /app
+    while :; do
+      echo "[gateway-wrapper] starting openclaw gateway"
+      /usr/local/bin/node dist/index.js gateway --bind lan --port 18789 &
+      child=$!
+
+      # Background watcher: polls the sentinel; on touch, kills the child
+      # and records WHY (so the main loop picks the short delay).
+      (
+        while kill -0 "$child" 2>/dev/null; do
+          if [ -f "$SENTINEL" ]; then
+            echo "[gateway-wrapper] restart requested via $SENTINEL"
+            rm -f "$SENTINEL" 2>/dev/null
+            : > "$FLAG"
+            kill -TERM "$child" 2>/dev/null
+            break
+          fi
+          sleep "$POLL"
+        done
+      ) &
+      watcher=$!
+
+      wait "$child"
+      rc=$?
+
+      kill "$watcher" 2>/dev/null || true
+      wait "$watcher" 2>/dev/null || true
+
+      if [ -f "$FLAG" ]; then
+        rm -f "$FLAG"
+        delay="$SENTINEL_DELAY"
+        reason="restart requested via sentinel"
+      else
+        delay="$RETRY_DELAY"
+        reason="natural exit (code=${rc})"
+      fi
+      echo "[gateway-wrapper] gateway ${reason}; sleeping ${delay}s before restart"
+
+      # Sleep, but allow the sentinel to short-circuit the backoff
+      # (so operators don't have to wait through 30s after fixing config).
+      end_ts=$(( $(date +%s) + delay ))
+      while [ "$(date +%s)" -lt "$end_ts" ]; do
+        if [ -f "$SENTINEL" ]; then
+          echo "[gateway-wrapper] sentinel observed during backoff, restarting immediately"
+          rm -f "$SENTINEL" 2>/dev/null
+          break
+        fi
+        sleep 1
+      done
+    done
+
+  # Convenience wrapper for users in the clawdbot shell. Equivalent to
+  # `touch /home/node/.openclaw/.gateway-restart-requested`, then polls
+  # /readyz to confirm the new process is serving.
+  restart-gateway: |
+    #!/usr/bin/env bash
+    set -u
+    SENTINEL="${OPENCLAW_GATEWAY_RESTART_SENTINEL:-/home/node/.openclaw/.gateway-restart-requested}"
+    READY_URL=http://127.0.0.1:18789/readyz
+    WAIT=1
+    [ "${1:-}" = "--no-wait" ] && WAIT=0
+
+    mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
+    : > "$SENTINEL"
+    echo "gateway: restart requested"
+
+    [ "${WAIT}" = "0" ] && exit 0
+
+    # Phase 1: wait for the old gateway to stop answering /readyz, so we
+    # don't mistake the pre-restart process for the post-restart one.
+    for _ in $(seq 1 30); do
+      if ! curl -fsS -o /dev/null --max-time 1 "${READY_URL}" 2>/dev/null; then
+        echo "gateway: old process gone, waiting for new one"
+        break
+      fi
+      sleep 1
+    done
+
+    # Phase 2: wait for the respawned gateway to be ready again.
+    for _ in $(seq 1 60); do
+      sleep 1
+      if curl -fsS -o /dev/null --max-time 2 "${READY_URL}" 2>/dev/null; then
+        echo "gateway: ready"
+        exit 0
+      fi
+    done
+    echo "gateway: did not become ready within 60s" >&2
+    exit 1

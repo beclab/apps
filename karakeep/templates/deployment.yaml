@@ -1,0 +1,215 @@
+{{- $karakeepDomainENV := split "," .Values.domain.karakeep -}}
+{{- $karakeepDomain := index $karakeepDomainENV "_0" -}}
+
+{{- $smtpUseSSL := .Values.olaresEnv.SMTP_SSL | default "" }}
+{{- $smtpUseTLS := .Values.olaresEnv.SMTP_TLS | default "" }}
+{{- $smtpSecurityProtocols := .Values.olaresEnv.SMTP_SECURITY_PROTOCOLS | default "" }}
+{{- $smtpSecurityLower := lower (toString $smtpSecurityProtocols) }}
+{{- $smtpSecure := "false" }}
+{{- if eq $smtpSecurityLower "ssl" }}
+  {{- $smtpSecure = "true" }}
+{{- else if eq $smtpSecurityLower "tls" }}
+  {{- $smtpSecure = "false" }}
+{{- else if eq $smtpSecurityLower "none" }}
+  {{- $smtpSecure = "false" }}
+{{- else }}
+  {{- if or (eq (lower (toString $smtpUseSSL)) "true") (eq (toString $smtpUseSSL) "1") }}
+    {{- $smtpSecure = "true" }}
+  {{- end }}
+{{- end }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: karakeep
+  name: karakeep
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: karakeep
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: karakeep
+    spec:
+      initContainers:
+      - name: init-permissions
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /var/lib/karakeep/data
+            mkdir -p /var/lib/karakeep/meili_data
+            chown -R 1000:1000 /var/lib/karakeep
+        volumeMounts:
+          - name: app-data
+            mountPath: /var/lib/karakeep
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: karakeep
+        image: "beclab/karakeep-app-karakeep:0.32.0"
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 3000
+        env:
+          - name: MEILI_ADDR
+            value: "http://127.0.0.1:7700"
+          - name: BROWSER_WEB_URL
+            value: "http://127.0.0.1:9222"
+          - name: DATA_DIR
+            value: "/data"
+          - name: NEXTAUTH_URL
+            value: "https://{{ $karakeepDomain }}"
+          - name: NEXTAUTH_SECRET
+            value: '{{ default (printf "%s-%s-karakeep-secret" .Release.Name .Release.Namespace) .Values.olaresEnv.NEXTAUTH_SECRET }}'
+          - name: OPENAI_API_KEY
+            value: '{{ .Values.olaresEnv.OPENAI_API_KEY }}'
+          - name: OLLAMA_BASE_URL
+            value: '{{ .Values.olaresEnv.OLLAMA_BASE_URL }}'
+          - name: INFERENCE_TEXT_MODEL
+            value: '{{ .Values.olaresEnv.INFERENCE_TEXT_MODEL }}'
+          - name: INFERENCE_IMAGE_MODEL
+            value: '{{ .Values.olaresEnv.INFERENCE_IMAGE_MODEL }}'
+          - name: EMBEDDING_TEXT_MODEL
+            value: '{{ .Values.olaresEnv.EMBEDDING_TEXT_MODEL }}'
+          - name: INFERENCE_OUTPUT_SCHEMA
+            value: '{{ .Values.olaresEnv.INFERENCE_OUTPUT_SCHEMA }}'
+          - name: INFERENCE_CONTEXT_LENGTH
+            value: '{{ .Values.olaresEnv.INFERENCE_CONTEXT_LENGTH }}'
+          - name: INFERENCE_MAX_OUTPUT_TOKENS
+            value: '{{ .Values.olaresEnv.INFERENCE_MAX_OUTPUT_TOKENS }}'
+          - name: INFERENCE_JOB_TIMEOUT_SEC
+            value: '{{ .Values.olaresEnv.INFERENCE_JOB_TIMEOUT_SEC }}'
+          - name: CRAWLER_VIDEO_DOWNLOAD
+            value: '{{ .Values.olaresEnv.CRAWLER_VIDEO_DOWNLOAD | default "false"}}'
+          - name: CRAWLER_VIDEO_DOWNLOAD_MAX_SIZE
+            value: '{{ .Values.olaresEnv.CRAWLER_VIDEO_DOWNLOAD_MAX_SIZE }}'
+          - name: CRAWLER_VIDEO_DOWNLOAD_TIMEOUT_SEC
+            value: '{{ .Values.olaresEnv.CRAWLER_VIDEO_DOWNLOAD_TIMEOUT_SEC }}'                                     
+          {{- if and (eq (toString .Values.olaresEnv.USE_SYSTEM_SMTP_SETTINGS) "true") (eq (toString .Values.olaresEnv.SMTP_ENABLED) "true") }}
+          - name: SMTP_HOST
+            value: '{{ .Values.olaresEnv.SMTP_HOST }}'
+          - name: SMTP_PORT
+            value: '{{ .Values.olaresEnv.SMTP_PORT | default "587" }}'
+          - name: SMTP_SECURE
+            value: '{{ $smtpSecure }}'
+          - name: SMTP_USER
+            value: '{{ .Values.olaresEnv.SMTP_USER }}'
+          - name: SMTP_PASSWORD
+            value: '{{ .Values.olaresEnv.SMTP_PASSWORD }}'
+          - name: SMTP_FROM
+            value: '{{ .Values.olaresEnv.SMTP_FROM }}'
+          {{- end }}
+        resources:
+          requests:
+            cpu: 300m
+            memory: 500Mi
+          limits:
+            cpu: 1000m
+            memory: 1500Mi
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+          allowPrivilegeEscalation: false
+        volumeMounts:
+          - name: app-data
+            mountPath: /data
+            subPath: data
+        readinessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 40
+          periodSeconds: 15
+          timeoutSeconds: 5
+      - name: chrome
+        image: "beclab/zenika-hub-alpine-chrome:124"
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: DBUS_SYSTEM_BUS_ADDRESS
+            value: "/dev/null"
+          - name: DBUS_SESSION_BUS_ADDRESS
+            value: "/dev/null"
+        command:
+          - /bin/sh
+          - '-c'
+          - |
+            exec chromium-browser \
+              --headless=new \
+              --no-sandbox \
+              --disable-gpu \
+              --disable-dev-shm-usage \
+              --disable-features=UseDBus \
+              --remote-debugging-address=0.0.0.0 \
+              --remote-debugging-port=9222 \
+              --hide-scrollbars
+        ports:
+          - containerPort: 9222
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+      - name: meilisearch
+        image: "getmeili/meilisearch:v1.41.0"
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 7700
+        env:
+          - name: MEILI_NO_ANALYTICS
+            value: "true"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 50Mi
+          limits:
+            cpu: 1000m
+            memory: 600Mi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+        volumeMounts:
+          - name: app-data
+            mountPath: /meili_data
+            subPath: meili_data
+      volumes:
+      - name: app-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: '{{ .Values.userspace.appData }}'
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: karakeep
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: karakeep
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: karakeep

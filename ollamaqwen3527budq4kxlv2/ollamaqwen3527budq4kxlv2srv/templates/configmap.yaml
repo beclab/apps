@@ -1,0 +1,39 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- $hfService := .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE | default "https://huggingface.co" }}
+{{- $hfEndpoint := $hfService | trimSuffix "/" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-env
+  namespace: "{{ .Release.Namespace }}"
+data:
+  PGID: "1000"
+  PUID: "1000"
+  TZ: "Etc/UTC"
+  OLLAMA_ORIGINS: "*"
+  MODEL_NAME: "qwen3.5:27b-ud-q4_K_XL"
+  HF_REPO: "unsloth/Qwen3.5-27B-GGUF"
+  HF_FILE: "Qwen3.5-27B-UD-Q4_K_XL.gguf"
+  HF_MMPROJ_FILE: "mmproj-F16.gguf"
+  HF_ENDPOINT: "{{ $hfEndpoint }}"
+  GGUF_DIR: "/models"
+  GGUF_PARAMS: '{"stop": ["<|im_end|>", "<|endoftext|>"], "repeat_penalty": 1, "presence_penalty": 1.5, "temperature": 1, "top_k": 20, "top_p": 0.95, "min_p": 0}'
+  # Left empty on purpose: keeps the proxy on the single-step files-API create so the
+  # mmproj projector stays attached; the GGUF's embedded chat template is used.
+  GGUF_TEMPLATE_NAME: ""
+  OLLAMA_CONTEXT_LENGTH: "131072"
+  OLLAMA_NUM_PARALLEL: "1"
+  OLLAMA_FLASH_ATTENTION: "1"
+  OLLAMA_KV_CACHE_TYPE: "q8_0"
+  # Thinking control for the proxy: "false" disables <think> reasoning (much faster
+  # for agentic/tool-calling loops), "true" forces it on, "" passes through so the
+  # client decides per-request (default thinking in chat, agents can turn it off).
+  OLLAMA_THINKING: ""
+  # Disk hygiene: reuse the registered model when its config fingerprint is
+  # unchanged (skip download/push/recreate), and delete the GGUF source files
+  # after a successful create. Combined with pruning (no OLLAMA_NOPRUNE on the
+  # Ollama container) this keeps disk usage to a single model copy.
+  GGUF_REUSE_IF_UNCHANGED: "true"
+  GGUF_CLEANUP_SOURCE: "true"
+{{- end }}

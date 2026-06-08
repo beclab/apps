@@ -1,0 +1,79 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco-plugin-installer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: falco-plugin-installer
+spec:
+  selector:
+    matchLabels:
+      app: falco-plugin-installer
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: falco-plugin-installer
+    spec:
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: init-chmod-falco-plugins
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /falco-plugins
+              chmod -R 0777 /falco-plugins
+              mkdir -p /falco-rules
+              chown -R 1000:1000 /falco-rules
+              chmod -R 0777 /falco-rules
+          resources: {}
+          volumeMounts:
+            - name: falco-plugins
+              mountPath: /falco-plugins
+            - name: falco-rules
+              mountPath: /falco-rules
+          securityContext:
+            runAsUser: 0
+      containers:
+        # Prebuilt toolbox image ships falcoctl + ca-certificates.
+        - name: toolbox
+          image: "docker.io/beclab/falco-toolbox:v0.0.1"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - '-c'
+            - sleep infinity
+          stdin: true
+          tty: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: falco-plugins
+              mountPath: /usr/share/falco/plugins
+            - name: falco-plugins
+              mountPath: /var/lib/falco/plugins
+            - name: falco-rules
+              mountPath: /etc/falco
+      restartPolicy: Always
+      volumes:
+        - name: falco-plugins
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/plugins'
+        - name: falco-rules
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/rules'
+{{- end }}

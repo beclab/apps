@@ -1,0 +1,201 @@
+{{- $trekDomainENV := split  ","  .Values.domain.trek -}}
+{{- $trekDomain := index $trekDomainENV "_0" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trek-nginx-config
+  namespace: '{{ .Release.Namespace }}'
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      upstream trek {
+        server 127.0.0.1:3000;
+      }
+
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+
+      server {
+        listen 8001;
+        server_name _;
+
+        client_max_body_size 100m;
+        proxy_connect_timeout 60s;
+
+        location / {
+          proxy_pass http://trek;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: trek
+  name: trek
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: trek
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: trek
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: NODE_ENV
+          value: production
+        - name: PORT
+          value: "3000"
+        - name: FORCE_HTTPS
+          value: "false"
+        - name: APP_URL
+          value: "https://{{ $trekDomain }}"
+        - name: ADMIN_EMAIL
+          value: {{ .Values.olaresEnv.ADMIN_EMAIL | quote }}
+        - name: ADMIN_PASSWORD
+          value: {{ .Values.olaresEnv.ADMIN_PASSWORD | quote }}
+        {{- if and (eq (toString .Values.olaresEnv.USE_SYSTEM_SMTP_SETTINGS) "true") (eq (toString .Values.olaresEnv.SMTP_ENABLED) "true") }}
+        - name: SMTP_HOST
+          value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+        - name: SMTP_PORT
+          value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+        - name: SMTP_USER
+          value: "{{ .Values.olaresEnv.SMTP_USER }}"
+        - name: SMTP_PASS
+          value: "{{ .Values.olaresEnv.SMTP_PASS }}"
+        - name: SMTP_FROM
+          value: "{{ .Values.olaresEnv.SMTP_FROM }}"
+        - name: SMTP_SKIP_TLS_VERIFY
+          value: "{{ .Values.olaresEnv.SMTP_SKIP_TLS_VERIFY }}"
+        {{- end }}
+        image: "docker.io/beclab/mauriceboe-trek:2.9.12"
+        name: trek
+        ports:
+        - name: http
+          containerPort: 3000
+        livenessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 5
+          timeoutSeconds: 5
+        startupProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 30
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 256Mi
+        volumeMounts:
+        - mountPath: /app/data
+          name: data
+        - mountPath: /app/uploads
+          name: uploads
+      - name: nginx
+        image: "docker.io/beclab/aboveos-nginx:1.27.0"
+        ports:
+        - name: proxy
+          containerPort: 8001
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8001
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: 100m
+            memory: 256Mi
+          requests:
+            cpu: 10m
+            memory: 64Mi
+      restartPolicy: Always
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: trek-nginx-config
+          defaultMode: 438
+          items:
+          - key: nginx.conf
+            path: nginx.conf
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+        name: data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/uploads'
+          type: DirectoryOrCreate
+        name: uploads
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: trek
+  name: trek-svc
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "http"
+    port: 3000
+    targetPort: 3000
+  - name: "proxy"
+    port: 8001
+    targetPort: 8001
+  selector:
+    io.kompose.service: trek

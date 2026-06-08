@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -8,7 +8,7 @@ metadata:
   labels:
     app: sdwebuiforgeneo
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "sdwebuiforgeneo"
 spec:
   replicas: 1
   selector:
@@ -46,15 +46,44 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
+        - name: wait-for-model
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - |
+              DONE_FILE="/models/.v1-5-pruned-emaonly.safetensors.done"
+              echo "[wait] Waiting for model download..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[wait] Model ready."
+          volumeMounts:
+            - name: modellibckp
+              mountPath: /models
+          imagePullPolicy: IfNotPresent
       containers:
         - name: sdwebuiforgeneo
           image: "docker.io/beclab/sdwebui-forge-neo:2.5"
-          securityContext:
-            runAsUser: 0
+          command:
+            - /usr/bin/tini
+            - --
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="/stable-diffusion-webui/models/Stable-diffusion/public/.v1-5-pruned-emaonly.safetensors.done"
+              echo "[wait] Waiting for model download..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[wait] Model ready, starting server."
+              exec /entrypoint.sh
           resources:
             requests:
               cpu: 500m
-              memory: 3Gi
+              memory: 2Gi
             limits:
               cpu: 4000m
               memory: 24Gi

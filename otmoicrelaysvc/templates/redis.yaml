@@ -1,0 +1,122 @@
+{{- $relay_redis_secret := (lookup "v1" "Secret" .Release.Namespace "otmoic-relay-db-redis") -}}
+{{- $redis_secret_redis_password := "" -}}
+{{ if $relay_redis_secret -}}
+{{- $redis_secret_redis_password = (index $relay_redis_secret "data" "redis-password") -}}
+{{ else -}}
+{{- $redis_secret_redis_password = randAlphaNum 16 | b64enc}}
+{{- end -}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: otmoic-relay-db-redis
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  redis-password: {{ $redis_secret_redis_password }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-relay-db-redis-master
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis
+  selector:
+    app: otmoic-relay-db-redis
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-relay-db-redis-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: tcp-redis
+      port: 6379
+      targetPort: redis
+  selector:
+    app: otmoic-relay-db-redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: otmoic-relay-db-redis
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoic-relay-db-redis
+  serviceName: otmoic-relay-db-redis-headless
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: otmoic-relay-db-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - redis-server
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            - --appendonly
+            - "yes"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-redis
+                  key: redis-password
+          ports:
+            - name: redis
+              containerPort: 6379
+          livenessProbe:
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 6
+            failureThreshold: 5
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping | grep PONG
+          readinessProbe:
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 5
+            exec:
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping | grep PONG
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 512Mi
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 8Gi

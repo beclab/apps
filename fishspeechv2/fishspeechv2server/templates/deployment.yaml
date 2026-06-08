@@ -1,4 +1,4 @@
-﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -31,8 +31,8 @@ spec:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /app-checkpoints /app-references /app-data-root /tmp-gradio
-            chmod -R 755 /app-checkpoints /app-references /app-data-root /tmp-gradio
+            chown -R 1000:1000 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
+            chmod -R 755 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
         resources: {}
         volumeMounts:
           - name: checkpoints
@@ -43,6 +43,8 @@ spec:
             mountPath: /app-data-root
           - name: output
             mountPath: /tmp-gradio
+          - name: app-cache
+            mountPath: /app-cache
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
@@ -50,7 +52,53 @@ spec:
           runAsUser: 0
       containers:
       - name: fishspeech
-        image: "docker.io/beclab/fishaudio-fish-speech:webui-cuda"
+        image: "docker.io/beclab/harveyff-fishaudio-fish-speech:webui-cuda-cu129-20260422"
+        workingDir: /app
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+            DONE_FILE="/app/checkpoints/s2-pro/.s2-pro.done"
+            echo "[wait] Waiting for $DONE_FILE ..."
+            while [ ! -f "$DONE_FILE" ]; do
+              echo "[wait] Model not ready, sleeping..."
+              sleep 10
+            done
+            echo "[wait] Detected $DONE_FILE, starting fishspeech webui."
+            mkdir -p "${TORCHINDUCTOR_CACHE_DIR:-/app-cache/torch-inductor}" "${TRITON_CACHE_DIR:-/app-cache/triton}" || true
+            FP_FILE="/app-cache/.fingerprint"
+            TORCH_VERSION_FILE="/app/.venv/lib/python3.12/site-packages/torch/version.py"
+            if [ -f "$TORCH_VERSION_FILE" ]; then
+              TORCH_FP=$(md5sum "$TORCH_VERSION_FILE" | awk '{print $1}')
+            else
+              TORCH_FP="no-torch"
+            fi
+            GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:]' || true)
+            GPU_CC=${GPU_CC:-unknown}
+            NEW_FP="torch=${TORCH_FP}|cc=${GPU_CC}"
+            OLD_FP=$(cat "$FP_FILE" 2>/dev/null || true)
+            if [ "$OLD_FP" != "$NEW_FP" ]; then
+              echo "[cache] fingerprint mismatch, clearing compile cache."
+              echo "[cache]   old: ${OLD_FP:-<none>}"
+              echo "[cache]   new: ${NEW_FP}"
+              rm -rf /app-cache/torch-inductor /app-cache/triton
+              mkdir -p /app-cache/torch-inductor /app-cache/triton
+              echo "$NEW_FP" > "$FP_FILE"
+            else
+              echo "[cache] compile cache fingerprint unchanged: ${NEW_FP}"
+            fi
+            cd /app
+            CMD_ARGS=()
+            if [ "${COMPILE:-0}" = "1" ] || [ "${COMPILE:-0}" = "true" ]; then
+              echo "[start] torch.compile enabled (first inference will be slow while compiling)."
+              CMD_ARGS+=(--compile)
+            fi
+            exec /app/.venv/bin/python tools/run_webui.py \
+              --llama-checkpoint-path "${LLAMA_CHECKPOINT_PATH:-checkpoints/s2-pro}" \
+              --decoder-checkpoint-path "${DECODER_CHECKPOINT_PATH:-checkpoints/s2-pro/codec.pth}" \
+              --decoder-config-name "${DECODER_CONFIG_NAME:-modded_dac_vq}" \
+              "${CMD_ARGS[@]}"
         ports:
           - containerPort: 7860
             protocol: TCP
@@ -58,14 +106,22 @@ spec:
           - name: HF_ENDPOINT
             value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
           - name: COMPILE
-            value: "0"
+            value: "1"
+          - name: UV_NO_SYNC
+            value: "1"
+          - name: UV_FROZEN
+            value: "1"
+          - name: TORCHINDUCTOR_CACHE_DIR
+            value: /app-cache/torch-inductor
+          - name: TRITON_CACHE_DIR
+            value: /app-cache/triton
         resources:
           limits:
             cpu: "5"
             memory: 35Gi
           requests:
             cpu: "500m"
-            memory: 2Gi
+            memory: 14Gi
         readinessProbe:
           httpGet:
             path: /
@@ -84,6 +140,8 @@ spec:
           name: references
         - mountPath: /tmp/gradio
           name: output
+        - mountPath: /app-cache
+          name: app-cache
         - name: shm
           mountPath: /dev/shm
         terminationMessagePath: /dev/termination-log
@@ -107,6 +165,10 @@ spec:
           path: '{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}'
           type: DirectoryOrCreate
         name: output
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/compile-cache'
+          type: DirectoryOrCreate
+        name: app-cache
       - name: shm
         emptyDir:
           medium: Memory
@@ -130,7 +192,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: download-model
-          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.6"
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.7"
           env:
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
@@ -138,7 +200,7 @@ spec:
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN }}"
           args:
             - "--tasks"
-            - '{"tasks":[{"repo":"fishaudio/openaudio-s1-mini","file":"","ref":"main","outDir":"/data/models/openaudio-s1-mini","doneNameTpl":".openaudio-s1-mini.done"}]}'
+            - '{"tasks":[{"repo":"fishaudio/s2-pro","file":"","ref":"main","outDir":"/data/models/s2-pro","doneNameTpl":".s2-pro.done"}]}'
             - "--static"
             - "/app/static"
             - "--port"

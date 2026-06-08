@@ -43,43 +43,57 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: firefox
     spec:
+      {{- $isOlaresOne := and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+      {{- $homepage := "https://www.google.com" }}
+      {{- if and .Values.olaresEnv .Values.olaresEnv.FIREFOX_HOMEPAGE }}
+      {{- $homepage = .Values.olaresEnv.FIREFOX_HOMEPAGE }}
+      {{- end }}
       containers:
-        - env:
-            - name: CHROME_CLI
-              value: https://www.linuxserver.io/
-            - name: PGID
-              value: "1000"
+        - name: firefox
+          image: "docker.io/beclab/linuxserver-firefox:1151.0.1"
+          {{- if $isOlaresOne }}
+          securityContext:
+            privileged: true
+          {{- end }}
+          env:
             - name: PUID
+              value: "1000"
+            - name: PGID
               value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ':0'               
-          image: docker.io/aboveos/linuxserver-firefox:131.0.3
-          name: firefox
-          command:
-            - bash
-            - '-c'
-            - >-
-              apt-get update; apt-get install -y fonts-wqy-zenhei
-              fonts-wqy-microhei; fc-cache -fv; /init
+            - name: FIREFOX_CLI
+              value: {{ $homepage | quote }}
+            {{- if $isOlaresOne }}
+            - name: DRINODE
+              value: /dev/dri/renderD128
+            - name: DRI_NODE
+              value: /dev/dri/renderD128
+            {{- end }}
           resources:
             requests:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
             limits:
-              cpu: 3000m
-              memory: 3Gi
+              cpu: "3"
+              memory: 6Gi
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
+              protocol: TCP
             - containerPort: 3001
+            - containerPort: 8082
           volumeMounts:
             - mountPath: /config
               name: config
             - mountPath: /home
               name: userdata
-            - name: dshm 
-              mountPath: /dev/shm     
+            - name: dshm
+              mountPath: /dev/shm
+            {{- if $isOlaresOne }}
+            - mountPath: /dev/dri
+              name: dev-dri
+            {{- end }}
       restartPolicy: Always
       volumes:
         - name: config
@@ -93,7 +107,12 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 512Mi 
+            sizeLimit: 1Gi
+        {{- if $isOlaresOne }}
+        - name: dev-dri
+          hostPath:
+            path: /dev/dri
+        {{- end }}
 status: {}
 ---
 apiVersion: v1
@@ -108,6 +127,7 @@ metadata:
   name: firefox
   namespace: {{ .Release.Namespace }}
 spec:
+  type: NodePort
   ports:
     - name: "3000"
       port: 3000
@@ -115,6 +135,7 @@ spec:
     - name: "3001"
       port: 3001
       targetPort: 3001
+      nodePort: 30002
   selector:
     io.kompose.service: firefox
 status:

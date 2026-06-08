@@ -1,3 +1,27 @@
+{{/*
+Build the comma-separated DEER_FLOW_TRUSTED_ORIGINS string from the
+entrance domains Olares injects via Values.domain.deerflowv2.
+
+Each entry is prefixed with https:// (Olares entrances are always TLS).
+If no domains are passed, fall back to http://localhost:3000 so the
+zod schema in gateway-config.ts (trustedOrigins: min(1)) does not throw
+on container start — the frontend would otherwise emit a config_error
+before any request reaches the gateway.
+*/}}
+{{- $rawDomains := "" -}}
+{{- with .Values.domain -}}
+  {{- $rawDomains = default "" (index . "deerflowv2") -}}
+{{- end -}}
+{{- $origins := list -}}
+{{- range splitList "," $rawDomains }}
+  {{- $h := trim . -}}
+  {{- if ne $h "" -}}
+    {{- $origins = append $origins (printf "https://%s" $h) -}}
+  {{- end -}}
+{{- end -}}
+{{- if eq (len $origins) 0 -}}
+  {{- $origins = list "http://localhost:3000" -}}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -33,7 +57,7 @@ spec:
           resources: {}
       containers:
         - name: deerflowv2-frontend
-          image: docker.io/beclab/harveyff-deerflow-frontend:v2.0.1
+          image: docker.io/beclab/harveyff-deerflow-frontend:v2.0.3
           ports:
             - containerPort: 3000
           env:
@@ -47,6 +71,16 @@ spec:
               value: "deerflowv2-olares-auth-secret"
             - name: ENABLE_FOLLOWUP_SUGGESTIONS
               value: "false"
+            # SSR auth (gateway-config.ts) calls the gateway by its in-cluster
+            # service name. The default is 127.0.0.1:8001, which only works in
+            # `make dev` where the frontend and gateway share a single host.
+            - name: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL
+              value: "http://deerflowv2-backend-svc:8001"
+            # Browser-facing origins SSR considers trusted. Built from
+            # Values.domain.deerflowv2 (Olares injects this from the
+            # `deerflowv2` entrance — see OlaresManifest.entrances).
+            - name: DEER_FLOW_TRUSTED_ORIGINS
+              value: {{ join "," $origins | quote }}
           resources:
             requests:
               cpu: "50m"
