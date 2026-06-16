@@ -12,6 +12,7 @@ spec:
     - 支持 Skills、Subagents 及 MCP 兼容工具调用。
     - 兼容 Claude Pro/Max 订阅（OAuth 登录）或 Console API Key，同时支持 Amazon Bedrock 和 Google Vertex AI。
     - 工作区镜像预装常见语言运行时与构建工具链（Python、Node.js、Go、Rust、OpenJDK 21、Ruby、PHP、Lua），以及数据库客户端（PostgreSQL、MySQL/MariaDB、Redis）、git-lfs、protobuf 编译器、Gradle、tmux、dig/ss/nc、shellcheck、clang-format/tidy、graphviz，以及各类常见 -dev 头文件（libpq、MySQL 客户端、curl、ICU、LDAP）等，便于在无 root 下完成常见开发任务。
+    - 可选 Docker-in-Docker 边车（`ENABLE_DIND`，默认开启）：在终端中直接运行 `docker build`、`docker compose` 等容器化开发命令（特权边车容器）。
 
     **首次使用设置**
     打开 `Claude Code CLI` 入口并运行 `claude` 启动 OAuth 登录流程，或在应用环境变量中设置 `ANTHROPIC_API_KEY` 并重启应用。
@@ -26,3 +27,22 @@ spec:
     - `CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX` / `CLAUDE_CODE_USE_FOUNDRY` = false
 
     上述变量在 chart 中按条件注入：留空字符串或 `false` 时**不会**写入容器环境，Claude Code 会视其为真正"未设置"（必须如此——它对 `CLAUDE_CODE_USE_*` 的判断是按是否存在，而不是按值）。
+  upgradeDescription: |
+    终端升级至 `beclab/terminal:v0.0.11`：新增文件上传功能——可粘贴截图、拖拽文件，
+    或点击上传按钮将文件发送到终端会话。
+
+    工作区内存上调（上限 16Gi → 24Gi，请求 256Mi → 2Gi），减少高强度 Agent/构建
+    场景下的内存不足崩溃。
+
+    基础镜像 `beclab/harveyff-claudecode-base` 升级至 0.5.3。
+
+    新增：
+    - 内置 `olares-cli`（vendor 裸二进制，完整子命令）已加入 PATH。
+    - 启动时由 `init-skills` 将 Olares 技能包（cluster、dashboard、files、market、
+      settings、shared）复制到 `~/.claude/skills`，Agent 可开箱操作 Olares。
+    - 扩充工具箱：`gh`、`ping`/`lsof`、`lrzsz`（sz/rz）、`tree`、`nano`、`tcpdump`、
+      `traceroute`、`httpie`、`aria2` 及常用网络/调试工具。
+
+    关于 Skills：`init-skills` 仅按目录名覆盖镜像内置的 Olares 技能（同名目录会
+    在每次 Pod 启动时用镜像版本替换）；`~/.claude/skills` 下其余自定义技能不会被
+    删除。若你曾就地修改过某个 Olares 技能目录，下次重启后会被还原为镜像自带版本。

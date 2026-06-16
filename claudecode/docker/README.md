@@ -31,6 +31,11 @@ readline, sqlite, lzma, xml, xslt, yaml, jpeg, png, **curl**, **ICU**, **LDAP**,
 `PIP_BREAK_SYSTEM_PACKAGES=1` so `pip install` into the distro Python is
 allowed when needed.
 
+**Olares integration (baked at build time):** `olares-cli` at `/usr/local/bin/olares-cli`
+(vendor binary from `@olares/cli`, same as clawdbot). Olares skill pack under
+`/skills-staging`; `init-skills` flattens into `$HOME/.claude/skills` on the PVC
+(Claude Code user skills; agent flag `claude-code` via `npx skills add`).
+
 **Not included:** the `claude` CLI binary (installed at runtime by
 `init-install-claude` into the shared PVC). `ripgrep` is omitted on purpose:
 Claude Code bundles its own.
@@ -45,7 +50,7 @@ docker build -t beclab/harveyff-claudecode-base:0.2.0 .
 docker buildx create --use --name claudecode-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-claudecode-base:0.2.0 \
+  -t beclab/harveyff-claudecode-base:0.5.3 \
   --push .
 ```
 
@@ -53,7 +58,7 @@ docker buildx build \
 
 When bumping apt dependencies or base Ubuntu:
 
-1. Increment the tag (e.g. `0.2.0 -> 0.2.1`).
+1. Increment the tag (e.g. `0.5.2 -> 0.5.3`).
 2. Update both references in `claudecode/templates/deployment.yaml`
    (initContainer + main container).
 3. Bump `version` in `claudecode/Chart.yaml` and `metadata.version` in
