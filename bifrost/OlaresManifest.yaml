@@ -5,7 +5,7 @@ metadata:
   description: The Fastest Enterprise AI Gateway
   icon: https://app.cdn.olares.com/appstore/bifrost/icon.png
   appid: bifrost
-  version: '1.0.7'
+  version: '1.0.9'
   title: Bifrost
   categories:
   - Utilities_v112
@@ -16,7 +16,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '1.4.10'
+  versionName: '1.5.13'
   promoteImage:
   - https://app.cdn.olares.com/appstore/bifrost/1.webp
   - https://app.cdn.olares.com/appstore/bifrost/2.webp
@@ -32,18 +32,40 @@ spec:
     - Enterprise Control: Budget management, SSO integration, fine-grained access control, and end-to-end observability.
     - Zero-Code Migration: One-click replacement of existing OpenAI/Anthropic/GenAI APIs, with zero-code integration for popular AI SDKs.
 
+  upgradeDescription: |
+    **Back up your data** manually before upgrading!
+    Upgrade Bifrost version to 1.5.13
+    Change to file-based configuration mode and switch database from PostgreSQL to SQLite
+    
+    What's Changed (up to v1.5.13):
+    - MCP Server Library: a browsable MCP server catalog with background sync, search and filters, an install sheet, and a multi-harness agent connect flow.
+    - Complexity Router: route requests by prompt complexity using complexity_tier expressions with a configurable analyzer.
+    - Vault backends for secrets: store sensitive config in AWS Secrets Manager, GCP Secret Manager, or HashiCorp Vault as an alternative to AES encryption.
+    - Per-alias provider overrides: key aliases can override Azure endpoint/API version, Anthropic version, Bedrock region/ARN, Vertex project/region, and Replicate endpoints.
+    - Per-model usage in the virtual key quota API, plus OTEL HTTP-level metrics and per-connector span filtering.
+    - Wildcard ("*") allow-lists now correctly permit any model for catalog-opaque providers (self-hosted vLLM/Ollama/SGL and custom providers).
+    - Fixes: virtual-key inference no longer returns 401 when dashboard password auth is enabled; plus fixes for Gemini tool responses, OpenRouter cache_control preservation, and Postgres logstore filters/pagination.
+
+    Full release notes: https://docs.getbifrost.ai/changelogs/v1.5.13
   developer: MAXIM TEAM
   website: https://www.getmaxim.ai/
   submitter: Olares
   locale:
   - en-US
   - zh-CN
+  # Sized for the two remaining deployments after dropping Terminal + CLI sidecar:
+  # bifrost (gateway) and bifrostingress (openresty proxy).
+  # required ≈ sum of requests; limited ≥ sum of limits.
+  #   requests: cpu 0.26 (250m+10m), mem 320Mi  (256+64)
+  #   limits:   cpu 1.1  (1000m+100m), mem 1280Mi (1Gi+256Mi)
+  # Disk: appData holds the SQLite config store (config.db) + logs store (logs.db);
+  # logs.db grows with request volume, so leave headroom on the appData volume.
   requiredMemory: 512Mi
-  limitedMemory: 1.5Gi
+  limitedMemory: 1536Mi
   requiredDisk: 256Mi
-  limitedDisk: 1Gi
-  requiredCpu: 0.5
-  limitedCpu: 1.5
+  limitedDisk: 2Gi
+  requiredCpu: 0.3
+  limitedCpu: 1.2
   doc: https://docs.getbifrost.ai/
   supportArch:
   - amd64
@@ -65,10 +87,3 @@ entrances:
 middleware:
   redis:
     namespace: bifrost
-  postgres:
-    username: bifrost
-    databases:
-      - name: bifrostdb
-        distributed: false
-        extensions:
-          - vector
