@@ -5,11 +5,16 @@
 #     common CLI deps pre-installed, non-root user UID 1000 baked in).
 #   - initContainers:
 #       * init-chmod-data (root): ensures /opt/data is owned by 1000:1000.
+#       * init-skills (root): flattens baked Olares skills into ~/.codex/skills.
 #       * init-install-codex (UID 1000): downloads the codex native
 #         binary from the matching GitHub Release tarball into
 #         /opt/data/.local/bin/ on first run for this version, then
 #         leaves a versioned sentinel so subsequent restarts skip the
 #         download and start instantly.
+#       * init-docker-cli (optional, ENABLE_DIND): copies docker CLI +
+#         compose/buildx plugins into a shared emptyDir.
+#   - Optional docker-dind sidecar (ENABLE_DIND, default on): privileged
+#     dockerd on tcp://localhost:2375; main container gets DOCKER_HOST.
 #   - Main container runs as UID 1000 with all Linux capabilities
 #     dropped and privilege escalation forbidden. The entrypoint is
 #     `sleep infinity`; the real work happens when the Olares terminal
@@ -59,10 +64,41 @@ spec:
             - -c
             - |
               set -e
-              mkdir -p /opt/data/.local/bin /opt/data/.codex /opt/data/.install-state
+              mkdir -p /opt/data/.local/bin /opt/data/.codex/skills /opt/data/.install-state
               chown -R 1000:1000 /opt/data
               chmod -R 0755 /opt/data
               echo "[init-chmod-data] /opt/data owned by 1000:1000"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # Flatten Olares skills from /skills-staging into Codex's
+        # user skills dir (~/.codex/skills = /opt/data/.codex/skills).
+        - name: init-skills
+          image: "beclab/harveyff-codex-base:0.5.4"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -u
+              if [ ! -d /skills-staging ]; then
+                echo "[init-skills] /skills-staging not in image; skipping"
+                exit 0
+              fi
+              mkdir -p /opt/data/.codex/skills
+              for d in /skills-staging/*/; do
+                name="$(basename "$d")"
+                rm -rf "/opt/data/.codex/skills/$name"
+                cp -a "$d" "/opt/data/.codex/skills/$name"
+                chown -R 1000:1000 "/opt/data/.codex/skills/$name"
+              done
+              echo "[init-skills] Olares skills installed under /opt/data/.codex/skills:"
+              ls -1 /skills-staging
           resources: {}
           volumeMounts:
             - mountPath: /opt/data
@@ -75,7 +111,7 @@ spec:
         # subsequent Pod starts skip the download; bumping appVersion
         # in Chart.yaml automatically forces a re-download.
         - name: init-install-codex
-          image: "harveyff/codex-base:0.1.0-amd"
+          image: "beclab/harveyff-codex-base:0.5.4"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -87,13 +123,15 @@ spec:
           env:
             - name: HOME
               value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
             - name: CODEX_VERSION
               value: "{{ .Chart.AppVersion }}"
           command:
             - bash
             - -c
             - |
-              set -e
+              set -euo pipefail
               SENTINEL="$HOME/.install-state/codex-${CODEX_VERSION}"
               mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
 
@@ -134,14 +172,43 @@ spec:
               "$HOME/.local/bin/codex" --version
           resources:
             limits:
-              cpu: "1"
-              memory: 1Gi
+              cpu: "2"
+              memory: 2Gi
             requests:
               cpu: 50m
               memory: 128Mi
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # docker CLI itself
+              cp /usr/local/bin/docker /docker-cli/docker
+              # CLI plugins (docker compose / buildx). The dind image ships
+              # these under one of the standard cli-plugins dirs; copy whatever
+              # exists into the shared dir so the main container can find them.
+              mkdir -p /docker-cli/cli-plugins
+              for d in /usr/local/libexec/docker/cli-plugins \
+                       /usr/local/lib/docker/cli-plugins \
+                       /usr/libexec/docker/cli-plugins \
+                       /usr/lib/docker/cli-plugins; do
+                [ -d "$d" ] || continue
+                cp "$d"/docker-compose /docker-cli/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-buildx  /docker-cli/cli-plugins/ 2>/dev/null || true
+              done
+              echo "[init-docker-cli] copied:" && ls -la /docker-cli /docker-cli/cli-plugins
+          resources: {}
+          volumeMounts:
+            - mountPath: /docker-cli
+              name: docker-cli-bin
+        {{- end }}
 
       containers:
         # Workspace container. kubectl exec from the beclab terminal
@@ -149,7 +216,7 @@ spec:
         # login / non-login / interactive / non-interactive shells all
         # see the codex binary on PATH.
         - name: codex
-          image: "harveyff/codex-base:0.1.0-amd"
+          image: "beclab/harveyff-codex-base:0.5.4"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
@@ -166,26 +233,38 @@ spec:
               value: xterm-256color
             - name: HOME
               value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
             - name: PATH
               value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: CODEX_HOME
               value: /opt/data/.codex
+            {{- with .Values.olaresEnv.OPENAI_API_KEY }}
             - name: OPENAI_API_KEY
-              value: "{{ .Values.olaresEnv.OPENAI_API_KEY }}"
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.OPENAI_BASE_URL }}
             - name: OPENAI_BASE_URL
-              value: "{{ .Values.olaresEnv.OPENAI_BASE_URL }}"
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.CODEX_MODEL }}
             - name: CODEX_MODEL
-              value: "{{ .Values.olaresEnv.CODEX_MODEL }}"
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
           command:
             - sleep
             - infinity
           resources:
             limits:
               cpu: "4"
-              memory: 16Gi
+              memory: 24Gi
             requests:
               cpu: 100m
-              memory: 256Mi
+              memory: 2Gi
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
@@ -197,6 +276,67 @@ spec:
             - mountPath: /home/userdata/external/
               name: olares-external-dir
             {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - mountPath: /usr/local/bin/docker
+              name: docker-cli-bin
+              subPath: docker
+              readOnly: true
+            - mountPath: /usr/local/lib/docker/cli-plugins
+              name: docker-cli-bin
+              subPath: cli-plugins
+              readOnly: true
+            {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-dind
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "8"
+              memory: 16Gi
+            requests:
+              cpu: 200m
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /var/lib/docker
+              name: dind-storage
+            # Share the workspace at the SAME path so bind-mounts resolve
+            # correctly inside dockerd.
+            - mountPath: /opt/data
+              name: app-data-home
+        {{- end }}
 
       restartPolicy: Always
       volumes:
@@ -214,5 +354,13 @@ spec:
         - name: olares-external-dir
           hostPath:
             path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
             type: DirectoryOrCreate
         {{- end }}

@@ -1,28 +1,57 @@
 # codex base image
 
-A thin Ubuntu 24.04 base image for the Olares `codex` app.
+Ubuntu 24.04 base image for the Olares `codex` app with common language
+runtimes, build toolchains, database clients, and extra dev headers pre-installed.
 
 ## What it ships
 
-- `ca-certificates`, `curl`, `git`, `jq`, `less`, `procps`, `tzdata`,
-  `unzip`, `vim-tiny`, `xz-utils`, `locales` (C.UTF-8 pre-generated).
-- A non-root user `codex` (UID 1000) with `HOME=/opt/data` and
-  `PATH` prepending `/opt/data/.local/bin`.
-- No `codex` binary. The binary is installed at runtime by the
-  `init-install-codex` initContainer into the shared PVC so bumping
-  codex versions does not require rebuilding this image.
+**Shell / tooling:** `ca-certificates`, `curl`, `wget`, `git`, `git-lfs`,
+`openssh-client`, `jq`, `yq` (kislyuk YAML CLI), `less`, `procps`, `tzdata`,
+`unzip`, `zip`, `vim-tiny`, `xz-utils`, `pigz`, `file`, `rsync`, `patch`,
+`tmux`, `htop`, `dnsutils`, `iproute2`, `netcat-openbsd`, `socat`, `xmlstarlet`,
+`shellcheck`, `graphviz`, `moreutils`, `locales` (C.UTF-8 pre-generated).
+
+**Build:** `build-essential`, `pkg-config`, `cmake`, `ninja-build`, `clang`,
+`clang-format`, `clang-tidy`, common `-dev` headers (SSL, FFI, zlib, bz2,
+readline, sqlite, lzma, xml, xslt, yaml, jpeg, png, **curl**, **ICU**, **LDAP**,
+**libpq**, **default-libmysqlclient-dev**), `gettext`, `protobuf-compiler`,
+`libprotobuf-dev`, `gfortran`.
+
+**Runtimes (distro):** Python 3 (`python3`, `pip`, `venv`, `pipx`), Node.js +
+`npm`, Go (`golang-go`), Rust (`rustc`, `cargo`), Ruby + `bundler`, OpenJDK 21
+(headless JDK), `maven`, **Gradle**, PHP 8.3 CLI + extensions (`curl`, `intl`,
+`mysql`, `pgsql`, `sqlite3`, `mbstring`, `xml`, `zip`) + `composer`, `lua5.4`,
+`sqlite3`, `perl`.
+
+**Database clients:** `postgresql-client`, `default-mysql-client`,
+`redis-tools`.
+
+**User:** non-root `codex` (UID 1000), `HOME=/opt/data`, `PATH` prepends
+`/opt/data/.local/bin`. `JAVA_HOME` points at OpenJDK 21.
+`PIP_BREAK_SYSTEM_PACKAGES=1` so `pip install` into the distro Python is
+allowed when needed.
+
+**Olares integration (baked at build time):** `olares-cli` at `/usr/local/bin/olares-cli`
+(vendor binary from `@olares/cli`, same as claudecode). Olares skill pack under
+`/skills-staging`; `init-skills` flattens into `$HOME/.codex/skills` on the PVC
+(Codex user skills via `.agents/skills` at build time; `init-skills` flattens into
+`$CODEX_HOME/skills` on the PVC; agent flag `codex` via `npx skills add`).
+
+**Not included:** the `codex` CLI binary (installed at runtime by
+`init-install-codex` into the shared PVC). `ripgrep` is omitted on purpose:
+Codex bundles its own.
 
 ## Build & push
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-codex-base:0.1.0 .
+docker build -t beclab/harveyff-codex-base:0.5.4 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name codex-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-codex-base:0.1.0 \
+  -t beclab/harveyff-codex-base:0.5.4 \
   --push .
 ```
 
@@ -30,14 +59,14 @@ docker buildx build \
 
 When bumping apt dependencies or base Ubuntu:
 
-1. Increment the tag: `0.1.0 -> 0.1.1` (or major if breaking).
-2. Update both references in
-   `codex/templates/deployment.yaml` (initContainer + main container).
-3. Bump `version` in `codex/Chart.yaml`.
+1. Increment the tag (e.g. `0.5.4 -> 0.5.5`).
+2. Update all references in `codex/templates/deployment.yaml`
+   (init-skills + init-install-codex + main container).
+3. Bump `version` in `codex/Chart.yaml` and `metadata.version` in
+   `OlaresManifest.yaml`.
 
-The `codex` binary itself (rust-v0.125.0 etc.) is controlled separately
-by `appVersion` in `Chart.yaml` and `metadata.version` /
-`spec.versionName` in `OlaresManifest.yaml`; it is pulled fresh from
-the matching GitHub Release tarball whenever
-`$HOME/.install-state/codex-<version>` is missing, regardless of base
-image tag.
+The `codex` binary itself (rust-v0.125.0 etc.) is controlled separately by
+`appVersion` in `Chart.yaml` and `metadata.version` / `spec.versionName` in
+`OlaresManifest.yaml`; it is pulled fresh from the matching GitHub Release
+tarball whenever `$HOME/.install-state/codex-<version>` is missing, regardless
+of base image tag.
