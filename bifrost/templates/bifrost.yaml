@@ -32,12 +32,25 @@ spec:
           args:
             - |
               mkdir -p /app/data/logs
+              # Seed the gateway config.json ONCE from the chart default if absent, then
+              # leave it alone -> the file lives on the writable appData volume and is
+              # USER-EDITABLE (no read-only mount). Upgrades from old releases are safe:
+              # those shipped config.json as a read-only ConfigMap mount (never written
+              # to appData), so on upgrade the file is absent here and gets seeded fresh
+              # with the current SQLite wiring.
+              if [ ! -f /app/data/config.json ]; then
+                cp /etc/bifrost-default/config.json /app/data/config.json
+              fi
               chown -R 1000:1000 /app/data
               chmod -R 755 /app/data
           resources: { }
           volumeMounts:
             - name: bifrost-data
               mountPath: /app/data
+            # Read-only source for the one-time config.json seed above.
+            - name: bifrost-config
+              mountPath: /etc/bifrost-default
+              readOnly: true
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -45,7 +58,7 @@ spec:
             runAsUser: 0
       containers:
         - name: bifrost
-          image: docker.io/beclab/maximhq-bifrost:v1.4.10
+          image: docker.io/beclab/maximhq-bifrost:v1.5.13
           envFrom:
             - configMapRef:
                 name: bifrost-env
@@ -75,30 +88,20 @@ spec:
               cpu: 1000m
               memory: 1Gi
           ports:
-            - containerPort: 8000
+            - containerPort: 8080
               name: http
           volumeMounts:
+            # config.json is seeded once onto this volume by the init container and is
+            # user-editable (no read-only mount); the gateway reads it from app-dir.
             - name: bifrost-data
               mountPath: /app/data
-            - name: bifrost-config
-              mountPath: /app/data/config.json
-              readOnly: true
-              subPath: config.json
 
       restartPolicy: Always
       volumes:
         - name: bifrost-data
           hostPath:
             type: DirectoryOrCreate
-                {{- if .Values.sysVersion }}
-                  {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-            path: '{{ .Values.userspace.appCache }}'
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/bifrost'
-                  {{- end }}
-                {{- else }}
-            path: '{{ .Values.userspace.appCache }}/bifrost'
-                {{- end }}
+            path: '{{ .Values.userspace.appData }}'
         - name: bifrost-config
           configMap:
             name: bifrost-config
