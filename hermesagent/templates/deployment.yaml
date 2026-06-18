@@ -1,14 +1,11 @@
-# Hermes Agent on Olares. 3 runtime containers (gateway / dashboard /
-# hermesagent workspace) + init containers, all sharing /opt/data (hostPath)
-# as the single source of truth (SQLite, config, .env, skills, memories).
-#
-# The s6-overlay v3 image (/init as PID 1) MUST start as root: s6 chowns /run +
-# /opt/data and drops every service to the hermes user via s6-setuidgid.
-# Pinning runAsUser breaks that drop (setgroups EPERM), so we start as root
-# and pass HERMES_UID/HERMES_GID=1000 to match Olares userData ownership.
-# `kubectl exec` attaches as root; interactive shells source drop-to-hermes
-# (profile.d + $HOME/.bashrc) to re-exec as hermes (uid 1000). The hermes
-# CLI shim at /opt/hermes/bin/hermes does the same for non-interactive calls.
+# 3 runtime containers (gateway / dashboard / workspace) + init containers
+# share /opt/data (hostPath). The s6-overlay v3 image MUST start as root (s6
+# chowns /run + /opt/data, then s6-setuidgid-drops to hermes); pinning
+# runAsUser breaks that drop, so we start root and let s6 drop to hermes.
+# The custom image bakes hermes at UID/GID 1000 (= Olares user-data owner),
+# so no HERMES_UID/GID override is needed: stage2's build-tree chown is a
+# no-op (no overlayfs copy-up on boot) and the runtime identity (1000) can
+# write the Olares user-data mounts.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -30,9 +27,7 @@ spec:
         io.kompose.service: hermesagent
         bytetrade.io/terminal: hermesagent
     spec:
-      # Start as root so s6 can drop services to uid 1000 itself; do NOT set
-      # runAsUser (breaks s6's privilege drop). fsGroup keeps volumes group-
-      # accessible to 1000 (Olares platform default).
+      # Do NOT set runAsUser (breaks s6's drop); fsGroup keeps volumes at gid 1000.
       securityContext:
         fsGroup: 1000
 
@@ -81,8 +76,7 @@ spec:
             - mountPath: /opt/data
               name: app-data-home
 
-        # Materialize Linuxbrew + olares-cli + CLI shims onto the brew-volume
-        # hostPath. Idempotent on .brew-base-build.
+        # Materialize Linuxbrew + olares-cli + CLI shims onto the brew-volume.
         - name: init-install-brew
           image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
           imagePullPolicy: IfNotPresent
@@ -105,46 +99,7 @@ spec:
                 cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
               fi
 
-              # Stage olares-cli into the persistent brew-volume bin dir.
-              OLARES_CLI=""
-              for p in /usr/local/bin/olares-cli \
-                         /brew-staging/.linuxbrew/bin/olares-cli \
-                         /brew-staging/olares-cli \
-                         /opt/olares-cli/olares-cli \
-                         /olares-cli; do
-                [ -x "$p" ] && OLARES_CLI="$p" && break
-              done
-              if [ -z "$OLARES_CLI" ]; then
-                OLARES_CLI="$(find /brew-staging /usr/local /opt -maxdepth 8 -type f \
-                  \( -name 'olares-cli' -o -name 'olares-cli-*' \) -perm -u+x 2>/dev/null | head -1)"
-              fi
-              if [ -z "$OLARES_CLI" ] && command -v curl >/dev/null 2>&1; then
-                case "$(uname -m)" in
-                  x86_64|amd64)
-                    OLARES_CLI_URL="https://cdn.olares.com/olares-cli-v1.12.7-20260510_linux_amd64.8705e94.tar.gz"
-                    ;;
-                  aarch64|arm64)
-                    OLARES_CLI_URL="https://cdn.olares.com/olares-cli-v1.12.7-20260510_linux_arm64.8705e94.tar.gz"
-                    ;;
-                esac
-                if [ -n "${OLARES_CLI_URL:-}" ]; then
-                  echo "[init-brew] fetching olares-cli from CDN (${OLARES_CLI_URL})..."
-                  mkdir -p /tmp/olares-cli-extract
-                  if curl -fsSL -o /tmp/olares-cli.tgz "$OLARES_CLI_URL"; then
-                    tar -xzf /tmp/olares-cli.tgz -C /tmp/olares-cli-extract
-                    OLARES_CLI="$(find /tmp/olares-cli-extract -maxdepth 4 -type f \
-                      \( -name 'olares-cli' -o -name 'olares-cli-*' \) -perm -u+x 2>/dev/null | head -1)"
-                  fi
-                fi
-              fi
-              if [ -n "$OLARES_CLI" ]; then
-                mkdir -p /home/linuxbrew/.linuxbrew/bin
-                install -m 0755 "$OLARES_CLI" /home/linuxbrew/.linuxbrew/bin/olares-cli
-                rm -f /home/linuxbrew/.linuxbrew/bin/olares-cli.real
-                echo "[init-brew] olares-cli staged to /home/linuxbrew/.linuxbrew/bin from $OLARES_CLI"
-              else
-                echo "[init-brew] WARN: olares-cli not found (image + CDN)"
-              fi
+              # olares-cli ships in the brew base and arrives via the cp above.
 
               # python3 shim -> hermes venv.
               printf '#!/bin/sh\nexec /opt/hermes/.venv/bin/python3 "$@"\n' > /cli-bin/python3
@@ -154,26 +109,11 @@ spec:
               printf '#!/bin/sh\nset -eu\nS="${HERMES_GATEWAY_RESTART_SENTINEL:-/opt/data/.gateway-restart-requested}"\ntouch "$S"\necho "[restart-gateway] sentinel touched at $S, waiting ~6s for gateway to come back..."\nsleep 6\necho "[restart-gateway] done"\n' > /cli-bin/restart-gateway
               chmod 0755 /cli-bin/restart-gateway
 
-              # Neutralize the image's 02-reconcile-profiles cont-init: it starts a
-              # per-profile gateway s6 logger that deadlocks on the shared /opt/data
-              # log lock across containers. The gateway runs via its CMD wrapper.
+              # Neutralize 02-reconcile-profiles: its per-profile s6 logger
+              # deadlocks on the shared /opt/data log lock across containers.
               printf '#!/bin/sh\nexit 0\n' > /cli-bin/02-reconcile-profiles
               chmod 0755 /cli-bin/02-reconcile-profiles
-
-              # WORKAROUND (remove once a fixed image ships): dashboard WS endpoints
-              # only accept a loopback peer in --insecure mode, breaking the web TUI
-              # behind the Olares ingress. Auth is handled by Olares SSO, so relax
-              # that peer check at boot. Upstream: NousResearch/hermes-agent #34396.
-              printf '#!/bin/sh\nF=/opt/hermes/hermes_cli/web_server.py\n[ -f "$F" ] && sed -i "s/return client_host in _LOOPBACK_HOSTS/return True/" "$F"\nexit 0\n' > /cli-bin/03-allow-dashboard-ws
-              chmod 0755 /cli-bin/03-allow-dashboard-ws
-
-              # Repair olares-cli state after legacy root kubectl exec writes.
-              printf '#!/bin/sh\nD="/opt/data/.olares-cli"\nmkdir -p "$D/data" 2>/dev/null || true\nchown -R 1000:1000 "$D" 2>/dev/null || true\nchmod -R u+rwX,g+rwX "$D" 2>/dev/null || true\nexit 0\n' \
-                > /cli-bin/04-fix-olares-cli-perms
-              chmod 0755 /cli-bin/04-fix-olares-cli-perms
-
-              # Interactive kubectl exec drops root → hermes (uid 1000) once per session.
-              # Mounted on the hermesagent container only; $HOME/.bashrc sources it too.
+              # drop-to-hermes: interactive root kubectl exec re-execs as hermes (1000).
               printf '%s\n' \
                 '#!/bin/sh' \
                 '# Olares: drop interactive root shells to hermes (UID 1000).' \
@@ -236,14 +176,10 @@ spec:
               name: app-data-home
 
       containers:
-        # Gateway sidecar: messaging gateway + (optional) OpenAI-compat API.
-        # Wrapper loop auto-restarts `hermes gateway run` (it exits clean with no
-        # tokens) so setup/.env edits get picked up. It also polls a sentinel
-        # (/opt/data/.gateway-restart-requested) so a TUI `gateway restart` in
-        # another container can trigger a restart. No port is bound by default,
-        # so probes check the data dir instead.
+        # Gateway sidecar. Wrapper loop auto-restarts `hermes gateway run` and
+        # polls a sentinel so a TUI `gateway restart` elsewhere triggers a restart.
         - name: gateway
-          image: "beclab/nousresearch-hermes-agent:v2026.5.29.2"
+          image: "beclab/harveyff-hermes-agent:v2026.6.5-uid1000"
           imagePullPolicy: IfNotPresent
           args:
             - "/bin/bash"
@@ -370,14 +306,8 @@ spec:
               containerPort: 8642
               protocol: TCP
           env:
-            # HOME on /opt/data so HOME-respecting CLIs persist + share config.
             - name: HOME
               value: /opt/data
-            # uid/gid s6 maps the hermes user to (Olares platform default 1000).
-            - name: HERMES_UID
-              value: "1000"
-            - name: HERMES_GID
-              value: "1000"
             - name: HERMES_HOME
               value: /opt/data
             - name: HERMES_GATEWAY_RESTART_DELAY_SECONDS
@@ -394,7 +324,6 @@ spec:
               value: "1"
             - name: PATH
               value: "/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            # Absolute olares-cli paths (hermes rewrites HOME for subprocesses).
             - name: OLARES_CLI_HOME
               value: /opt/data/.olares-cli
             - name: OLARES_CLI_DATA_DIR
@@ -447,10 +376,6 @@ spec:
               name: cli-bin
               subPath: 02-reconcile-profiles
               readOnly: true
-            - mountPath: /etc/cont-init.d/04-fix-olares-cli-perms
-              name: cli-bin
-              subPath: 04-fix-olares-cli-perms
-              readOnly: true
             - mountPath: /dev/shm
               name: dshm
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -461,14 +386,20 @@ spec:
             - mountPath: /home/userdata/external/
               name: olares-external-dir
             {{- end }}
+          # Hardening (gateway only for now; validate before extending). Caps are
+          # the minimal set s6's root stage needs to chown + s6-setuidgid-drop.
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "SETUID", "SETGID", "KILL"]
 
-        # Dashboard sidecar: web UI on 9119, reads gateway health on localhost.
-        # --insecure: allow non-localhost bind behind the Olares SSO ingress.
-        # The web TUI WS gate is relaxed by the 03-allow-dashboard-ws cont-init.
+        # Dashboard sidecar: web UI on 9119. --insecure binds non-localhost
+        # behind the Olares SSO ingress.
         - name: dashboard
-          image: "beclab/nousresearch-hermes-agent:v2026.5.29.2"
+          image: "beclab/harveyff-hermes-agent:v2026.6.5-uid1000"
           imagePullPolicy: IfNotPresent
           args:
             - "dashboard"
@@ -476,7 +407,6 @@ spec:
             - "0.0.0.0"
             - "--insecure"
             - "--no-open"
-            - "--tui"
           ports:
             - name: dashboard
               containerPort: 9119
@@ -484,14 +414,8 @@ spec:
           env:
             - name: HOME
               value: /opt/data
-            # uid/gid s6 maps the hermes user to (Olares platform default 1000).
-            - name: HERMES_UID
-              value: "1000"
-            - name: HERMES_GID
-              value: "1000"
             - name: GATEWAY_HEALTH_URL
               value: "http://localhost:8642"
-            # Match gateway PATH so dashboard-side `hermes ...` sees brew.
             - name: HOMEBREW_PREFIX
               value: /home/linuxbrew/.linuxbrew
             - name: HOMEBREW_NO_AUTO_UPDATE
@@ -538,15 +462,6 @@ spec:
               name: cli-bin
               subPath: 02-reconcile-profiles
               readOnly: true
-            # Relax the dashboard WS loopback gate at boot.
-            - mountPath: /etc/cont-init.d/03-allow-dashboard-ws
-              name: cli-bin
-              subPath: 03-allow-dashboard-ws
-              readOnly: true
-            - mountPath: /etc/cont-init.d/04-fix-olares-cli-perms
-              name: cli-bin
-              subPath: 04-fix-olares-cli-perms
-              readOnly: true
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
               name: olares-home-dir
@@ -558,11 +473,10 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
 
-        # Workspace for the TUI: `sleep infinity` so the terminal entrance can
-        # `kubectl exec` in and run `hermes setup` / `hermes`. `args` lets the
-        # image entrypoint bootstrap /opt/data first.
+        # Workspace for the TUI: `sleep infinity` so the terminal can exec in
+        # and run `hermes setup` / `hermes`.
         - name: hermesagent
-          image: "beclab/nousresearch-hermes-agent:v2026.5.29.2"
+          image: "beclab/harveyff-hermes-agent:v2026.6.5-uid1000"
           imagePullPolicy: IfNotPresent
           args: ["sleep", "infinity"]
           env:
@@ -570,11 +484,6 @@ spec:
               value: xterm-256color
             - name: HOME
               value: /opt/data
-            # uid/gid s6 maps the hermes user to (Olares platform default 1000).
-            - name: HERMES_UID
-              value: "1000"
-            - name: HERMES_GID
-              value: "1000"
             - name: HERMES_HOME
               value: /opt/data
             - name: HOMEBREW_PREFIX
@@ -617,10 +526,6 @@ spec:
             - mountPath: /etc/profile.d/99-drop-to-hermes.sh
               name: cli-bin
               subPath: drop-to-hermes
-              readOnly: true
-            - mountPath: /etc/cont-init.d/04-fix-olares-cli-perms
-              name: cli-bin
-              subPath: 04-fix-olares-cli-perms
               readOnly: true
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
             - mountPath: /home/userdata/home/
@@ -677,8 +582,7 @@ spec:
   selector:
     io.kompose.service: hermesagent
 ---
-# Gateway OpenAI-compatible API service. Always created (stable DNS for the
-# `api` entrance) even though the gateway only binds when the API key is set.
+# Gateway OpenAI-compatible API service (stable DNS; binds only when API key set).
 apiVersion: v1
 kind: Service
 metadata:
