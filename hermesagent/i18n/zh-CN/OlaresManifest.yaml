@@ -30,9 +30,35 @@ spec:
     - 已本地化为 7 种语言（中文 / 日本語 / Deutsch / Español / Français / Українська / Türkçe），Dashboard 已支持中文。
 
   upgradeDescription: |
-    镜像变更：改用预置 UID 1000:1000 的镜像（beclab/harveyff-hermes-agent:v2026.6.5-uid1000，Hermes v0.16.0）。
+    升级 Hermes 到 v0.17.0（v2026.6.19）
 
-    具体变更说明：
-    - 直接以镜像内置的 UID/GID 1000:1000 运行，不再通过 HERMES_UID 在启动时重映射身份，从而去掉了可能导致容器启动卡死的属主重写过程；全新安装与升级都直接匹配 Olares userData 的属主。
-    - 移除已被上游 v0.16.0 修复的临时绕过逻辑：Dashboard WebSocket loopback 补丁、olares-cli 权限修复，以及已被上游删除的 `--tui` 参数。
-    - 为 gateway 容器加固：启用 seccomp RuntimeDefault 与最小化 Linux capabilities。
+    **本次更新亮点**
+    - **Hermes 支持 iMessage — 基于 Photon Spectrum，无需 Mac 中继** — 现在新增了基于 Photon 托管号池的 iMessage 平台插件。运行 `hermes photon login`，用设备码认证，Hermes 即可发送和接收 iMessage —— 无需把 Mac 扔在角落跑中继，也不用再维护 BlueBubbles 网桥。它定位于 BlueBubbles 的继任者：免费起步，无需自托管。如果你亲友都在蓝气泡聊天圈，Hermes 也能陪你畅聊。（#32348, #42582, #44713 — @teknium1）
+
+    - **Raft — Hermes 以网关形式接入 Raft 代理网络** — 新增内置的 Raft 平台适配器，让 Hermes 可作为外部 Agent 通过 wake-channel 网桥接入 Raft。配置 RAFT_PROFILE，启动网桥，Raft 就能唤醒 Hermes 处理消息，实现全流程隐私保护唤醒：负载只包含元数据（事件ID、时间戳），永不携带消息正文。Hermes 可“现身”并工作的新维度。（#48210 — @xxchan, @teknium1）
+
+    - **桌面版大幅进化** — v0.16.0 推出桌面版，v0.17.0 十余个 PR 持续深度提升：快捷键可自定义、操作系统级通知（按类型细分开关）、实时子 Agent 监控（在单独面板流式展示子 Agent 活动）、带预设的模型选择器、自动识别 RTL/双向文本、终端窗口可调整大小（遵循 VS Code 主题）、每线程独立草稿、多种 VS Code 主题一键安装。桌面版已真正走向生产力主力！（#45866, #40660, #47060, #46959, #43292, #44596 — @OutThisLife, @teknium1）
+
+    - **异步/后台子 Agent —— 委托工作，还能继续操作** — 现在调用 delegate_task(background=true) 时，会异步派发一个后台子 Agent，立即返回句柄。你和模型可以先继续其它任务，等结果就绪，完整结果会自动以新一轮消息进入对话。可用于拉长的调研、多步流水式任务等，无需“卡死”在等待上。（#40946, #46968 — @teknium1）
+
+    - **图片编辑支持 —— 不再仅能生成图片，还能编辑图片** — image_generate 工具现可编辑和处理输入图片，不再只能“从零生成”。传递已有图片和提示词，会自动路由到后端对应的图片编辑接口（跟 video_generate 用法一致），所有支持的平台适配。比如“把这个 logo 变蓝”“去掉背景”“草图变渲染图”都能一步搞定。（#48705 — @teknium1）
+
+    - **自动化蓝图 —— 无需手写 cron 就能定时安排** — 选择一个自动化蓝图名称，Hermes 会向你提问所需参数，无需学习 cron 语法、也不用 slot=value 填参。一次性定义，原生适配所有渠道：Dashboard 表单、CLI/TUI/消息端斜杠命令、桌面对话、文档目录，都能直接用。“每天早上8点推送新闻简报” —— 现在仅需交互式回答几个问题，而不用背 0 8 * * * 。（#41309 — @teknium1）
+
+    - **xAI Grok Composer 模型适配 Cursor** — grok-composer-2.5-fast 已加入 xAI OAuth 模型选择器，窗口拉满至 20 万字。Composer 是 Cursor 背后的速写代码模型 —— 如你有 xAI Grok 订阅，现在可直接 OAuth 接入 Hermes，无需单独 API 密钥。Grok 订阅计划、Hermes 代理循环、Composer 编码速度，三者合一。（#47908, #6f89e17 — @teknium1）
+
+    - **仪表盘支持完整 profile 构建** — 直接在浏览器创建完整 Hermes profile：选模型、配技能、挂 MCP 服务器 —— 全程无需手动改 config.yaml。Dashboard 还整合了多 profile 管理，全球切换一目了然，每个 profile 一站式管理。（#39084, #44007 — @teknium1）
+
+    - **技能商店大改版** — Dashboard 的技能中心重构：多源集成，独立 Featured 区块，完整技能预览+扫描安全每一项，从官方 taps（OpenAI、Anthropic、HuggingFace、NVIDIA）浏览和安装技能，体验不再是平铺列表，而是真·浏览式。 (#40384, #43398 — @teknium1)
+
+    - **记忆工具重大升级 —— 批量原子操作** — 记忆工具新增 operations 队列，可一次性批量 add/replace/remove 编辑，并最终按字符数原子提交。模型可先释放空间再加新项（哪怕纯 add 会超限），原本脆弱的多步操作一键搞定。记忆更新更快、更易成功。（#48507 — @teknium1）
+
+    - **Dashboard 登录安全加固** — Dashboard 认证全面升级：所有需 token 接口均已正确在 OAuth 封锁下返回 401，Websocket 认证严格用当前 Dashboard token，若 public_url 配置被 silent reject 也会给出安全警告。网络暴露 Dashboard 默认更安全。（#42578, #42578 — @benbarclay, @teknium1）
+
+    - **官方 WhatsApp Business Cloud API 适配** — 除 Baileys 网桥外，Hermes 现已支持官方 WhatsApp Business Cloud API——Meta 官方托管、无桥进程、无需扫码。配置好 Business API 凭据，Hermes 能直接和 WhatsApp 对话，无需保持 QR 网桥进程存活。（#44331, #43921 — @jquesnelle, @teknium1）
+
+    - **Telegram 富文本支持** — Bot API 10.1 富文本消息 —— Telegram 回复现已原生渲染富文本：格式更优，长消息处理更流畅，使用原生标记不再是平铺文本。默认启用，可选关闭；无须额外配置，Telegram 聊天焕然一新。（#44829, #45584, #45953 — @teknium1）
+
+    - **Curator 成本优化 —— 常规巡检不再额外消耗 LLM** — 技能 curator 现在默认只巡检并清理废弃技能，不再每次自动触发 LLM 聚合，除非手动 opt-in（curator.consolidate: true 或 hermes curator run --consolidate）。确定性的惰性清理一直免费跑，带 LLM 的“构建伞式技能”分支现默认关闭。例行巡检，零 token 花费。（#47840 — @teknium1）
+
+    完整更新日志：https://github.com/NousResearch/hermes-agent/releases/tag/v2026.6.19
