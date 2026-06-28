@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vaultwarden
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vaultwarden
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: vaultwarden
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: vaultwarden
+    spec:
+      containers:
+        - name: vaultwarden
+          image: docker.io/vaultwarden/server:1.36.0
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            {{- if .Values.olaresEnv }}
+            {{- if .Values.olaresEnv.SIGNUPS_ALLOWED }}
+            - name: SIGNUPS_ALLOWED
+              value: {{ .Values.olaresEnv.SIGNUPS_ALLOWED | quote }}
+            {{- end }}
+            {{- if .Values.olaresEnv.WEBSOCKET_ENABLED }}
+            - name: WEBSOCKET_ENABLED
+              value: {{ .Values.olaresEnv.WEBSOCKET_ENABLED | quote }}
+            {{- end }}
+            {{- if .Values.olaresEnv.ADMIN_TOKEN }}
+            - name: ADMIN_TOKEN
+              value: {{ .Values.olaresEnv.ADMIN_TOKEN | quote }}
+            {{- end }}
+            {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 16Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: vaultwarden-data
+      restartPolicy: Always
+      volumes:
+        - name: vaultwarden-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/vaultwarden'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vaultwarden
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vaultwarden
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 80
+  selector:
+    io.kompose.service: vaultwarden
