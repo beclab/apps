@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wealthpilot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: wealthpilot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: wealthpilot
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: wealthpilot
+    spec:
+      containers:
+        - name: wealthpilot
+          image: "docker.io/secureplatform45/wealthpilot:1.0.0"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "8080"
+          resources:
+            limits:
+              memory: 512Mi
+              cpu: "1"
+            requests:
+              memory: 128Mi
+              cpu: 100m
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/wealthpilot"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wealthpilot-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: wealthpilot
+spec:
+  selector:
+    io.kompose.service: wealthpilot
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
