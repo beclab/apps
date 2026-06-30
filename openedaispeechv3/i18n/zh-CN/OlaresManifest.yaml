@@ -1,0 +1,40 @@
+metadata:
+  title: OpenedAI Speech
+  description: 一个与 OpenAI API 兼容的文本转语音服务器，使用 Coqui AI 和/或 piper TTS 作为后端。
+spec:
+  fullDescription: |
+    **使用须知**
+    该应用为共享应用，在 Olares 内部仅会部署一个服务。每个用户可以安装一个桌面入口进行访问或使用共享入口进行 API 调用。
+
+    **应用概览**
+    OpenedAI Speech 是一个与 OpenAI API 兼容的文本转语音服务器。
+    - 兼容 OpenAI 音频/语音 API
+    - 提供 /v1/audio/speech 端点服务
+    - 与 OpenAI 没有任何关联，不需要 OpenAI API 密钥
+    - 一个免费的、私密的文本转语音服务器，支持自定义语音克隆
+
+    提供多种默认语音：
+    - tts-1：alloy、echo、fable、onyx、nova 和 shimmer
+    - tts-1-hd：alloy、echo、fable、onyx、nova 和 shimmer
+
+    支持多种格式
+    - 响应格式包括 mp3、opus、aac、flac、wav 和 pcm
+    - 可调节速度在 0.25-4.0 之间（甚至更多）
+
+    **模型说明**
+    安装阶段不预下载模型包。容器首次启动时，上游镜像会将 Piper 与 Coqui XTTS 权重（约 2GB）
+    下载到持久化数据目录 `appData/voices`（容器内 `/app/voices`）；配置在 `appData/config`。
+    之后重启会复用该目录。
+
+    - **`tts-1`（Piper）**：仅 CPU，不需要 GPU，安装时选 **cpu** 加速器即可。
+    - **`tts-1-hd`（XTTS）**：需要 **nvidia** GPU（约 4Gi 显存）。
+  upgradeDescription: |
+    将 OpenedAI Speech 迁移至 apiVersion v3 共享应用模式（openedaispeechv2 → openedaispeechv3）。
+
+    **更新内容**
+
+    - **存储**：模型与配置从 `appCache` 迁至 **`appData/voices`** / **`appData/config`**，持久化更强。
+    - **模型供给**：保持不变——无 llm-init 或 CDN 预下载；仍由容器首次启动时下载到 `appData/voices`。
+    - **架构**：合并 openedaispeechv2 / openedaispeechv2server 子 chart 为单一 chart；后端服务在 release 命名空间内解析（移除 `*-shared` 管理员/非管理员拆分）。
+    - **加速器**：`cpu` 模式用于 Piper（`tts-1`）；`nvidia` 模式用于 XTTS / `tts-1-hd`。
+    - **扩缩**：`workloadReplicas` 声明引擎与 nginx 客户端 workload。

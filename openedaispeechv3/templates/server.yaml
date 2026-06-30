@@ -1,0 +1,156 @@
+{{- /* OpenedAI Speech engine. Models are fetched lazily by the upstream image
+       entrypoint (Piper + Coqui XTTS) into appData/voices; no install-time
+       downloader Job or llm-init. */ -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openedaispeechv3
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.openedaispeechv3.replicaCount }}
+  selector:
+    matchLabels:
+      app: openedaispeechv3
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: openedaispeechv3
+        io.kompose.network/chrome-default: "true"
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /app-data-root/voices /app-data-root/config
+              chown -R 1000:1000 /app-data-root
+          volumeMounts:
+            - name: app-data-root
+              mountPath: /app-data-root
+          securityContext:
+            runAsUser: 0
+        # Empty appData/config hides image defaults; seed *.default.yaml once.
+        - name: seed-config
+          image: docker.io/beclab/aboveos-matatonic-openedai-speech:0.18.2
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - "-c"
+            - |
+              set -e
+              for f in /app/config/*.default.yaml; do
+                [ -f "$f" ] || continue
+                base=$(basename "$f" .default.yaml)
+                dest="/seed-config/${base}.yaml"
+                if [ ! -f "$dest" ]; then
+                  cp "$f" "$dest"
+                  echo "seeded ${base}.yaml"
+                fi
+              done
+          volumeMounts:
+            - name: config
+              mountPath: /seed-config
+      containers:
+        - name: openedaispeechv3
+          image: docker.io/beclab/aboveos-matatonic-openedai-speech:0.18.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: TTS_HOME
+              value: voices
+            - name: HF_HOME
+              value: voices
+            - name: COQUI_TOS_AGREED
+              value: "1"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            # Port 8000 opens only after startup.sh finishes (~2GB model fetch).
+            failureThreshold: 360
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: 100m
+              memory: 2Gi
+          volumeMounts:
+            - name: voices
+              mountPath: /app/voices
+            - name: config
+              mountPath: /app/config
+      volumes:
+        - name: voices
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/voices"
+            type: DirectoryOrCreate
+        - name: config
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/config"
+            type: DirectoryOrCreate
+        - name: app-data-root
+          hostPath:
+            path: "{{ .Values.userspace.appData }}"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openedaispeech
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openedaispeechv3
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    app: openedaispeechv3
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: openedaispeechv3
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  selector:
+    app: openedaispeechv3
+  type: ClusterIP
