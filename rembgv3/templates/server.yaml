@@ -1,0 +1,185 @@
+{{- /* rembg HTTP server + CDN model download. ONNX models are extracted from the
+       Olares CDN tar.zst bundle into /root/.u2net; the engine waits for the
+       downloader-init success marker before starting rembg s. */ -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rembgv3-config
+  namespace: {{ .Release.Namespace }}
+data:
+  DEFAULT_LANG: "en"
+  LOG_LEVEL: "DEBUG"
+  CDN_HOST: "{{ .Values.downloadCdnURL | default "https://cdn.olares.com" }}/models"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rembgv3
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.rembgv3.replicaCount }}
+  selector:
+    matchLabels:
+      app: rembgv3
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: rembgv3
+    spec:
+      containers:
+        - name: rembgv3
+          image: "docker.io/beclab/harveyff-rembg-cuda:v1.0.1"
+          ports:
+            - containerPort: 7000
+          command:
+            - sh
+            - -c
+            - |
+              {{- if and (hasKey .Values "models") (gt (len .Values.models) 0) }}
+              {{- range $i, $model := .Values.models }}
+              while [ ! -f /root/.u2net/.success.{{ $model.name }} ]; do
+                echo "Waiting for /root/.u2net/.success.{{ $model.name }} ..."
+                sleep 5
+              done
+              {{- end }}
+              echo "All model files are ready."
+              {{- end }}
+              echo "Starting rembg server..."
+              exec rembg s
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 18Gi
+          volumeMounts:
+            - name: models
+              mountPath: /root/.u2net
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-download-models
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-download-models
+spec:
+  ttlSecondsAfterFinished: 100
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-download-models
+    spec:
+      containers:
+        - name: {{ .Release.Name }}-download-models
+          image: "docker.io/beclab/downloader-init:v0.1.1"
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: rembgv3-config
+          command: ["sh", "-c"]
+          args:
+            - |
+              {{- range $i, $model := .Values.models }}
+              echo "${CDN_HOST}/{{ $model.name }} {{ $model.output }} {{ $model.md5 }}" {{ if eq $i 0 }} > {{ else }} >> {{ end }} /app/tasks/tasks.txt && \
+              {{- end }}
+              /app/downloader-init /app/tasks/tasks.txt 8090 1 Rembg /gradio_api/info && \
+              echo "Download finished..."
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: downloader-tmp-vol
+              mountPath: /app/downloader-tmp
+            - name: downloads-vol
+              mountPath: /app/downloads
+            - name: tasks-txt-vol
+              mountPath: /app/tasks
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: downloader-tmp-vol
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/{{ .Release.Name }}/download/temp"
+            type: DirectoryOrCreate
+        - name: downloads-vol
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: tasks-txt-vol
+          emptyDir: {}
+      restartPolicy: OnFailure
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rembgv3-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: rembgv3
+  ports:
+    - name: api
+      port: 7000
+      targetPort: 7000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-ai
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rembgv3
+spec:
+  selector:
+    app: rembgv3
+  ports:
+    - name: api
+      port: 80
+      targetPort: 7000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Release.Name }}-download-models
+  ports:
+    - name: download-status
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
