@@ -1,0 +1,169 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: embeddinggemmav3
+  icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+  description: "EmbeddingGemma-300M text embeddings via IREmbeddingServer (OpenVINO / ONNX)"
+  appid: embeddinggemmav3
+  title: EmbeddingGemma
+  version: '1.0.8'
+  categories:
+    - AI
+sharedEntrances:
+  - name: embeddinggemmav3
+    host: sharedentrances-api
+    port: 0
+    title: EmbeddingGemma API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+entrances:
+  - name: embedclient
+    port: 8090
+    host: download-svc
+    title: EmbeddingGemma
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+    openMethod: window
+    authLevel: internal
+  - name: embedapi
+    port: 8080
+    host: embedserver
+    title: EmbeddingGemma API
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+    invisible: true
+    openMethod: window
+    authLevel: internal
+  - name: console
+    port: 80
+    host: console-svc
+    title: Embedding Console
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+    openMethod: window
+    authLevel: internal
+#   embeddinggemmav3 — embed-server engine Deployment (== appid / Release.Name)
+#   llminit            — llm-init download-only sidecar
+#   embedconsole       — Web Console (nginx + React SPA)
+workloadReplicas:
+  embeddinggemmav3: 1
+  llminit: 1
+  embedconsole: 1
+spec:
+  onlyAdmin: true
+  versionName: '0.1.0'
+  fullDescription: |
+    **EmbeddingGemma-300M** text embedding service powered by IREmbeddingServer. Serves OpenAI-compatible `/v1/embeddings` and `/v1/models` on port 8080.
+
+    **Accelerator modes**
+    | Olares mode | Image | Backend | `EMBED_DEVICE` |
+    |-------------|-------|---------|----------------|
+    | `cpu` | `embed-server:*-ov-intel` | OpenVINO IR | `auto` (iGPU → CPU) |
+    | `nvidia` | `embed-server:*-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
+    | `nvidia-gb10` | `embed-server:*-onnx-cuda13` (unified memory) | ONNX CUDA EP | `cuda` |
+    | `strix-halo` | `embed-server:*-onnx-rocm-amd64` | ONNX ROCm EP | `rocm` |
+
+    CPU mode intentionally uses the **ov-intel** image (not onnx-cpu).
+
+    **Model download**
+    On first start, llm-init downloads both Hugging Face repos into the shared App Common cache (`appCommon/huggingface` → `/cache/hf/hub`):
+    - [wangzhong/embeddinggemma-300m-ov](https://huggingface.co/wangzhong/embeddinggemma-300m-ov) — OpenVINO IR
+    - [wangzhong/embeddinggemma-300m-onnx-export](https://huggingface.co/wangzhong/embeddinggemma-300m-onnx-export) — ONNX
+
+    **Device mounts**
+    - `cpu` (ov-intel): `/dev/dri`, `/sys/class/drm` for Intel iGPU stack
+    - `strix-halo` (ROCm): `/dev/dri`, `/sys/class/drm`, `/dev/kfd`
+    - `nvidia` / `nvidia-gb10`: GPU injection via Olares scheduler
+
+    **Stack**
+    - **embed-server** (`beclab/embed-server`, port 8080): Rust embedding inference.
+    - **llm-init** (`beclab/llm-init`, port 8090): model download + progress UI.
+    - **embedconsole** (`beclab/embed-server:*-ui`, port 80): Web Console — Playground,
+      similarity compare, device diagnostics, and API settings. Browser requests use
+      same-origin `/api`, proxied by nginx to `embedserver:8080` (no direct backend URL
+      in the UI). Open the **Embedding Console** entrance after the engine is healthy;
+      use **embedclient** to monitor model download if the engine is still waiting.
+
+  developer: beclab
+  website: https://huggingface.co/google/embeddinggemma-300m
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Gemma
+      url: https://huggingface.co/google/embeddinggemma-300m
+
+  accelerator:
+    - mode: cpu
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+    - mode: nvidia
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+      requiredGPUMemory: 2048Mi
+      limitedGPUMemory: 4096Mi
+    - mode: nvidia-gb10
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 4Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+    - mode: intel
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  allowMultipleInstall: true
+  LLMGatewaySupported: true
+  shared: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error

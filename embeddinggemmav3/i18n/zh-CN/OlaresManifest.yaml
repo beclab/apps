@@ -1,0 +1,34 @@
+metadata:
+  title: EmbeddingGemma
+  description: "基于 IREmbeddingServer 的 EmbeddingGemma-300M 文本向量服务（OpenVINO / ONNX）"
+
+spec:
+  fullDescription: |
+    **EmbeddingGemma-300M** 文本向量服务，由 IREmbeddingServer 提供支持。在 8080 端口提供兼容 OpenAI 的 `/v1/embeddings` 和 `/v1/models` 接口。
+
+    **加速器模式**
+    | Olares 模式 | 镜像 | 后端 | `EMBED_DEVICE` |
+    |-------------|------|------|----------------|
+    | `cpu` | `embed-server:*-ov-intel` | OpenVINO IR | `auto`（iGPU → CPU） |
+    | `nvidia` | `embed-server:*-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
+    | `nvidia-gb10` | `embed-server:*-onnx-cuda13`（统一内存） | ONNX CUDA EP | `cuda` |
+    | `strix-halo` | `embed-server:*-onnx-rocm-amd64` | ONNX ROCm EP | `rocm` |
+
+    CPU 模式专门使用 **ov-intel** 镜像（而非 onnx-cpu）。
+
+    **模型下载**
+    首次启动时，llm-init 会将两个 Hugging Face 模型仓库下载到共享的 App Common 缓存（`appCommon/huggingface` → `/cache/hf/hub`）：
+    - [wangzhong/embeddinggemma-300m-ov](https://huggingface.co/wangzhong/embeddinggemma-300m-ov) — OpenVINO IR
+    - [wangzhong/embeddinggemma-300m-onnx-export](https://huggingface.co/wangzhong/embeddinggemma-300m-onnx-export) — ONNX
+
+    **设备挂载**
+    - `cpu`（ov-intel）：`/dev/dri`, `/sys/class/drm` 用于 Intel iGPU
+    - `strix-halo`（ROCm）：`/dev/dri`, `/sys/class/drm`, `/dev/kfd`
+    - `nvidia` / `nvidia-gb10`：通过 Olares 调度器注入 GPU
+
+    **技术栈**
+    - **embed-server**（`beclab/embed-server`，端口 8080）：Rust 实现向量推理服务。
+    - **llm-init**（`beclab/llm-init`，端口 8090）：模型下载+进度UI。
+    - **embedconsole**（`beclab/embed-server:*-ui`，端口 80）：Web 控制台 —— Playground、相似度对比、设备诊断与 API 设置。浏览器请求使用同源 `/api`，通过 nginx 转发到 `embedserver:8080`（UI 中无后端直链）。引擎就绪后可通过 **Embedding Console** 入口访问；如果还在等待模型下载，则可使用 **embedclient** 入口监控下载进度。
+ 
+
