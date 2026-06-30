@@ -1,0 +1,253 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    # Speaches Gradio UI entrance (:8080, main)
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 500m;
+
+      proxy_buffering off;
+      proxy_redirect off;
+      proxy_connect_timeout                          60s;
+      proxy_send_timeout                             600s;
+      proxy_read_timeout                             600s;
+      proxy_set_header      Host                      $host;
+      proxy_set_header      X-Forwarded-Host          $http_host;
+      proxy_set_header      X-Forwarded-Proto         $http_x_forwarded_proto;
+      proxy_set_header      X-Real-IP                 $remote_addr;
+      proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+      location /healthz {
+          return 200 'ok';
+          add_header Content-Type text/plain;
+      }
+
+      # Models-ready gate, backed by the llm-init downloader's /readyz (200 only
+      # once ALL sources are fetched). speaches itself binds :8000 immediately so
+      # the pod is Ready and Olares publishes the entrance; this gate is what
+      # decides whether the user sees the app or the download dashboard.
+      #   - /__models_ready : internal subrequest target for auth_request on "/".
+      #   - /__app_ready    : public endpoint the dashboard's reload script polls.
+      location = /__models_ready {
+          internal;
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz;
+          proxy_pass_request_body off;
+          proxy_set_header Content-Length "";
+          proxy_connect_timeout 3s;
+          proxy_read_timeout 5s;
+          proxy_send_timeout 5s;
+      }
+      location = /__app_ready {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz;
+          proxy_connect_timeout 3s;
+          proxy_read_timeout 5s;
+          proxy_send_timeout 5s;
+      }
+
+      location / {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          # Gate on model readiness: auth_request returns 200 (allow -> app) once
+          # the downloader is ready; while it is still downloading /readyz is 503,
+          # which auth_request maps to an error, and we fall back to the dashboard.
+          auth_request /__models_ready;
+          error_page 401 403 500 502 503 504 = @downloader;
+          proxy_pass http://speaches.{{ .Release.Namespace }}.svc.cluster.local:8000;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 600s;
+          proxy_send_timeout 600s;
+          client_max_body_size 500m;
+      }
+
+      # Fallback target: llm-init download-only progress dashboard. We inject a
+      # tiny polling script before </body> so that, once models are ready, the
+      # dashboard page auto-reloads and lands on the real app (download-only mode
+      # has no engine of its own to redirect, so the proxy owns the hand-off).
+      # Accept-Encoding is cleared so the upstream HTML is uncompressed and
+      # sub_filter can rewrite it.
+      location @downloader {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090;
+          proxy_set_header Accept-Encoding "";
+          sub_filter_once on;
+          sub_filter_types text/html;
+          sub_filter '</body>' '<script>(function(){function c(){fetch("/__app_ready",{cache:"no-store"}).then(function(r){if(r.ok){location.reload();}}).catch(function(){});}setInterval(c,3000);})();</script></body>';
+          proxy_connect_timeout 10s;
+          proxy_read_timeout 120s;
+          proxy_send_timeout 120s;
+      }
+    }
+
+    # Terminal entrance (:8081)
+    server {
+      listen 8081;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 10m;
+
+      proxy_connect_timeout                          30s;
+      proxy_send_timeout                             300s;
+      proxy_read_timeout                             300s;
+      proxy_set_header      Host                      $host;
+      proxy_set_header      X-Forwarded-Host          $http_host;
+      proxy_set_header      X-Real-IP                 $remote_addr;
+      proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+      location / {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://terminal.{{ .Release.Namespace }}.svc.cluster.local:80;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 300s;
+          proxy_send_timeout 300s;
+      }
+    }
+
+    # Speaches API entrance (:8082)
+    server {
+      listen 8082;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 500m;
+
+      proxy_buffering off;
+      proxy_redirect off;
+      proxy_connect_timeout                          60s;
+      proxy_send_timeout                             600s;
+      proxy_read_timeout                             600s;
+      proxy_set_header      Host                      $host;
+      proxy_set_header      X-Forwarded-Host          $http_host;
+      proxy_set_header      X-Forwarded-Proto         $http_x_forwarded_proto;
+      proxy_set_header      X-Real-IP                 $remote_addr;
+      proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+
+      location /healthz {
+          return 200 'ok';
+          add_header Content-Type text/plain;
+      }
+
+      location / {
+          resolver coredns.kube-system.svc.cluster.local valid=10s;
+          proxy_pass http://speaches.{{ .Release.Namespace }}.svc.cluster.local:8000;
+          proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+          proxy_connect_timeout 60s;
+          proxy_read_timeout 600s;
+          proxy_send_timeout 600s;
+          client_max_body_size 500m;
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: speachesingress
+  name: speachesingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.speachesingress.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: speachesingress
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: speachesingress
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+      containers:
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
+              protocol: TCP
+            - containerPort: 8082
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: speachesingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: speachesingress
+  ports:
+    - name: ui
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: terminal
+      protocol: TCP
+      port: 8081
+      targetPort: 8081
+    - name: api
+      protocol: TCP
+      port: 8082
+      targetPort: 8082
