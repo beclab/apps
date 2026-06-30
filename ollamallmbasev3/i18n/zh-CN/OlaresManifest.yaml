@@ -1,0 +1,38 @@
+metadata:
+  description: "通用 Ollama 引擎基座。在安装时通过环境变量选择任意 Ollama 库模型。"
+  title: Ollama 引擎基座
+
+spec:
+  fullDescription: |
+    **重要提示**  
+    此应用是一个模板，不能单独使用。请按下方环境变量设置模型后，方可使用本应用提供模型服务。
+
+    **环境变量设置指南**
+    - `MODEL_SOURCE`：`ollama://<模型>:<标签>`。Ollama 模型库下载源，例如 `ollama://qwen3.5:2b` 或 `ollama://gemma3:27b`。可在 https://ollama.com/library 浏览模型。
+    - `MODEL_NAME`：`<模型>:<标签>`。模型名称，取 `MODEL_SOURCE` 中 `ollama://` 之后的字符串，例如 `qwen3.5:2b`。此项也作为 OpenAI 别名。
+    - `MODEL_MODE`：`chat` 或 `embedding`。对话模型选 `chat`，向量模型选 `embedding`。
+    - `MODEL_SUPPORTS`：模型能力选项（Vision / Tools / Thinking / None）。请选择您的模型支持的功能，可在 ollama.com/library 查看模型能力。必填。
+    - `ENGINE_ARGS`：`OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1`。Ollama 守护进程额外参数，多个 `key=value` 之间用空格分隔。若未设置 `OLLAMA_KEEP_ALIVE`，图表默认 `-1`（模型常驻显存）。详见 https://github.com/ollama/ollama/blob/main/docs/faq.mdx。
+    - `LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`。llm-init 容器的日志等级。
+    - `OLLAMA_REQUIRED_GPU_MEMORY`：`8Gi`、`8192` 或 `8192Mi`。模型所需显存，CPU 模式下请设置为 `0`。NVIDIA 下设置 `nvidia.com/gpumem`（MiB），Spark 下设置 pod 显存。
+
+    **工作流程说明**
+    首先，`llm-init` 从 Ollama 模型库拉取并准备模型，然后 Ollama 守护进程在模型准备好后启动服务。这两个部分独立运行但共享文件与进度信息。
+
+    **技术栈说明**
+    - **Ollama 守护进程**（11434 端口）：拉取并服务模型
+    - **llm-init**（8090 端口）：驱动模型拉取、展示进度，并通过 OpenAI API 代理到 Ollama
+
+    **加速器模式**
+    | 模式           | 设备             | 说明                                                         |
+    |----------------|------------------|--------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)       | 需设置 `OLLAMA_REQUIRED_GPU_MEMORY`；Ollama 默认使用 GPU     |
+    | `nvidia-gb10`  | GPU (Spark)      | 类似上方，但显存由 pod 管理                                  |
+    | `cpu`          | CPU              | 图表自动注入 `OLLAMA_NUM_GPU=0`，禁用 GPU                    |
+
+    **模型存储**
+    所有拉取的模型存储在共享目录 `appCommon/ollama`。所有 Ollama 应用共用此目录，按 digest 去重，避免重复占用存储。
+
+    **资源建议**
+    - CPU、内存和 GPU 数量随图表自动配置，磁盘配额为固定
+    - 部署大模型（如 gemma3:27b）时，可在 `ENGINE_ARGS` 中设置 `OLLAMA_CONTEXT_LENGTH` 和 `OLLAMA_KV_CACHE_TYPE` 以平衡上下文长度与显存占用

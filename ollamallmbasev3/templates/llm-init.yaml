@@ -1,0 +1,161 @@
+{{- $ollamaclientDomainENV := split "," .Values.domain.ollamaclient -}}
+{{- $ollamaclientDomain := index $ollamaclientDomainENV "_0" -}}
+{{- /* Model identity + source are clone-configurable via olaresEnv. This
+       base currently supports the ollama:// source shape only
+       (MODEL_SOURCE=ollama://<library-tag>); hf:// GGUF support was
+       intentionally removed for now. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "" -}}
+{{- /* MODEL_SUPPORTS is a multi-select of coarse capability GROUPS (vision /
+       tools / thinking / embedding). Expand each group one-to-many into the
+       supports_* keys llm-init validates against its gateway AllSupports mirror,
+       then re-join into the CSV the container env expects. "none" is the
+       required-field fallback (no extra capabilities); legacy "embedding"
+       token is kept as an alias. Unknown tokens pass through verbatim so a raw supports_* key still
+       works. */ -}}
+{{- $supportsGroups := dict
+      "vision" "supports_vision"
+      "tools" "supports_function_calling,supports_parallel_function_calling,supports_tool_choice"
+      "thinking" "supports_reasoning,supports_reasoning_effort"
+      "none" ""
+      "embedding" "" -}}
+{{- $modelSupports := $oe.MODEL_SUPPORTS | default "" -}}
+{{- $expandedSupports := list -}}
+{{- range $tok := splitList "," $modelSupports -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- if hasKey $supportsGroups $tok -}}
+{{- $mapped := index $supportsGroups $tok -}}
+{{- if $mapped -}}
+{{- $expandedSupports = append $expandedSupports $mapped -}}
+{{- end -}}
+{{- else -}}
+{{- $expandedSupports = append $expandedSupports $tok -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $modelSupports = join "," $expandedSupports -}}
+{{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $isCpuMode := eq $gpuType "cpu" -}}
+{{- /* ENGINE_ARGS is mirrored onto llm-init so /api/config + diagnostics
+       reflect the same OLLAMA_* tuning the ollama.sh wrapper exports. */ -}}
+{{- $engineArgs := include "ollamallmbasev3.engineArgs" (dict "Args" ($oe.ENGINE_ARGS | default "") "IsCpu" $isCpuMode) -}}
+---
+# llm-init Pod (no GPU). Talks to the ollama daemon via the "ollama"
+# Service on :11434 (defined in templates/ollama.yaml). llm-init derives
+# that URL from ENGINE_KIND, so the Service name must be "ollama".
+# Exposes the OpenAI-compatible /v1/*
+# surface and the unified /api/progress + /healthz endpoints on :8090.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Static name (llminit) — engine Deployment uses {{ .Release.Name }} for
+  # allowMultipleInstall. Label stays io.kompose.service: llm-init.
+  name: llminit
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: llm-init
+          image: docker.io/beclab/llm-init:v1.2.7
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENGINE_KIND
+              value: ollama
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+{{- if $modelSupports }}
+            - name: MODEL_SUPPORTS
+              value: "{{ $modelSupports }}"
+{{- end }}
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: "{{ $logLevel }}"
+            - name: LOG_FORMAT
+              value: json
+            - name: APP_URL
+              value: "https://{{ $ollamaclientDomain }}"
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # model pull needs headroom; 256Mi can get OOMKilled mid-pull
+              # -> pod restart -> state machine wedges. 1Gi is safe.
+              cpu: "1"
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+  type: ClusterIP
