@@ -1,0 +1,258 @@
+{{- /* whisperX-FastAPI engine (official upstream image, mirrored to beclab).
+       Big models (faster-whisper + pyannote diarization/segmentation) are HF
+       repos, fetched by the llm-init download-only Deployment into the shared
+       cross-app HF Hub cache (App Common, /cache/hf/hub); the engine reads them
+       via HF_HUB_CACHE and gates on /readyz. The English alignment weight is a
+       torchaudio (download.pytorch.org) asset whisperX pulls lazily on first
+       word-level alignment; /root/.cache is a persistent hostPath so it is
+       downloaded once and cached (nltk + VAD are baked into the image). */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperservice
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.whisperservicev3.replicaCount }}
+  selector:
+    matchLabels:
+      app: whisperservice
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisperservice
+    spec:
+      containers:
+        - name: whisperservice
+          image: "docker.io/beclab/pavelzbornik-whisperx-fastapi:0.8.0"
+          workingDir: /app
+          ports:
+            - containerPort: 8000
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
+            - name: HF_TOKEN
+              value: "{{ .Values.olaresEnv.HF_TOKEN }}"
+            # Read the big HF models from the shared cross-app cache populated by
+            # the llm-init downloader (faster-whisper + pyannote).
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: TRANSFORMERS_CACHE
+              value: /cache/hf/hub
+          envFrom:
+            - configMapRef:
+                name: whisperapi-config
+          command:
+            - /bin/sh
+            - "-c"
+          args:
+            - |
+              set -e
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+              echo "[wait] Waiting for llm-init downloader (/readyz)..."
+              until curl -sf "$READYZ" >/dev/null 2>&1; do
+                echo "[wait] models not ready yet..."
+                sleep 10
+              done
+              echo "[wait] models ready; starting whisperX-FastAPI."
+              exec uv run --no-sync gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 0 app.main:app -k uvicorn.workers.UvicornWorker
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 18Gi
+          volumeMounts:
+            # Shared cross-app HF Hub cache (App Common), populated by llm-init.
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            # Persistent app-local cache for the lazily-downloaded torchaudio
+            # English alignment weight (and any other torch hub assets).
+            - name: cache
+              mountPath: /root/.cache
+            - name: data
+              mountPath: /tmp
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: cache
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/cache"
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+
+---
+{{/* llm-init in download-only mode (ENGINE_KIND empty): pure HF downloader.
+       Comma multi-source — first segment ROLE=main, rest ROLE=extra. All hf://.
+       faster-whisper-large-v3 (ASR) + pyannote diarization/segmentation (gated;
+       needs the admin HF token to have accepted their terms). */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisperservicev3download
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperservicev3download
+spec:
+  replicas: {{ .Values.workloads.whisperservicev3download.replicaCount }}
+  selector:
+    matchLabels:
+      app: whisperservicev3download
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisperservicev3download
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          image: docker.io/beclab/llm-init:v1.2.4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENGINE_KIND
+              value: ""
+            # Placeholders (llm-init v1.2.4 still requires them in download-only
+            # mode); the repos come from MODEL_SOURCE.
+            - name: MODEL_NAME
+              value: "Systran/faster-whisper-large-v3"
+            - name: MODEL_MODE
+              value: "chat"
+            # First = ROLE=main, rest = ROLE=extra. All hf://.
+            # Chinese word-level alignment (whisperX default for language=zh).
+            - name: MODEL_SOURCE
+              value: "hf://Systran/faster-whisper-large-v3,hf://pyannote/speaker-diarization-3.1,hf://pyannote/segmentation-3.0,hf://jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+            - name: HF_ENDPOINT
+              value: "{{ $oe.HF_ENDPOINT }}"
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 4Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisperservice-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: whisperservice
+  ports:
+    - name: api
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: whisperservice
+  ports:
+    - name: api
+      port: 80
+      targetPort: 8000
+  type: ClusterIP
+---
+# Internal progress / health surface (no entrance). The engine waits on /readyz
+# here; the nginx entrance uses this Service as the download-dashboard backup
+# upstream until the engine comes up.
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperservicev3download
+spec:
+  selector:
+    app: whisperservicev3download
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP

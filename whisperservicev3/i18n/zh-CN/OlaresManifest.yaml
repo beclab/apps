@@ -1,0 +1,50 @@
+metadata:
+  title: Whisper API
+  description: 基于 WhisperX 的 FastAPI 服务
+spec:
+  fullDescription: |
+    **使用须知**
+    该应用为共享应用，在 Olares 内部仅会部署一个服务。每个用户可以安装一个桌面入口进行访问或使用共享入口进行 API 调用。
+
+    **前置条件**
+    安装前请配置 **HF_TOKEN**（来自 Olares 的 Hugging Face Token）和 **HF_ENDPOINT**。安装管理员的 Token 必须在 Hugging Face 上**已接受以下受限仓库的使用条款**：
+    - `pyannote/speaker-diarization-3.1`
+    - `pyannote/segmentation-3.0`
+
+    安装时 llm-init 会将以下模型下载到共享 HF 缓存：
+    - `Systran/faster-whisper-large-v3`（ASR，默认）
+    - `pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`（说话人分离）
+    - `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn`（中文逐词对齐）
+
+    **性能说明**
+    安装后首次转写可能较慢（模型载入 GPU），后续请求会更快。
+
+    **应用概览**
+    whisperX API 是一款用于增强和分析音频内容的工具。该 API 提供了一套用于处理音频和视频文件的服务，包括转录、对齐、说话人分割以及将转录内容与二值化结果合并。
+
+    可用服务
+    **语音转文本 (/speech-to-text)**
+    - 上传音频/视频文件进行转录
+    - 支持多种语言和 Whisper 模型
+
+    **语音转文本 URL (/speech-to-text-url)**
+    - 从 URL 转录音频/视频
+    - 与直接上传功能相同
+
+    **单个服务：**
+    - 转录 (/service/transcribe)：将语音转换为文本
+    - 对齐 (/service/align)：将转录文本与音频对齐
+    - 分割 (/service/diarize)：说话人分割
+    - 合并 (/service/combine)：将转录文本与区分大小写合并
+
+    **任务管理：**
+    - 获取所有任务 (/task/all)
+    - 获取任务状态 (/task/{identifier})
+
+    **健康检查端点：**
+    - 基本健康检查 (/health)：简单的服务状态检查
+    - 活跃度探测 (/health/live)：验证应用程序是否正在运行
+    - 就绪度探测 (/health/ready)：检查应用程序是否已准备好接受请求（包括数据库连接检查）
+
+  upgradeDescription: |
+    将 Whisper API 迁移到 apiVersion v3 共享应用模式，并将模型下载切换为共享的 llm-init 下载器（whisperservicev2 → whisperservicev3）。改用上游官方镜像 `beclab/pavelzbornik-whisperx-fastapi:0.8.0`（nltk 与 VAD 已内置镜像）。以 `llm-init:v1.2.4` 下载专用 Deployment（`whisperservicev3download`）替换原有的 CDN tar.zst `downloader-init`，从 HF 拉取 `Systran/faster-whisper-large-v3`、`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0` 到跨应用共享 HF 缓存（App Common，`/cache/hf/hub`）；引擎经 `HF_HUB_CACHE` 读取并等待下载器 `/readyz`。英文对齐的 torchaudio 权重在首次逐词对齐时懒加载，缓存到持久化的 `/root/.cache`。将子 chart 扁平化为单一 chart（引擎以发布名命名、nginx 入口 `whisperserviceclient`），GPU 需求移入 accelerator 模式列表，新增 `appCommon` 与 `workloadReplicas`。说话人分离（pyannote）为受限仓库——管理员的 HF token 需已接受其条款。
