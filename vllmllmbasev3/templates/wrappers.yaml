@@ -1,0 +1,71 @@
+# Engine wrapper mounted into the vLLM container at /llm-init/wrappers. Helpers
+# inlined from llm-init v1.1.0 common.sh + vllm.sh (single engine). llm-init
+# downloads the model and writes model_download_finish under /run/llm-init;
+# the wrapper waits on it, then loads --model from MODEL_NAME (owner/repo).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+data:
+  vllm.sh: |
+    #!/bin/sh
+    # Waits for llm-init's sentinel, then starts vLLM's OpenAI server with
+    # --model "$MODEL_NAME" (HF owner/repo). ENGINE_ARGS is word-split and
+    # appended after the baseline flags, e.g. "--max-model-len 8192 --gpu-memory-utilization 0.9".
+    # Do NOT pass --disable-log-stats (llm-init's /api/diag/gpu needs /metrics).
+    set -eu
+
+    ENGINE=vllm
+    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
+    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
+    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+
+    looks_like_hf_repo_id() {
+        s=$1
+        case "$s" in
+            ""|/*|./*|*://*) return 1 ;;
+        esac
+        case "$s" in
+            */*)
+                rest=${s#*/}
+                case "$rest" in
+                    */*|*:*) return 1 ;;
+                esac
+                return 0
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # Block until the sentinel appears (or WAIT_TIMEOUT elapses).
+    elapsed=0
+    while [ ! -f "$SENTINEL" ]; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
+            exit 1
+        fi
+        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL found after ${elapsed}s"
+
+    if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
+        log "MODEL_NAME must be owner/repo for --model (got ${MODEL_NAME:-<empty>})"
+        exit 1
+    fi
+
+    log "starting vLLM with model=$MODEL_NAME args=${ENGINE_ARGS:-<empty>}"
+
+    # shellcheck disable=SC2086  # intentional word-splitting of ENGINE_ARGS
+    exec python3 -m vllm.entrypoints.openai.api_server \
+        --model "$MODEL_NAME" \
+        --served-model-name "$MODEL_NAME" \
+        --host 0.0.0.0 \
+        --port "${VLLM_PORT:-8000}" \
+        ${ENGINE_ARGS:-} \
+        "$@"
