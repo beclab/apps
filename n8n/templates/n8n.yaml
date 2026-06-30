@@ -10,7 +10,7 @@ spec:
   ports:
     - protocol: TCP
       port: 80
-      targetPort: 80
+      targetPort: 5678
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -31,6 +31,25 @@ spec:
       labels:
         app: n8n
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-chown-data
+          image: beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /data
+          volumeMounts:
+            - mountPath: /data
+              name: n8n-config
       volumes:
         - name: n8n-config
           hostPath:
@@ -46,22 +65,21 @@ spec:
             {{- end }}
       containers:
         - name: n8n
-          image: "docker.io/beclab/n8nio-n8n:2.20.9"
+          image: "docker.io/n8nio/n8n:2.27.5"
+          securityContext:
+            runAsNonRoot: true
           resources:
             requests:
               cpu: 500m
-              memory: 1Gi
+              memory: 2Gi
             limits:
-              cpu: 2000m
-              memory: 4Gi
+              cpu: 3000m
+              memory: 6Gi
           ports:
-            - containerPort: 80
+            - containerPort: 5678
           envFrom:
             - configMapRef:
                 name: n8n-config
-          securityContext:
-            runAsUser: 0
-            runAsNonRoot: false
           volumeMounts:
-            - mountPath: /root/.n8n
+            - mountPath: /home/node/.n8n
               name: n8n-config
