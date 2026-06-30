@@ -1,0 +1,187 @@
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $is50Series := $gpuInfo.is50Series -}}
+{{- $paddleocrImage := "" -}}
+{{- $PUOptions := .Values.olaresEnv.DEVICE_TYPE -}}
+{{- if eq $PUOptions "gpu" -}}
+  {{- if eq $is50Series "true" -}}
+    {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-nividia-gpu-sm120-offline:0.0.1" -}}
+  {{- else -}}
+    {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-nividia-gpu-offline:0.0.1" -}}
+  {{- end -}}
+{{- else -}}
+  {{- $paddleocrImage = "docker.io/beclab/bleachzou-paddleocr3.4-cpu-offline:0.0.1" -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pipeline-config
+  namespace: {{ .Release.Namespace }}
+data:
+  pipeline_config_fastdeploy.yaml: |
+    pipeline_name: PaddleOCR-VL-1.5
+
+    batch_size: 1
+
+    use_queues: True
+
+    use_doc_preprocessor: False
+    use_layout_detection: True
+    use_chart_recognition: False
+    use_seal_recognition: False
+    format_block_content: False
+    merge_layout_blocks: True
+    markdown_ignore_labels:
+      - number
+      - footnote
+      - header
+      - header_image
+      - footer
+      - footer_image
+      - aside_text
+
+    SubModules:
+      LayoutDetection:
+        module_name: layout_detection
+        model_name: PP-DocLayoutV3
+        model_dir: null
+        batch_size: 8
+        threshold: 0.1  # 进一步降低阈值以检测更多文本区域（从0.3降到0.1）
+        layout_nms: True
+        layout_unclip_ratio: [1.2, 1.2]  # 扩大检测范围，从 [1.0, 1.0] 增加到 [1.2, 1.2] 
+        layout_merge_bboxes_mode: 
+          0: "union" # abstract
+          1: "union" # algorithm
+          2: "union" # aside_text
+          3: "large" # chart
+          4: "union" # content
+          5: "large" # display_formula
+          6: "large" # doc_title
+          7: "union" # figure_title
+          8: "union" # footer
+          9: "union" # footer
+          10: "union" # footnote
+          11: "union" # formula_number
+          12: "union" # header
+          13: "union" # header
+          14: "union" # image
+          15: "large" # inline_formula
+          16: "union" # number
+          17: "large" # paragraph_title
+          18: "union" # reference
+          19: "union" # reference_content
+          20: "union" # seal
+          21: "union" # table
+          22: "union" # text
+          23: "union" # text
+          24: "union" # vision_footnote
+      VLRecognition:
+        module_name: vl_recognition
+        model_name: PaddleOCR-VL-1.5-0.9B
+        model_dir: null
+        batch_size: 512
+
+
+    SubPipelines:
+      DocPreprocessor:
+        pipeline_name: doc_preprocessor
+        batch_size: 8
+        use_doc_orientation_classify: True
+        use_doc_unwarping: True
+        SubModules:
+          DocOrientationClassify:
+            module_name: doc_text_orientation
+            model_name: PP-LCNet_x1_0_doc_ori
+            model_dir: null
+            batch_size: 8
+          DocUnwarping:
+            module_name: image_unwarping
+            model_name: UVDoc
+            model_dir: null
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paddleocr
+  annotations:
+    {{- if eq $PUOptions "gpu" }}
+    applications.app.bytetrade.io/gpu-inject: "true"
+    {{- end }}
+spec:
+  replicas: {{ .Values.workloads.paddleocrv3.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: paddleocr
+  template:
+    metadata:
+      labels:
+        io.kompose.service: paddleocr
+    spec:
+      containers:
+        - name: paddleocr
+          image: {{ $paddleocrImage }}
+          command:
+            - /usr/local/bin/paddlex
+            - --serve
+            - --pipeline
+            - /home/paddleocr/pipeline_config_fastdeploy.yaml
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,graphics,utility,video,display"
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: pipeline-config
+              mountPath: /home/paddleocr/pipeline_config_fastdeploy.yaml
+              subPath: pipeline_config_fastdeploy.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 2Gi
+            limits:
+              cpu: "2000m"
+              memory: 9Gi
+      volumes:
+        - name: pipeline-config
+          configMap:
+            name: pipeline-config
+            defaultMode: 0444
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paddleocr-api-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paddleocr
+spec:
+  selector:
+    io.kompose.service: paddleocr
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-paddleocr
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paddleocr
+spec:
+  selector:
+    io.kompose.service: paddleocr
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
