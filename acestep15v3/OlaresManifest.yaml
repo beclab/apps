@@ -1,0 +1,162 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: acestep15v3
+  description: The most powerful local music generation model that outperforms most commercial alternatives
+  icon: https://app.cdn.olares.com/appstore/acestep/icon2.png
+  appid: acestep15v3
+  version: '1.1.7'
+  title: ACE-Step 1.5
+  categories:
+    - Creativity
+    - AI
+
+entrances:
+  - name: acestep15
+    port: 8080
+    host: acestep-web-svc
+    title: ACE-Step 1.5
+    icon: https://app.cdn.olares.com/appstore/acestep/icon2.png
+    authLevel: internal
+    openMethod: window
+
+# Declares every workload's replica count (v3 schema). Keys MUST match the
+# rendered Deployment metadata.name and values.yaml workloads.<name>:
+#   acestep15v3        — nginx entrance Deployment (must match metadata.name / appid)
+#   acestepserver      — ACE-Step 1.5 gradio engine Deployment
+#   acestepdownloader  — llm-init download-only model fetcher
+workloadReplicas:
+  acestep15v3: 1
+  acestepserver: 1
+  acestepdownloader: 1
+
+permission:
+  appData: true
+  appCache: true   # llm-init sentinel/run-state under appCache/llm-init-run/<release>
+  # ACE-Step HF models live in the shared cross-app App Common store
+  # (appCommon/huggingface, mounted at the fixed /cache/hf/hub container path).
+  appCommon: true
+  externalData: true
+  userData:
+    - Home
+
+spec:
+  versionName: '0.1.8'
+  featuredImage: https://app.cdn.olares.com/appstore/acestep/1.webp
+  promoteImage:
+    - https://app.cdn.olares.com/appstore/acestep/1.webp
+    - https://app.cdn.olares.com/appstore/acestep/2.webp
+    - https://app.cdn.olares.com/appstore/acestep/3.webp
+
+  fullDescription: |
+    We present ACE-Step v1.5, a highly efficient open-source music foundation model that brings commercial-grade generation to consumer hardware. On commonly used evaluation metrics, ACE-Step v1.5 achieves quality beyond most commercial music models while remaining extremely fast—under 2 seconds per full song on an A100 and under 10 seconds on an RTX 3090. The model runs locally with less than 4GB of VRAM, and supports lightweight personalization: users can train a LoRA from just a few songs to capture their own style.
+
+    **Features**
+    Performance
+    - Ultra-Fast Generation: Under 2s per full song on A100, under 10s on RTX 3090 (0.5s to 10s on A100 depending on think mode & diffusion steps)
+    - Flexible Duration: Supports 10 seconds to 10 minutes (600s) audio generation
+    - Batch Generation: Generate up to 8 songs simultaneously
+
+    Generation Quality
+    - Commercial-Grade Output: Quality beyond most commercial music models (between Suno v4.5 and Suno v5)
+    - Rich Style Support: 1000+ instruments and styles with fine-grained timbre description
+    - Multi-Language Lyrics: Supports 50+ languages with lyrics prompt for structure & style control
+
+    Versatility & Control
+    - Reference Audio Input: Use reference audio to guide generation style
+    - Cover Generation: Create covers from existing audio
+    - Repaint & Edit: Selective local audio editing and regeneration
+    - Track Separation: Separate audio into individual stems
+    - Multi-Track Generation: Add layers like Suno Studio's "Add Layer" feature
+    - Vocal2BGM: Auto-generate accompaniment for vocal tracks
+    - Metadata Control: Control duration, BPM, key/scale, time signature
+    - Simple Mode: Generate full songs from simple descriptions
+    - Query Rewriting: Auto LM expansion of tags and lyrics
+    - Audio Understanding: Extract BPM, key/scale, time signature & caption from audio
+    - LRC Generation: Auto-generate lyric timestamps for generated music
+    - LoRA Training: One-click annotation & training in Gradio. 8 songs, 1 hour on 3090 (12GB VRAM)
+    - Quality Scoring: Automatic quality assessment for generated audio
+
+    **ACE-Step 1.5 XL (4B DiT)**
+    - acestep-v15-xl-base, acestep-v15-xl-sft, acestep-v15-xl-turbo — higher audio quality with 4B-parameter DiT decoder
+    - Requires ≥12GB VRAM; all LM models remain compatible
+
+  upgradeDescription: |
+    Migrated ACE-Step 1.5 to apiVersion v3 shared app pattern (acestep15v2 → acestep15v3).
+
+    **What's Changed**
+
+    - **Download architecture**: replaced the bespoke downloader image + Job with
+      the shared `llm-init` download-only Deployment (`acestepdownloader`),
+      matching speachesv3. Models now land in the shared cross-app HF cache
+      (App Common) and the engine gates on the downloader's `/readyz` instead of
+      per-repo `.done` sentinels. `/app/checkpoints` is now an ephemeral symlink
+      farm over the cached snapshots, so model bytes are de-duplicated and reused
+      across apps. Declared `permission.appCommon: true` for the shared HF store.
+      Downloader image bumped to `llm-init:v1.2.4` (default LFS; chart no longer
+      sets `HF_HUB_DISABLE_XET`).
+    - **Entrance routing**: rewrote nginx to match speachesv3 — llm-init API paths
+      (`/api/progress`, `/healthz`, …) pin to download-svc; `/` gates on model
+      download + Gradio readiness and auto-reloads into the app via `/__app_ready`.
+    - **Resources**: raised nvidia `limitedMemory` to 34Gi so the llm-init downloader
+      (4Gi) + engine (29Gi) + entrance (256Mi) limits sum within the envelope.
+    - **Multi-install**: the acestepweb Deployment now uses {{ .Release.Name }} so allowMultipleInstall installs don't collide on workload names.
+    - **Accelerator**: declared the GPU requirement via the accelerator modes list (nvidia only; amd64-only app).
+
+    - **Architecture**: flattened the acestep15v2/acestep15v2server sub-charts
+      into a single chart; renamed the nginx entrance Deployment to `acestep15v3`
+      so it matches appid for v3 workload verification. Cross-namespace backend
+      references now resolve within the release namespace.
+    - **Scaling**: `workloadReplicas` declares replica counts for the
+      `acestep15v3` entrance and `acestepserver` gradio engine workloads.
+      The model-download Job carries no replicas.
+    - **Runtime**: manual service initialization in Gradio Settings (disabled
+      `--service_mode` / `--init_service` auto-load); nvidia `requiredGPUMemory`
+      set to 12Gi for acestep-v15-xl-sft + acestep-5Hz-lm-4B.
+
+  developer: ace-step
+  website: https://acemusic.ai/
+  sourceCode: https://github.com/ace-step/ACE-Step-1.5
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  doc: https://github.com/ace-step/ACE-Step-1.5
+  license:
+    - text: MIT License
+      url: https://github.com/ace-step/ACE-Step-1.5?tab=MIT-1-ov-file
+
+  accelerator:
+  # nvidia — discrete GPU; GPU memory via nvidia.com/gpumem. amd64 only.
+  - mode: nvidia
+    requiredCpu: "1"
+    limitedCpu: "7"
+    requiredMemory: 13Gi
+    limitedMemory: 34Gi
+    requiredDisk: 36Gi
+    limitedDisk: 100Gi
+    requiredGPUMemory: 12Gi
+    limitedGPUMemory: 24Gi
+
+  supportArch:
+    - amd64
+  onlyAdmin: true
+
+envs:
+  - envName: HF_ENDPOINT
+    required: true
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+
+options:
+  shared: true
+  apiTimeout: 0
+  conflicts:
+    - name: acestep15v2
+      type: application
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
