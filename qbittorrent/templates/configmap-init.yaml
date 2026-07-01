@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qbittorrent-init
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    homeDir="/olares/userdata/home"
+    appDataDir="/appData"
+    confFile="$appDataDir/qBittorrent.conf"
+    defaultConf="/chart-defaults/qBittorrent.conf"
+
+    mkdir -p "$homeDir/Downloads/qBittorrent"
+    chown -R 1000:1000 "$homeDir" "$appDataDir"
+
+    if [ ! -f "$confFile" ]; then
+      echo "First-time setup: copying default qBittorrent.conf into appData."
+      cp "$defaultConf" "$confFile"
+    else
+      echo "Existing qBittorrent.conf found in appData."
+    fi
+  # Temporary migration helper — remove once all users upgraded past chart <= 1.0.20.
+  init-migrate-webui-auth.sh: |
+    #!/bin/sh
+    set -e
+
+    # Up to chart 1.0.20 an nginx sidecar forwarded 8001 -> 127.0.0.1:8080, so
+    # qBittorrent saw loopback and LocalHostAuth=false was enough to skip the login page.
+    # From 1.0.21 the Olares entrance reaches the pod directly; qBittorrent 5.x only
+    # bypasses auth for loopback or AuthSubnetWhitelist IPs (WebUI\Authentication is
+    # ignored). Only patch legacy configs that lack working bypass in [Preferences]
+    # and have not opted into WebUI login (credentials or explicit disable).
+    confFile="/appData/qBittorrent.conf"
+    [ -f "$confFile" ] || exit 0
+
+    need_add="$(awk '
+      BEGIN { in_prefs=0 }
+      function pref_val(line, key) {
+        if (substr(line, 1, length(key)) == key)
+          return substr(line, length(key) + 1)
+        return ""
+      }
+      function auth_subnet_enabled(line,    v) {
+        v = pref_val(line, "WebUI\\AuthSubnetWhitelistEnabled=")
+        if (v == "") v = pref_val(line, "WebUI/AuthSubnetWhitelistEnabled=")
+        if (v == "true") return 1
+        if (v == "false") return 2
+        return 0
+      }
+      function auth_subnet_list(line,    v) {
+        v = pref_val(line, "WebUI\\AuthSubnetWhitelist=")
+        if (v == "") v = pref_val(line, "WebUI/AuthSubnetWhitelist=")
+        return (v != "")
+      }
+      /^\[Preferences\]/ { in_prefs=1; next }
+      /^\[/ { in_prefs=0 }
+      in_prefs {
+        s = auth_subnet_enabled($0)
+        if (s == 1) has_bypass=1
+        if (s == 2) wants_login=1
+        if (auth_subnet_list($0)) has_bypass=1
+        if (pref_val($0, "WebUI\\LocalHostAuth=") == "true")
+          wants_login=1
+        if (pref_val($0, "WebUI\\Username=") != "")
+          has_credentials=1
+        if (pref_val($0, "WebUI\\Password_PBKDF2=") != "")
+          has_credentials=1
+      }
+      END {
+        if (has_bypass || wants_login || has_credentials) print "0"
+        else print "1"
+      }
+    ' "$confFile")"
+
+    if [ "$need_add" != "1" ]; then
+      echo "WebUI auth bypass: user config respected, skipping migration."
+      exit 0
+    fi
+
+    tmp="$(mktemp)"
+    awk '
+      BEGIN { in_prefs=0; inserted=0; seen_prefs=0 }
+      /^\[/ {
+        if (in_prefs && !inserted) {
+          print "WebUI\\AuthSubnetWhitelistEnabled=true"
+          print "WebUI\\AuthSubnetWhitelist=0.0.0.0/0, ::/0"
+          inserted=1
+        }
+        in_prefs = ($0 == "[Preferences]")
+        if (in_prefs) seen_prefs=1
+        print
+        next
+      }
+      { print }
+      END {
+        if (!inserted) {
+          if (!seen_prefs) print "[Preferences]"
+          print "WebUI\\AuthSubnetWhitelistEnabled=true"
+          print "WebUI\\AuthSubnetWhitelist=0.0.0.0/0, ::/0"
+        }
+      }
+    ' "$confFile" > "$tmp"
+    mv "$tmp" "$confFile"
+    echo "WebUI auth bypass settings added under [Preferences]."
