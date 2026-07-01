@@ -1,0 +1,234 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: llamacppllmbasev3
+  icon: https://app.cdn.olares.com/appstore/llamacpp/icon2.png
+  description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
+  appid: llamacppllmbasev3
+  title: llama.cpp Engine Base
+  version: '1.2.19'
+  categories:
+    - AI
+sharedEntrances:
+  - name: llamacppllmbasev3
+    host: sharedentrances-api
+    port: 0
+    title: llama.cpp API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/llamacpp/icon2.png
+entrances:
+  - name: llamacppclient
+    port: 8090
+    host: download-svc
+    title: llama.cpp API
+    icon: https://app.cdn.olares.com/appstore/llamacpp/icon2.png
+    openMethod: window
+    authLevel: internal
+#   llamacppllmbasev3 — engine Deployment (== appid / Release.Name)
+#   llminit           — llm-init / entrance Deployment
+workloadReplicas:
+  llamacppllmbasev3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'b9853'
+  upgradeDescription: |
+    Bump llama.cpp engine to server-cuda12-b9853 and llm-init to v1.2.8.
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `hf://<repo> --include <file>.gguf`. The source to download your model. For models with split files, only include the first part; for vision-language models, add the projector with a comma, like `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`.
+    - `MODEL_NAME`: `owner/repo:quant`. The name of your model in `owner/repo:quant` format, for example `unsloth/Qwen3.5-2B-GGUF:UD-Q4_K_XL`. This is also used as the OpenAI alias.
+    - `MODEL_MODE`: `chat` or `embedding`. If you pick embedding, the chart adds `--embedding` automatically.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. This is required.
+    - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`; for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level: choose from `debug`, `info`, `warn`, or `error`.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed (for GPU only; ignored on CPU). Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+    
+    **How It Works**
+    First, `llm-init` downloads your model and gets it ready, then `llama.cpp` starts serving the model when it’s ready. These two parts run separately but share files and progress info.
+
+    **Stack**
+    - **llama.cpp**: Runs the model and serves API requests (port 8081)
+    - **llm-init**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`.
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                            |
+    |----------------|-------------------|---------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `LLAMACPP_REQUIRED_GPU_MEMORY`; use `-ngl all` for full GPU use |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                        |
+    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU                                         |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - To use the GPU, set `-ngl all` in `ENGINE_ARGS`. Without it, the model will run on CPU.
+
+  developer: ggml-org
+  website: https://llama.app/
+  sourceCode: https://github.com/ggml-org/llama.cpp
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: MIT
+      url: https://github.com/ggml-org/llama.cpp?tab=MIT-1-ov-file
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects -ngl 0, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  allowMultipleInstall: true
+  shared: true
+  templateOnly: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  # Single value for text models; for VLM append a comma-separated mmproj segment:
+  #   hf://unsloth/Qwen3.5-2B-GGUF --include model.gguf,hf://unsloth/Qwen3.5-2B-GGUF --include mmproj-F16.gguf
+  - envName: MODEL_SOURCE        # example: hf://unsloth/Qwen3-0.6B-GGUF --include Qwen3-0.6B-Q4_K_M.gguf
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true    
+    description:  "Example: hf://unsloth/Qwen3-0.6B-GGUF --include Qwen3-0.6B-Q4_K_M.gguf. The source to download your model. For models with split files, only include the first part; for vision-language models, add the projector with a comma, like `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: unsloth/Qwen3-0.6B-GGUF:Q4_K_M (-hf repo:quant)
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    description:  "Example: unsloth/Qwen3-0.6B-GGUF:Q4_K_M. The name of your model in `owner/repo:quant` format"
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # example: -c 8192 -ngl all -fa on
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`, for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`."
+  - envName: LOG_LEVEL           # single-select: debug | info | warn | error
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "debug"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: LLAMACPP_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    regex: "^[0-9]+(Gi|Mi)?$"
