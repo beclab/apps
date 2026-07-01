@@ -45,13 +45,13 @@ Codex bundles its own.
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-codex-base:0.5.4 .
+docker build -t beclab/harveyff-codex-base:0.5.5 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name codex-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-codex-base:0.5.4 \
+  -t beclab/harveyff-codex-base:0.5.5 \
   --push .
 ```
 
@@ -59,7 +59,7 @@ docker buildx build \
 
 When bumping apt dependencies or base Ubuntu:
 
-1. Increment the tag (e.g. `0.5.4 -> 0.5.5`).
+1. Increment the tag (e.g. `0.5.5 -> 0.5.6`).
 2. Update all references in `codex/templates/deployment.yaml`
    (init-skills + init-install-codex + main container).
 3. Bump `version` in `codex/Chart.yaml` and `metadata.version` in
