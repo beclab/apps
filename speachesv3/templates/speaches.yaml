@@ -1,0 +1,479 @@
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $speachesGpu := ne (index $env "SPEACHES_GPU" | default "true") "false" }}
+{{- $chatCompletionBaseUrl := index $env "CHAT_COMPLETION_BASE_URL" | default "" | trim -}}
+{{- $hfEndpoint := $env.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $env.HF_TOKEN | default "" -}}
+{{- /* Accelerator type (Olares-injected, same detection as the llm* base charts).
+       On GB10/Spark the GPU has no separate VRAM: gpu-inject carves GPU memory
+       from the pod's RAM (gpumem == accelerator.requiredMemory), so the 8Gi GPU
+       working set shows up in this container's cgroup. The discrete-GPU
+       requests/limits only size the process RAM and would under-reserve on Spark,
+       so on nvidia-gb10 we raise them to also hold the GPU memory. */ -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- /* Only the memory request/limit varies across modes (cpu is always 500m/4):
+       CPU-only 4Gi/12Gi; discrete GPU 6Gi/18Gi (VRAM is separate); nvidia-gb10
+       10Gi/19Gi to also hold the 8Gi GPU working set carved from pod RAM, while
+       staying within the nvidia-gb10 envelope (requiredMemory 12Gi, limitedMemory
+       21Gi) given the llm-init downloader (req 128Mi / lim 1Gi). */ -}}
+{{- $memRequest := "4Gi" -}}
+{{- $memLimit := "12Gi" -}}
+{{- if $speachesGpu -}}
+{{- $memRequest = "6Gi" -}}
+{{- $memLimit = "18Gi" -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = "10Gi" -}}
+{{- $memLimit = "19Gi" -}}
+{{- end -}}
+{{- end -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: speaches
+  {{- if $speachesGpu }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.speachesv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: speaches
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: speaches
+        bytetrade.io/terminal: speaches
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-chmod-speaches
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - |
+              mkdir -p /hf-cache
+              chown -R 1000:1000 /hf-cache || true
+              chmod -R 777 /hf-cache || true
+          resources: {}
+          volumeMounts:
+            - name: speaches-hf-cache
+              mountPath: /hf-cache
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: speaches
+          {{- if $speachesGpu }}
+          image: "docker.io/beclab/speaches-ai-speaches:0.8.2-cuda-12.4.1"
+          {{- else }}
+          image: "docker.io/beclab/speaches-ai-speaches:0.8.2-cpu"
+          {{- end }}
+          command:
+            - sh
+            - '-c'
+            - |
+              # NOTE: uvicorn is started immediately (no model-download gate) so
+              # the pod becomes Ready quickly and Olares publishes the entrance.
+              # The nginx entrance decides what to show: while the llm-init
+              # downloader is not ready it serves the download dashboard, and only
+              # routes here once models are present. The warm-up below is what
+              # actually waits for the download, so it cannot race the downloader
+              # on the shared HF cache locks.
+              uv tool install huggingface-hub 2>/dev/null || true
+              # Install misaki[zh] for proper Chinese phonemization.
+              # Without it, kokoro_onnx delegates to phonemizer/espeak-ng which
+              # rejects lang="zh" with RuntimeError, so any Chinese voice
+              # (zf_*/zm_*) would crash. Install is idempotent and best-effort:
+              # if PyPI is unreachable, the runtime patch below falls back to
+              # espeak-ng's "cmn" code so the request still succeeds.
+              if ! /home/ubuntu/speaches/.venv/bin/python -c "from misaki import zh" 2>/dev/null; then
+                echo "=== Installing misaki[zh] for Chinese TTS support ==="
+                uv pip install --python /home/ubuntu/speaches/.venv/bin/python --quiet 'misaki[zh]' 2>/dev/null \
+                  || /home/ubuntu/speaches/.venv/bin/python -m pip install --no-cache-dir --quiet 'misaki[zh]' 2>/dev/null \
+                  || echo "WARN: failed to install misaki[zh] - Chinese voices will fall back to espeak cmn"
+              fi
+              python3 << 'PATCH_EOF'
+              import pathlib, json, os, re
+              patched = []
+
+              # whisper-1 alias: configurable via SPEACHES_WHISPER_MODEL env var
+              # default: Systran/faster-whisper-small (pre-installed)
+              # user can set to e.g. Systran/faster-whisper-large-v3 after downloading it
+              whisper_model = os.environ.get('SPEACHES_WHISPER_MODEL', 'Systran/faster-whisper-small')
+              f = pathlib.Path('/home/ubuntu/speaches/model_aliases.json')
+              if f.exists():
+                  a = json.loads(f.read_text())
+                  if a.get('whisper-1') != whisper_model:
+                      a['whisper-1'] = whisper_model
+                      f.write_text(json.dumps(a, indent=2) + '\n')
+                      patched.append(f'model_aliases.json (whisper-1 -> {whisper_model.split("/")[-1]})')
+
+              # audio_chat.py: store transcript text directly instead of
+              # audio.id cache ref (prevents KeyError on multi-turn chat);
+              # also return dropdown+fn so app.py can bind demo.load
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'audio=Audio(id=choice.message.audio.id),',
+                  'content=choice.message.audio.transcript,',
+              )
+              s = s.replace(
+                  'audio=Audio(id=audio_id),',
+                  'content=text_chat_message.content,',
+              )
+              s = s.replace(
+                  'openai_client = openai_client_from_gradio_req(request, config)',
+                  'if not message["text"] and not message["files"]:\n            yield gr.ChatMessage(role="assistant", content="No content received. If you just recorded audio, it may still be uploading — please wait a moment and click the Send button again (no need to re-record).")\n            return\n        openai_client = openai_client_from_gradio_req(request, config)',
+              )
+              old_tail = 'tab.select(\n            update_chat_model_dropdown,\n            inputs=None,\n            outputs=[chat_model_dropdown],\n        )'
+              new_tail = old_tail + '\n        return chat_model_dropdown, update_chat_model_dropdown'
+              s = s.replace(old_tail, new_tail)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('audio_chat.py')
+
+              # audio_chat.py: graceful models.list() for the LLM model dropdown.
+              # Regex body-replace (robust to upstream formatting: one-line vs multi-line
+              # AsyncOpenAI args, presence/absence of max_retries, the NOTE comment, etc.).
+              # On any failure (unreachable / bad URL / malformed /v1/models response) it
+              # returns a gray hint dropdown instead of raising a red error.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/tabs/audio_chat.py')
+              s = f.read_text()
+              o = s
+              new_llm_fn = (
+                  '    async def update_chat_model_dropdown() -> gr.Dropdown:\n'
+                  '        import httpx\n'
+                  '        _hint = gr.Dropdown(\n'
+                  '            choices=[],\n'
+                  '            label="Chat Model",\n'
+                  '            value=None,\n'
+                  '            info="Could not load chat models. Check CHAT_COMPLETION_BASE_URL in the app environment variables (an OpenAI-compatible endpoint ending in /v1), then switch to another tab and back.",\n'
+                  '        )\n'
+                  '        try:\n'
+                  '            openai_client = AsyncOpenAI(\n'
+                  '                base_url=config.chat_completion_base_url,\n'
+                  '                api_key=config.chat_completion_api_key.get_secret_value(),\n'
+                  '                max_retries=0,\n'
+                  '                timeout=httpx.Timeout(10.0),\n'
+                  '            )\n'
+                  '            models = (await openai_client.models.list()).data\n'
+                  '            model_ids: list[str] = [model.id for model in models]\n'
+                  '        except Exception:\n'
+                  '            logger.exception("Audio Chat: failed to load LLM models (url=%s)", config.chat_completion_base_url)\n'
+                  '            return _hint\n'
+                  '        if not model_ids:\n'
+                  '            return gr.Dropdown(\n'
+                  '                choices=[],\n'
+                  '                label="Chat Model",\n'
+                  '                value=None,\n'
+                  '                info="The LLM endpoint is reachable but returned no models. Make sure at least one model is available, then switch to another tab and back.",\n'
+                  '            )\n'
+                  '        return gr.Dropdown(\n'
+                  '            choices=model_ids,\n'
+                  '            label="Chat Model",\n'
+                  '            value=model_ids[0],\n'
+                  '        )'
+              )
+              _llm_pat = re.compile(
+                  r'    async def update_chat_model_dropdown\(\) -> gr\.Dropdown:.*?(?=\n+    with gr\.Tab\(label="Audio Chat"\))',
+                  re.DOTALL,
+              )
+              if _llm_pat.search(s):
+                  s = _llm_pat.sub(lambda _m: new_llm_fn, s, count=1)
+              else:
+                  print('WARN: update_chat_model_dropdown not found - LLM dropdown NOT patched', flush=True)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('audio_chat.py (LLM dropdown error handling)')
+
+              # Write mic-fix JS (delays submit click while mic upload is pending)
+              mic_fix_head = (
+                  '<script>(function(){var _s=false;document.addEventListener("click",function(e){'
+                  'if(_s){_s=false;return}'
+                  'var b=e.target.closest&&e.target.closest(".submit-button");'
+                  'if(!b)return;'
+                  'if(!document.querySelector(".compact-audio"))return;'
+                  'e.stopImmediatePropagation();e.preventDefault();'
+                  'b.disabled=true;b.style.opacity="0.5";'
+                  'setTimeout(function(){b.disabled=false;b.style.opacity="";_s=true;b.click()},3000)'
+                  '},true)})()</script>'
+              )
+              pathlib.Path('/tmp/_mic_fix_head.html').write_text(mic_fix_head)
+
+              # app.py: populate model dropdown + inject mic delay JS
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/ui/app.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'gr.Blocks(title="Speaches Playground")',
+                  'gr.Blocks(title="Speaches Playground", head=open("/tmp/_mic_fix_head.html").read())',
+              )
+              s = s.replace(
+                  'create_audio_chat_tab(config)',
+                  '_dropdown, _update_fn = create_audio_chat_tab(config)\n        demo.load(_update_fn, None, [_dropdown])',
+              )
+              if s != o:
+                  f.write_text(s)
+                  patched.append('app.py')
+
+              # chat.py: graceful fallback when audio.id not in cache
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/routers/chat.py')
+              s = f.read_text()
+              o = s
+              s = s.replace(
+                  'transcript = cache[message.audio.id]',
+                  'transcript = cache.get(message.audio.id, "[audio transcript expired]")',
+              )
+              if s != o:
+                  f.write_text(s)
+                  patched.append('chat.py')
+
+              # dependencies.py: disable 500 retry cascade (backport from v0.8.3)
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/dependencies.py')
+              s = f.read_text()
+              o = s
+              s = s.replace('max_retries=1', 'max_retries=0')
+              if s != o:
+                  f.write_text(s)
+                  patched.append('dependencies.py')
+
+              # text_utils.py: drop the over-broad emoji range that wipes out
+              # CJK / Hangul / Kana (U+24C2..U+1F251 covers the entire CJK
+              # block, so any non-Latin input reaches generate_audio() empty
+              # and a 0-byte mp3 is returned with HTTP 200). Upstream master
+              # already removed this line; we backport the fix to v0.8.2.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/text_utils.py')
+              s = f.read_text()
+              o = s
+              s = s.replace('        "\\U000024c2-\\U0001f251"\n', '')
+              if s != o:
+                  f.write_text(s)
+                  patched.append('text_utils.py (CJK-safe strip_emojis)')
+
+              # kokoro/utils.py: route Chinese voices (zf_*/zm_*) through misaki[zh]
+              # so they don't hit espeak-ng (which rejects lang="zh" and crashes
+              # the /v1/audio/speech request). Falls back to espeak "cmn" if
+              # misaki couldn't be installed at startup.
+              f = pathlib.Path('/home/ubuntu/speaches/src/speaches/executors/kokoro/utils.py')
+              s = f.read_text()
+              o = s
+              old_zh = '    async for audio_data, _ in kokoro_tts.create_stream(text, voice, lang=voice_language, speed=speed):'
+              new_zh = (
+                  '    if voice_language == "zh":\n'
+                  '        try:\n'
+                  '            if "_zh_g2p" not in globals():\n'
+                  '                from misaki import zh as _misaki_zh\n'
+                  '                globals()["_zh_g2p"] = _misaki_zh.ZHG2P(version=None)\n'
+                  '            _phonemes, _ = globals()["_zh_g2p"](text)\n'
+                  '            _stream = kokoro_tts.create_stream(_phonemes, voice, is_phonemes=True, speed=speed)\n'
+                  '        except Exception as _e:\n'
+                  '            logger.warning(f"misaki[zh] unavailable ({_e}); falling back to espeak cmn for Chinese TTS")\n'
+                  '            _stream = kokoro_tts.create_stream(text, voice, lang="cmn", speed=speed)\n'
+                  '    else:\n'
+                  '        _stream = kokoro_tts.create_stream(text, voice, lang=voice_language, speed=speed)\n'
+                  '    async for audio_data, _ in _stream:'
+              )
+              if old_zh in s:
+                  s = s.replace(old_zh, new_zh)
+              if s != o:
+                  f.write_text(s)
+                  patched.append('kokoro/utils.py (Chinese voice support)')
+
+              if patched:
+                  print(f'=== Speaches hotfix: patched {len(patched)} files ===')
+                  for p in patched:
+                      print(f'  - {p}')
+              else:
+                  print('=== Speaches hotfix: no patches needed ===')
+              PATCH_EOF
+              (
+              # Gate the warm-up (and any model file access) on the llm-init
+              # downloader being ready. Until then the entrance keeps users on the
+              # download dashboard, so this background task is the only thing that
+              # could touch the cache -- waiting here avoids racing the downloader
+              # on the shared HF locks.
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+              _gw=0
+              until python3 - "$READYZ" <<'RDY_EOF' 2>/dev/null
+              import sys, urllib.request
+              try:
+                  with urllib.request.urlopen(sys.argv[1], timeout=5) as r:
+                      sys.exit(0 if r.status == 200 else 1)
+              except Exception:
+                  sys.exit(1)
+              RDY_EOF
+              do
+                [ "$_gw" -ge 3600 ] && break
+                sleep 5
+                _gw=$((_gw + 5))
+              done
+              python3 << 'WARMUP_EOF'
+              import time, wave, sys, os, urllib.request
+
+              _wm = os.environ.get('SPEACHES_WHISPER_MODEL', 'small')
+              _is_small = any(k in _wm for k in ('small', 'tiny', 'base'))
+              wait_secs = 60 if _is_small else 90
+              for i in range(wait_secs):
+                  try:
+                      urllib.request.urlopen('http://localhost:8000/v1/models', timeout=2)
+                      break
+                  except Exception:
+                      time.sleep(1)
+              else:
+                  print(f'=== Warm-up: server did not start in {wait_secs}s, skipping ===')
+                  sys.exit(0)
+
+              with wave.open('/tmp/_warmup.wav', 'wb') as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(16000)
+                  w.writeframes(b'\x00\x00' * 16000)
+
+              from openai import OpenAI
+              whisper_model = os.environ.get('SPEACHES_WHISPER_MODEL', 'Systran/faster-whisper-small')
+              model_name = whisper_model.split('/')[-1]
+              client = OpenAI(base_url='http://localhost:8000/v1', api_key='warmup',
+                              timeout=60.0 if _is_small else 180.0)
+
+              eta = '20-30s on GPU' if _is_small else '30-60s on GPU'
+              print(f'=== Warm-up: loading STT model {model_name} (may take {eta} first run) ===')
+              t = time.time()
+              try:
+                  client.audio.transcriptions.create(
+                      file=open('/tmp/_warmup.wav', 'rb'),
+                      model='whisper-1',
+                      response_format='text',
+                  )
+                  print(f'=== Warm-up: STT ready ({time.time()-t:.1f}s) ===')
+              except Exception as e:
+                  print(f'=== Warm-up: STT failed ({e}) - will load on first use ===')
+
+              print('=== Warm-up: loading TTS model ===')
+              t = time.time()
+              try:
+                  client.audio.speech.create(model='tts-1', input='hello', voice='af_heart')
+                  print(f'=== Warm-up: TTS ready ({time.time()-t:.1f}s) ===')
+              except Exception as e:
+                  print(f'=== Warm-up: TTS failed ({e}) - will load on first use ===')
+
+              try:
+                  os.remove('/tmp/_warmup.wav')
+              except OSError:
+                  pass
+              print('=== Model warm-up complete ===')
+              WARMUP_EOF
+              ) &
+              exec uvicorn --factory speaches.main:create_app
+          env:
+            - name: HF_HUB_CACHE
+              value: "/home/ubuntu/.cache/huggingface/hub"
+            - name: HF_HUB_DISABLE_XET
+              value: "1"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: SPEACHES_WHISPER_MODEL
+              value: {{ index $env "SPEACHES_WHISPER_MODEL" | default "Systran/faster-whisper-small" | quote }}
+            - name: LOOPBACK_HOST_URL
+              value: "http://localhost:8000"
+            - name: CHAT_COMPLETION_BASE_URL
+              value: {{ $chatCompletionBaseUrl | quote }}
+          ports:
+            - containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: {{ $memRequest }}
+            limits:
+              cpu: "4"
+              memory: {{ $memLimit }}
+          volumeMounts:
+            - name: speaches-hf-cache
+              mountPath: /home/ubuntu/.cache/huggingface/hub
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            # uvicorn now binds :8000 immediately (model download is no longer a
+            # startup gate -- the nginx entrance and the background warm-up own
+            # that), so a normal grace window is enough.
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        # Shared cross-app HF Hub cache (App Common). Mounted RW so Terminal-driven
+        # `hf download` of additional models writes into the same shared store.
+        - name: speaches-hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: speaches
+  name: speaches
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    io.kompose.service: speaches
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: speaches
+  name: sharedentrances-speaches
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  selector:
+    io.kompose.service: speaches
+status:
+  loadBalancer: {}
