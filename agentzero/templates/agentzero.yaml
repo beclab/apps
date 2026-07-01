@@ -8,7 +8,7 @@ metadata:
   labels:
     io.kompose.service: agentzero
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.agentzero.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: agentzero
@@ -25,7 +25,7 @@ spec:
         fsGroup: 0
       containers:
         - name: agentzero
-          image: docker.io/beclab/agent0ai-agent-zero:v0.9.8.2
+          image: docker.io/beclab/agent0ai-agent-zero:v1.15
           resources:
             limits:
               cpu: 4
@@ -40,20 +40,28 @@ spec:
             - name: agentzero-data
               mountPath: /a0/usr
               subPath: usr
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 80
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
           livenessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 80
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 1
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 4
           readinessProbe:
             httpGet:
-              path: /health
+              path: /api/health
               port: 80
-            initialDelaySeconds: 30
             periodSeconds: 10
-            timeoutSeconds: 1
+            timeoutSeconds: 5
+            failureThreshold: 3
 
       restartPolicy: Always
       volumes:
@@ -84,13 +92,13 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
-  name: sharedentrances-agentzero
+  name: agentzero-mcp
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: agentzero
 spec:
   ports:
-    - name: "80"
+    - name: mcp-port
       port: 80
       targetPort: 80
   selector:
