@@ -1,0 +1,157 @@
+{{- /* llm-init in download-only mode (ENGINE_KIND empty): no engine is started
+       or proxied; llm-init degrades to a pure model downloader that drops the
+       pre-installed STT/TTS models into the shared cross-app HF Hub cache
+       (App Common, fixed /cache/hf/hub). The speaches engine mounts the same
+       store and waits until both repos are present before it starts.
+
+       Two HF repos via the comma form: the first segment is ROLE=main, the rest
+       ROLE=extra automatically (the index form would default every entry to
+       main and fail the "multiple ROLE=main" check). ollama:// sources are
+       rejected in download-only mode, so both must be hf://. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- /* Per-release run-state hostPath so concurrent clones on the same node do
+       not collide on the sentinel. */ -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Static name matching workloadReplicas + values.workloads. Label stays
+  # io.kompose.service: llm-init so the Service selectors still resolve here.
+  name: speachesdownloader
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.speachesdownloader.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      volumes:
+        # Shared cross-app HF Hub cache (App Common); image bakes HF_HUB_CACHE=/cache/hf/hub.
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        # Per-release sentinel / run-state dir (App Cache).
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          # v1.2.x is the first line with comma multi-source (v1.1.0 only ever
+          # fetches a single repo, which is why earlier the Kokoro source was
+          # silently skipped). v1.2.3 also has the nullengine download-only path
+          # (empty ENGINE_KIND).
+          image: docker.io/beclab/llm-init:v1.2.3
+          imagePullPolicy: IfNotPresent
+          env:
+            # Empty ENGINE_KIND selects download-only mode (nullengine).
+            - name: ENGINE_KIND
+              value: ""
+            # TEMPORARY (llm-init v1.2.3 image): download-only still requires
+            # MODEL_NAME + MODEL_MODE (the "make-optional" patch is not yet in a
+            # released tag). They are placeholders only — the repos to fetch come
+            # entirely from MODEL_SOURCE. Drop both once the patched image ships.
+            - name: MODEL_NAME
+              value: "Systran/faster-whisper-small"
+            - name: MODEL_MODE
+              value: "chat"
+            # Comma multi-source (v1.2.x): first segment is ROLE=main, the rest
+            # are ROLE=extra automatically and are pre-fetched before main. Both
+            # must be hf:// (ollama:// is rejected in download-only mode).
+            - name: MODEL_SOURCE
+              value: "hf://Systran/faster-whisper-small,hf://speaches-ai/Kokoro-82M-v1.0-ONNX"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Readiness on /livez (process up), not /readyz (model ready), so the
+          # downloader stays scheduled and serving progress while downloading.
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              # `hf download` runs a python subprocess in this same cgroup;
+              # 256Mi OOM-kills it mid-download. 1Gi gives headroom for the
+              # huggingface_hub CLI with --max-workers 4.
+              memory: 1Gi
+---
+# Internal progress / health surface (no entrance). speaches waits on the
+# shared cache directly, but this Service is handy for diagnostics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
