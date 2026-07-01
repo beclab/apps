@@ -1,4 +1,16 @@
-﻿---
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    chown -R 1000:1000 /config
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +19,7 @@ metadata:
   labels:
     app: prowlarr
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.prowlarr.replicaCount }}
   selector:
     matchLabels:
       app: prowlarr
@@ -18,6 +30,22 @@ spec:
       labels:
         app: prowlarr
     spec:
+      initContainers:
+      - name: init-prowlarr
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            sh /init.sh
+        volumeMounts:
+        - mountPath: /config
+          name: prowlarr-config
+        - name: init-config
+          mountPath: /init.sh
+          subPath: init.sh
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -29,7 +57,7 @@ spec:
         - name: TZ
           value: Etc/UTC
         name: prowlarr
-        image: "beclab/harveyff-hotio-prowlarr:v0.0.1"
+        image: "linuxserver/prowlarr:2.4.0"
         imagePullPolicy: IfNotPresent
         resources:
           requests:
@@ -47,16 +75,14 @@ spec:
       - name: prowlarr-config
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: {{ .Values.userspace.appData }}
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/prowlarr 
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/prowlarr 
-          {{- end }}
-        
+      - name: init-config
+        configMap:
+          name: init-config
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
 
 ---
 apiVersion: v1
@@ -72,29 +98,3 @@ spec:
     - protocol: TCP
       port: 9696
       targetPort: 9696
-
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_prowlarr
-  deployment: prowlarr
-  description: prowlarr legacy api
-  endpoint: prowlarr-svc.{{ .Release.Namespace }}:9696
-  group: api.prowlarr
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active
-  {{- end }}
-{{- end }}
