@@ -7,7 +7,7 @@ metadata:
   labels:
     app: crawl4ai
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.crawl4ai.replicaCount }}
   selector:
     matchLabels:
       app: crawl4ai
@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: crawl4ai
-          image: "docker.io/beclab/unclecode-crawl4ai:0.7.4"
+          image: "docker.io/unclecode/crawl4ai:0.8.9"
           env:
             - name: PGID
               value: "1000"
@@ -37,6 +37,31 @@ spec:
           envFrom:
             - configMapRef:
                 name: crawl4ai-config
+          volumeMounts:
+            - name: crawl4ai-config-file
+              mountPath: /app/config.yml
+              subPath: config.yml
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -sf http://127.0.0.1:11235/health >/dev/null
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -sf http://127.0.0.1:11235/health >/dev/null
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
           resources:
             requests:
               cpu: 500m
@@ -48,6 +73,11 @@ spec:
             - name: http
               containerPort: 11235
               protocol: TCP
+
+      volumes:
+        - name: crawl4ai-config-file
+          configMap:
+            name: crawl4ai-config
 
 ---
 apiVersion: v1
