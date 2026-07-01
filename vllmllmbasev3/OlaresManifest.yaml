@@ -1,0 +1,234 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: vllmllmbasev3
+  icon: https://app.cdn.olares.com/appstore/vllm/icon.png
+  description: "Generic vLLM engine base. Pick any HuggingFace Safetensors model at install via env."
+  appid: vllmllmbasev3
+  title: vLLM Engine Base
+  version: '1.2.19'
+  categories:
+    - AI
+sharedEntrances:
+  - name: vllmllmbasev3
+    host: sharedentrances-api
+    port: 0
+    title: vLLM API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/vllm/icon.png
+entrances:
+  - name: vllmclient
+    port: 8090
+    host: download-svc
+    title: vLLM
+    icon: https://app.cdn.olares.com/appstore/vllm/icon.png
+    openMethod: window
+    authLevel: internal
+#   vllmllmbasev3 — engine Deployment (== appid / Release.Name)
+#   llminit        — llm-init / entrance Deployment
+workloadReplicas:
+  vllmllmbasev3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: '0.24.0'
+  upgradeDescription: |
+    Bump vLLM engine to 0.24.0 and llm-init to v1.2.8.
+    Spark (nvidia-gb10): mem_utils patch; chart gpumem only on nvidia (gb10 uses pod memory + gpu-inject).
+    HF_ENDPOINT from OLARES_SYSTEM_HUGGINGFACE_SERVICE.
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `hf://<repo>`. The HuggingFace source to download your model, for example `hf://Qwen/Qwen3.5-2B`. Use a repo that contains `.safetensors` weight files. Optionally append `--include <file>` or `--revision <sha>`.
+    - `MODEL_NAME`: `owner/repo`. The name of your model — use the string after `hf://` in `MODEL_SOURCE`, for example `Qwen/Qwen3.5-2B`. This is also used as the OpenAI alias and vLLM `--model`.
+    - `MODEL_MODE`: `chat` or `embedding`. Use `chat` for conversational models; for embedding, the chart auto-adds `--task embed`.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports.
+    - `ENGINE_ARGS`: `--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --enable-prefix-caching --kv-cache-dtype fp8`. Extra vLLM CLI flags. Separate multiple `--key value` pairs with spaces. See https://docs.vllm.ai/en/v0.17.0/configuration/engine_args/.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
+    - `VLLM_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On GPU modes (`nvidia`, `nvidia-gb10`), gpu-inject caps visible CUDA memory to this quota; tune `--gpu-memory-utilization` in ENGINE_ARGS against that budget.
+
+    **How It Works**
+    First, `llm-init` downloads your model and gets it ready, then vLLM starts serving the model when it's ready. Both containers run in the same Pod and share the model directory and readiness sentinel.
+
+    **Stack**
+    - **vLLM** (port 8000): runs the model and serves API requests
+    - **llm-init** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to vLLM
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `VLLM_REQUIRED_GPU_MEMORY`; tune `--gpu-memory-utilization` in ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Same as `nvidia`: set `VLLM_REQUIRED_GPU_MEMORY`; tune `--gpu-memory-utilization` in ENGINE_ARGS (no auto remapping) |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - vLLM model loading can take several minutes for large models. Keep the app Running until ready.
+    - For high-concurrency workloads, vLLM's PagedAttention delivers strong throughput; tune `--max-num-batched-tokens` and `--gpu-memory-utilization` in `ENGINE_ARGS`.
+
+  developer: vLLM
+  website: https://vllm.ai/
+  sourceCode: https://github.com/vllm-project/vllm
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://github.com/vllm-project/vllm/blob/main/LICENSE
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects --device cpu, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; VLLM_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; VLLM_REQUIRED_GPU_MEMORY -> gpumem
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  allowMultipleInstall: true
+  shared: true
+  templateOnly: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE        # example: hf://Qwen/Qwen3.5-2B
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Example: hf://Qwen/Qwen3.5-2B. The HuggingFace source to download your model. Use a repo with `.safetensors` weights. Optionally append `--include <file>` or `--revision <sha>`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: Qwen/Qwen3.5-2B
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Example: Qwen/Qwen3.5-2B. The name of your model — use the string after `hf://` in MODEL_SOURCE. This is also used as the OpenAI alias and vLLM `--model`."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description: "The model capabilities. Pick what your model supports. If no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # stability-first example for quantized Ornith 9B on 24GB: --max-model-len 131072 --gpu-memory-utilization 0.92 --tensor-parallel-size 1 --max-num-batched-tokens 4096 --kv-cache-dtype fp8 --quantization compressed-tensors --language-model-only --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml --trust-remote-code --enforce-eager
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Flags only — do not prefix with ENGINE_ARGS=. Example: --max-model-len 131072 --gpu-memory-utilization 0.92 .... On Spark (nvidia-gb10), use the same style; the chart does not rewrite --gpu-memory-utilization (visible CUDA memory is capped by VLLM_REQUIRED_GPU_MEMORY via gpu-inject)."
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "debug"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: VLLM_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On GPU modes, gpu-inject caps visible CUDA memory to this value."
+    regex: "^[0-9]+(Gi|Mi)?$"
