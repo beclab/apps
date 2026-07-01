@@ -1,0 +1,60 @@
+# Engine wrapper script, mounted into the Ollama daemon container at
+# /llm-init/wrappers. Single-file wrapper: the helpers Ollama needs are
+# inlined from llm-init v1.1.0 deploy/wrappers/common.sh (this chart only
+# runs one engine, so the shared common.sh + per-engine split is collapsed).
+# The daemon is started via ollama.sh, which exports each KEY=VALUE token in
+# ENGINE_ARGS before `exec ollama serve`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ollama
+data:
+  ollama.sh: |
+    #!/bin/sh
+    # Ollama engine wrapper (single file; helpers inlined from llm-init
+    # v1.1.0 common.sh — Ollama only needs ENGINE_ARGS export + log).
+    #
+    # Ollama's deployment model is the inverse of vLLM/SGLang/llama.cpp: the
+    # daemon owns the model bytes and llm-init drives /api/pull + /api/create,
+    # so there is NO sentinel to wait on — Ollama starts immediately.
+    #
+    # v1.1.0 ENGINE_ARGS contract (docs/engine-args.md): a KEY=VALUE list of
+    # OLLAMA_* daemon env, exported before `ollama serve`. Non-KV tokens are
+    # logged and skipped. Example:
+    #   ENGINE_ARGS="OLLAMA_CONTEXT_LENGTH=8192 OLLAMA_KEEP_ALIVE=30m"
+    #     -> export OLLAMA_CONTEXT_LENGTH=8192
+    #     -> export OLLAMA_KEEP_ALIVE=30m
+    #     -> exec ollama serve
+    set -eu
+
+    ENGINE=ollama
+    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+
+    # engine_args_export_env exports each KEY=VALUE token in $ENGINE_ARGS as a
+    # daemon env var. POSIX sh has no shlex; this uses default IFS
+    # word-splitting, so values with whitespace must survive the env round-trip
+    # (rare; OLLAMA_* values are typically scalars). Runs in its own function
+    # so `set --` does not clobber the script's positional params.
+    engine_args_export_env() {
+        args="${ENGINE_ARGS:-}"
+        [ -z "$args" ] && return 0
+        # shellcheck disable=SC2086
+        set -- $args
+        for tok in "$@"; do
+            case "$tok" in
+                *=*) export "$tok" && log "engine_args export: $tok" ;;
+                *)   log "engine_args drop non-KV token: $tok" ;;
+            esac
+        done
+    }
+
+    # Listen on all interfaces so llm-init (same release) can reach the daemon
+    # via the "ollama" ClusterIP Service without --network host shenanigans.
+    export OLLAMA_HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
+    engine_args_export_env
+    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}"
+    log "starting ollama serve on $OLLAMA_HOST"
+    exec ollama serve "$@"
