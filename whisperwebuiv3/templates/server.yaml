@@ -1,0 +1,290 @@
+{{- /* Whisper-WebUI engine. HF models (faster-whisper + pyannote) are fetched by
+       llm-init into the shared cross-app HF Hub cache (App Common, /cache/hf/hub).
+       At startup the engine symlinks the expected models--* dirs into
+       /Whisper-WebUI/models/{Whisper/faster-whisper,Diarization} and gates on
+       /readyz before launching Gradio + the OpenAI-compatible API sidecar. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperwebui
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.whisperwebuiv3.replicaCount }}
+  selector:
+    matchLabels:
+      app: whisperwebui
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisperwebui
+        bytetrade.io/terminal: whisperwebui
+    spec:
+      initContainers:
+        - name: init-configs
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
+          command:
+            - sh
+            - -c
+            - |
+              if [ -z "$(ls -A /Whisper-WebUI/configs 2>/dev/null)" ]; then
+                echo "configs directory is empty, copying default configs..."
+                cp -r /Whisper-WebUI/configs_default/* /Whisper-WebUI/configs/
+              else
+                echo "configs directory already has content, skipping copy."
+              fi
+          volumeMounts:
+            - name: configs
+              mountPath: /Whisper-WebUI/configs
+      containers:
+        - name: whisperwebui
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
+          envFrom:
+            - configMapRef:
+                name: whisperwebui-config
+          command:
+            - sh
+            - "-c"
+          args:
+            - |
+              set -e
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+              echo "[wait] Waiting for llm-init downloader (/readyz)..."
+              until curl -sf "$READYZ" >/dev/null 2>&1; do
+                echo "[wait] models not ready yet..."
+                sleep 10
+              done
+              echo "[wait] models ready; linking HF cache into Whisper-WebUI layout."
+
+              CACHE=/cache/hf/hub
+              FW_DIR=/Whisper-WebUI/models/Whisper/faster-whisper
+              DIA_DIR=/Whisper-WebUI/models/Diarization
+              mkdir -p "$FW_DIR" "$DIA_DIR"
+
+              link_repo() {
+                repo="$1"
+                dest_dir="$2"
+                hub_name="models--$(echo "$repo" | tr '/' '--')"
+                src="${CACHE}/${hub_name}"
+                dest="${dest_dir}/${hub_name}"
+                if [ -d "$src" ]; then
+                  rm -f "$dest" 2>/dev/null || true
+                  ln -sfn "$src" "$dest"
+                  echo "[link] ${dest} -> ${src}"
+                else
+                  echo "[warn] missing HF cache dir: ${src}"
+                fi
+              }
+
+              link_repo "Systran/faster-whisper-large-v2" "$FW_DIR"
+              link_repo "pyannote/speaker-diarization-3.1" "$DIA_DIR"
+              link_repo "pyannote/segmentation-3.0" "$DIA_DIR"
+
+              pip install audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
+              pip install --quiet --upgrade pytubefix 2>&1 | tail -3
+              echo "Starting Whisper-WebUI..."
+              exec python /Whisper-WebUI/whisper_openai_api.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
+          ports:
+            - containerPort: 7860
+            - containerPort: 8000
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: HF_ENDPOINT
+              value: "{{ $oe.HF_ENDPOINT }}"
+            - name: HF_TOKEN
+              value: "{{ $oe.HF_TOKEN }}"
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 6Gi
+            limits:
+              cpu: "4"
+              memory: 18Gi
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: models
+              mountPath: /Whisper-WebUI/models
+            - name: outputs
+              mountPath: /Whisper-WebUI/outputs
+            - name: configs
+              mountPath: /Whisper-WebUI/configs
+            - name: api-proxy-script
+              mountPath: /Whisper-WebUI/whisper_openai_api.py
+              subPath: whisper_openai_api.py
+          securityContext:
+            runAsUser: 0
+      volumes:
+        - name: api-proxy-script
+          configMap:
+            name: whisper-openai-api
+            items:
+              - key: whisper_openai_api.py
+                path: whisper_openai_api.py
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/models"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/outputs"
+            type: DirectoryOrCreate
+        - name: configs
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/configs"
+            type: DirectoryOrCreate
+
+---
+{{/* llm-init download-only: faster-whisper-large-v2 (default ASR) + pyannote
+       diarization/segmentation (gated; admin HF token must have accepted terms). */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whisperwebuiv3download
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperwebuiv3download
+spec:
+  replicas: {{ .Values.workloads.whisperwebuiv3download.replicaCount }}
+  selector:
+    matchLabels:
+      app: whisperwebuiv3download
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: whisperwebuiv3download
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          image: docker.io/beclab/llm-init:v1.2.4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENGINE_KIND
+              value: ""
+            - name: MODEL_NAME
+              value: "Systran/faster-whisper-large-v2"
+            - name: MODEL_MODE
+              value: "chat"
+            - name: MODEL_SOURCE
+              value: "hf://Systran/faster-whisper-large-v2,hf://pyannote/speaker-diarization-3.1,hf://pyannote/segmentation-3.0"
+            - name: HF_ENDPOINT
+              value: "{{ $oe.HF_ENDPOINT }}"
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whisperwebui-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: whisperwebui
+  ports:
+    - name: gradio
+      port: 7860
+      targetPort: 7860
+    - name: openai-api
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: whisperwebuiv3download
+spec:
+  selector:
+    app: whisperwebuiv3download
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
