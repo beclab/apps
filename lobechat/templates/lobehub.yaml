@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: "{{ .Release.Name }}"
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: {{ .Values.workloads.lobechat.replicaCount }}
+  selector:
+    matchLabels:
+      app: "{{ .Release.Name }}"
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: "{{ .Release.Name }}"
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: "docker.io/beclab/wait-for:0.1.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-it"
+            - "lobehub-postgres:5432"
+          resources: {}
+        - name: wait-for-redis
+          image: "docker.io/beclab/wait-for:0.1.0"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-it"
+            - "{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+          resources: {}
+      containers:
+        - name: lobehub
+          image: "docker.io/lobehub/lobehub:2.1.56"
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: lobehub-config
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: DATABASE_URL
+              value: "postgresql://lobehub:lobehub@lobehub-postgres:5432/lobehub"
+            - name: REDIS_URL
+              {{- if .Values.redis.password }}
+              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+              {{- else }}
+              value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+              {{- end }}
+            - name: REDIS_PREFIX
+              value: "lobehub"
+            - name: REDIS_TLS
+              value: "0"
+            - name: INTERNAL_APP_URL
+              value: "http://{{ .Release.Name }}.{{ .Release.Namespace }}.svc.cluster.local"
+            - name: LLM_VISION_IMAGE_USE_BASE64
+              value: "1"
+            - name: S3_ENABLE_PATH_STYLE
+              value: "1"
+            - name: S3_SET_ACL
+              value: "0"
+          ports:
+            - name: http
+              containerPort: 3210
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: 3210
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            tcpSocket:
+              port: 3210
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1000Mi
+            limits:
+              cpu: 4000m
+              memory: 3000Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: 3210
+  selector:
+    app: "{{ .Release.Name }}"
