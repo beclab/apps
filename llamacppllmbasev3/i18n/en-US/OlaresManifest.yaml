@@ -1,0 +1,38 @@
+metadata:
+  description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
+  title: llama.cpp Engine Base
+
+spec:
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `hf://<repo> --include <file>.gguf`. The source to download your model. For models with split files, only include the first part; for vision-language models, add the projector with a comma, like `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`.
+    - `MODEL_NAME`: `owner/repo:quant`. The name of your model in `owner/repo:quant` format, for example `unsloth/Qwen3.5-2B-GGUF:UD-Q4_K_XL`. This is also used as the OpenAI alias.
+    - `MODEL_MODE`: `chat` or `embedding`. If you pick embedding, the chart adds `--embedding` automatically.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. This is required.
+    - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`; for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level: choose from `debug`, `info`, `warn`, or `error`.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed (for GPU only; ignored on CPU). Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+    
+    **How It Works**
+    First, `llm-init` downloads your model and gets it ready, then `llama.cpp` starts serving the model when it’s ready. These two parts run separately but share files and progress info.
+
+    **Stack**
+    - **llama.cpp**: Runs the model and serves API requests (port 8081)
+    - **llm-init**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`.
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                            |
+    |----------------|-------------------|---------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `LLAMACPP_REQUIRED_GPU_MEMORY`; use `-ngl all` for full GPU use |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                        |
+    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU                                         |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - To use the GPU, set `-ngl all` in `ENGINE_ARGS`. Without it, the model will run on CPU.
