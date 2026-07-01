@@ -1,0 +1,176 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: whisperwebuiv3
+  description: A Web UI for easy subtitle using whisper model.
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+  appid: whisperwebuiv3
+  version: '1.1.6'
+  title: Whisper-WebUI
+  categories:
+  - AI
+  - Utilities_v112
+
+
+entrances:
+- name: whisperwebui
+  port: 8080
+  host: whisperwebui-web-svc
+  title: Whisper WebUI
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+  authLevel: private
+  openMethod: window
+- name: whisperwebuiTerminal
+  port: 8081
+  host: whisperwebui-web-svc
+  title: Whisper Terminal
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/terminal.png
+  openMethod: window
+  authLevel: internal
+- name: whisperwebuiApi
+  port: 8082
+  host: whisperwebui-web-svc
+  title: Whisper API
+  icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
+  invisible: true
+  openMethod: window
+  authLevel: internal
+
+workloadReplicas:
+  whisperwebuiv3: 1
+  whisperwebuiv3download: 1
+  whisperwebuiv3client: 1
+  terminal: 1
+
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+  userData:
+  - Home
+
+spec:
+  versionName: '1.0.7'
+  promoteImage:
+  - https://app.cdn.olares.com/appstore/whisperwebui/1.webp
+  - https://app.cdn.olares.com/appstore/whisperwebui/2.webp
+  - https://app.cdn.olares.com/appstore/whisperwebui/3.webp
+  fullDescription: |
+    **IMPORTANT NOTE**
+    This is a shared app. Only one service will be installed across the entire Olares system. Every user can install a desktop entry to access or use the shared entrance to call the service API.
+
+    **PREREQUISITES**
+    Before installing, configure **HF_TOKEN** (mapped from your Olares Hugging Face token) and **HF_ENDPOINT**. The installing admin's token must have **accepted the terms of use** on Hugging Face for these gated repositories:
+    - `pyannote/speaker-diarization-3.1`
+    - `pyannote/segmentation-3.0`
+
+    Models are downloaded at install time via llm-init into the shared HF cache:
+    - `Systran/faster-whisper-large-v2` (ASR, default faster-whisper backend)
+    - `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` (speaker diarization)
+
+    **PERFORMANCE NOTE**
+    The first transcription after install may take noticeably longer while models are loaded into GPU memory; subsequent requests are faster.
+
+    **OVERVIEW**
+    A Gradio-based browser interface for Whisper. You can use it as an Easy Subtitle Generator!
+
+    **Features**
+    Select the Whisper implementation you want to use between :
+    - openai/whisper
+    - SYSTRAN/faster-whisper (used by default)
+    - Vaibhavs10/insanely-fast-whisper
+
+    Generate subtitles from various sources, including :
+    - Files
+    - Youtube
+    - Microphone
+
+    Currently supported subtitle formats :
+    - SRT
+    - WebVTT
+    - txt ( only text file without timeline )
+
+    Speech to Text Translation
+    - From other languages to English. ( This is Whisper's end-to-end speech-to-text translation feature )
+
+    Text to Text Translation
+    - Translate subtitle files using Facebook NLLB models
+    - Translate subtitle files using DeepL API
+
+    Pre-processing audio input with Silero VAD.
+
+    Pre-processing audio input to separate BGM with UVR.
+
+    Post-processing with speaker diarization using the pyannote model
+
+  upgradeDescription: |
+    Migrated Whisper-WebUI to the apiVersion v3 shared app pattern and switched
+    model provisioning to the shared llm-init downloader (whisperwebuiv2 →
+    whisperwebuiv3).
+
+    **What's Changed**
+
+    - **Model download**: replaced the CDN `downloader-init` tar.zst bundle with
+      an `llm-init:v1.2.4` download-only Deployment (`whisperwebuiv3download`)
+      that fetches `Systran/faster-whisper-large-v2`, `pyannote/speaker-diarization-3.1`,
+      and `pyannote/segmentation-3.0` into the shared cross-app HF cache (App Common,
+      `/cache/hf/hub`). The engine symlinks the cached repos into the Whisper-WebUI
+      layout and gates on `/readyz`. Diarization (pyannote) is gated — the admin HF
+      token must have accepted its terms.
+    - **Entrance routing**: nginx gates the Gradio UI on model download + engine
+      readiness with auto-reload; llm-init API paths pin to `download-svc`.
+    - **Architecture**: flattened the whisperwebuiv2 / whisperwebuiv2server
+      sub-charts into a single chart; backends resolve within the release namespace
+      (dropping the `*-shared` admin / non-admin split).
+    - **Accelerator**: moved the GPU requirement into the accelerator modes list
+      (nvidia only; amd64-only app).
+    - **Scaling**: `workloadReplicas` declares the engine, downloader, nginx client,
+      and terminal workloads.
+
+  developer: jhj0517
+  website: https://github.com/jhj0517/Whisper-WebUI
+  sourceCode: https://github.com/jhj0517/Whisper-WebUI
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  doc: https://github.com/jhj0517/Whisper-WebUI
+  license:
+  - text: Apache-2.0 License
+    url: https://github.com/jhj0517/Whisper-WebUI?tab=Apache-2.0-1-ov-file
+  supportArch:
+  - amd64
+  onlyAdmin: true
+
+  requiredCpu: "1"
+  limitedCpu: "6"
+  requiredMemory: 6.5Gi
+  limitedMemory: 22Gi
+  requiredDisk: 12Gi
+  limitedDisk: 20Gi
+envs:
+- envName: HF_TOKEN
+  required: true
+  applyOnChange: true
+  valueFrom:
+    envName: OLARES_USER_HUGGINGFACE_TOKEN
+- envName: HF_ENDPOINT
+  required: true
+  applyOnChange: true
+  valueFrom:
+    envName: OLARES_USER_HUGGINGFACE_SERVICE
+
+options:
+  shared: true
+  apiTimeout: 0
+  allowedOutboundPorts:
+  - 80
+  - 443
+  conflicts:
+  - name: whisperwebuiv2
+    type: application
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.6-0'
