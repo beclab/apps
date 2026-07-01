@@ -40,6 +40,8 @@
 {{- if and .Values.runner .Values.runner.ciServerUrl -}}
 {{- $runnerCiServerUrl = .Values.runner.ciServerUrl -}}
 {{- end -}}
+{{- /* Per-install IngressClass: Namespace is the primary uniqueness boundary; Name included for Olares allowMultipleInstall lint. */ -}}
+{{- $ingressClassName := printf "gitlab-nginx-%s-%s" .Release.Namespace .Release.Name -}}
 {{- $workhorseTrusted := concat $trustedProxies (list "127.0.0.1/32") -}}
 ---
 # Source: gitlab/charts/gitlab/charts/gitaly/templates/pdb.yaml
@@ -3897,7 +3899,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-gitlab-exporter").replicaCount }}
   selector:
     matchLabels:
       app: gitlab-exporter
@@ -4151,7 +4153,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-gitlab-shell").replicaCount }}
   selector:
     matchLabels:
       app: gitlab-shell
@@ -4383,7 +4385,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-kas").replicaCount }}
   selector:
     matchLabels:
       app: kas
@@ -4603,7 +4605,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-sidekiq-all-in-1-v2").replicaCount }}
   selector:
     matchLabels:
       app: sidekiq
@@ -4999,7 +5001,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-toolbox").replicaCount }}
   selector:
     matchLabels:
       app: toolbox
@@ -5350,7 +5352,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-webservice-default").replicaCount }}
   selector:
     matchLabels:
       app: webservice
@@ -6007,7 +6009,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     component: "controller"
     app.kubernetes.io/component: controller
-  name: gitlab
+  name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   annotations:
 spec:
@@ -6016,7 +6018,7 @@ spec:
       app: nginx-ingress
       release: gitlab
       component: "controller"
-  replicas: 1
+  replicas: {{ .Values.workloads.gitlab.replicaCount }}
   revisionHistoryLimit: 10
   minReadySeconds: 0
   template:
@@ -6053,7 +6055,7 @@ spec:
             - --publish-service=$(POD_NAMESPACE)/gitlab-nginx-ingress-controller
             - --election-id=ingress-controller-leader
             - --controller-class=k8s.io/ingress-nginx
-            - --ingress-class=gitlab-nginx
+            - --ingress-class={{ $ingressClassName }}
             - --configmap=$(POD_NAMESPACE)/gitlab-nginx-ingress-controller
             - --tcp-services-configmap={{ .Release.Namespace }}/gitlab-nginx-ingress-tcp
             - --watch-namespace=$(POD_NAMESPACE)
@@ -6147,7 +6149,7 @@ metadata:
   annotations:
     
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-registry").replicaCount }}
   selector:
     matchLabels:
       app: registry
@@ -6384,7 +6386,7 @@ spec:
       release: gitlab
       
   serviceName: gitlab-gitaly
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-gitaly").replicaCount }}
   podManagementPolicy: Parallel
   template:
     metadata:
@@ -6631,7 +6633,7 @@ metadata:
     helm.sh/chart: postgresql-13.4.4
     app.kubernetes.io/component: primary
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-postgresql").replicaCount }}
   serviceName: gitlab-postgresql-hl
   updateStrategy:
     rollingUpdate: {}
@@ -6884,7 +6886,7 @@ metadata:
     helm.sh/chart: redis-18.19.4
     app.kubernetes.io/component: master
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "gitlab-redis-master").replicaCount }}
   selector:
     matchLabels:
       app.kubernetes.io/instance: gitlab
@@ -7453,7 +7455,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     component: "controller"
     app.kubernetes.io/component: controller
-  name: "gitlab-nginx"
+  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}
 spec:
   controller: k8s.io/ingress-nginx
 ---
@@ -7470,7 +7472,7 @@ metadata:
     heritage: Helm
     
   annotations:
-    kubernetes.io/ingress.class: "gitlab-nginx"
+    kubernetes.io/ingress.class: {{ $ingressClassName | quote }}
     kubernetes.io/ingress.provider: "nginx"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/custom-http-errors: ""
@@ -7487,7 +7489,7 @@ metadata:
       proxy_set_header X-Forwarded-Host {{ $kasDomain }};
 
 spec:
-  ingressClassName: gitlab-nginx
+  ingressClassName: {{ $ingressClassName }}
   rules:
     - host: {{ $kasDomain }}
       http:
@@ -7525,7 +7527,7 @@ metadata:
     gitlab.com/webservice-name: default
     
   annotations:
-    kubernetes.io/ingress.class: "gitlab-nginx"
+    kubernetes.io/ingress.class: {{ $ingressClassName | quote }}
     kubernetes.io/ingress.provider: "nginx"
     
     nginx.ingress.kubernetes.io/proxy-body-size: "512m"
@@ -7545,7 +7547,7 @@ metadata:
       proxy_set_header X-Forwarded-Port 443;
       proxy_set_header X-Forwarded-Host {{ $gitlabDomain }};
 spec:
-  ingressClassName: gitlab-nginx
+  ingressClassName: {{ $ingressClassName }}
   rules:
     - host: {{ $gitlabDomain }}
       http:
@@ -7575,7 +7577,7 @@ metadata:
     heritage: Helm
     
   annotations:
-    kubernetes.io/ingress.class: "gitlab-nginx"
+    kubernetes.io/ingress.class: {{ $ingressClassName | quote }}
     kubernetes.io/ingress.provider: "nginx"
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
@@ -7583,7 +7585,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     
 spec:
-  ingressClassName: gitlab-nginx
+  ingressClassName: {{ $ingressClassName }}
   rules:
     - host: {{ $minioDomain }}
       http:
@@ -7613,7 +7615,7 @@ metadata:
     heritage: Helm
     
   annotations:
-    kubernetes.io/ingress.class: "gitlab-nginx"
+    kubernetes.io/ingress.class: {{ $ingressClassName | quote }}
     kubernetes.io/ingress.provider: "nginx"
     nginx.ingress.kubernetes.io/proxy-body-size: "0"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "900"
@@ -7621,7 +7623,7 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     
 spec:
-  ingressClassName: gitlab-nginx
+  ingressClassName: {{ $ingressClassName }}
   rules:
     - host: {{ $registryDomain }}
       http:
