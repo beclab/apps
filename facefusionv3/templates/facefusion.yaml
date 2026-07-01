@@ -1,0 +1,365 @@
+﻿{{- /* v3-shared FaceFusion engine + llm-init download-only sidecar.
+       Models for every FaceFusion release line (3.0..3.6) live in the shared
+       cross-app App Common HF Hub cache (appCommon/huggingface, fixed
+       /cache/hf/hub container path). llm-init writes the standard HF cache
+       layout there:
+           /cache/hf/hub/models--facefusion--models-3.X.X/snapshots/<sha>/...
+       The engine startup script gates on download-svc:/readyz, then rebuilds
+       the flat /facefusion/.assets/models view the engine expects as an
+       ephemeral symlink farm over the cached snapshots.
+       HF mirror/token are declared as local names HF_ENDPOINT / HF_TOKEN in
+       OlaresManifest.envs (valueFrom from the user-system HF account);
+       templates only ever reference the local names. */ -}}
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $env.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $env.HF_TOKEN | default "" -}}
+{{- /* Per-release sentinel/run-state hostPath so concurrent installs of
+       facefusionv3 on the same node never collide on the /run/llm-init lock. */ -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $outputsHostPath := printf "%s/output" .Values.userspace.appData -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: facefusion
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.facefusionv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: facefusion
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: facefusion
+        bytetrade.io/terminal: facefusion
+    spec:
+      initContainers:
+        # /facefusion/.assets is now an ephemeral emptyDir (the real bytes
+        # live in the shared HF cache). Ensure the engine UID (1000 in the
+        # facefusion image) owns it so the symlink farm step can write.
+        - name: init-chmod-assets
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - '-c'
+            - chown -R 1000:1000 /facefusion/.assets || true
+          volumeMounts:
+            - name: assets
+              mountPath: /facefusion/.assets
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: facefusion
+          image: "docker.io/facefusion/facefusion:3.6.1-cuda"
+          workingDir: /facefusion
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              CACHE=/cache/hf/hub
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+
+              # Gate on the llm-init downloader (download-only mode) reporting
+              # all repos present. /readyz flips to 200 only once every repo in
+              # MODEL_SOURCE is fully on disk, replacing the legacy per-repo
+              # .facefusion-models-*.done sentinels.
+              echo "[wait] Waiting for llm-init downloader (/readyz)..."
+              until python3 - "$READYZ" <<'RDY_EOF' 2>/dev/null
+              import sys, urllib.request
+              try:
+                  with urllib.request.urlopen(sys.argv[1], timeout=5) as r:
+                      sys.exit(0 if r.status == 200 else 1)
+              except Exception:
+                  sys.exit(1)
+              RDY_EOF
+              do
+                echo "[wait] downloader not ready yet..."
+                sleep 10
+              done
+              echo "[wait] downloader ready; materialising /facefusion/.assets/models from HF cache."
+
+              # llm-init writes the standard HF cache snapshot layout
+              # ($CACHE/models--facefusion--models-3.X.X/snapshots/<sha>/...),
+              # but the FaceFusion engine reads flat files under
+              # /facefusion/.assets/models. Rebuild that flat view as a symlink
+              # farm pointing at the resolved snapshots. The snapshot's internal
+              # blob symlinks are relative to $CACHE (mounted here at the same
+              # path), so they resolve transparently.
+              snap() {  # $1 = models--facefusion--models-3.X.X -> prints snapshot dir
+                ref="$CACHE/$1/refs/main"
+                if [ -f "$ref" ]; then
+                  echo "$CACHE/$1/snapshots/$(cat "$ref")"
+                else
+                  ls -d "$CACHE/$1"/snapshots/*/ 2>/dev/null | head -1
+                fi
+              }
+
+              MODEL_VERSIONS="3.0.0 3.1.0 3.2.0 3.3.0 3.4.0 3.5.0 3.6.0"
+              mkdir -p /facefusion/.assets/models
+              for ver in $MODEL_VERSIONS; do
+                SNAP="$(snap "models--facefusion--models-${ver}")"
+                if [ -z "$SNAP" ] || [ ! -d "$SNAP" ]; then
+                  echo "[wait] FATAL: snapshot dir for models-${ver} missing"
+                  exit 1
+                fi
+                echo "[wait] linking ${ver} from $SNAP"
+                # Link every visible top-level entry of the snapshot into the
+                # flat models dir; existing symlinks from earlier versions are
+                # replaced (later versions win, matching the upstream models
+                # CDN tarball merge order).
+                for f in "$SNAP"/*; do
+                  [ -e "$f" ] || continue
+                  ln -sfn "$f" "/facefusion/.assets/models/$(basename "$f")"
+                done
+              done
+              echo "[wait] All model files are linked; starting FaceFusion..."
+
+              exec python facefusion.py run --execution-providers cuda
+          ports:
+            - containerPort: 7860
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: GRADIO_SERVER_NAME
+              value: "0.0.0.0"
+            # Engine doesn't fetch from HF at runtime (the downloader does),
+            # but kokoro_onnx-style libs may still try; wire the user mirror
+            # in defensively so any stray hit lands on the Olares HF service.
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+          envFrom:
+            - configMapRef:
+                name: facefusion-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 3Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          volumeMounts:
+            - name: assets
+              mountPath: /facefusion/.assets
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: caches
+              mountPath: /facefusion/.caches
+            - name: outputs
+              mountPath: /tmp
+      volumes:
+        # /facefusion/.assets is rebuilt on every start as a symlink farm; the
+        # real model bytes persist in the shared HF cache below.
+        - name: assets
+          emptyDir: {}
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: caches
+          emptyDir: {}
+        - name: outputs
+          hostPath:
+            path: "{{ $outputsHostPath }}"
+            type: DirectoryOrCreate
+
+---
+# llm-init in download-only mode (ENGINE_KIND empty). No engine is started or
+# proxied; llm-init degrades to a pure model downloader that drops the seven
+# facefusion/models-3.X.X repos into the shared cross-app HF Hub cache. The
+# engine container gates on /readyz before symlink-farming the flat layout.
+#
+# Comma multi-source (v1.2.x): first segment is ROLE=main, the rest are
+# ROLE=extra automatically and are pre-fetched before main. All must be hf://
+# (ollama:// is rejected in download-only mode).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: facefusiondownloader
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    # Service download-svc selects on io.kompose.service: llm-init.
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.facefusiondownloader.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      volumes:
+        # Shared cross-app HF Hub cache (App Common); the llm-init image bakes
+        # HF_HUB_CACHE=/cache/hf/hub.
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        # Per-release sentinel / run-state dir (App Cache). Concurrent clones
+        # on the same node get their own lock space.
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          # v1.2.4: comma multi-source, nullengine download-only path, default
+          # LFS transport (hf_xet off unless HF_ENABLE_XET=true).
+          image: docker.io/beclab/llm-init:v1.2.4
+          imagePullPolicy: IfNotPresent
+          env:
+            # Empty ENGINE_KIND selects download-only mode (nullengine).
+            - name: ENGINE_KIND
+              value: ""
+            # TEMPORARY: download-only still requires MODEL_NAME + MODEL_MODE
+            # in v1.2.x (the "make-optional" patch is not yet in a released
+            # tag). They are placeholders only — the repos to fetch come from
+            # MODEL_SOURCE. Drop both once the patched image ships.
+            - name: MODEL_NAME
+              value: "facefusion/models-3.6.0"
+            - name: MODEL_MODE
+              value: "chat"
+            - name: MODEL_SOURCE
+              value: "hf://facefusion/models-3.6.0,hf://facefusion/models-3.0.0,hf://facefusion/models-3.1.0,hf://facefusion/models-3.2.0,hf://facefusion/models-3.3.0,hf://facefusion/models-3.4.0,hf://facefusion/models-3.5.0"
+            # Always wire the Olares HF mirror (manifest declares it required).
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            # Seven full repos: keep concurrency low so the huggingface_hub
+            # subprocess inside llm-init stays inside its 4Gi memory limit.
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Readiness on /livez (process up), not /readyz (model ready), so the
+          # downloader stays scheduled and serving its progress dashboard while
+          # repos are still downloading.
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              # `hf download` runs a python subprocess in the same cgroup; the
+              # facefusion/models-* repos can be multi-GB sharded, so 4Gi gives
+              # the huggingface_hub CLI (--max-workers 1) headroom.
+              memory: 4Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: facefusion-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: facefusion
+  ports:
+    - name: api
+      port: 7860
+      targetPort: 7860
+  type: ClusterIP
+
+---
+# Internal progress / health surface for the llm-init downloader. The engine
+# gates on /readyz here; the nginx entrance proxies API paths to it and falls
+# back to its dashboard while repos are downloading.
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+
+---
+# Shared entrance: cluster-internal "API"-style hop other Olares apps can use
+# to talk to FaceFusion's Gradio backend (port 80 -> 7860) without going
+# through the user-facing nginx proxy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-facefusion
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: facefusion
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: 7860
+  selector:
+    io.kompose.service: facefusion

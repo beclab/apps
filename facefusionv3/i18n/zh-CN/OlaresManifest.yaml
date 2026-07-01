@@ -1,0 +1,56 @@
+metadata:
+  title: FaceFusion
+  description: 业界领先的人脸处理平台
+spec:
+  fullDescription: |
+    FaceFusion 是业界领先的人脸处理平台。它让您轻松交换人脸，并创作令人惊艳的照片处理效果。
+
+    **主要功能：**
+    先进的人脸图像生成和编辑
+    - 采用高质量算法，无缝逼真地融合人脸特征，并可自定义强度级别，提供面部变形、多张人脸融合、逼真变形等功能。
+
+    多张人脸交换：
+    - 支持在单个项目中交换多张人脸。
+
+    实时处理：
+    - 提供即时预览和结果，通过快速交互式的人脸融合提升用户体验。
+
+    年龄修改：
+    - 改变人脸的表观年龄
+
+    唇形同步：
+    - 确保视频中交换的人脸与音频完美同步，创造出与语音匹配的无缝口型。
+
+    Deep Swapper（兼容 DeepFaceLive 模型）：
+    - 基于社区训练的 DeepFaceLive `.dfm` 模型的专用换脸 processor，内置 24+ 个开箱即用的名人脸模型。
+
+    **模型存储（App Common 共享）**
+    FaceFusion 的模型包（3.0.0 → 3.6.0）存放在跨应用共享的 App Common HF Hub 缓存
+    （`appCommon/huggingface`，容器内固定挂载 `/cache/hf/hub`）。由一个 `llm-init`
+    download-only 边车通过用户的 `OLARES_USER_HUGGINGFACE_SERVICE` 将所有 repo 下载
+    到该存储；引擎挂载同一存储，等待 `download-svc:/readyz` 就绪后，从缓存的
+    snapshot 构建扁平的符号链接视图（`/facefusion/.assets/models`），模型字节在
+    多个应用之间去重共享。
+  upgradeDescription: |
+    FaceFusion（引擎 3.6.1）的 V3 共享应用迁移。
+
+    **主要变化**
+
+    - **下载架构**：用共享的 `llm-init` download-only Deployment
+      （`facefusiondownloader`）替换了原本的 `harveyff-hf-downloader-only` Job，
+      与 speachesv3 / acestep15v3 对齐。模型包现在落到跨应用共享的 HF 缓存
+      （App Common，`/cache/hf/hub`），采用标准的
+      `models--owner--repo/snapshots/<sha>/...` 布局；引擎通过 `download-svc:/readyz`
+      判断就绪（取代了原来的逐 repo `.done` 哨兵文件），并在启动时用符号链接重建
+      引擎期望的扁平 `/facefusion/.assets/models` 视图。
+    - **入口路由**：nginx 改写为 acestep15v3 那套——`/api/*` 等 llm-init 控制面
+      路径固定路由到 download-svc；`/` 同时检查模型下载和 Gradio 就绪，未就绪时回落
+      到下载面板并通过 `/__app_ready` 在两者都 OK 后自动刷新进入应用。
+    - **结构**：引擎 Deployment 以 appid 命名（`facefusionv3`）；nginx 入口
+      （`facefusionproxy`）与下载器（`facefusiondownloader`）拆分为独立工作负载，
+      均通过 `workloadReplicas` 声明。
+    - **HF 环境变量**：HF 镜像 / 令牌通过 `valueFrom` 从用户的系统 HF 账号注入
+      （本地名为 `HF_ENDPOINT` / `HF_TOKEN`；模板内不再直接引用 `OLARES_USER_*`
+      名称，符合 v3 规范）。
+    - **资源**：`limitedMemory` 提到 21Gi，确保引擎（16Gi）+ llm-init（4Gi）+
+      nginx（256Mi）的 limits 之和落在 envelope 内。
