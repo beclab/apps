@@ -1,0 +1,190 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: difyv3
+  description: The Innovation Engine for GenAI Applications
+  icon: https://app.cdn.olares.com/appstore/dify/icon-new.png
+  version: '1.1.8'
+  appid: difyv3
+  title: Dify
+  categories:
+    - Productivity_v112
+
+sharedEntrances:
+  - name: difyv3
+    host: sharedentrances-dify
+    port: 0
+    title: Dify
+    icon: https://app.cdn.olares.com/appstore/dify/icon-new.png
+    invisible: true
+    authLevel: internal
+
+entrances:
+  - authLevel: internal
+    host: difyv3
+    icon: https://app.cdn.olares.com/appstore/dify/icon-new.png
+    name: difyv3
+    openMethod: window
+    port: 80
+    title: Dify
+
+# Declares every workload's replica count (v3 schema). Keys MUST match the
+# rendered Deployment metadata.name and values.yaml workloads.<name>:
+#   difyv3 — nginx entrance Deployment (must match metadata.name / appid)
+workloadReplicas:
+  difyv3: 1
+  api: 1
+  worker: 1
+  web: 1
+  redis: 1
+  weaviate: 1
+  sandbox: 1
+  ssrfproxy: 1
+  plugindaemon: 1
+
+permission:
+  appData: true
+  appCache: true
+  userData:
+    - Home
+
+spec:
+  versionName: '1.13.3'
+  featuredImage: https://app.cdn.olares.com/appstore/dify/1.webp
+  promoteImage:
+    - https://app.cdn.olares.com/appstore/dify/1.webp
+    - https://app.cdn.olares.com/appstore/dify/2.webp
+    - https://app.cdn.olares.com/appstore/dify/3.webp
+    - https://app.cdn.olares.com/appstore/dify/4.webp
+
+  fullDescription: |
+    **IMPORTANT NOTE**
+    This is a shared version of Dify. Only one service will be installed across the entire Olares system. However, every user still needs to install an desktop entry to access and use the service installed by the Olares Admin.
+
+    After installation, everyone on this Olares cluster can use the same application. This shared setup makes it easier for users to share information with each other, while reducing maintenance work and using fewer resources.
+
+    **Migration Note**
+    If you're using an older version of Dify, it might conflict with Dify v1.0 or later. We recommend backing up your data, uninstalling the old version, and then installing this latest version.
+
+    **OVERVIEW**
+    Dify is an open-source LLM app development platform. Its intuitive interface combines AI workflow, RAG pipeline, agent capabilities, model management, observability features and more, letting you quickly go from prototype to production. Here's a list of the core features:
+
+    1. Workflow: Build and test powerful AI workflows on a visual canvas, leveraging all the following features and beyond.
+
+    2. Comprehensive model support: Seamless integration with hundreds of proprietary / open-source LLMs from dozens of inference providers and self-hosted solutions, covering GPT, Mistral, Llama3, and any OpenAI API-compatible models. A full list of supported model providers can be found here.
+
+    3. Prompt IDE: Intuitive interface for crafting prompts, comparing model performance, and adding additional features such as text-to-speech to a chat-based app.
+
+    4. RAG Pipeline: Extensive RAG capabilities that cover everything from document ingestion to retrieval, with out-of-box support for text extraction from PDFs, PPTs, and other common document formats.
+
+    5. Agent capabilities: You can define agents based on LLM Function Calling or ReAct, and add pre-built or custom tools for the agent. Dify provides 50+ built-in tools for AI agents, such as Google Search, DELL·E, Stable Diffusion and WolframAlpha.
+
+    6. LLMOps: Monitor and analyze application logs and performance over time. You could continuously improve prompts, datasets, and models based on production data and annotations.
+
+    7. Backend-as-a-Service: All of Dify's offerings come with corresponding APIs, so you could effortlessly integrate Dify into your own business logic.
+
+  upgradeDescription: |
+    Migrated Dify to apiVersion v3 shared app pattern (difyv2 → difyv3).
+
+    **What's Changed**
+
+    - **Multi-install**: the nginx Deployment now uses {{ .Release.Name }} so allowMultipleInstall installs don't collide on workload names.
+
+    - **Architecture**: flattened sub-charts into a single chart; removed the
+      nginx clientproxy layer — the entrance routes directly to the Dify nginx
+      Service on port 80.
+    - **Scaling**: `workloadReplicas` declares replica counts for all Dify
+      workloads (api, worker, web, nginx, redis, weaviate, sandbox,
+      ssrf-proxy, plugin-daemon).
+    - **Runtime**: Dify v1.13.3 with inherited Olares packaging fixes (Worker
+      Celery mode, Weaviate gRPC endpoint, reduced SQLAlchemy pool size).
+
+  developer: LangGenius
+  website: https://dify.ai/
+  locale:
+    - en-US
+    - zh-CN
+  sourceCode: https://github.com/langgenius/dify
+  submitter: Olares
+  doc: https://github.com/langgenius/dify#readme
+  license:
+    - text: Apache-2.0
+      url: https://github.com/langgenius/dify?tab=License-1-ov-file#readme
+
+  requiredMemory: 6.5Gi
+  requiredDisk: 512Mi
+  requiredCpu: 3.5
+  limitedMemory: 14Gi
+  limitedCpu: 8
+  limitedDisk: 50Gi
+
+  supportArch:
+    - amd64
+    - arm64
+  onlyAdmin: true
+
+middleware:
+  redis:
+    namespace: difyv3
+  postgres:
+    username: dify
+    password: dify
+    databases:
+      - name: dify
+        distributed: true
+      - name: difyplugin
+        distributed: true
+
+options:
+  shared: true
+  allowedOutboundPorts:
+    - 3128
+  apiTimeout: 0
+  conflicts:
+    - name: dify
+      type: application
+    - name: difyv2
+      type: application
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+
+envs:
+  - envName: MAIL_TYPE
+    required: false
+    applyOnChange: true
+    default: smtp
+    type: string
+    editable: true
+  - envName: SMTP_SERVER
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_SERVER
+  - envName: SMTP_PORT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PORT
+  - envName: SMTP_USERNAME
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USERNAME
+  - envName: SMTP_PASSWORD
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PASSWORD
+  - envName: MAIL_DEFAULT_SEND_FROM
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_FROM_ADDRESS
+  - envName: SMTP_USE_TLS
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
