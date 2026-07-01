@@ -1,0 +1,137 @@
+{{- $hfEndpoint := (.Values.olaresEnv | default dict).HF_ENDPOINT | default "" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  # Primary workload: named after the release (== appid xinferencev3) for v3
+  # workload verification. The label/selector stays io.kompose.service: xinference
+  # so the Services below keep resolving.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.xinferencev3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: xinference
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: xinference
+    spec:
+      containers:
+      - name: xinference
+        image: "xprobe/xinference:v2.10.0"
+        # `unset LD_PRELOAD` avoids a host-injected preload leaking into the
+        # engine; xinference-local binds :9997 (supervisor/REST + Web UI) and
+        # :8000 (VLLM_PORT). Port 9997 is the default, so no --port needed.
+        command: ["sh", "-c", "unset LD_PRELOAD;xinference-local -H 0.0.0.0 --log-level debug"]
+        ports:
+          - containerPort: 9997
+            protocol: TCP
+          - containerPort: 8000
+            protocol: TCP
+        # The entrance routes straight to :9997, so gate pod readiness on the
+        # supervisor API actually listening (Olares only publishes the entrance
+        # once the pod is Ready). The startup grace covers first-boot init.
+        startupProbe:
+          tcpSocket:
+            port: 9997
+          failureThreshold: 60
+          periodSeconds: 5
+        readinessProbe:
+          tcpSocket:
+            port: 9997
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        env:
+          # Home for .xinference state/logs; HF + ModelScope caches default to
+          # /root/.cache/* — all under the mounted /root (appCache) volume, so
+          # downloaded models persist across restarts.
+          - name: XINFERENCE_HOME
+            value: /root/.xinference
+          - name: XINFERENCE_MODEL_SRC
+            value: modelscope
+          - name: VLLM_PORT
+            value: "8000"
+          - name: HF_ENDPOINT
+            value: "{{ $hfEndpoint }}"
+        resources:
+          limits:
+            cpu: "5"
+            # Large-model launch/download can spike well past 20Gi (weights staging,
+            # vLLM worker init, HF/ModelScope cache I/O). 40Gi avoids OOM during
+            # first boot of big checkpoints on typical GPU nodes.
+            memory: 40Gi
+          requests:
+            cpu: "1"
+            memory: 6Gi
+        volumeMounts:
+        - mountPath: /root
+          name: data
+        - name: shm
+          mountPath: /dev/shm
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}'
+          type: DirectoryOrCreate
+        name: data
+      - name: shm
+        emptyDir:
+          medium: Memory
+          # vLLM / torch multiprocessing uses /dev/shm heavily; 2Gi was tight for
+          # multi-GB models.
+          sizeLimit: "8Gi"
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  name: xinference
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8000"
+    port: 8000
+    targetPort: 8000
+  - name: "9997"
+    port: 9997
+    targetPort: 9997
+  selector:
+    io.kompose.service: xinference
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  name: sharedentrances-api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "sharedentrances-api"
+    port: 80
+    targetPort: 9997
+  selector:
+    io.kompose.service: xinference
+status:
+  loadBalancer: {}
