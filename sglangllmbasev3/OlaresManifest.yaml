@@ -1,0 +1,233 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: sglangllmbasev3
+  icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+  description: "Generic SGLang engine base. Pick any HuggingFace Safetensors model at install via env."
+  appid: sglangllmbasev3
+  title: SGLang Engine Base
+  version: '1.2.20'
+  categories:
+    - AI
+sharedEntrances:
+  - name: sglangllmbasev3
+    host: sharedentrances-api
+    port: 0
+    title: SGLang
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+entrances:
+  - name: sglangclient
+    port: 8090
+    host: download-svc
+    title: SGLang
+    icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+    openMethod: window
+    authLevel: internal
+#   sglangllmbasev3 — engine Deployment (== appid / Release.Name)
+#   llminit          — llm-init / entrance Deployment
+workloadReplicas:
+  sglangllmbasev3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: '0.5.14'
+  upgradeDescription: |
+    Bump llm-init to v1.2.8.
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `hf://<repo>`. The HuggingFace source to download your model, for example `hf://openai/gpt-oss-20b`. Use a repo that contains `.safetensors` weight files. Optionally append `--include <file>` or `--revision <sha>`.
+    - `MODEL_NAME`: `owner/repo`. The name of your model — use the string after `hf://` in `MODEL_SOURCE`, for example `openai/gpt-oss-20b`. This is also used as the OpenAI alias and SGLang `--model-path`.
+    - `MODEL_MODE`: `chat` or `embedding`. Use `chat` for conversational models; for embedding, the chart auto-adds `--is-embedding`.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports.
+    - `ENGINE_ARGS`: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser gpt-oss --tool-call-parser gpt-oss`. Extra SGLang CLI flags. Separate multiple `--key value` pairs with spaces. Adjust `--reasoning-parser` and `--tool-call-parser` to match your model family. See https://docs.sglang.io/docs/advanced_features/server_arguments.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
+    - `SGLANG_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+
+    **How It Works**
+    First, `llm-init` downloads your model and gets it ready, then SGLang starts serving the model when it's ready. These two parts run in separate Deployments but share the HF cache and run-state via App Common storage.
+
+    **Stack**
+    - **SGLang** (port 30000): runs the model and serves API requests
+    - **llm-init** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to SGLang
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `SGLANG_REQUIRED_GPU_MEMORY`; tune `--mem-fraction-static` in ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                         |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - SGLang model loading can take several minutes for large models. Keep the app Running until ready.
+    - SGLang excels at prefix caching and structured output (JSON, tool calls, agents); prefix caching is enabled by default.
+
+  developer: SGLang
+  website: https://sglang.io/
+  sourceCode: https://github.com/sgl-project/sglang
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://github.com/sgl-project/sglang/blob/main/LICENSE
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects --device cpu, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; SGLANG_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  allowMultipleInstall: true
+  shared: true
+  templateOnly: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE        # example: hf://openai/gpt-oss-20b
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Example: hf://openai/gpt-oss-20b. The HuggingFace source to download your model. Use a repo with `.safetensors` weights. Optionally append `--include <file>` or `--revision <sha>`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: openai/gpt-oss-20b
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Example: openai/gpt-oss-20b. The name of your model — use the string after `hf://` in MODEL_SOURCE. This is also used as the OpenAI alias and SGLang `--model-path`."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description: "The model capabilities. Pick what your model supports. If no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # example: --context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser gpt-oss --tool-call-parser gpt-oss
+    required: true
+    default: ""
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Example: --context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser gpt-oss --tool-call-parser gpt-oss. Extra SGLang CLI flags. Separate multiple --key value pairs with spaces. Adjust parsers to match your model family."
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "debug"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: SGLANG_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    regex: "^[0-9]+(Gi|Mi)?$"
