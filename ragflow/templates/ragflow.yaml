@@ -1,103 +1,15 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ragflow-config
-  namespace: {{ .Release.Namespace }}
-data:
-  nginx.conf: |
-    user  root;
-    worker_processes  auto;
-
-    error_log  /var/log/nginx/error.log notice;
-    pid        /var/run/nginx.pid;
-
-
-    events {
-        worker_connections  1024;
-    }
-
-
-    http {
-        include       /etc/nginx/mime.types;
-        default_type  application/octet-stream;
-
-        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                          '$status $body_bytes_sent "$http_referer" '
-                          '"$http_user_agent" "$http_x_forwarded_for"';
-
-        access_log  /var/log/nginx/access.log  main;
-
-        sendfile        on;
-        #tcp_nopush     on;
-
-        keepalive_timeout  65;
-
-        #gzip  on;
-        client_max_body_size 1024M;
-
-        include /etc/nginx/conf.d/ragflow.conf;
-    }
-
-  proxy.conf: |
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_buffering off;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-
-  ragflow.conf: |
-    server {
-        listen 80;
-        server_name _;
-        root /ragflow/web/dist;
-
-        gzip on;
-        gzip_min_length 1k;
-        gzip_comp_level 9;
-        gzip_types text/plain application/javascript application/x-javascript text/css application/xml text/javascript application/x-httpd-php image/jpeg image/gif image/png;
-        gzip_vary on;
-        gzip_disable "MSIE [1-6]\.";
-
-        location ~ ^/api/v1/admin {
-            proxy_pass http://127.0.0.1:9381;
-            include proxy.conf;
-        }
-
-        location ~ ^/(v1|api) {
-            proxy_pass http://127.0.0.1:9380;
-            include proxy.conf;
-        }
-
-
-        location / {
-            index index.html;
-            try_files $uri $uri/ /index.html;
-        }
-
-        # Cache-Control: max-age~@~AExpires
-        location ~ ^/static/(css|js|media)/ {
-            expires 10y;
-            access_log off;
-        }
-    }
-
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ragflow
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.ragflow.replicaCount }}
   selector:
     matchLabels:
       app: ragflow
   strategy:
-    type: Recreate         
+    type: Recreate
   template:
     metadata:
       labels:
@@ -110,11 +22,13 @@ spec:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /appcache
+            chown -R 1000:1000 /appcache /ragflow/logs
         resources: {}
         volumeMounts:
-          - name:  appcache
+          - name: appcache
             mountPath: /appcache
+          - name: ragflow-logs
+            mountPath: /ragflow/logs
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
@@ -122,15 +36,22 @@ spec:
           runAsUser: 0
       containers:
       - name: ragflow
-        image: "docker.io/beclab/infiniflow-ragflow:v0.24.0"
+        image: "docker.io/infiniflow/ragflow:v0.26.1"
+        args:
+          - --enable-adminserver
         ports:
         - containerPort: 9380
+        - containerPort: 9381
         - containerPort: 80
         env:
         - name: HF_ENDPOINT
           value: '{{ .Values.olaresEnv.HF_ENDPOINT }}'
         - name: MACOS
           value: '0'
+        - name: API_PROXY_SCHEME
+          value: 'python'
+        - name: DOC_ENGINE
+          value: 'elasticsearch'
         - name: MYSQL_PORT
           value: "{{ .Values.mysql.port }}"
         - name: MYSQL_HOST
@@ -141,6 +62,24 @@ spec:
           value: "{{ .Values.mysql.password }}"
         - name: MYSQL_DBNAME
           value: "{{ .Values.mysql.databases.rag_flow }}"
+        - name: ES_HOST
+          value: 'es01'
+        - name: ELASTIC_PASSWORD
+          value: 'infini_rag_flow'
+        - name: REDIS_HOST
+          value: 'redis'
+        - name: REDIS_PORT
+          value: '6379'
+        - name: REDIS_PASSWORD
+          value: 'infini_rag_flow'
+        - name: MINIO_HOST
+          value: 'minio'
+        - name: MINIO_PORT
+          value: '9000'
+        - name: MINIO_USER
+          value: 'rag_flow'
+        - name: MINIO_PASSWORD
+          value: 'infini_rag_flow'
         resources:
           limits:
             cpu: "4"
@@ -148,20 +87,33 @@ spec:
           requests:
             cpu: "1"
             memory: 1Gi
+        startupProbe:
+          httpGet:
+            path: /api/v1/system/healthz
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /api/v1/system/healthz
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /api/v1/system/ping
+            port: 80
+          initialDelaySeconds: 120
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 5
         volumeMounts:
-          - name: nginx-config
-            mountPath: /etc/nginx/conf.d/ragflow.conf
-            subPath: ragflow.conf
-          - name: nginx-config
-            mountPath: /etc/nginx/proxy.conf
-            subPath: proxy.conf
-          - name: nginx-config
-            mountPath: /etc/nginx/nginx.conf
-            subPath: nginx.conf
+          - name: ragflow-logs
+            mountPath: /ragflow/logs
       volumes:
-      - name: nginx-config
-        configMap:
-          name: ragflow-config
       - hostPath:
           {{- if .Values.sysVersion }}
             {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
