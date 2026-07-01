@@ -1,0 +1,110 @@
+
+{{- $difyDomainENV := split "," .Values.domain.difyv3 -}}
+{{- $difyDomain := index $difyDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $difyDomain "$1" -}}
+
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: web
+  name: web
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.web.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: web
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: web
+    spec:
+      containers:
+        - env:
+            - name: ALLOW_EMBED
+              value: "false"
+            - name: APP_API_URL
+              value: 'https://{{ $difyDomain }}'
+            - name: APP_WEB_URL
+              value: 'https://{{ $difyDomain }}'
+            - name: CONSOLE_API_URL
+              value: 'https://{{ $difyDomain }}'
+            - name: CONSOLE_WEB_URL
+              value: 'https://{{ $difyDomain }}'
+            - name: CSP_WHITELIST
+            - name: ENABLE_WEBSITE_FIRECRAWL
+              value: "true"
+            - name: ENABLE_WEBSITE_JINAREADER
+              value: "true"
+            - name: ENABLE_WEBSITE_WATERCRAWL
+              value: "true"
+            - name: INDEXING_MAX_SEGMENTATION_TOKENS_LENGTH
+              value: "4000"
+            - name: LOOP_NODE_MAX_COUNT
+              value: "100"
+            - name: MARKETPLACE_API_URL
+              value: https://marketplace.dify.ai
+            - name: MARKETPLACE_URL
+              value: https://marketplace.dify.ai
+            - name: MAX_ITERATIONS_NUM
+              value: "99"
+            - name: MAX_PARALLEL_LIMIT
+              value: "10"
+            - name: MAX_TOOLS_NUM
+              value: "10"
+            - name: NEXT_TELEMETRY_DISABLED
+              value: "0"
+            - name: PM2_INSTANCES
+              value: "2"
+            - name: SENTRY_DSN
+            - name: TEXT_GENERATION_TIMEOUT_MS
+              value: "60000"
+            - name: TOP_K_MAX_VALUE
+            - name: COOKIE_DOMAIN
+              value: "{{ $topDomain }}"
+            - name: NEXT_PUBLIC_COOKIE_DOMAIN
+              value: "1"
+            - name: NODE_ENV
+              value: "production"
+            - name: NEXT_PUBLIC_ENABLE_SENTRY
+              value: "false"
+          image: "docker.io/beclab/langgenius-dify-web:1.13.3"
+          name: web
+          ports:
+            - containerPort: 3000
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      restartPolicy: Always
