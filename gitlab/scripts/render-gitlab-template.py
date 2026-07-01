@@ -141,6 +141,35 @@ spec:
     return text
 
 
+def apply_namespace_ingress_class(text: str) -> str:
+    """Per-namespace IngressClass name avoids cluster-wide collisions for multi-instance installs."""
+    ingress_class_var = (
+        '{{- /* Per-install IngressClass: Namespace is the primary uniqueness boundary; Name included for Olares allowMultipleInstall lint. */ -}}\n'
+        '{{- $ingressClassName := printf "gitlab-nginx-%s-%s" .Release.Namespace .Release.Name -}}'
+    )
+    if "$ingressClassName" not in text.split("---", 1)[0]:
+        marker = '{{- $workhorseTrusted := concat $trustedProxies (list "127.0.0.1/32") -}}'
+        if marker in text:
+            text = text.replace(marker, ingress_class_var + "\n" + marker, 1)
+
+    text = text.replace("- --ingress-class=nginx\n", "- --ingress-class={{ $ingressClassName }}\n")
+    text = text.replace("- --ingress-class=gitlab-nginx\n", "- --ingress-class={{ $ingressClassName }}\n")
+    text = text.replace(
+        "  name: nginx\nspec:\n  controller: k8s.io/ingress-nginx",
+        "  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}\nspec:\n  controller: k8s.io/ingress-nginx",
+    )
+    text = text.replace('  name: "gitlab-nginx"\n', "  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}\n")
+    text = text.replace('  name: {{ $ingressClassName | quote }}\n', "  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}\n")
+    text = text.replace('  name: gitlab-nginx-{{ .Release.Namespace }}\n', "  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}\n")
+    text = text.replace('  name: gitlab-nginx-{{ .Release.Name }}\n', "  name: gitlab-nginx-{{ .Release.Namespace }}-{{ .Release.Name }}\n")
+    text = text.replace(
+        'kubernetes.io/ingress.class: "gitlab-nginx"',
+        "kubernetes.io/ingress.class: {{ $ingressClassName | quote }}",
+    )
+    text = text.replace("ingressClassName: gitlab-nginx", "ingressClassName: {{ $ingressClassName }}")
+    return text
+
+
 ROLE_CLUSTER_REPLACEMENT = """# Source: gitlab/charts/nginx-ingress/templates/clusterrole.yaml (namespaced Role; aligns with gitlab-in-olares)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -303,20 +332,30 @@ def main() -> None:
     if _selfsign_prefix in text and "namespace={{ .Release.Namespace }}\n          certname=gitlab-wildcard-tls" not in text:
         text = text.replace(_selfsign_prefix, _selfsign_prefix_fixed, 1)
 
-    # Olares: nginx controller Deployment name matches previous chart (Service stays gitlab-nginx-ingress-controller)
+    # Olares allowMultipleInstall: nginx controller Deployment uses Release.Name; Service stays gitlab-nginx-ingress-controller
     text = re.sub(
         r"(# Source: gitlab/charts/nginx-ingress/templates/controller-deployment\.yaml\n"
         r"apiVersion: apps/v1\n"
         r"kind: Deployment\n"
         r"metadata:\n"
         r"  labels:[\s\S]*?\n  name: )gitlab-nginx-ingress-controller\n",
-        r"\1gitlab\n",
+        r"\1{{ .Release.Name }}\n",
+        text,
+        count=1,
+    )
+    text = re.sub(
+        r"(# Source: gitlab/charts/nginx-ingress/templates/controller-deployment\.yaml\n"
+        r"apiVersion: apps/v1\n"
+        r"kind: Deployment\n"
+        r"metadata:\n"
+        r"  labels:[\s\S]*?\n  name: )gitlab\n",
+        r"\1{{ .Release.Name }}\n",
         text,
         count=1,
     )
 
-    # Match IngressClass name gitlab-nginx (chart default class name; controller arg must agree)
-    text = text.replace("- --ingress-class=nginx\n", "- --ingress-class=gitlab-nginx\n")
+    # Per-namespace IngressClass (must match Ingress ingressClassName and controller --ingress-class)
+    text = apply_namespace_ingress_class(text)
 
     # Mitigate pthread_create EAGAIN under small limits (same idea as prior gitlab-in-olares patch)
     if "worker-processes:" not in text:
@@ -350,6 +389,7 @@ def main() -> None:
 
     # Kubernetes 1.25+ / Olares: deprecated API versions removed from apiserver
     text = upgrade_k8s_api_versions(text)
+    text = apply_namespace_ingress_class(text)
 
     with open(path_out, "w", encoding="utf-8") as f:
         f.write(text)
