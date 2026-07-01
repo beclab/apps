@@ -1,0 +1,177 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: facefusionv3
+  icon: https://app.cdn.olares.com/appstore/facefusion/icon.png
+  description: Industry leading face manipulation platform
+  appid: facefusionv3
+  title: FaceFusion
+  version: '1.1.4'
+  categories:
+    - Creativity
+
+sharedEntrances:
+  - name: facefusion
+    host: sharedentrances-facefusion
+    port: 0
+    title: FaceFusion API
+    icon: https://app.cdn.olares.com/appstore/facefusion/icon.png
+    invisible: true
+    authLevel: internal
+entrances:
+  - name: facefusion
+    port: 8080
+    host: facefusion-web-svc
+    title: FaceFusion
+    icon: https://app.cdn.olares.com/appstore/facefusion/icon.png
+    openMethod: window
+    authLevel: internal
+# Declares every workload's replica count (flat map; keys = Deployment
+# metadata.name). Keys MUST match rendered workload names and values.yaml
+# workloads.<name>:
+#   facefusionv3         — facefusion engine Deployment (== appid / Release.Name)
+#   facefusiondownloader — Hugging Face model downloader (Deployment, was Job)
+#   facefusionproxy      — nginx entrance proxy
+workloadReplicas:
+  facefusionv3: 1
+  facefusiondownloader: 1
+  facefusionproxy: 1
+permission:
+  appData: true
+  appCache: true   # llm-init sentinel/run-state under appCache/llm-init-run/<release>
+  # FaceFusion model packs live in the shared cross-app HF Hub cache
+  # (appCommon/huggingface, mounted at the fixed /cache/hf/hub container path);
+  # the engine symlink-farms a flat /facefusion/.assets/models view from those
+  # snapshots so all users on the cluster share one deduplicated copy.
+  appCommon: true
+spec:
+  onlyAdmin: true
+  versionName: '3.6.1'
+  featuredImage: https://app.cdn.olares.com/appstore/facefusion/1.webp
+  promoteImage:
+    - https://app.cdn.olares.com/appstore/facefusion/1.webp
+    - https://app.cdn.olares.com/appstore/facefusion/2.webp
+    - https://app.cdn.olares.com/appstore/facefusion/3.webp
+    - https://app.cdn.olares.com/appstore/facefusion/4.webp
+  fullDescription: |
+    FaceFusion is a industry leading face manipulation platform. It enables you to effortlessly swap faces and create breathtaking photo manipulations.
+
+    **Key Features:**
+    Advanced Facical Image Generation and Editing
+    - Utilizes high-quality algorithms for seamless and realistic blending of facial features with customizable intensity levels, provides features such as facial morphing, blending multiple faces, realistic transformations
+
+    Multiple Face Swapping:
+    - Supports swapping multiple faces in a single project.
+
+    Real-Time Processing:
+    - Provides instant previews and results, enhancing user experience with fast and interactive face fusion.
+
+    Age Modification:
+    - Alter the apparent age of a face
+
+    Lip Sync:
+    - ensures that swapped faces in videos are perfectly synced with the audio, creating seamless mouth movements that match the speech.
+
+    Deep Swapper (DeepFaceLive Models):
+    - A dedicated face-swap processor backed by community-trained DeepFaceLive `.dfm` models, with a built-in library of 24+ ready-to-use celebrity faces.
+
+    **Model storage (App Common, shared)**
+    FaceFusion model packs (3.0.0 → 3.6.0) live in the shared cross-app App Common
+    HF Hub cache (`appCommon/huggingface`, fixed `/cache/hf/hub` container path).
+    A `llm-init` download-only sidecar fetches every repo into that store via the
+    user's `OLARES_USER_HUGGINGFACE_SERVICE`; the engine mounts the same store and
+    gates on `download-svc:/readyz` before rebuilding the flat
+    `/facefusion/.assets/models` view it expects as an ephemeral symlink farm over
+    the cached snapshots. Model bytes are de-duplicated and reused across apps.
+  upgradeDescription: |
+    V3 shared-app migration of FaceFusion (engine 3.6.1).
+
+    **What's Changed**
+
+    - **Download architecture**: replaced the bespoke `harveyff-hf-downloader-only`
+      Job with the shared `llm-init` download-only Deployment
+      (`facefusiondownloader`), matching speachesv3 / acestep15v3. Model packs now
+      land in the shared cross-app HF cache (App Common, `/cache/hf/hub`) in the
+      standard `models--owner--repo/snapshots/<sha>/...` layout; the engine gates
+      on `download-svc:/readyz` instead of per-repo `.done` sentinels and rebuilds
+      the flat `/facefusion/.assets/models` layout as a symlink farm at startup.
+      Declared `permission.appCommon: true` for the shared HF store. Downloader
+      image bumped to `llm-init:v1.2.4` (default LFS; chart no longer sets
+      `HF_HUB_DISABLE_XET`).
+    - **Entrance routing**: rewrote nginx to match acestep15v3 — llm-init API
+      paths (`/api/*`, `/healthz`, `/livez`, `/readyz`, `/static/*`) pin to
+      download-svc; `/` gates on model download AND Gradio readiness and
+      auto-reloads off the download dashboard into the app via `/__app_ready`.
+    - **Architecture**: dropped the `Values.admin / Values.bfl.username` cross-namespace
+      upstream branch; the engine Deployment is now named after the appid
+      (`facefusionv3`), the nginx entrance (`facefusionproxy`) and downloader
+      (`facefusiondownloader`) are independent workloads declared via
+      `workloadReplicas`.
+    - **HF env**: HF mirror / token are sourced from the user's system HF account
+      via `valueFrom` (declared as `HF_ENDPOINT` / `HF_TOKEN` locally; templates
+      no longer reference `OLARES_USER_*` names directly, as required by v3).
+    - **Resources**: bumped `limitedMemory` to 21Gi so engine (16Gi) + llm-init
+      (4Gi) + nginx (256Mi) limits fit inside the envelope.
+  developer: facefusion
+  website: https://join.facefusion.io
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  doc: https://docs.facefusion.io/
+  license:
+    - text: MIT
+      url: https://github.com/facefusion/facefusion?tab=readme-ov-file#License-1-ov-file
+  # Olares validates per mode, summing ALL app containers (initContainers
+  # excluded): Σ requests.cpu <= requiredCpu, Σ requests.memory <= requiredMemory,
+  # Σ limits.cpu <= limitedCpu, Σ limits.memory <= limitedMemory.
+  # Running containers (GPU mode):
+  #   container       req cpu / mem      lim cpu / mem
+  #   facefusion      500m / 3Gi         4000m / 16Gi
+  #   llm-init        100m / 128Mi       500m  / 4Gi
+  #   nginx ingress   10m  / 64Mi        100m  / 256Mi
+  #   --------------------------------------------------------
+  #   Σ               610m / ~3.19Gi     4600m / ~20.25Gi
+  accelerator:
+    - mode: nvidia
+      requiredCpu: 700m
+      limitedCpu: 6000m
+      requiredMemory: 4Gi
+      limitedMemory: 21Gi
+      requiredDisk: 18Gi
+      limitedDisk: 50Gi
+      requiredGPUMemory: 3Gi
+      limitedGPUMemory: 16Gi
+  supportArch:
+    - amd64
+options:
+  shared: true
+  apiTimeout: 0
+  onlyAdmin: true
+  conflicts:
+    - name: facefusion
+      type: application
+  allowedOutboundPorts:
+    - 80
+    - 443
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+# HF mirror/token: system-sourced, NOT install-dialog fields.
+# v3 forbids referencing OLARES_USER_* names inside chart template files; the
+# sanctioned pattern declares app-local names here and pulls the system value
+# in via valueFrom. Templates reference .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE / .HF_TOKEN.
+# HF_ENDPOINT is required because llm-init always wires it as an env var (acestep15v3 style).
+envs:
+  - envName: HF_ENDPOINT
+    required: true
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
