@@ -1,0 +1,38 @@
+metadata:
+  description: "Generic Ollama engine base. Pick any Ollama library model at install via env."
+  title: Ollama Engine Base
+
+spec:
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `ollama://<model>:<tag>`. The Ollama library source to pull your model, for example `ollama://qwen3.5:2b` or `ollama://gemma3:27b`. Browse models at https://ollama.com/library.
+    - `MODEL_NAME`: `<model>:<tag>`. The name of your model — use the string after `ollama://` in `MODEL_SOURCE`, for example `qwen3.5:2b`. This is also used as the OpenAI alias.
+    - `MODEL_MODE`: `chat` or `embedding`. Use `chat` for conversational models; use `embedding` for embedding models.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. Check the model page on ollama.com/library for capabilities.
+    - `ENGINE_ARGS`: `OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1`. Extra Ollama daemon options. Separate multiple `key=value` pairs with spaces. If `OLLAMA_KEEP_ALIVE` is omitted, the chart defaults to `-1` (keep model in VRAM). See https://github.com/ollama/ollama/blob/main/docs/faq.mdx.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
+    - `OLLAMA_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+
+    **How It Works**
+    First, `llm-init` pulls your model from the Ollama library and gets it ready, then the Ollama daemon starts serving the model when it's ready. These two parts run separately but share files and progress info.
+
+    **Stack**
+    - **Ollama daemon** (port 11434): pulls and serves the model
+    - **llm-init** (port 8090): drives model pull, shows progress, and provides the OpenAI API, proxying to Ollama
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `OLLAMA_REQUIRED_GPU_MEMORY`; Ollama uses GPU by default         |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                         |
+    | `cpu`          | CPU only          | Chart injects `OLLAMA_NUM_GPU=0`; disables GPU                       |
+
+    **Model Storage**
+    All pulled models are stored in a shared folder at `appCommon/ollama`. All Ollama-based apps share this location, so blobs deduplicate by digest across installs.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - For large models (e.g. gemma3:27b), set `OLLAMA_CONTEXT_LENGTH` and `OLLAMA_KV_CACHE_TYPE` in `ENGINE_ARGS` to balance context length and VRAM usage.
