@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plugin
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: plugin
+spec:
+  replicas: {{ .Values.workloads.plugin.replicaCount }}
+  selector:
+    matchLabels:
+      app: plugin
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: plugin
+    spec:
+      containers:
+        - name: plugin
+          image: "docker.io/beclab/labring-fastgpt-plugin:v0.6.2"
+          env:
+            - name: AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fastgpt-secrets
+                  key: PLUGIN_TOKEN
+            - name: SERVICE_REQUEST_MAX_CONTENT_LENGTH
+              value: "10"
+            - name: MAX_API_SIZE
+              value: "10"
+            - name: LOG_OTEL_SERVICE_NAME
+              value: "fastgpt-plugin"
+          envFrom:
+            - configMapRef:
+                name: fastgpt-config
+          ports:
+            - containerPort: 3000
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  curl -sf http://127.0.0.1:3000/health >/dev/null
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plugin-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: plugin
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000

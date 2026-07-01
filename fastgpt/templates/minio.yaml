@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: minio
+spec:
+  replicas: {{ .Values.workloads.minio.replicaCount }}
+  selector:
+    matchLabels:
+      app: minio
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      containers:
+        - name: minio
+          image: "docker.io/beclab/minio-minio:RELEASE.2023-12-20T01-00-02Z"
+          args: ["server", "--console-address", ":9001", "/data"]
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+      volumes:
+        - name: minio-data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appCache }}/minio"
+              {{- else }}
+            path: "{{ .Values.userspace.appCache }}/fastgpt/minio"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appCache }}/fastgpt/minio"
+            {{- end }}
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
