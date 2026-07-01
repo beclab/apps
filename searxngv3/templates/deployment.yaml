@@ -1,0 +1,128 @@
+{{- $searxngDomainENV := split  ","  .Values.domain.searxngv3 -}}
+{{- $searxngDomain := index $searxngDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: searxng
+  # Service name MUST NOT be "searxng": K8s injects SEARXNG_PORT=tcp://… which
+  # overwrites the port SearXNG/granian reads and crashes startup.
+  # Deployment name uses {{ .Release.Name }} (== appid searxngv3) for
+  # allowMultipleInstall; the Service below keeps the static "searxngv3" name.
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.searxngv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: searxng
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: searxng
+    spec:
+      containers:
+      - name: searxng
+        image: docker.io/beclab/searxng-searxng:2026.5.10-df1f24fb7
+        ports:
+          - containerPort: 8080
+        env:
+          - name: PGID
+            value: "1000"
+          - name: PUID
+            value: "1000"
+          - name: TZ
+            value: Etc/UTC
+          - name: SEARXNG_BASE_URL
+            value: "https://{{ $searxngDomain }}"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+            httpHeaders:
+            - name: X-Real-IP
+              value: 127.0.0.1
+            - name: X-Forwarded-For
+              value: 127.0.0.1
+          initialDelaySeconds: 30
+          timeoutSeconds: 60
+          periodSeconds: 60
+          successThreshold: 1
+          failureThreshold: 10
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 5
+          periodSeconds: 10
+          successThreshold: 1
+          failureThreshold: 30
+        resources:
+          limits:
+            cpu: "4"
+            memory: 8000Mi
+          requests:
+            cpu: 50m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /etc/searxng/limiter.toml
+          name: config
+          subPath: limiter.toml
+        # NOTE: the SearXNG runtime reads /etc/searxng/settings.yml (controlled by
+        # SEARXNG_SETTINGS_PATH). Mounting at /usr/local/searxng/searx/settings.yml
+        # only overrides the default template, which the entrypoint then re-renders
+        # (and strips) into /etc/searxng/settings.yml. Mount directly at the runtime
+        # path so the entrypoint sees the file exists and skips re-creating it.
+        - name: config
+          mountPath: /etc/searxng/settings.yml
+          subPath: settings.yml
+      restartPolicy: Always
+      volumes:
+      - name: config
+        configMap:
+          name: searxng-config
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: searxng
+  name: searxngv3
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - name: "8080"
+    port: 8080
+    targetPort: 8080
+  selector:
+    io.kompose.service: searxng
+status:
+  loadBalancer: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: searxng
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - name: "api"
+    port: 80
+    targetPort: 8080
+  selector:
+    io.kompose.service: searxng
+status:
+  loadBalancer: {}
