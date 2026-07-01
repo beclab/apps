@@ -1,23 +1,15 @@
 ﻿apiVersion: v1
-data:
-  init.sh: |
-    #!/bin/bash
-
-    source_dir="/config"
-    dest_dir="/new-config"
-
-    if [ -z "$(ls -A $dest_dir)" ]; then
-      echo "$dest_dir is empty. Copying files from $source_dir..."
-      cp -r $source_dir/. $dest_dir
-      echo "Files copied successfully."
-    else
-      echo "$dest_dir is not empty. No action taken."
-    fi
-
 kind: ConfigMap
 metadata:
   name: init-config
   namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    chown -R 1000:1000 /olares/userdata/home /config
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +19,7 @@ metadata:
   labels:
     app: radarr
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.radarr.replicaCount }}
   selector:
     matchLabels:
       app: radarr
@@ -39,37 +31,23 @@ spec:
         app: radarr
     spec:
       initContainers:
-      - env:
-        - name: PGID
-          value: "1000" 
-        - name: PUID
-          value: "1000" 
-        - name: UMASK
-          value: "002" 
-        - name: TZ
-          value: Etc/UTC
-        name: radarr-init-data
-        image: "beclab/harveyff-hotio-radarr:v0.0.1"
-        resources:
-          requests:
-            cpu: 100m
-            memory: 64Mi
-          limits:
-            cpu: 500m
-            memory: 256Mi
-        ports:
-        - containerPort: 7878
-        volumeMounts:
-        - mountPath: /new-config
-          name: radarr-config
-        - name: init-config 
-          mountPath: /init.sh
-          subPath: init.sh
+      - name: init-radarr
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
-            chmod +x /init.sh & bash /init.sh
+            sh /init.sh
+        volumeMounts:
+        - mountPath: /olares/userdata/home
+          name: home
+        - mountPath: /config
+          name: radarr-config
+        - name: init-config
+          mountPath: /init.sh
+          subPath: init.sh
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
@@ -81,7 +59,7 @@ spec:
         - name: TZ
           value: Etc/UTC
         name: radarr
-        image: "beclab/harveyff-hotio-radarr:v0.0.1"
+        image: "linuxserver/radarr:6.2.1"
         resources:
           requests:
             cpu: 100m
@@ -95,21 +73,15 @@ spec:
         - mountPath: /config
           name: radarr-config
         - name: home
+          mountPath: /olares/userdata/home
+        - name: home
           mountPath: /home
 
       volumes:
       - name: radarr-config
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: {{ .Values.userspace.appData }} 
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/radarr 
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/radarr 
-          {{- end }}
       - name: home
         hostPath:
           type: Directory
@@ -136,28 +108,3 @@ spec:
     - protocol: TCP
       port: 7878
       targetPort: 7878
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_{{ .Release.Name }}
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:7878
-  group: api.{{ .Release.Name }}
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /
-status:
-  state: active
-  {{- end }}
-{{- end }}
