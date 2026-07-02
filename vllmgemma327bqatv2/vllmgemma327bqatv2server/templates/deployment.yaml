@@ -25,7 +25,7 @@ spec:
     spec:
       containers:
         - name: vllm
-          image: "docker.io/vllm/vllm-openai:v0.20.2-cu129"
+          image: "docker.io/vllm/vllm-openai:v0.22.0-cu129"
           command:
             - /bin/bash
             - -c
@@ -61,10 +61,15 @@ spec:
                 --gpu-memory-utilization {{ $gpuMemUtil }} \
                 --max-model-len {{ $maxModelLen }} \
 {{- end }}
-                --tensor-parallel-size 1 {{- if eq $isSparkDGX "true" }} \
+{{- if eq $isSparkDGX "true" }}
+                -O0 \
                 --enforce-eager \
                 --max-num-seqs 8 \
-                --no-enable-prefix-caching{{- end }}
+                --no-enable-prefix-caching \
+{{- else }}
+                -O3 \
+{{- end }}
+                --tensor-parallel-size 1
           env:
             - name: PGID
               value: "1000"
@@ -92,10 +97,16 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /models/gemma-3-27b
+            - name: vllm-cache
+              mountPath: /root/.cache
       volumes:
         - name: data
           hostPath:
             path: "{{ .Values.userspace.userData }}/Huggingface/gemma327bqat"
+            type: DirectoryOrCreate
+        - name: vllm-cache
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Cache/vllm-gemma327bqat"
             type: DirectoryOrCreate
       restartPolicy: Always
 
