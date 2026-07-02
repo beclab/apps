@@ -15,7 +15,7 @@
 # Build & push:
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     -t beclab/harveyff-codex-base:0.5.4 \
+#     -t beclab/harveyff-codex-base:0.5.5 \
 #     --push .
 # syntax=docker/dockerfile:1.7
 
@@ -92,8 +92,6 @@ RUN apt-get update \
         python3-pip \
         python3-venv \
         pipx \
-        nodejs \
-        npm \
         golang-go \
         rustc \
         cargo \
@@ -184,6 +182,14 @@ RUN apt-get update \
  && mkdir -p /opt/data \
  && chown -R 1000:1000 /opt/data
 
+# Node 20 LTS via NodeSource. Ubuntu 24.04's nodejs is v18.19.1, which is
+# too old for some CLIs (e.g. @larksuite/cli needs node >= 20.12.0). This
+# ships node + npm under /usr/local, replacing the distro packages above.
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && node --version && npm --version
+
 COPY --from=olares-assets /out/bin/olares-cli /usr/local/bin/olares-cli
 RUN chmod 755 /usr/local/bin/olares-cli \
  && ( /usr/local/bin/olares-cli --version || /usr/local/bin/olares-cli version || true )
@@ -200,6 +206,8 @@ WORKDIR /opt/data
 ENV HOME=/opt/data \
     PATH=/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     TERM=xterm-256color \
-    PIP_BREAK_SYSTEM_PACKAGES=1
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    NPM_CONFIG_PREFIX=/opt/data/.local \
+    NPM_CONFIG_CACHE=/opt/data/.npm
 
 CMD ["bash"]
