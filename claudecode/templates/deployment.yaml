@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +6,7 @@ metadata:
   name: "{{ .Release.Name }}"
   namespace: "{{ .Release.Namespace }}"
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.claudecode.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: claudecode
@@ -49,7 +48,7 @@ spec:
         # Flatten Olares skills from /skills-staging into Claude Code's
         # user skills dir (~/.claude/skills = /opt/data/.claude/skills).
         - name: init-skills
-          image: "beclab/harveyff-claudecode-base:0.5.3"
+          image: "beclab/harveyff-claudecode-base:0.5.4"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -82,7 +81,7 @@ spec:
         # only writes under $HOME. A sentinel file makes subsequent
         # Pod starts skip the download.
         - name: init-install-claude
-          image: "beclab/harveyff-claudecode-base:0.5.3"
+          image: "beclab/harveyff-claudecode-base:0.5.4"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -98,16 +97,18 @@ spec:
               value: /usr/lib/jvm/java-21-openjdk-current
             - name: DISABLE_AUTOUPDATER
               value: "1"
+            - name: CLAUDE_VERSION
+              value: "{{ .Chart.AppVersion }}"
           command:
             - bash
             - -c
             - |
               set -euo pipefail
-              SENTINEL="$HOME/.install-state/install-complete"
+              SENTINEL="$HOME/.install-state/install-complete-${CLAUDE_VERSION}"
               mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
 
               if [ -x "$HOME/.local/bin/claude" ] && [ -f "$SENTINEL" ]; then
-                echo "[init-install-claude] cached binary found (installed $(cat "$SENTINEL"))"
+                echo "[init-install-claude] cached claude ${CLAUDE_VERSION} found (installed $(cat "$SENTINEL"))"
                 "$HOME/.local/bin/claude" --version
                 exit 0
               fi
@@ -120,8 +121,10 @@ spec:
                 https://claude.ai/install.sh -o "$INSTALLER"
               echo "[init-install-claude] installer downloaded ($(wc -c < "$INSTALLER") bytes)"
 
-              echo "[init-install-claude] running installer..."
-              bash "$INSTALLER"
+              # Pin the installed version to the chart's appVersion. The installer
+              # accepts: install.sh [stable|latest|VERSION].
+              echo "[init-install-claude] running installer for version ${CLAUDE_VERSION}..."
+              bash "$INSTALLER" "${CLAUDE_VERSION}"
 
               if [ ! -x "$HOME/.local/bin/claude" ]; then
                 echo "[init-install-claude] installer completed but binary not found at $HOME/.local/bin/claude" >&2
@@ -130,7 +133,7 @@ spec:
               fi
 
               date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
-              echo "[init-install-claude] installed"
+              echo "[init-install-claude] installed claude ${CLAUDE_VERSION}"
               "$HOME/.local/bin/claude" --version
           resources:
             limits:
@@ -178,7 +181,7 @@ spec:
         # login / non-login / interactive / non-interactive shells all
         # see the claude binary on PATH.
         - name: claudecode
-          image: "beclab/harveyff-claudecode-base:0.5.3"
+          image: "beclab/harveyff-claudecode-base:0.5.4"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
