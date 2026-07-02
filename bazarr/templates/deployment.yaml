@@ -1,4 +1,16 @@
-﻿---
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: init-config
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    chown -R 1000:1000 /olares/userdata/home /config
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,32 +19,35 @@ metadata:
   labels:
     app: bazarr
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.bazarr.replicaCount }}
   selector:
     matchLabels:
       app: bazarr
   strategy:
-    type: Recreate  
+    type: Recreate
   template:
     metadata:
       labels:
         app: bazarr
     spec:
       initContainers:
-      - name: init-chmod-data
+      - name: init-bazarr
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
-        imagePullPolicy: IfNotPresent
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /app-data-root
-        resources: {}
+            sh /init.sh
         volumeMounts:
-          - name: bazarr-config
-            mountPath: /app-data-root
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
+        - mountPath: /olares/userdata/home
+          name: home
+        - mountPath: /olares/userdata/external
+          name: external-data
+        - mountPath: /config
+          name: bazarr-config
+        - name: init-config
+          mountPath: /init.sh
+          subPath: init.sh
         securityContext:
           runAsUser: 0
       containers:
@@ -46,34 +61,44 @@ spec:
         - name: TZ
           value: Etc/UTC
         name: bazarr
-        image: "beclab/harveyff-hotio-bazarr:v0.0.1"
+        image: "linuxserver/bazarr:1.5.6"
         imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 100m
-            memory: 512Mi
+            memory: 256Mi
           limits:
             cpu: 500m
-            memory: 1Gi
+            memory: 512Mi
         ports:
         - containerPort: 6767
         volumeMounts:
         - mountPath: /config
           name: bazarr-config
+        - name: home
+          mountPath: /olares/userdata/home
+        - name: external-data
+          mountPath: /olares/userdata/external
       volumes:
       - name: bazarr-config
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: {{ .Values.userspace.appData }} 
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/bazarr 
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/bazarr 
-          {{- end }}
-        
+          path: {{ .Values.userspace.appData }}
+      - name: home
+        hostPath:
+          type: Directory
+          path: {{ .Values.userspace.userData }}
+      - name: external-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: "{{ .Values.sharedlib }}"
+      - name: init-config
+        configMap:
+          name: init-config
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
 
 ---
 apiVersion: v1
@@ -89,28 +114,3 @@ spec:
     - protocol: TCP
       port: 6767
       targetPort: 6767
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_{{ .Release.Name }}
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api v2
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:6767
-  group: api.{{ .Release.Name }}
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active
-  {{- end }}  
-{{- end }}
