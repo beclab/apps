@@ -1,75 +1,4 @@
 {{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
----
-apiVersion: v1
-data:
-  nginx.conf: |
-    events {
-      worker_connections 1024;
-    }
-
-    http {
-      upstream homeassistant {
-        server 127.0.0.1:8123;
-      }
-
-      map $http_upgrade $connection_upgrade {
-        default upgrade;
-        '' close;
-      }
-
-      server {
-        listen 8001;
-        server_name _;
-
-        client_max_body_size 0;
-        proxy_connect_timeout 60s;
-
-        location / {
-          proxy_pass http://homeassistant;
-          proxy_http_version 1.1;
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection $connection_upgrade;
-          proxy_buffering off;
-          proxy_read_timeout 3600s;
-          proxy_send_timeout 3600s;
-          add_header X-Frame-Options "";
-        }
-      }
-    }
-
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: {{ .Release.Namespace }}
-
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: {{ .Release.Name }}-config
-  namespace: {{ .Release.Namespace }}
-data:
-  configuration.yaml: |-
-    # Loads default set of integrations. Do not remove.
-    default_config:
-    # Load frontend themes from the themes folder
-    frontend:
-      themes: !include_dir_merge_named themes
-    # Text to speech
-    tts:
-      - platform: google_translate
-    http:
-      use_x_forwarded_for: true
-      use_x_frame_options: false
-      trusted_proxies:
-        - "127.0.0.1"
-      ip_ban_enabled: true
-      login_attempts_threshold: 5
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -78,7 +7,7 @@ metadata:
   labels:
     app: homeassistant
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.homeassistant.replicaCount }}
   selector:
     matchLabels:
       app: homeassistant
@@ -88,6 +17,7 @@ spec:
     metadata:
       labels:
         app: homeassistant
+        applications.app.bytetrade.io/macvlan-init: "true"
     spec:
       initContainers:
         - name: init-chmod-data
@@ -98,6 +28,11 @@ spec:
             - >
               cp /config/configuration.yaml
               /homeassistant-config/configuration.yaml;
+              mkdir -p /homeassistant-config/themes;
+              [ -f /homeassistant-config/automations.yaml ] || echo "[]" > /homeassistant-config/automations.yaml;
+              for f in scripts.yaml scenes.yaml; do
+              [ -f "/homeassistant-config/$f" ] || touch "/homeassistant-config/$f";
+              done;
               chown -R 1000:1000 /homeassistant-config
           resources: {}
           volumeMounts:
@@ -112,7 +47,11 @@ spec:
             runAsUser: 0
       containers:
         - name: homeassistant
-          image: "docker.io/beclab/homeassistant-home-assistant:2026.3.1"
+          image: "docker.io/beclab/homeassistant-home-assistant:2026.6.4"
+          {{- if eq (toString .Values.olaresEnv.USB_PASSTHROUGH) "true" }}
+          securityContext:
+            privileged: true
+          {{- end }}
           resources:
             requests:
               cpu: 500m
@@ -155,6 +94,10 @@ spec:
             - mountPath: /etc/localtime
               name: homeassistant-localtime
               readOnly: true
+            {{- if eq (toString .Values.olaresEnv.USB_PASSTHROUGH) "true" }}
+            - mountPath: {{ .Values.olaresEnv.USB_DEVICE_PATH }}
+              name: usb-device
+            {{- end }}
         - name: nginx
           image: "docker.io/beclab/aboveos-nginx:1.27.0"
           volumeMounts:
@@ -190,6 +133,12 @@ spec:
               cpu: 100m
               memory: 256Mi
       volumes:
+        {{- if eq (toString .Values.olaresEnv.USB_PASSTHROUGH) "true" }}
+        - name: usb-device
+          hostPath:
+            path: {{ .Values.olaresEnv.USB_DEVICE_PATH }}
+            type: CharDevice
+        {{- end }}
         - name: homeassistant-config
           hostPath:
             type: DirectoryOrCreate
@@ -212,22 +161,3 @@ spec:
             items:
               - key: nginx.conf
                 path: nginx.conf
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: homeassistant-svc
-  namespace: {{ .Release.Namespace }}
-spec:
-  type: ClusterIP
-  selector:
-    app: homeassistant
-  ports:
-    - protocol: TCP
-      port: 8123
-      targetPort: 8123
-      name: ha-service
-    - protocol: TCP
-      port: 8001
-      targetPort: 8001
-      name: ha-proxy
