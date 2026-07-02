@@ -1,0 +1,50 @@
+metadata:
+  title: Whisper API
+  description: FastAPI service on top of WhisperX
+spec:
+  fullDescription: |
+    **IMPORTANT NOTE**
+    This is a shared app. Only one service will be installed across the entire Olares system. Every user can install a desktop entry to access or use the shared entrance to call the service API.
+
+    **PREREQUISITES**
+    Before installing, configure **HF_TOKEN** (mapped from your Olares Hugging Face token) and **HF_ENDPOINT**. The installing admin's token must have **accepted the terms of use** on Hugging Face for these gated repositories:
+    - `pyannote/speaker-diarization-3.1`
+    - `pyannote/segmentation-3.0`
+
+    Models are downloaded at install time via llm-init into the shared HF cache:
+    - `Systran/faster-whisper-large-v3` (ASR, default)
+    - `pyannote/speaker-diarization-3.1` and `pyannote/segmentation-3.0` (speaker diarization)
+    - `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn` (Chinese word-level alignment)
+
+    **PERFORMANCE NOTE**
+    The first transcription after install may take noticeably longer while models are loaded into GPU memory; subsequent requests are faster.
+
+    **OVERVIEW**
+    The whisperX API is a tool for enhancing and analyzing audio content. This API provides a suite of services for processing audio and video files, including transcription, alignment, diarization, and combining transcript with diarization results.
+
+    Available Services
+    **Speech-to-Text (/speech-to-text)**
+    - Upload audio/video files for transcription
+    - Supports multiple languages and Whisper models
+
+    **Speech-to-Text URL (/speech-to-text-url)**
+    - Transcribe audio/video from URLs
+    - Same features as direct upload
+
+    **Individual Services:**
+    - Transcribe (/service/transcribe): Convert speech to text
+    - Align (/service/align): Align transcript with audio
+    - Diarize (/service/diarize): Speaker diarization
+    - Combine (/service/combine): Merge transcript with diarization
+
+    **Task Management:**
+    - Get all tasks (/task/all)
+    - Get task status (/task/{identifier})
+
+    **Health Check Endpoints:**
+    - Basic health check (/health): Simple service status check
+    - Liveness probe (/health/live): Verifies if application is running
+    - Readiness probe (/health/ready): Checks if application is ready to accept requests (includes database connectivity check)
+
+  upgradeDescription: |
+    Migrated Whisper API to the apiVersion v3 shared app pattern and switched model provisioning to the shared llm-init downloader (whisperservicev2 → whisperservicev3). Now runs the upstream image `beclab/pavelzbornik-whisperx-fastapi:0.8.0` (nltk + VAD baked in). Replaced the bespoke CDN tar.zst `downloader-init` with an `llm-init:v1.2.4` download-only Deployment (`whisperservicev3download`) that fetches the HF repos (`Systran/faster-whisper-large-v3`, `pyannote/speaker-diarization-3.1`, `pyannote/segmentation-3.0`) into the shared cross-app HF cache (App Common, `/cache/hf/hub`); the engine reads them via `HF_HUB_CACHE` and gates on `/readyz`. The English alignment torchaudio weight is pulled lazily on first word-level alignment and cached in a persistent `/root/.cache`. Flattened the sub-charts into a single chart (engine named after the release, nginx entrance `whisperserviceclient`), moved the GPU requirement into the accelerator modes list, and added `appCommon` + `workloadReplicas`. Diarization (pyannote) is gated — the admin HF token must have accepted its terms.
