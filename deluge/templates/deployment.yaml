@@ -1,5 +1,4 @@
-﻿---
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}
@@ -7,7 +6,7 @@ metadata:
   labels:
     app: deluge
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.deluge.replicaCount }}
   selector:
     matchLabels:
       app: deluge
@@ -18,16 +17,39 @@ spec:
       labels:
         app: deluge
     spec:
+      initContainers:
+      - name: init-deluge
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            sh /chart-init/init.sh
+        resources: {}
+        imagePullPolicy: IfNotPresent
+        volumeMounts:
+        - name: home-downloads
+          mountPath: /olares/userdata/home
+        - name: deluge-config
+          mountPath: /config
+        - name: deluge-init
+          mountPath: /chart-init
+          readOnly: true
+        - name: deluge-defaults
+          mountPath: /chart-defaults
+          readOnly: true
+        securityContext:
+          runAsUser: 0
       containers:
       - env:
         - name: PGID
-          value: "1000" 
+          value: "1000"
         - name: PUID
-          value: "1000" 
+          value: "1000"
         - name: TZ
-          value: Europe/London
+          value: UTC
         name: deluge
-        image: "docker.io/beclab/aboveos-linuxserver-deluge:2.1.1"
+        image: "linuxserver/deluge:2.2.0"
         resources:
           requests:
             cpu: 100m
@@ -45,29 +67,40 @@ spec:
         volumeMounts:
         - mountPath: /config
           name: deluge-config
+        - mountPath: /olares/userdata/home
+          name: home-downloads
+        - mountPath: /olares/userdata/external
+          name: external-downloads
         - mountPath: /downloads
-          name: deluge-downloads
-        securityContext:
-          runAsUser: 0
+          name: home-downloads
+          subPath: Downloads
       volumes:
       - name: deluge-config
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: {{ .Values.userspace.appData }}
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/deluge
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/deluge
-          {{- end }}
-      - name: deluge-downloads
+      - name: home-downloads
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.userData }}/Downloads    
-        
-
+          path: {{ .Values.userspace.userData }}
+      - name: external-downloads
+        hostPath:
+          type: DirectoryOrCreate
+          path: "{{ .Values.sharedlib }}"
+      - name: deluge-init
+        configMap:
+          name: deluge-init
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
+      - name: deluge-defaults
+        configMap:
+          name: deluge-defaults
+          defaultMode: 438
+          items:
+          - key: core.conf
+            path: core.conf
 ---
 apiVersion: v1
 kind: Service
@@ -91,28 +124,3 @@ spec:
       protocol: UDP
       port: 6881
       targetPort: 6881
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_{{ .Release.Name }}
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api v2
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8112
-  group: api.{{ .Release.Name }}
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active
-  {{- end }}
-{{- end }}
