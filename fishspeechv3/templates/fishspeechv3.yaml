@@ -1,0 +1,248 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    # Fish Speech entrance: gate the Gradio WebUI on model download (llm-init
+    # /readyz) AND app readiness (Gradio answering /gradio_api/info). While
+    # gated, serve the llm-init download dashboard; llm-init API paths
+    # (/api/, /static/, /healthz, …) are pinned to download-svc so they never
+    # fall through to Gradio. The dashboard auto-reloads into the app once
+    # /__app_ready flips to 200.
+    server {
+      listen 8080;
+      access_log /opt/bitnami/openresty/nginx/logs/access.log;
+      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+
+      client_max_body_size 500m;
+      resolver coredns.kube-system.svc.cluster.local valid=10s;
+
+      # llm-init control-plane API — always reach the downloader, not Gradio.
+      # (Gradio's own assets/API live under /gradio_api/ and the root, so these
+      # paths only ever serve the download dashboard.)
+      location /api/ {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090;
+      }
+      location /static/ {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090;
+      }
+      location = /healthz {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/healthz;
+      }
+      location = /livez {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/livez;
+      }
+      location = /readyz {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz;
+      }
+      # Legacy progress path → llm-init progress snapshot.
+      location = /progress {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/api/progress;
+      }
+
+      # Gradio streaming API — proxy straight to the app (SSE + HTTPS forcing).
+      location /gradio_api/ {
+        proxy_pass http://fishspeech.{{ .Release.Namespace }}.svc.cluster.local:7860;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_pass_request_headers on;
+        # Force HTTPS protocol for Gradio to generate HTTPS URLs
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Scheme https;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+
+        # Disable buffering for SSE/streaming
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_connect_timeout 600s;
+        proxy_set_header Connection '';
+        chunked_transfer_encoding on;
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin * always;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin * always;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+          return 204;
+        }
+      }
+
+      # Internal gates for auth_request / auto-reload polling.
+      location = /__models_ready {
+        internal;
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 5s;
+        proxy_send_timeout 5s;
+      }
+      location = /__main_ready {
+        internal;
+        proxy_pass http://fishspeech.{{ .Release.Namespace }}.svc.cluster.local:7860/gradio_api/info;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 5s;
+        proxy_send_timeout 5s;
+      }
+      # Public: 200 once the model is on disk AND Gradio is answering.
+      location = /__app_ready {
+        default_type text/plain;
+        content_by_lua_block {
+          local models = ngx.location.capture("/__models_ready")
+          if models.status ~= 200 then
+            ngx.status = 503
+            return
+          end
+          local main = ngx.location.capture("/__main_ready")
+          if main.status < 200 or main.status >= 500 then
+            ngx.status = 503
+            return
+          end
+          ngx.status = 200
+          ngx.say("ok")
+        }
+      }
+
+      location / {
+        auth_request /__models_ready;
+        error_page 401 403 500 502 503 504 = @downloader;
+        proxy_pass http://fishspeech.{{ .Release.Namespace }}.svc.cluster.local:7860;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Force HTTPS protocol for Gradio to generate HTTPS URLs
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Port 443;
+        proxy_set_header X-Forwarded-Scheme https;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header Cookie $http_cookie;
+        proxy_pass_request_headers on;
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+
+      # llm-init download dashboard + auto-reload once /__app_ready flips 200.
+      location @downloader {
+        proxy_pass http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090;
+        proxy_set_header Accept-Encoding "";
+        sub_filter_once on;
+        sub_filter_types text/html;
+        sub_filter '</body>' '<script>(function(){function c(){fetch("/__app_ready",{cache:"no-store"}).then(function(r){if(r.ok){location.reload();}}).catch(function(){});}setInterval(c,3000);})();</script></body>';
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fishspeechclient
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fishspeechclient
+spec:
+  replicas: {{ .Values.workloads.fishspeechclient.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: fishspeechclient
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: fishspeechclient
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+      containers:
+        - name: nginx
+          image: docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: OPENRESTY_CONF_FILE
+              value: /etc/nginx/nginx.conf
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  http_code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+                  [ $http_code -ge 200 ] && [ $http_code -lt 500 ]
+            initialDelaySeconds: 2
+            timeoutSeconds: 3
+            periodSeconds: 3
+            successThreshold: 1
+            failureThreshold: 60
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/server_blocks/nginx.conf
+              subPath: nginx.conf
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fishspeechclient
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    io.kompose.service: fishspeechclient
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
