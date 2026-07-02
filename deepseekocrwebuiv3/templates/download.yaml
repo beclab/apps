@@ -1,0 +1,149 @@
+{{- /* llm-init in download-only mode (ENGINE_KIND empty): no engine is started
+       or proxied; llm-init degrades to a pure model downloader that drops the
+       DeepSeek-OCR-2 repo into the shared cross-app HF Hub cache (App Common,
+       fixed /cache/hf/hub). The OCR engine mounts the same store and waits on
+       /readyz before materialising the flat /app/models layout it expects
+       (see deployment.yaml). This replaces the bespoke harveyff-hf-downloader. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- /* Per-release run-state hostPath so concurrent clones on the same node do
+       not collide on the sentinel. */ -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseekocrwebuiv3download
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv3download
+spec:
+  replicas: {{ .Values.workloads.deepseekocrwebuiv3download.replicaCount }}
+  selector:
+    matchLabels:
+      app: deepseekocrwebuiv3download
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deepseekocrwebuiv3download
+    spec:
+      restartPolicy: Always
+      volumes:
+        # Shared cross-app HF Hub cache (App Common); image bakes HF_HUB_CACHE=/cache/hf/hub.
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        # Per-release sentinel / run-state dir (App Cache).
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "chown 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          # v1.2.4: nullengine download-only, default LFS (hf_xet off unless
+          # HF_ENABLE_XET=true) for stable download memory.
+          image: docker.io/beclab/llm-init:v1.2.4
+          imagePullPolicy: IfNotPresent
+          env:
+            # Empty ENGINE_KIND selects download-only mode (nullengine).
+            - name: ENGINE_KIND
+              value: ""
+            # TEMPORARY (llm-init v1.2.4 image): download-only still requires
+            # MODEL_NAME + MODEL_MODE. They are placeholders only — the repo to
+            # fetch comes entirely from MODEL_SOURCE. Drop both once the
+            # make-optional patch ships.
+            - name: MODEL_NAME
+              value: "deepseek-ai/DeepSeek-OCR-2"
+            - name: MODEL_MODE
+              value: "chat"
+            # Single full repo (no --include); must be hf://.
+            - name: MODEL_SOURCE
+              value: "hf://deepseek-ai/DeepSeek-OCR-2"
+            # Always wire the Olares HF mirror (manifest requires HF_ENDPOINT).
+            - name: HF_ENDPOINT
+              value: "{{ $oe.HF_ENDPOINT }}"
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            # Keep concurrency low; LFS is the image default in v1.2.4.
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Readiness on /livez (process up), not /readyz (model ready), so the
+          # downloader stays scheduled and serving progress while downloading.
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              # `hf download` runs a python subprocess in this cgroup; 4Gi gives
+              # the huggingface_hub CLI headroom on multi-GB model downloads.
+              memory: 4Gi
+
+---
+# Internal progress / health surface (no entrance). The OCR engine waits on
+# /readyz here before reading the shared cache; the nginx clientproxy uses this
+# Service as the backup upstream so the download dashboard shows until the app
+# comes up.
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv3download
+spec:
+  selector:
+    app: deepseekocrwebuiv3download
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
