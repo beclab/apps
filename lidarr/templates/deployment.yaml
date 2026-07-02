@@ -1,22 +1,14 @@
 ﻿apiVersion: v1
-data:
-  init.sh: |
-    #!/bin/bash
-
-    source_dir="/config"
-    dest_dir="/new-config"
-
-    if [ -z "$(ls -A $dest_dir)" ]; then
-      echo "$dest_dir is empty. Copying files from $source_dir..."
-      cp -r $source_dir/. $dest_dir
-      echo "Files copied successfully."
-    else
-      echo "$dest_dir is not empty. No action taken."
-    fi
 kind: ConfigMap
 metadata:
   name: init-config
   namespace: {{ .Release.Namespace }}
+data:
+  init.sh: |
+    #!/bin/sh
+    set -e
+
+    chown -R 1000:1000 /olares/userdata/home /config
 
 ---
 apiVersion: apps/v1
@@ -27,7 +19,7 @@ metadata:
   labels:
     app: lidarr
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.lidarr.replicaCount }}
   strategy:
     type: Recreate
   selector:
@@ -39,38 +31,35 @@ spec:
         app: lidarr
     spec:
       initContainers:
+      - name: init-lidarr
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            sh /init.sh
+        volumeMounts:
+        - mountPath: /olares/userdata/home
+          name: home
+        - mountPath: /config
+          name: lidarr-config
+        - name: init-config
+          mountPath: /init.sh
+          subPath: init.sh
+        securityContext:
+          runAsUser: 0
+      containers:
       - env:
         - name: PGID
           value: "1000" 
         - name: PUID
           value: "1000" 
+        - name: UMASK
+          value: "002" 
         - name: TZ
-          value: Europe/London
-        name: lidarr-init-data
-        image: "docker.io/beclab/aboveos-linuxserver-lidarr:version-2.4.3.4248"
-        command:
-          - sh
-          - '-c'
-          - |
-            chmod +x /init.sh & bash /init.sh
-        resources:
-          requests:
-            cpu: 100m
-            memory: 32Mi
-          limits:
-            cpu: 1000m
-            memory: 256Mi
-        ports:
-        - containerPort: 8686
-        volumeMounts:
-        - mountPath: /new-config
-          name: lidarr-config
-        - name: init-config 
-          mountPath: /init.sh
-          subPath: init.sh
-      containers:
-      - name: lidarr
-        image: "docker.io/beclab/aboveos-linuxserver-lidarr:version-2.4.3.4248"
+          value: Etc/UTC
+        name: lidarr
+        image: "linuxserver/lidarr:3.1.0"
         resources:
           requests:
             cpu: 100m
@@ -78,37 +67,24 @@ spec:
           limits:
             cpu: 500m
             memory: 512Mi
-        env:
-        - name: PGID
-          value: "1000" 
-        - name: PUID
-          value: "1000" 
-        - name: TZ
-          value: Europe/London
         ports:
         - containerPort: 8686
         volumeMounts:
         - mountPath: /config
           name: lidarr-config
-        - mountPath: /home
-          name: home
+        - name: home
+          mountPath: /olares/userdata/home
+        - name: home
+          mountPath: /home
       volumes:
       - name: lidarr-config
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: {{ .Values.userspace.appData }} 
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/lidarr 
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/lidarr 
-          {{- end }}
       - name: home
         hostPath:
-          type: DirectoryOrCreate
-          path: {{ .Values.userspace.userData }}           
+          type: Directory
+          path: {{ .Values.userspace.userData }}
       - name: init-config
         configMap:
           name: init-config
@@ -130,28 +106,3 @@ spec:
     - protocol: TCP
       port: 8686
       targetPort: 8686
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_{{ .Release.Name }}
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8686
-  group: api.{{ .Release.Name }}
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /
-status:
-  state: active
-  {{- end }}
-{{- end }}
