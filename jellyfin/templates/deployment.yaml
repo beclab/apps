@@ -26,7 +26,7 @@ metadata:
   labels:
     app: jellyfin
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.jellyfin.replicaCount }}
   selector:
     matchLabels:
       app: jellyfin
@@ -36,6 +36,7 @@ spec:
     metadata:
       labels:
         app: jellyfin
+        applications.app.bytetrade.io/macvlan-init: "true"
     spec:
       volumes:
         - name: home
@@ -109,11 +110,11 @@ spec:
             - sh
             - '-c'
             - |
-              chown -R 1000:1000 /home; chown -R 1000:1000 /app-data-root
+              chown -R 1000:1000 /olares/userdata/home; chown -R 1000:1000 /app-data-root
           resources: {}
           volumeMounts:
             - name: home
-              mountPath: /home
+              mountPath: /olares/userdata/home
             - name: app-data-root
               mountPath: /app-data-root
           imagePullPolicy: IfNotPresent
@@ -135,11 +136,15 @@ spec:
           - containerPort: 8096
           volumeMounts:
           - name: home
+            mountPath: /olares/userdata/home
+          - name: home
             mountPath: /home
           - name: config
             mountPath: /config
           - name: cache
             mountPath: /cache
+          - name: external
+            mountPath: /olares/userdata/external
           - name: external
             mountPath: /external
           env:
@@ -168,24 +173,3 @@ spec:
       port: 8096
       targetPort: 8096
       
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: {{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_api
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8096
-  group: api.jellyfin
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v1
-status:
-  state: active
-  {{- end }}  
-{{- end }}
