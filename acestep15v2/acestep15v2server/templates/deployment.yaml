@@ -36,7 +36,7 @@ spec:
             runAsUser: 0
       containers:
         - name: acestep
-          image: "docker.io/beclab/ace-step-ace-step-1.5:v0.1.0"
+          image: "docker.io/beclab/ace-step-ace-step-1.5:0.1.8"
           ports:
             - containerPort: 7860
           command:
@@ -45,37 +45,36 @@ spec:
             - |
               set -e
               MAIN_DONE="/app/checkpoints/.Ace-Step1.5.done"
-              XL_DONE="/app/checkpoints/acestep-v15-xl-turbo/.acestep-v15-xl-turbo.done"
+              XL_DONE="/app/checkpoints/acestep-v15-xl-sft/.acestep-v15-xl-sft.done"
+              LM_DONE="/app/checkpoints/acestep-5Hz-lm-4B/.acestep-5Hz-lm-4B.done"
               echo "[wait] Waiting for model downloads..."
-              while [ ! -f "$MAIN_DONE" ] || [ ! -f "$XL_DONE" ]; do
-                echo "[wait] main=$([ -f "$MAIN_DONE" ] && echo ok || echo pending) xl-turbo=$([ -f "$XL_DONE" ] && echo ok || echo pending)"
+              while [ ! -f "$MAIN_DONE" ] || [ ! -f "$XL_DONE" ] || [ ! -f "$LM_DONE" ]; do
+                echo "[wait] main=$([ -f "$MAIN_DONE" ] && echo ok || echo pending) xl-sft=$([ -f "$XL_DONE" ] && echo ok || echo pending) lm-4b=$([ -f "$LM_DONE" ] && echo ok || echo pending)"
                 sleep 10
               done
               echo "[wait] All required models ready, starting ACE-Step server."
 
-              CMD_ARGS="--server-name 0.0.0.0 --port 7860 --init_service true --service_mode true"
-
-              case "${ACESTEP_INIT_LLM:-auto}" in
-                true|1|yes)
-                  CMD_ARGS="$CMD_ARGS --init_llm true"
-                  ;;
-                false|0|no)
-                  CMD_ARGS="$CMD_ARGS --init_llm false"
-                  ;;
-              esac
-
-              if [ -n "${ACESTEP_UI_LANGUAGE:-}" ]; then
-                CMD_ARGS="$CMD_ARGS --language ${ACESTEP_UI_LANGUAGE}"
-              else
-                CMD_ARGS="$CMD_ARGS --language en"
+              cd /app
+              if [ -x /app/docker-entrypoint.sh ]; then
+                export ACESTEP_MODE=gradio
+                export ACESTEP_INIT_SERVICE=true
+                export GRADIO_SERVER_NAME=0.0.0.0
+                export GRADIO_PORT=7860
+                export ACESTEP_EXTRA_ARGS="--service_mode true --language ${ACESTEP_UI_LANGUAGE:-en} --device ${ACESTEP_DEVICE:-auto}"
+                exec /app/docker-entrypoint.sh
               fi
 
-              [ -n "${ACESTEP_CONFIG_PATH:-}" ] && CMD_ARGS="$CMD_ARGS --config_path ${ACESTEP_CONFIG_PATH}"
-              [ -n "${ACESTEP_LM_MODEL_PATH:-}" ] && CMD_ARGS="$CMD_ARGS --lm_model_path ${ACESTEP_LM_MODEL_PATH}"
-              CMD_ARGS="$CMD_ARGS --backend ${ACESTEP_LM_BACKEND:-pt}"
-              [ -n "${ACESTEP_DEVICE:-}" ] && CMD_ARGS="$CMD_ARGS --device ${ACESTEP_DEVICE}"
-
-              exec python3 acestep/acestep_v15_pipeline.py $CMD_ARGS
+              exec uv run python -m acestep.acestep_v15_pipeline \
+                --server-name 0.0.0.0 \
+                --port 7860 \
+                --init_service true \
+                --service_mode true \
+                --init_llm true \
+                --config_path "${ACESTEP_CONFIG_PATH}" \
+                --lm_model_path "${ACESTEP_LM_MODEL_PATH}" \
+                --backend "${ACESTEP_LLM_BACKEND:-pt}" \
+                --language "${ACESTEP_UI_LANGUAGE:-en}" \
+                --device "${ACESTEP_DEVICE:-auto}"
           env:
             - name: PGID
               value: "1000"
@@ -86,21 +85,27 @@ spec:
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
             - name: ACESTEP_CONFIG_PATH
-              value: "acestep-v15-xl-turbo"
-            - name: ACESTEP_INIT_LLM
-              value: "auto"
+              value: "acestep-v15-xl-sft"
+            - name: ACESTEP_INIT_SERVICE
+              value: "true"
             - name: ACESTEP_LM_MODEL_PATH
-              value: "acestep-5Hz-lm-1.7B"
-            - name: ACESTEP_LM_BACKEND
+              value: "acestep-5Hz-lm-4B"
+            - name: ACESTEP_LLM_BACKEND
               value: "pt"
+            - name: GRADIO_SERVER_NAME
+              value: "0.0.0.0"
+            - name: GRADIO_PORT
+              value: "7860"
+            - name: ACESTEP_MODE
+              value: "gradio"
             - name: ACESTEP_DOWNLOAD_SOURCE
               value: "auto"
             - name: ACESTEP_USE_FLASH_ATTENTION
               value: "true"
             - name: ACESTEP_OFFLOAD_TO_CPU
-              value: "false"
+              value: "true"
             - name: ACESTEP_LM_OFFLOAD_TO_CPU
-              value: "false"
+              value: "true"
             - name: ACESTEP_DEVICE
               value: "auto"
             - name: TOKENIZERS_PARALLELISM
