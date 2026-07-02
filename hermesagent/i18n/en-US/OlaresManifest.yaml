@@ -7,7 +7,7 @@ spec:
 
     **Tips**
     Gateway Restart
-    - Run `restart-gateway` to reload the gateway and pick up the latest config (`hermes gateway restart` does NOT work in containerized deployments).
+    - Run `hermes gateway restart` from the Hermes CLI terminal (same container as the supervised gateway). Config changes are picked up after restart.
 
     Storage
     - All Hermes state — config, API keys, sessions (SQLite + FTS5), skills, memories, cron, logs, checkpoints — lives in `/opt/data` (`HERMES_HOME`). No external database is required. The directory is persisted across pod restarts and upgrades by the host volume.
@@ -30,35 +30,10 @@ spec:
     - Localized into 7 languages (中文 / 日本語 / Deutsch / Español / Français / Українська / Türkçe) plus a Chinese dashboard.
 
   upgradeDescription: |
-    Upgrade Hermes to v0.17.0 (v2026.6.19)
+    Architecture change: merge gateway, dashboard, and CLI into one s6-supervised container (Hermes v0.17.0 upstream layout).
 
-    **Highlights**
-    - **Hermes reaches iMessage — Photon Spectrum, no Mac relay required** — There's now an iMessage platform plugin built on Photon's managed line pool. Run hermes photon login, authenticate with a device code, and Hermes can send and receive iMessage — no Mac sitting in a closet running a relay, no BlueBubbles bridge to babysit. It's positioned as the successor to BlueBubbles: free to start, nothing to self-host. If your friends and family live in the blue bubbles, Hermes lives there now too. (#32348, #42582, #44713 — @teknium1)
-
-    - **Raft — Hermes joins the Raft agent network as a gateway channel** — A new bundled Raft platform adapter lets Hermes connect to Raft as an external agent through a wake-channel bridge. Set RAFT_PROFILE, run the bridge, and Raft can wake Hermes to handle messages — with a privacy-by-contract design where wake payloads carry only metadata (event IDs, timestamps), never message bodies. Another surface where Hermes can show up and do work. (#48210 — @xxchan, @teknium1)
-
-    - **A substantially more capable desktop app** — v0.16.0 shipped the desktop app; v0.17.0 deepened it across dozens of PRs. Rebindable keyboard shortcuts, native OS notifications with per-type toggles, live subagent watch-windows that stream a delegated agent's activity into its own pane, a composer model selector with per-model presets, automatic RTL/bidi text direction, a resizable VS Code-themed terminal pane, per-thread composer drafts, and the ability to install any VS Code Marketplace theme directly into the app. The desktop is now a serious daily driver, not a preview. (#45866, #40660, #47060, #46959, #43292, #44596 — @OutThisLife, @teknium1)
-
-    - **Background / async subagents — delegate work and keep going** — delegate_task(background=true) now dispatches a subagent that runs in the background and returns a handle immediately. You and the model keep working while it churns, and the full result re-enters the conversation as a new turn the moment it finishes. Kick off a long research dive or a multi-step build, then carry on with something else instead of sitting blocked waiting on it. (#40946, #46968 — @teknium1)
-
-    - **Edit images, not just generate them — image-to-image in image_generate** — image_generate can now edit and transform a source image, not only create one from scratch. Pass an existing image and a prompt and it routes to the backend's edit endpoint (same tool, same pattern as video_generate), across every supported image provider. "Make this logo blue," "remove the background," "turn this sketch into a render" — all from the tool you already use. (#48705 — @teknium1)
-
-    - **Automation Blueprints — schedule things without learning cron** — Pick an automation by name and Hermes asks you for what it needs — no cron syntax, no slot=value typing. One blueprint definition renders natively on every surface: a form in the dashboard, a slash command in the CLI/TUI/messenger, a conversation with the agent, an entry in the docs catalog. "Daily news briefing at 8am" becomes a thing you set up by answering questions, not by memorizing 0 8 * * *. (#41309 — @teknium1)
-
-    - **Cursor's Composer model, through your xAI Grok subscription** — grok-composer-2.5-fast is now in the xAI OAuth model picker, with its context window reconciled to the full 200k. Composer is the fast coding model behind Cursor — and if you have an xAI Grok subscription, you can now point Hermes at it directly over OAuth, no separate API key. Your Grok plan, Hermes's agent loop, Composer's coding speed. (#47908, #6f89e17 — @teknium1)
-
-    - **Full profile builder in the dashboard** — Build a complete Hermes profile from the browser — pick its model, choose its skills, attach its MCP servers — without hand-editing config.yaml. The dashboard also unified multi-profile management into one machine-wide view with a global profile switcher, so you manage every profile from a single place. (#39084, #44007 — @teknium1)
-
-    - **Skills Hub browser rehaul** — The dashboard's Skills Hub got a ground-up rework: connected hubs, a Featured section, full skill previews before you install, and a security scan on each skill. Browsing and installing skills from the trusted taps (OpenAI, Anthropic, HuggingFace, NVIDIA) is now a real browsing experience, not a flat list. (#40384, #43398 — @teknium1)
-
-    - **The memory tool got a major upgrade** — atomic batch operations — The memory tool gained an operations array that applies a batch of add/replace/remove edits atomically against the final character budget. The model can free up space and add new entries in a single call — even when an add alone would overflow the budget — collapsing what used to be a fragile multi-turn dance into one reliable operation. Memory updates are now faster and far less likely to fail mid-edit. (#48507 — @teknium1)
-
-    - **Secure dashboard login** — The dashboard's authentication was hardened: every token-required endpoint now correctly returns 401 behind the OAuth gate, websocket auth uses the served dashboard token, and a warning fires when a public_url override is silently rejected. Exposing your dashboard to the network is safer by default. (#42578, #42578 — @benbarclay, @teknium1)
-
-    - **Official WhatsApp Business Cloud API adapter** — Alongside the existing Baileys bridge, Hermes now speaks the official WhatsApp Business Cloud API — Meta's first-party, hosted, no-bridge-process path. Point it at your Business API credentials and Hermes talks WhatsApp through the supported channel, with no QR-scanning bridge process to keep alive. (#44331, #43921 — @jquesnelle, @teknium1)
-
-    - **Rich text for Telegram** — Bot API 10.1 rich messages — Telegram replies now render as proper rich messages via Bot API 10.1: better formatting, cleaner long-message handling, native markup instead of flattened text. It's on by default with an opt-out, so your Telegram conversations look the way they should without any configuration. (#44829, #45584, #45953 — @teknium1)
-
-    - **Curator cost optimization** — no aux-model spend on routine runs — The skill curator now prunes stale skills by default but no longer runs its LLM-powered consolidation pass unless you opt in (curator.consolidate: true or hermes curator run --consolidate). The deterministic inactivity sweep keeps running for free; the opinionated, aux-model-spending "build umbrella skills" fork is now off by default. Routine background curation costs you zero tokens. (#47840 — @teknium1)
-
-    Full release notes: https://github.com/NousResearch/hermes-agent/releases/tag/v2026.6.19
+    Change Details:
+    - Single container runs `gateway run` with s6 auto-restart and `HERMES_DASHBOARD=1`; Channels, Profiles, and Terminal now share the same gateway PID namespace and agree on status.
+    - Dashboard binds 0.0.0.0 without Hermes login (`HERMES_DASHBOARD_INSECURE=1` behind Olares internal ingress).
+    - Remove cross-container workarounds (`restart-gateway` sentinel, health-relay stub, `HERMES_GATEWAY_NO_SUPERVISE`). Use `hermes gateway restart` from the CLI instead.
+    - Raise resource limits to 8 CPU / 20 GiB for the combined workload.
