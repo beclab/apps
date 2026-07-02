@@ -1,4 +1,7 @@
-﻿---
+﻿{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,9 +10,9 @@ metadata:
   labels:
     app: localai
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"    
+    applications.app.bytetrade.io/gpu-inject: "true"
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.localai.replicaCount }}
   selector:
     matchLabels:
       app: localai
@@ -22,30 +25,28 @@ spec:
     spec:
       containers:
         - name: localai
-          image: "docker.io/beclab/localai-localai:master-gpu-nvidia-cuda-12"
+          image: "docker.io/localai/localai:v4.5.6-gpu-nvidia-cuda-12"
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
             - name: DEBUG
-              value: "true"
-            - name: MODELS_PATH
+              value: "false"
+            - name: LOCALAI_MODELS_PATH
               value: "/models"
-            - name: THREADS
+            - name: LOCALAI_DATA_PATH
+              value: "/data"
+            - name: LOCALAI_THREADS
               value: "4"
-            - name: NVIDIA_VISIBLE_DEVICES
-              value: "all"
-            - name: PROFILE
-              value: "gpu-8g"
-            - name: MODELS
-              value: ""
-            - name: DEBUG
-              value: "true"
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
           resources:
             requests:
               cpu: 500m
@@ -57,18 +58,40 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 20
+            failureThreshold: 10
           volumeMounts:
             - mountPath: /models
-              name: models-data
-          securityContext:
-            capabilities:
-              add:
-                - SYS_ADMIN
+              name: localai-storage
+              subPath: models
+            - mountPath: /data
+              name: localai-storage
+              subPath: data
+            - name: hf-cache
+              mountPath: /cache/hf/hub
       volumes:
-        - name: models-data
+        - name: localai-storage
           hostPath:
             type: DirectoryOrCreate
-            path: "{{ .Values.sharedlib }}/ai/localai"
+            path: "{{ .Values.userspace.appData }}"
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
 
 ---
 apiVersion: v1
@@ -86,5 +109,3 @@ spec:
       protocol: TCP
   selector:
     app: localai
-status:
-  loadBalancer: {}

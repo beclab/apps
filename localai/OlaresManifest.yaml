@@ -1,22 +1,28 @@
-olaresManifest.version: '0.10.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  localai: 1
 metadata:
   name: localai
   description: The free, Open Source alternative to OpenAI, Claude and others.
   icon: https://app.cdn.olares.com/appstore/localai/icon.png
   appid: localai
-  version: '1.0.12'
+  version: '1.0.18'
   title: LocalAI
   categories:
-    - Utilities_v112
-    - Productivity
+  - Utilities_v112
+
 permission:
   appData: true
   appCache: true
+  appCommon: true
   userData:
-    - Home
+  - Home
+  externalData: true
 spec:
-  versionName: '3.7.0'
+  versionName: '4.5.6'
   featuredImage: https://app.cdn.olares.com/appstore/localai/1.webp
   promoteImage:
   - https://app.cdn.olares.com/appstore/localai/1.webp
@@ -39,50 +45,14 @@ spec:
     - P2P Inferencing
     - Voice activity detection (Silero-VAD support)
     - Integrated WebUI!
+
+    **Model storage**
+    - Hugging Face downloads share `appCommon/huggingface` (mounted as `/cache/hf/hub`) with vLLM / llama.cpp LLM base apps.
+    - Model YAML and app-private state live under `appData` (`/models`, `/data`).
   upgradeDescription: |
-    Welcome to LocalAI 3.7.0
-
-    This release introduces Agentic MCP support with full WebUI integration, a brand-new neutts TTS backend, fuzzy model search, long-form TTS chunking for chatterbox, and a complete WebUI overhaul.
-    We’ve also fixed critical bugs, improved stability, and enhanced compatibility with OpenAI’s APIs.
-
-    What’s New in LocalAI 3.7.0
-    Agentic MCP Support (WebUI-enabled)	
-    - Build AI agents that use real tools (web search, code exec). Fully-OpenAI compatible and integrated into the WebUI.
-    
-    neutts TTS Backend (Neuphonic-powered)	
-    - Generate natural, high-quality speech with low-latency audio — ideal for voice assistants.
-    
-    WebUI enhancements
-    - Faster, cleaner UI with real-time updates and full YAML model control.
-    
-    Long-Text TTS Chunking (Chatterbox)
-    - Generate natural-sounding long-form audio by intelligently splitting text and preserving context.
-    
-    Advanced Agent Controls
-    - Fine-tune agent behavior with new options for retries, reasoning, and re-evaluation.
-    
-    New Video Creation Endpoint
-    - We now support the OpenAI-compatible /v1/videos endpoint for text-to-video generation.
-    
-    Enhanced Whisper compatibility
-    - Whisper.cpp is now supported on various CPU variants (AVX, AVX2, etc.) to prevent illegal instruction crashes.
-    
-    Fuzzy Gallery Search
-    - Find models in the gallery even with typos (e.g., gema finds gemma).
-    
-    Easier Model & Backend Management
-    - Import, edit, and delete models directly via clean YAML in the WebUI.
-    
-    Realtime Example
-    - Check out the new realtime voice assistant example (multilingual).
-    
-    Security, Stability & API Compliance
-    - Fixed critical crashes, deadlocks, session events, OpenAI compliance, and JSON schema panics.
-    
-    Qwen 3 VL
-    - Support for Qwen 3 VL with llama.cpp/gguf models
-
-    Please refer to the release notes for more details: https://github.com/mudler/LocalAI/releases/tag/v3.7.0
+    - Mount shared Hugging Face Hub cache at `appCommon/huggingface` (`HF_HUB_CACHE=/cache/hf/hub`) for reuse with llm-init base apps.
+    - HF mirror from system settings (`OLARES_SYSTEM_HUGGINGFACE_SERVICE`); token from user HF account.
+    - Set `options.apiTimeout: 0` for long LLM streams through the entrance proxy.
 
   developer: Ettore Di Giacinto
   website: https://localai.io/
@@ -93,35 +63,49 @@ spec:
   - text: MIT
     url: https://github.com/mudler/LocalAI#MIT-1-ov-file
   locale:
-    - en-US
-    - zh-CN
-  requiredMemory: 2Gi
-  limitedMemory: 16Gi
-  requiredDisk: 20Gi
-  limitedDisk: 100Gi
-  requiredCpu: 1
-  limitedCpu: 3
-  requiredGpu: 2Gi
-  limitedGpu: 16Gi
+  - en-US
+  - zh-CN
+  accelerator:
+  - mode: nvidia
+    requiredMemory: 2Gi
+    limitedMemory: 16Gi
+    requiredDisk: 20Gi
+    limitedDisk: 100Gi
+    requiredCpu: "1"
+    limitedCpu: "3"
+    requiredGPUMemory: 2Gi
+    limitedGPUMemory: 16Gi
   supportArch:
-    - amd64
+  - amd64
 options:
+  apiTimeout: 0
   allowedOutboundPorts:
-    - 465
-    - 587
+  - 465
+  - 587
   dependencies:
-    - name: olares
-      type: system
-      version: '>=1.12.2-0'
+  - name: olares
+    type: system
+    version: '>=1.12.6-0'
 entrances:
-  - name: localai
-    port: 8080
-    host: localai
-    title: LocalAI
-    icon: https://app.cdn.olares.com/appstore/localai/icon.png
-    openMethod: window
+- name: localai
+  port: 8080
+  host: localai
+  title: LocalAI
+  icon: https://app.cdn.olares.com/appstore/localai/icon.png
+  openMethod: window
+envs:
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
 middleware:
   postgres:
     username: localai
     databases:
-      - name: localai 
+    - name: localai
