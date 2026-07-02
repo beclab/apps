@@ -1,0 +1,169 @@
+{{- /* vLLM engine Deployment. ENGINE_ARGS = raw vLLM CLI flags, word-split and
+       appended after --model by wrappers/vllm.sh. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- /* Defaults avoid empty K8s quantities. CPU needs "m" (200m = 0.2 core).
+       Sums (llm-init + vllm) must fit the manifest accelerator limits. */ -}}
+{{- $cpuRequest := trim ($oe.VLLM_CPU_REQUEST | default "200m") -}}
+{{- $memRequest := trim ($oe.VLLM_MEMORY_REQUEST | default "2Gi") -}}
+{{- $cpuLimit := trim ($oe.VLLM_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.VLLM_MEMORY_LIMIT | default "35Gi") -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = (.Values.GPU | default dict).Type | default "nvidia" -}}
+{{- end -}}
+{{- $isCpuMode := eq $gpuType "cpu" -}}
+{{- $gb10FromNodes := eq (include "llmbase.isGb10" .) "true" -}}
+{{- $unifiedMem := or $gb10FromNodes (eq $gpuType "nvidia-gb10") -}}
+{{- $engineArgs = include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) -}}
+{{- /* nvidia.com/gpumem: nvidia -> explicit in chart; gb10 -> pod memory quota only,
+       gpu-inject sets matching requests/limits (chart gpumem on gb10 breaks K8s
+       validation: requests has gpumem but limits stripped by platform). */ -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.VLLM_REQUIRED_GPU_MEMORY | default "4096") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+{{- /* Must match llm-init.yaml: per-release run-state hostPath. */ -}}
+{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+---
+# vLLM engine Deployment. wrappers/vllm.sh waits on llm-init's sentinel in
+# the shared run-state dir, then serves --model "$MODEL_NAME" on :8000. llm-init
+# reverse-proxies http://vllm:8000 via the "vllm" Service below.
+# Shared hostPath volumes (read-only here, llm-init owns writes): hf-cache
+# (/cache/hf/hub), run-state (sentinel handshake). vllm-cache and .nv/ComputeCache
+# live as subdirs of the same appCommon/huggingface store (siblings to models--*).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid vllmllmbasev3) for v3
+  # allowMultipleInstall. Label/selector stays io.kompose.service: vllm.
+  name: '{{ .Release.Name }}'
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+  {{- if not $isCpuMode }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "vllm"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.vllmllmbasev3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: vllm
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: vllm
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: vllm
+          image: docker.io/vllm/vllm-openai:v0.24.0-cu129
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/vllm.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: vllm
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: VLLM_PORT
+              value: "8000"
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: VLLM_CACHE_ROOT
+              value: /cache/vllm
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+{{- if $unifiedMem }}
+            - name: VLLM_PATCH_SPARK_MEM_UTILS
+              value: "true"
+            - name: VLLM_SPARK_AUTO_GPU_UTIL
+              value: "false"
+{{- end }}
+{{- if $isCpuMode }}
+            - name: CUDA_VISIBLE_DEVICES
+              value: ""
+{{- end }}
+          ports:
+            - name: vllm
+              containerPort: 8000
+          # No readiness/liveness probe (intentional): serving readiness is owned
+          # by llm-init (polls /v1/models, flips its own /readyz). A probe here
+          # would keep the Pod NotReady during the long model load and couple the
+          # app status back to it. restartPolicy: Always still recovers crashes.
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: hf-cache
+              mountPath: /cache/vllm
+              subPath: vllm-cache
+{{- if not $isCpuMode }}
+            - name: hf-cache
+              mountPath: /root/.nv/ComputeCache
+              subPath: .nv/ComputeCache
+{{- end }}
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            # nvidia.com/gpumem: nvidia only in chart; gb10 via pod memory + gpu-inject.
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+# Service name MUST be "vllm": llm-init v1.1.0 derives the engine URL
+# http://vllm:8000 from ENGINE_KIND (no override). Internal only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+spec:
+  selector:
+    io.kompose.service: vllm
+  ports:
+    - name: vllm
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
