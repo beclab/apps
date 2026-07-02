@@ -4,12 +4,12 @@ metadata:
   name: infinity
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.infinity.replicaCount }}
   selector:
     matchLabels:
       app: infinity
   strategy:
-    type: Recreate     
+    type: Recreate
   template:
     metadata:
       labels:
@@ -22,11 +22,13 @@ spec:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /appcache
+            chown -R 1000:1000 /appcache /var/infinity
         resources: {}
         volumeMounts:
-          - name:  appcache
+          - name: appcache
             mountPath: /appcache
+          - name: infinity-data
+            mountPath: /var/infinity
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
@@ -34,15 +36,21 @@ spec:
           runAsUser: 0
       containers:
       - name: infinity
-        image: "docker.io/beclab/infiniflow-infinity:v0.7.0-dev5"
+        image: "docker.io/infiniflow/infinity:v0.7.0"
+        args: ["-f", "/infinity_conf.toml"]
         ports:
         - containerPort: 23820
+        - containerPort: 23817
+        - containerPort: 5432
         env:
         - name: TZ
           value: "Asia/Shanghai"
         volumeMounts:
         - name: infinity-data
           mountPath: /var/infinity
+        - name: infinity-config
+          mountPath: /infinity_conf.toml
+          subPath: infinity_conf.toml
         resources:
           limits:
             cpu: "1"
@@ -75,6 +83,9 @@ spec:
           {{- end }}
           type: DirectoryOrCreate
         name: infinity-data
+      - name: infinity-config
+        configMap:
+          name: infinity-config
 ---
 apiVersion: v1
 kind: Service
@@ -83,7 +94,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   ports:
-  - port: 23820
+  - name: http
+    port: 23820
     targetPort: 23820
+  - name: thrift
+    port: 23817
+    targetPort: 23817
+  - name: postgres
+    port: 5432
+    targetPort: 5432
   selector:
     app: infinity
