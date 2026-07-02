@@ -1,0 +1,57 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: worker
+  name: worker
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.worker.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: worker
+    spec:
+      containers:
+        - name: worker
+          image: "docker.io/beclab/dify-api:1.13.3"
+          envFrom:
+            - configMapRef:
+                name: dify-api-env
+          env:
+            - name: MODE
+              value: "worker"
+            - name: DB_EXTRAS
+              value: "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /app/api/storage
+              name: worker-claim0
+          command: ["/entrypoint.sh"]
+      restartPolicy: Always
+      volumes:
+        - name: worker-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/volumes/app/storage
+        - name: redis-extension
+          configMap:
+            name: dify-redis-extension
