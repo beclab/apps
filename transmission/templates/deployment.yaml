@@ -1,5 +1,4 @@
-﻿---
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ .Release.Name }}
@@ -7,7 +6,7 @@ metadata:
   labels:
     app: transmission
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.transmission.replicaCount }}
   selector:
     matchLabels:
       app: transmission
@@ -19,47 +18,45 @@ spec:
         app: transmission
     spec:
       initContainers:
-      - name: init-chmod-data
+      - name: init-transmission
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /app-data-root; chown -R 1000:1000 /config
+            sh /chart-init/init.sh
         resources: {}
+        imagePullPolicy: IfNotPresent
         volumeMounts:
-          - name: downloads
-            mountPath: /app-data-root
-          - mountPath: /config
-            name: transmission-data
-          - mountPath: /subpathconfig
-            name: transmission-data
-            subPath: config
-          - mountPath: /subpathwatch
-            name: transmission-data  
-            subPath: watch
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: Always
+        - name: home-downloads
+          mountPath: /olares/userdata/home
+        - name: transmission-data
+          mountPath: /appdata-root
+        - name: transmission-init
+          mountPath: /chart-init
+          readOnly: true
+        - name: transmission-defaults
+          mountPath: /chart-defaults
+          readOnly: true
         securityContext:
           runAsUser: 0
       containers:
       - name: transmission
         env:
         - name: PGID
-          value: "1000"  
+          value: "1000"
         - name: PUID
-          value: "1000" 
+          value: "1000"
         - name: TZ
-          value: Asia/Shanghai
-        image: "docker.io/beclab/linuxserver-transmission:4.0.6"
+          value: UTC
+        image: "linuxserver/transmission:4.1.2"
         resources:
           requests:
             cpu: 100m
-            memory: 32Mi
+            memory: 128Mi
           limits:
             cpu: 500m
-            memory: 64Mi
+            memory: 256Mi
         ports:
         - containerPort: 9091
           protocol: TCP
@@ -71,30 +68,43 @@ spec:
         - mountPath: /config
           name: transmission-data
           subPath: config
-        - mountPath: /downloads
-          name: downloads
         - mountPath: /watch
-          name: transmission-data  
+          name: transmission-data
           subPath: watch
-        
+        - mountPath: /olares/userdata/home
+          name: home-downloads
+        - mountPath: /olares/userdata/external
+          name: external-downloads
+        - mountPath: /downloads
+          name: home-downloads
+          subPath: Downloads
       volumes:
       - name: transmission-data
         hostPath:
           type: DirectoryOrCreate
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: {{ .Values.userspace.appData }}
-            {{- else }}
-          path: {{ .Values.userspace.appData }}/transmission
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appData }}/transmission
-          {{- end }}
-      - name: downloads
+      - name: home-downloads
         hostPath:
-          type: Directory
-          path: {{ .Values.userspace.userData }}/Downloads
-
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.userData }}
+      - name: external-downloads
+        hostPath:
+          type: DirectoryOrCreate
+          path: "{{ .Values.sharedlib }}"
+      - name: transmission-init
+        configMap:
+          name: transmission-init
+          defaultMode: 438
+          items:
+          - key: init.sh
+            path: init.sh
+      - name: transmission-defaults
+        configMap:
+          name: transmission-defaults
+          defaultMode: 438
+          items:
+          - key: settings.json
+            path: settings.json
 ---
 apiVersion: v1
 kind: Service
@@ -107,8 +117,8 @@ spec:
     app: {{ .Release.Name }}
   ports:
     - name: webui-port
-      port: 9091            
-      targetPort: 9091       
+      port: 9091
+      targetPort: 9091
       protocol: TCP
     - name: torrent-port
       port: 51413
@@ -118,28 +128,3 @@ spec:
       port: 51413
       protocol: UDP
       targetPort: 51413
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_{{ .Release.Name }}
-  deployment: {{ .Release.Name }}
-  description: {{ .Release.Name }} legacy api v2
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:9091
-  group: api.{{ .Release.Name }}
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active
-  {{- end }}
-{{- end }}
