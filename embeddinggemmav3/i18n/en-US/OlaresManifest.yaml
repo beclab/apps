@@ -1,0 +1,37 @@
+metadata:
+  title: EmbeddingGemma
+  description: "EmbeddingGemma-300M text embeddings via IREmbeddingServer (OpenVINO / ONNX)"
+
+spec:
+  fullDescription: |
+    **EmbeddingGemma-300M** text embedding service powered by IREmbeddingServer. Serves OpenAI-compatible `/v1/embeddings` and `/v1/models` on port 8080.
+
+    **Accelerator modes**
+    | Olares mode | Image | Backend | `EMBED_DEVICE` |
+    |-------------|-------|---------|----------------|
+    | `cpu` | `embed-server:*-ov-intel` | OpenVINO IR | `auto` (iGPU → CPU) |
+    | `nvidia` | `embed-server:*-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
+    | `nvidia-gb10` | `embed-server:*-onnx-cuda13` (unified memory) | ONNX CUDA EP | `cuda` |
+    | `strix-halo` | `embed-server:*-onnx-rocm-amd64` | ONNX ROCm EP | `rocm` |
+
+    CPU mode intentionally uses the **ov-intel** image (not onnx-cpu).
+
+    **Model download**
+    On first start, llm-init downloads both Hugging Face repos into the shared App Common cache (`appCommon/huggingface` → `/cache/hf/hub`):
+    - [wangzhong/embeddinggemma-300m-ov](https://huggingface.co/wangzhong/embeddinggemma-300m-ov) — OpenVINO IR
+    - [wangzhong/embeddinggemma-300m-onnx-export](https://huggingface.co/wangzhong/embeddinggemma-300m-onnx-export) — ONNX
+
+    **Device mounts**
+    - `cpu` (ov-intel): `/dev/dri`, `/sys/class/drm` for Intel iGPU stack
+    - `strix-halo` (ROCm): `/dev/dri`, `/sys/class/drm`, `/dev/kfd`
+    - `nvidia` / `nvidia-gb10`: GPU injection via Olares scheduler
+
+    **Stack**
+    - **embed-server** (`beclab/embed-server`, port 8080): Rust embedding inference.
+    - **llm-init** (`beclab/llm-init`, port 8090): model download + progress UI.
+    - **embedconsole** (`beclab/embed-server:*-ui`, port 80): Web Console — Playground,
+      similarity compare, device diagnostics, and API settings. Browser requests use
+      same-origin `/api`, proxied by nginx to `embedserver:8080` (no direct backend URL
+      in the UI). Open the **Embedding Console** entrance after the engine is healthy;
+      use **embedclient** to monitor model download if the engine is still waiting.
+

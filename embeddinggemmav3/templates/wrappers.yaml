@@ -1,0 +1,122 @@
+# Engine wrapper: wait for llm-init sentinel, resolve HF snapshot paths, exec embed_server.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: embed-server-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: embed-server
+data:
+  embed-server.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=embed-server
+    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
+    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
+    HF_HUB=${HF_HUB_CACHE:-/cache/hf/hub}
+    EMPTY_EMBED_SERVER=${EMPTY_EMBED_SERVER:-/usr/local/bin/empty_embed_server}
+
+    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*" >&2; }
+
+    FAKE_PID=""
+
+    start_fake_embed_server() {
+        if [ -n "$FAKE_PID" ] && kill -0 "$FAKE_PID" 2>/dev/null; then
+            return 0
+        fi
+        if [ ! -x "$EMPTY_EMBED_SERVER" ]; then
+            log "missing executable: $EMPTY_EMBED_SERVER"
+            return 1
+        fi
+        log "starting empty_embed_server (GET /health -> modelNotReady)"
+        "$EMPTY_EMBED_SERVER" &
+        FAKE_PID=$!
+        sleep 1
+        if ! kill -0 "$FAKE_PID" 2>/dev/null; then
+            log "empty_embed_server exited immediately (pid=$FAKE_PID)"
+            FAKE_PID=""
+            return 1
+        fi
+        log "empty_embed_server running (pid=$FAKE_PID)"
+        return 0
+    }
+
+    stop_fake_embed_server() {
+        if [ -z "$FAKE_PID" ]; then
+            return 0
+        fi
+        if kill -0 "$FAKE_PID" 2>/dev/null; then
+            log "stopping empty_embed_server (pid=$FAKE_PID)"
+            kill "$FAKE_PID" 2>/dev/null || true
+            wait "$FAKE_PID" 2>/dev/null || true
+        fi
+        FAKE_PID=""
+    }
+
+    resolve_snapshot() {
+        slug="$1"
+        base="${HF_HUB}/models--${slug}/snapshots"
+        if [ ! -d "$base" ]; then
+            log "missing HF cache dir: $base"
+            return 1
+        fi
+        # shellcheck disable=SC2012
+        dir=$(ls -1d "${base}"/*/ 2>/dev/null | head -1)
+        if [ -z "$dir" ]; then
+            log "no snapshot under $base"
+            return 1
+        fi
+        dir=${dir%/}
+        log "resolved snapshot slug=${slug} -> ${dir}"
+        printf '%s\n' "$dir"
+    }
+
+    if [ ! -f "$SENTINEL" ]; then
+        start_fake_embed_server || true
+    fi
+
+    elapsed=0
+    while [ ! -f "$SENTINEL" ]; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            stop_fake_embed_server
+            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
+            exit 1
+        fi
+        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL found after ${elapsed}s"
+
+
+
+    stop_fake_embed_server
+
+    case "${EMBED_BACKEND:-openvino}" in
+        openvino)
+            EMBED_MODEL_DIR=$(resolve_snapshot "wangzhong--embeddinggemma-300m-ov") || exit 1
+            export EMBED_MODEL_DIR
+            export MODEL_ID="${MODEL_ID:-embeddinggemma-300m-ov}"
+            export EMBED_DEVICE="${EMBED_DEVICE:-auto}"
+            ;;
+        onnx)
+            EMBED_MODEL_DIR=$(resolve_snapshot "wangzhong--embeddinggemma-300m-onnx-export") || exit 1
+            export EMBED_MODEL_DIR
+            export MODEL_ID="${MODEL_ID:-embeddinggemma-300m-onnx}"
+            export EMBED_DEVICE="${EMBED_DEVICE:-auto}"
+            ;;
+        *)
+            log "unknown EMBED_BACKEND=${EMBED_BACKEND:-<empty>}"
+            exit 1
+            ;;
+    esac
+
+    if [ ! -d "$EMBED_MODEL_DIR" ]; then
+        log "EMBED_MODEL_DIR is not a directory: $EMBED_MODEL_DIR"
+        exit 1
+    fi
+
+    log "starting embed_server MODEL_ID=$MODEL_ID EMBED_DEVICE=$EMBED_DEVICE EMBED_MODEL_DIR=$EMBED_MODEL_DIR"
+    exec /usr/local/bin/embed_server
