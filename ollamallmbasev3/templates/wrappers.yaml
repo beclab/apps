@@ -1,9 +1,6 @@
 # Engine wrapper script, mounted into the Ollama daemon container at
-# /llm-init/wrappers. Single-file wrapper: the helpers Ollama needs are
-# inlined from llm-init v1.1.0 deploy/wrappers/common.sh (this chart only
-# runs one engine, so the shared common.sh + per-engine split is collapsed).
-# The daemon is started via ollama.sh, which exports each KEY=VALUE token in
-# ENGINE_ARGS before `exec ollama serve`.
+# /llm-init/wrappers. Exports ENGINE_ARGS, starts ollama serve, then preloads
+# the install-time model into VRAM after llm-init pull (name from MODEL_SOURCE).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,30 +11,11 @@ metadata:
 data:
   ollama.sh: |
     #!/bin/sh
-    # Ollama engine wrapper (single file; helpers inlined from llm-init
-    # v1.1.0 common.sh — Ollama only needs ENGINE_ARGS export + log).
-    #
-    # Ollama's deployment model is the inverse of vLLM/SGLang/llama.cpp: the
-    # daemon owns the model bytes and llm-init drives /api/pull + /api/create,
-    # so there is NO sentinel to wait on — Ollama starts immediately.
-    #
-    # v1.1.0 ENGINE_ARGS contract (docs/engine-args.md): a KEY=VALUE list of
-    # OLLAMA_* daemon env, exported before `ollama serve`. Non-KV tokens are
-    # logged and skipped. Example:
-    #   ENGINE_ARGS="OLLAMA_CONTEXT_LENGTH=8192 OLLAMA_KEEP_ALIVE=30m"
-    #     -> export OLLAMA_CONTEXT_LENGTH=8192
-    #     -> export OLLAMA_KEEP_ALIVE=30m
-    #     -> exec ollama serve
     set -eu
 
     ENGINE=ollama
     log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
 
-    # engine_args_export_env exports each KEY=VALUE token in $ENGINE_ARGS as a
-    # daemon env var. POSIX sh has no shlex; this uses default IFS
-    # word-splitting, so values with whitespace must survive the env round-trip
-    # (rare; OLLAMA_* values are typically scalars). Runs in its own function
-    # so `set --` does not clobber the script's positional params.
     engine_args_export_env() {
         args="${ENGINE_ARGS:-}"
         [ -z "$args" ] && return 0
@@ -51,10 +29,125 @@ data:
         done
     }
 
-    # Listen on all interfaces so llm-init (same release) can reach the daemon
-    # via the "ollama" ClusterIP Service without --network host shenanigans.
+    # Ollama names are model:tag. MODEL_SOURCE (ollama://qwen3.5:4b) is authoritative;
+    # MODEL_NAME may use a hyphen (qwen3.5-4b) which show/run will not resolve.
+    add_model_candidate() {
+        cand="$1"
+        [ -z "$cand" ] && return 0
+        case " ${OLLAMA_MODEL_CANDIDATES:-} " in
+            *" ${cand} "*) return 0 ;;
+        esac
+        OLLAMA_MODEL_CANDIDATES="${OLLAMA_MODEL_CANDIDATES:+${OLLAMA_MODEL_CANDIDATES} }${cand}"
+    }
+
+    build_model_candidates() {
+        OLLAMA_MODEL_CANDIDATES=""
+        case "${MODEL_SOURCE:-}" in
+            ollama://*)
+                ref="${MODEL_SOURCE#ollama://}"
+                ref="${ref%% *}"
+                add_model_candidate "$ref"
+                ;;
+        esac
+        add_model_candidate "${MODEL_NAME:-}"
+        mn="${MODEL_NAME:-}"
+        case "$mn" in
+            *:*) ;;
+            *)
+                base="${mn%-*}"
+                tag="${mn##*-}"
+                if [ -n "$base" ] && [ -n "$tag" ] && [ "$base" != "$mn" ]; then
+                    add_model_candidate "${base}:${tag}"
+                fi
+                ;;
+        esac
+        log "preload candidates: ${OLLAMA_MODEL_CANDIDATES:-<none>}"
+    }
+
+    find_ready_model() {
+        for cand in $OLLAMA_MODEL_CANDIDATES; do
+            if ollama show "$cand" >/dev/null 2>&1; then
+                printf '%s' "$cand"
+                return 0
+            fi
+        done
+        return 1
+    }
+
+    preload_via_api() {
+        model="$1"
+        host="${OLLAMA_HOST#http://}"
+        host="${host#https://}"
+        case "${MODEL_MODE:-chat}" in
+            embedding|embed)
+                if ollama embed "$model" "warmup" >/dev/null 2>&1; then
+                    return 0
+                fi
+                ;;
+        esac
+        # Load weights into VRAM; keep_alive inherits OLLAMA_KEEP_ALIVE=-1.
+        ollama run "$model" "Hello" >/dev/null 2>&1
+    }
+
+    preload_model() {
+        case "${OLLAMA_PRELOAD:-true}" in
+            false|FALSE|0|no|NO|off|OFF)
+                log "preload disabled (OLLAMA_PRELOAD=$OLLAMA_PRELOAD)"
+                return 0
+                ;;
+        esac
+        if [ -z "${OLLAMA_MODEL_CANDIDATES:-}" ]; then
+            log "preload skipped: no model candidates (set MODEL_SOURCE / MODEL_NAME)"
+            return 0
+        fi
+
+        timeout="${OLLAMA_PRELOAD_TIMEOUT:-3600}"
+        elapsed=0
+        ready_model=""
+        log "waiting for model (ollama show, llm-init pull, timeout=${timeout}s)..."
+        while [ -z "$ready_model" ]; do
+            ready_model=$(find_ready_model 2>/dev/null || true)
+            if [ -n "$ready_model" ]; then
+                break
+            fi
+            if [ "$elapsed" -ge "$timeout" ]; then
+                log "WARN: preload timed out after ${timeout}s (model not ready)"
+                return 0
+            fi
+            sleep 5
+            elapsed=$((elapsed + 5))
+        done
+        log "model $ready_model ready after ${elapsed}s"
+
+        log "preloading $ready_model (mode=${MODEL_MODE:-chat})..."
+        start=$(date +%s)
+        set +e
+        preload_via_api "$ready_model"
+        rc=$?
+        set -e
+        end=$(date +%s)
+        if [ "$rc" -eq 0 ]; then
+            log "preload completed in $((end - start))s"
+        else
+            log "WARN: preload failed (exit $rc); daemon still running"
+        fi
+    }
+
     export OLLAMA_HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
     engine_args_export_env
     export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}"
+    build_model_candidates
+
     log "starting ollama serve on $OLLAMA_HOST"
-    exec ollama serve "$@"
+    ollama serve "$@" &
+    SERVER_PID=$!
+    trap 'kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; exit 0' INT TERM
+
+    until ollama list >/dev/null 2>&1; do
+        sleep 1
+    done
+    log "ollama API ready"
+
+    preload_model
+
+    wait "$SERVER_PID"
