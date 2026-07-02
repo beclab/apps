@@ -1,0 +1,39 @@
+metadata:
+  description: "Generic SGLang engine base. Pick any HuggingFace Safetensors model at install via env."
+  title: SGLang Engine Base
+
+spec:
+  fullDescription: |
+    **IMPORTANT NOTE**  
+    This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
+
+    **Environment Variables Setup Guide**
+    - `MODEL_SOURCE`: `hf://<repo>`. The HuggingFace source to download your model, for example `hf://openai/gpt-oss-20b`. Use a repo that contains `.safetensors` weight files. Optionally append `--include <file>` or `--revision <sha>`.
+    - `MODEL_NAME`: `owner/repo`. The name of your model — use the string after `hf://` in `MODEL_SOURCE`, for example `openai/gpt-oss-20b`. This is also used as the OpenAI alias and SGLang `--model-path`.
+    - `MODEL_MODE`: `chat` or `embedding`. Use `chat` for conversational models; for embedding, the chart auto-adds `--is-embedding`.
+    - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports.
+    - `ENGINE_ARGS`: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser gpt-oss --tool-call-parser gpt-oss`. Extra SGLang CLI flags. Separate multiple `--key value` pairs with spaces. Adjust `--reasoning-parser` and `--tool-call-parser` to match your model family. See https://docs.sglang.io/docs/advanced_features/server_arguments.
+    - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
+    - `SGLANG_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+
+    **How It Works**
+    First, `llm-init` downloads your model and gets it ready, then SGLang starts serving the model when it's ready. These two parts run in separate Deployments but share the HF cache and run-state via App Common storage.
+
+    **Stack**
+    - **SGLang** (port 30000): runs the model and serves API requests
+    - **llm-init** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to SGLang
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Set `SGLANG_REQUIRED_GPU_MEMORY`; tune `--mem-fraction-static` in ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                         |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - SGLang model loading can take several minutes for large models. Keep the app Running until ready.
+    - SGLang excels at prefix caching and structured output (JSON, tool calls, agents); prefix caching is enabled by default.

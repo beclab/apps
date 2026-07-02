@@ -1,0 +1,170 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- /* MODEL_MODE=embedding -> auto-add SGLang's --is-embedding so it works out
+       of the box; skipped if the user already passed it in ENGINE_ARGS. */ -}}
+{{- $modelMode := $oe.MODEL_MODE | default "" -}}
+{{- if and (eq $modelMode "embedding") (not (contains "--is-embedding" $engineArgs)) -}}
+{{- $engineArgs = trim (printf "%s --is-embedding" $engineArgs) -}}
+{{- end -}}
+{{- $cpuRequest := trim ($oe.SGLANG_CPU_REQUEST | default "200m") -}}
+{{- $memRequest := trim ($oe.SGLANG_MEMORY_REQUEST | default "2Gi") -}}
+{{- $cpuLimit := trim ($oe.SGLANG_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.SGLANG_MEMORY_LIMIT | default "35Gi") -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $isCpuMode := eq $gpuType "cpu" -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $engineArgs = include "sglangllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) -}}
+{{- /* nvidia.com/gpumem needs a BARE MiB int; Spark unified memory reuses the
+       same value as pod memory ("<MiB>Mi"). CPU mode skips GPU inject and gpumem. */ -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.SGLANG_REQUIRED_GPU_MEMORY | default "4096") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+---
+# SGLang engine Deployment. wrappers/sglang.sh blocks on the sentinel
+# llm-init writes, reads model_path, then execs launch_server on :30000.
+# llm-init reverse-proxies at http://sglang:30000 — Service name MUST be "sglang".
+# Shared hostPath volumes (read-only here, llm-init owns writes): hf-cache
+# (/cache/hf/hub), run-state (sentinel handshake). sglang-cache and .nv/ComputeCache
+# live as subdirs of the same appCommon/huggingface store (siblings to models--*).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid sglangllmbasev3) for v3
+  # allowMultipleInstall. Label/selector stays io.kompose.service: sglang.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: sglang
+  {{- if not $isCpuMode }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "sglang"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.sglangllmbasev3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: sglang
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: sglang
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: sglang
+          image: docker.io/lmsysorg/sglang:v0.5.14
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/sglang.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: sglang
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: SGLANG_PORT
+              value: "30000"
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: SGLANG_JIT_CACHE_ROOT
+              value: /cache/sglang
+            # Without these, huggingface_hub defaults to ~/.cache/huggingface
+            # (root's home) instead of the shared hf-cache mount below, so
+            # SGLang can't see the model llm-init already downloaded and
+            # re-downloads it into the ephemeral container filesystem.
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: TRANSFORMERS_CACHE
+              value: /cache/hf/hub
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+{{- if $isCpuMode }}
+            - name: CUDA_VISIBLE_DEVICES
+              value: ""
+{{- end }}
+          ports:
+            - name: sglang
+              containerPort: 30000
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: hf-cache
+              mountPath: /cache/sglang
+              subPath: sglang-cache
+{{- if not $isCpuMode }}
+            - name: hf-cache
+              mountPath: /root/.nv/ComputeCache
+              subPath: .nv/ComputeCache
+{{- end }}
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            # nvidia.com/gpumem is the per-instance GPU memory quota read by the
+            # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
+            # It's a non-overcommittable extended resource, so it must be in BOTH
+            # requests and limits with the same value. Dropped on gb10 (unified
+            # memory uses pod memory instead) and cpu (no GPU inject).
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sglang
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: sglang
+spec:
+  selector:
+    io.kompose.service: sglang
+  ports:
+    - name: sglang
+      port: 30000
+      targetPort: 30000
+  type: ClusterIP
