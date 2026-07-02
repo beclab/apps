@@ -11,7 +11,7 @@ metadata:
   name: steamheadless
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.steamheadless.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: steam-headless
@@ -93,7 +93,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
-          image: docker.io/beclab/steam-headless:v0.1.14
+            - name: DBUS_SESSION_BUS_ADDRESS
+              value: unix:path=/run/dbus/session_bus_socket
+          image: docker.io/beclab/steam-headless:v0.1.15
           livenessProbe:
             httpGet:
               path: /
@@ -162,6 +164,9 @@ spec:
                 - -c
                 - |
                   cat /dev/null > /usr/libexec/upowerd
+                  mkdir -p /run/dbus
+                  dbus-daemon --session --fork --nopidfile \
+                    --address=unix:path=/run/dbus/session_bus_socket || true
           securityContext:
             privileged: true
             runAsUser: 0
