@@ -1,68 +1,12 @@
-apiVersion: v1
-data:
-  nginx.conf: |
-    stream {
-      server {
-        listen 8001;  
-        proxy_pass 127.0.0.1:8080;
-      }
-    }
-
-    events {
-      # Your event-related configurations go here
-    }
-
-    http {
-      # Your HTTP server configurations go here
-    }
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: {{ .Release.Namespace }}
----
-apiVersion: v1
-data:
-  init.sh: |
-    #!/bin/bash
-
-    appDataDir="/appData"
-    configDir="/config/qBittorrent"
-    confFile="$appDataDir/qBittorrent.conf"
-
-    if [ "$(ls -A $appDataDir)" ]; then
-      echo "$appDataDir not empty"
-    else
-      echo "$appDataDir is empty"
-      cp -r $configDir/. $appDataDir
-      echo "copy succeed"
-    fi
-
-    mkdir -p "$(dirname "$confFile")"
-    touch "$confFile"
-
-    grep -q "^\[Preferences\]" "$confFile" || echo "[Preferences]" >> "$confFile"
-    grep -q "^WebUI\\\\CSRFProtection=" "$confFile" || echo "WebUI\\CSRFProtection=false" >> "$confFile"
-    grep -q "^WebUI\\\\HostHeaderValidation=" "$confFile" || echo "WebUI\\HostHeaderValidation=false" >> "$confFile"
-    grep -q "^WebUI\\\\Authentication=" "$confFile" || echo "WebUI\\Authentication=false" >> "$confFile"
-    grep -q "^WebUI\\\\LocalHostAuth=" "$confFile" || echo "WebUI\\LocalHostAuth=false" >> "$confFile"
-
-    grep -q "^Downloads\\\\SavePath=" "$confFile" || echo "Downloads\\SavePath=/downloads/home/Downloads/qBittorrent" >> "$confFile"
-
-    echo "qBittorrent config ensured"
-kind: ConfigMap
-metadata:
-  name: init-config
-  namespace: {{ .Release.Namespace }}
----
-kind: Deployment
 apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Release.Name }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.qbittorrent.replicaCount }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -83,85 +27,69 @@ spec:
         - name: appdata
           hostPath:
             type: DirectoryOrCreate
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: {{ .Values.userspace.appData }}
-              {{- else }}
-            path: {{ .Values.userspace.appData }}/qbittorrent
-              {{- end }}
-            {{- else }}
-            path: {{ .Values.userspace.appData }}/qbittorrent
-            {{- end }}
-        - name: nginx-config
+        - name: qbittorrent-init
           configMap:
-            name: nginx-config
-            defaultMode: 438
-            items:
-              - key: nginx.conf
-                path: nginx.conf
-        - name: init-config
-          configMap:
-            name: init-config
+            name: qbittorrent-init
             defaultMode: 438
             items:
               - key: init.sh
                 path: init.sh
+              - key: init-migrate-webui-auth.sh
+                path: init-migrate-webui-auth.sh
+        - name: qbittorrent-defaults
+          configMap:
+            name: qbittorrent-defaults
+            defaultMode: 438
+            items:
+              - key: qBittorrent.conf
+                path: qBittorrent.conf
       initContainers:
-        - name: init-chmod-data
+        - name: init-qbittorrent
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
             - |
-              mkdir -p /home-data/Downloads/qBittorrent
-              chown -R 1000:1000 /home-data; chown -R 1000:1000 /appdata; chown -R 1000:1000 /external-data
+              sh /chart-init/init.sh
           resources: {}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: home-downloads
-              mountPath: /home-data
+              mountPath: /olares/userdata/home
+            - name: home-downloads
+              mountPath: /downloads/home
             - name: appdata
-              mountPath: /appdata
-            - name: external-downloads
-              mountPath: /external-data
+              mountPath: /appData
+            - name: qbittorrent-init
+              mountPath: /chart-init
+              readOnly: true
+            - name: qbittorrent-defaults
+              mountPath: /chart-defaults
+              readOnly: true
           securityContext:
             runAsUser: 0
-        - name: init-qbittorrent-config
-          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.4"
+        # TODO: drop after all users upgraded from chart <= 1.0.20 (nginx loopback proxy).
+        - name: init-migrate-webui-auth
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
             - |
-              chmod +x /init.sh & bash /init.sh
+              sh /chart-init/init-migrate-webui-auth.sh
           resources: {}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: appdata
               mountPath: /appData
-            - name: init-config
-              mountPath: /init.sh
-              subPath: init.sh
+            - name: qbittorrent-init
+              mountPath: /chart-init
+              readOnly: true
           securityContext:
             runAsUser: 0
       containers:
-        - name: nginx
-          image: "docker.io/beclab/aboveos-nginx:1.27.0"
-          volumeMounts:
-            - name: nginx-config 
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
-          ports:
-            - containerPort: 8001
-          imagePullPolicy: IfNotPresent
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
         - name: qbittorrent
-          image: "docker.io/beclab/linuxserver-qbittorrent:5.1.4"
+          image: "linuxserver/qbittorrent:5.2.2"
           resources:
             requests:
               cpu: 100m
@@ -182,9 +110,19 @@ spec:
               value: "002" 
             - name: TZ
               value: UTC
+            - name: WEBUI_PORT
+              value: "8080"
+            - name: TORRENTING_PORT
+              value: "6881"
           volumeMounts:
             - name: home-downloads
+              mountPath: /olares/userdata/home
+            - name: home-downloads
               mountPath: /downloads/home
+            - name: home-downloads
+              mountPath: /home
+            - name: external-downloads
+              mountPath: /olares/userdata/external
             - name: external-downloads
               mountPath: /downloads/external
             - name: appdata
@@ -225,45 +163,3 @@ spec:
     type: Recreate
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 600
-
-{{- if .Values.sysVersion }}
-  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: {{ .Release.Name }}-svc
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_api
-  deployment: qbittorrent
-  description: qbittorrent legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8001
-  group: api.qbittorrent
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v1
-status:
-  state: active
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_qbittorrent
-  deployment: qbittorrent
-  description: qbittorrent legacy api v2
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8001
-  group: apiv2.qbittorrent
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-    - name: All
-      uri: /  
-status:
-  state: active
-  {{- end }}
-{{- end }}
