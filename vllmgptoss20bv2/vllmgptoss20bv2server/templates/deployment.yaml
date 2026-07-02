@@ -23,45 +23,9 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: vllm
     spec:
-      initContainers:
-        - name: download-tiktoken
-          image: beclab/alpine:3.18
-          envFrom:
-            - configMapRef:
-                name: vllm-config
-          command:
-            - /bin/sh
-            - -c
-            - |
-              set -eu
-
-              : "${CDN_HOST:?CDN_HOST is required}"
-              echo "Using CDN_HOST=${CDN_HOST}"
-
-              mkdir -p /data/tiktoken
-
-              if [ ! -s /data/tiktoken/o200k_base.tiktoken ] || [ ! -s /data/tiktoken/cl100k_base.tiktoken ]; then
-                echo "Installing curl..."
-                apk add --no-cache curl
-              fi
-
-              if [ ! -s /data/tiktoken/o200k_base.tiktoken ]; then
-                echo "Downloading o200k_base.tiktoken"
-                curl -fL --retry 3 "${CDN_HOST}/o200k_base.tiktoken" -o /data/tiktoken/o200k_base.tiktoken
-              fi
-
-              if [ ! -s /data/tiktoken/cl100k_base.tiktoken ]; then
-                echo "Downloading cl100k_base.tiktoken"
-                curl -fL --retry 3 "${CDN_HOST}/cl100k_base.tiktoken" -o /data/tiktoken/cl100k_base.tiktoken
-              fi
-
-              ls -lh /data/tiktoken
-          volumeMounts:
-            - name: data
-              mountPath: /data
       containers:
         - name: vllm
-          image: "docker.io/vllm/vllm-openai:v0.20.2-cu129"
+          image: "docker.io/vllm/vllm-openai:v0.22.0-cu129"
           command:
             - /bin/bash
             - -c
@@ -97,10 +61,15 @@ spec:
                 --gpu-memory-utilization {{ $gpuMemUtil }} \
                 --max-model-len {{ $maxModelLen }} \
 {{- end }}
-                --tensor-parallel-size 1 {{- if eq $isSparkDGX "true" }} \
+{{- if eq $isSparkDGX "true" }}
+                -O0 \
                 --enforce-eager \
                 --max-num-seqs 8 \
-                --no-enable-prefix-caching{{- end }}
+                --no-enable-prefix-caching \
+{{- else }}
+                -O3 \
+{{- end }}
+                --tensor-parallel-size 1
           env:
             - name: PGID
               value: "1000"
@@ -112,8 +81,6 @@ spec:
               value: "1"
             - name: VLLM_PORT
               value: "8000"
-            - name: TIKTOKEN_ENCODINGS_BASE
-              value: /data/tiktoken
             {{- if eq $isSparkDGX "true" }}
             - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
               value: "1"
@@ -130,12 +97,16 @@ spec:
           volumeMounts:
             - mountPath: /models/gpt-oss-20b
               name: data
-            - name: data
-              mountPath: /data
+            - name: vllm-cache
+              mountPath: /root/.cache
       volumes:
         - name: data
           hostPath:
             path: "{{ .Values.userspace.userData }}/Huggingface/openaigptoss20b"
+            type: DirectoryOrCreate
+        - name: vllm-cache
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Cache/vllm-gptoss20b"
             type: DirectoryOrCreate
       restartPolicy: Always
 
