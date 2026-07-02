@@ -1,0 +1,543 @@
+{{- $clsENV := split  ","  .Values.domain.comfyuilauncherweb -}}
+{{- $cls := index $clsENV "_0" -}}
+
+{{- $comfyuiENV := split  ","  .Values.domain.comfyuientrance -}}
+{{- $comfyuientrance := index $comfyuiENV "_0" -}}
+
+{{- $desktopApiDomain := .Values.domain.comfyuilauncherweb | splitList "." | rest | join "." -}}
+
+{{- $gb10FromNodes := eq (include "comfyuisharev3.GPU.isGb10" .) "true" -}}
+{{- /* v3 targets CUDA 12.8+ amd64 or GB10/Spark arm64 only — no cu124 fallback. */ -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = (.Values.GPU | default dict).Type | default "nvidia" -}}
+{{- end -}}
+{{- $isGb10 := or $gb10FromNodes (eq $gpuType "nvidia-gb10") -}}
+{{- $memRequest := "20Gi" -}}
+{{- $memLimit := "70Gi" -}}
+{{- if $isGb10 -}}
+{{- $memRequest = "22Gi" -}}
+{{- end -}}
+{{- $image := "beclab/comfyui:v0.26.0-fe1.47.6-launcher0.2.49" -}}
+{{- if $isGb10 -}}
+{{- $image = "beclab/comfyui_launcher-arm64:v0.26.0-fe1.47.6-launcher0.2.49-arm64" -}}
+{{- end -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  # Primary workload: named after the release (== appid comfyuisharev3) for v3
+  # workload verification. Service/selector labels stay io.kompose.service: comfyui.
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.comfyuisharev3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: comfyui
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: comfyui
+    spec:
+      initContainers:
+      - name: migrate-io
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            migrate_dir() {
+              LEGACY="$1"
+              NEW="$2"
+              LABEL="$3"
+              if [ ! -d "$LEGACY" ] || [ -z "$(ls -A "$LEGACY" 2>/dev/null)" ]; then
+                echo "migrate-io: $LABEL legacy empty, skip"
+                return 0
+              fi
+              mkdir -p "$NEW"
+              echo "migrate-io: rsync $LABEL sharedlib -> appCommon"
+              rsync -a --ignore-existing "$LEGACY/" "$NEW/"
+              echo "migrate-io: verifying $LABEL"
+              find "$LEGACY" -type f -exec sh -c '
+                src="$1"
+                NEW="$2"
+                LEGACY="$3"
+                rel="${src#$LEGACY/}"
+                dst="$NEW/$rel"
+                if [ ! -f "$dst" ]; then
+                  echo "migrate-io: verify failed, missing in new store: $rel (expected $dst)"
+                  exit 1
+                fi
+                src_size=$(wc -c < "$src" | tr -d " ")
+                dst_size=$(wc -c < "$dst" | tr -d " ")
+                if [ "$src_size" != "$dst_size" ]; then
+                  echo "migrate-io: verify failed, size mismatch: $rel ($src_size vs $dst_size)"
+                  exit 1
+                fi
+              ' _ {} "$NEW" "$LEGACY" \;
+              echo "migrate-io: verification passed for $LABEL, removing legacy files"
+              find "$LEGACY" -mindepth 1 -depth -exec rm -rf {} +
+              echo "migrate-io: $LABEL done"
+            }
+            migrate_dir /legacy-output /new-output output
+            migrate_dir /legacy-appdata/ComfyUI/input /new-input input
+        resources: {}
+        volumeMounts:
+          - name: legacy-output
+            mountPath: /legacy-output
+          - name: output
+            mountPath: /new-output
+          - name: legacy-appdata
+            mountPath: /legacy-appdata
+          - name: input
+            mountPath: /new-input
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: migrate-appdata
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            LEGACY=/legacy-appdata
+            NEW=/new-appdata
+            if [ ! -d "$LEGACY" ] || [ -z "$(ls -A "$LEGACY" 2>/dev/null)" ]; then
+              echo "migrate-appdata: legacy store empty, skip"
+              exit 0
+            fi
+            mkdir -p "$NEW"
+            echo "migrate-appdata: rsync sharedlib/ai/comfyui -> appData/comfyui (excluding input/output)"
+            rsync -a --ignore-existing \
+              --exclude='ComfyUI/output/' \
+              --exclude='ComfyUI/output' \
+              --exclude='ComfyUI/input/' \
+              --exclude='ComfyUI/input' \
+              "$LEGACY/" "$NEW/"
+            echo "migrate-appdata: verifying every legacy file exists in new store with same size"
+            find "$LEGACY" -type f ! -path "$LEGACY/ComfyUI/output/*" ! -path "$LEGACY/ComfyUI/input/*" -exec sh -c '
+              src="$1"
+              NEW="$2"
+              LEGACY="$3"
+              rel="${src#$LEGACY/}"
+              dst="$NEW/$rel"
+              if [ ! -f "$dst" ]; then
+                echo "migrate-appdata: verify failed, missing in new store: $rel (expected $dst)"
+                exit 1
+              fi
+              src_size=$(wc -c < "$src" | tr -d " ")
+              dst_size=$(wc -c < "$dst" | tr -d " ")
+              if [ "$src_size" != "$dst_size" ]; then
+                echo "migrate-appdata: verify failed, size mismatch: $rel ($src_size vs $dst_size)"
+                exit 1
+              fi
+            ' _ {} "$NEW" "$LEGACY" \;
+            echo "migrate-appdata: verification passed, removing legacy appdata files"
+            find "$LEGACY" -mindepth 1 -depth -exec rm -rf {} +
+            echo "migrate-appdata: done"
+        resources: {}
+        volumeMounts:
+          - name: legacy-appdata
+            mountPath: /legacy-appdata
+          - name: appdata
+            mountPath: /new-appdata
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: upversion
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - >-
+              chmod +x /runner-scripts/up-version-cp.sh; sh
+              /runner-scripts/up-version-cp.sh; rsync -av --update
+              /runner-scripts/ /root/runner-scripts/;
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: output
+            mountPath: /root/ComfyUI/output
+          - name: input
+            mountPath: /root/ComfyUI/input
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: installcomfyui
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - >-
+            if [ ! -d /root/ComfyUI ]; then chmod u+x
+            /runner-scripts/download.sh; /runner-scripts/download.sh; fi
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: output
+            mountPath: /root/ComfyUI/output
+          - name: input
+            mountPath: /root/ComfyUI/input
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: migrate-models-appcommon
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            LEGACY=/legacy-model
+            NEW=/app-common-model
+            if [ ! -d "$LEGACY" ] || [ -z "$(ls -A "$LEGACY" 2>/dev/null)" ]; then
+              echo "migrate-models: legacy store empty, skip"
+              exit 0
+            fi
+            mkdir -p "$NEW"
+            echo "migrate-models: rsync sharedlib/ai/model -> appCommon/comfyui/model"
+            rsync -a --ignore-existing "$LEGACY/" "$NEW/"
+            # Legacy SD-shared layout used "main" for checkpoint models; ComfyUI
+            # expects "checkpoints" (see extra_model_paths / folder_paths).
+            if [ -d "$NEW/main" ]; then
+              if [ ! -e "$NEW/checkpoints" ]; then
+                echo "migrate-models: rename main -> checkpoints"
+                mv "$NEW/main" "$NEW/checkpoints"
+              else
+                echo "migrate-models: merge main/ into checkpoints/"
+                rsync -a "$NEW/main/" "$NEW/checkpoints/"
+                rm -rf "$NEW/main"
+              fi
+            fi
+            echo "migrate-models: verifying every legacy file exists in App Common with same size"
+            find "$LEGACY" -type f -exec sh -c '
+              src="$1"
+              NEW="$2"
+              LEGACY="$3"
+              rel="${src#$LEGACY/}"
+              case "$rel" in
+                main/*) dst="$NEW/checkpoints/${rel#main/}" ;;
+                main) dst="$NEW/checkpoints" ;;
+                *) dst="$NEW/$rel" ;;
+              esac
+              if [ ! -f "$dst" ]; then
+                echo "migrate-models: verify failed, missing in new store: $rel (expected $dst)"
+                exit 1
+              fi
+              src_size=$(wc -c < "$src" | tr -d " ")
+              dst_size=$(wc -c < "$dst" | tr -d " ")
+              if [ "$src_size" != "$dst_size" ]; then
+                echo "migrate-models: verify failed, size mismatch: $rel ($src_size vs $dst_size)"
+                exit 1
+              fi
+            ' _ {} "$NEW" "$LEGACY" \;
+            echo "migrate-models: verification passed, removing legacy model files"
+            find "$LEGACY" -mindepth 1 -depth -exec rm -rf {} +
+            echo "migrate-models: done"
+        resources: {}
+        volumeMounts:
+          - name: legacy-modellib
+            mountPath: /legacy-model
+          - name: modellib-hub
+            mountPath: /app-common-model
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /root
+            chown -R 1000:1000 /mnt/olares-shared-model
+            chown -R 1000:1000 /root/ComfyUI/output
+            chown -R 1000:1000 /root/ComfyUI/input
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: modellib-hub
+            mountPath: /mnt/olares-shared-model
+          - name: output
+            mountPath: /root/ComfyUI/output
+          - name: input
+            mountPath: /root/ComfyUI/input
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: cleanup-folders
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - >
+            cp /volume-script/cleanup_folders.sh /tmp/cleanup_folders.sh;
+            chmod +x /tmp/cleanup_folders.sh; sh /tmp/cleanup_folders.sh
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: volume-script
+            mountPath: /volume-script
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      - name: fix-crystools-save
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - >
+            rm -rf /root/ComfyUI/custom_nodes/ComfyUI-Crystools-save
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+        - env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+            - name: CLI_ARGS
+              value: '--disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.47.6'
+            - name: HOME
+              value: /root
+            - name: PIP_CACHE_DIR
+              value: /root/.cache/pip
+            - name: CACHE_DIR
+              value: /root/.cache
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /root/.cache
+            - name: PIP_CONFIG_FILE
+              value: /root/.config/pip/pip.conf
+            - name: PIP_INDEX_URL
+              value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
+            - name: MODELS_DIR
+              value: '/root/ComfyUI/models'
+            - name: EXTRA_MODEL_PATHS_CONFIG
+              value: /runner-config/extra_model_paths.yaml
+            - name: SHARED_MODEL_HUB_PATH
+              value: /mnt/olares-shared-model
+            - name: PLUGIN_PATH
+              value: '/root/ComfyUI/custom_nodes'
+            - name: DATA_DIR
+              value: '/root/ComfyUI/launchercache'
+            - name: COMFYUI_PATH
+              value: '/root/ComfyUI'
+            - name: APP_FILES_PATH
+              value: '/Data/{{ .Release.Name }}/comfyui/'
+            - name: IO_FILES_PATH
+              value: '/Common/comfyui/'
+            - name: MODEL_FILES_PATH
+              value: '/Common/comfyui/model/'
+            - name: NODE_ENV
+              value: 'production'
+            - name: API_PROTOCOL
+              value: 'https'
+            - name: API_HOST
+              value: '{{ $cls }}'
+            - name: API_PORT
+              value: '443'
+            - name: OS_SYSTEM_SERVER
+              value: system-server.user-system-{{ .Values.bfl.username }}
+            - name: DOMAIN_COMFYUI_FOR_ADMIN
+              value: '{{ $comfyuientrance }}'
+            - name: DOMAIN_LAUNCHER_FOR_ADMIN
+              value: https://{{ $cls }}
+            - name: DOWNLOAD_CDN_URL
+              value: '{{ (.Values.olaresEnv | default dict).SYSTEM_CDN_SERVICE | default .Values.downloadCdnURL | default "https://cdn.olares.com" }}'
+            - name: DESKTOP_API_URL
+              value: 'http://desktop.{{ $desktopApiDomain }}/server/intent/send'
+            - name: FORCE_LOG_LANGUAGE
+              value: en
+            - name: NODENAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0
+          image: {{ $image }}
+          name: comfyui
+          ports:
+            - containerPort: 8188
+            - containerPort: 8190
+            - containerPort: 8080
+            - containerPort: 3000
+          resources:
+            requests:
+              cpu: 4
+              memory: {{ $memRequest }}
+            limits:
+              cpu: "4"
+              memory: {{ $memLimit }}
+          volumeMounts:
+            - name: appdata
+              mountPath: /root
+            - name: modellib-hub
+              mountPath: /mnt/olares-shared-model
+            - name: output
+              mountPath: /root/ComfyUI/output
+            - name: input
+              mountPath: /root/ComfyUI/input
+          # Entrances route via comfyuientrance Service (8080->8190, 8081->8080 gateway).
+          # Gate readiness on the Launcher ComfyUI proxy (:8190) so Olares does not
+          # publish the entrance before the "please start" page can be served.
+          startupProbe:
+            tcpSocket:
+              port: 8190
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8190
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+        - name: script
+          configMap:
+            name: script
+            defaultMode: 438
+            items:
+            - key: cleanup_folders.sh
+              path: cleanup_folders.sh
+        - name: output
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCommon }}/comfyui/output
+        - name: input
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCommon }}/comfyui/input
+        # Legacy paths (pre appData/appCommon layout). migrate-* init containers
+        # rsync into the new stores, verify sizes, then remove legacy files.
+        - name: legacy-output
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/output/comfyui
+        - name: legacy-appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/comfyui
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/comfyui
+        - name: appcache
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache}}
+        # Legacy model store (pre-App Common). migrate-models-appcommon init rsyncs
+        # into modellib-hub, verifies sizes, then deletes legacy files.
+        - name: legacy-modellib
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.sharedlib }}/ai/model
+        # App Common shared model store: all ComfyUI apps mount the SAME
+        # appCommon/comfyui/model dir so models deduplicate across apps.
+        # appCommon is SSD on single-node, JuiceFS on multi-node
+        # (requires permission.appCommon).
+        - name: modellib-hub
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCommon }}/comfyui/model
+        - name: volume-script
+          configMap:
+            name: script
+            defaultMode: 420
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  name: comfyui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    # 8190 — Launcher ComfyUI proxy (503 "please start" page, or proxy to 8188).
+    - name: "8190"
+      port: 8190
+      targetPort: 8190
+    # 8080 — Launcher gateway (/api -> :3000, static -> :8081).
+    - name: "8080"
+      port: 8080
+      targetPort: 8080
+  selector:
+    io.kompose.service: comfyui
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfyuientrance
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: comfyui
+  ports:
+    - name: comfyuientrance
+      protocol: TCP
+      port: 8080
+      targetPort: 8190
+    - name: comfyuilauncherweb
+      protocol: TCP
+      port: 8081
+      targetPort: 8080
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: comfyui
+  name: sharedentrances-comfyui
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - name: "8190"
+      port: 80
+      targetPort: 8190
+  selector:
+    io.kompose.service: comfyui
