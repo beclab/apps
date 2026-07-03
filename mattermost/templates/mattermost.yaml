@@ -1,5 +1,6 @@
 ﻿{{- $mattermostDomainENV := split  ","  .Values.domain.mattermost -}}
 {{- $mattermostDomain := index $mattermostDomainENV "_0" -}}
+{{- $pgDatasource := printf "postgres://%s:%s@%s:%v/%s?sslmode=disable&connect_timeout=10" .Values.postgres.username .Values.postgres.password .Values.postgres.host .Values.postgres.port .Values.postgres.databases.mattermost -}}
 
 ---
 apiVersion: apps/v1
@@ -19,46 +20,51 @@ spec:
       io.kompose.service: mattermost
   template:
     metadata:
-      annotations:
-        checksum/config: b3a6119a370af9701afd437a53727798bba6e368b5324c341de66528c28f53f4
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: mattermost
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       initContainers:
-      - name: getconfigfile
-        image: "docker.io/beclab/aboveos-mattermost-mattermost-team-edition:9.9.1"
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         imagePullPolicy: IfNotPresent
-        command: ["sh", "-c", "if [ ! -f '/mattermost/config-new/config.json' ]; then cp '/mattermost/config/config.json' '/mattermost/config-new/config.json'; fi"]
-        volumeMounts:
-        - mountPath: /mattermost/config-new
-          name: mattermost-config
-      - name: resetconfig
-        image: "beclab/harveyff-utils-jq:v0.0.1"
-        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
         command:
-          - "sh"
-          - "-c"
+          - sh
+          - '-c'
           - |
-            mv /mattermost/config-new/config.json /mattermost/config-new/config-old.json;
-            jq '.SqlSettings.DataSource = "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.mattermost }}?sslmode=disable&connect_timeout=10"' /mattermost/config-new/config-old.json > /mattermost/config-new/config-new1.json;
-            jq '.ServiceSettings.SiteURL = "https://{{ $mattermostDomain }}"' /mattermost/config-new/config-new1.json > /mattermost/config-new/config-new2.json;
-            jq '.TeamSettings.SiteName = "Mattermost in Olares"' /mattermost/config-new/config-new2.json > /mattermost/config-new/config-new3.json;
-            jq '.SqlSettings.DriverName = "postgres"' /mattermost/config-new/config-new3.json > /mattermost/config-new/config.json;
+            chown -R 1000:1000 /mattermost/config /mattermost/data /mattermost/plugins /mattermost/client/plugins
         volumeMounts:
-        - mountPath: /mattermost/config-new
+        - mountPath: /mattermost/config
           name: mattermost-config
+        - mountPath: /mattermost/data
+          name: mattermost-data
+        - mountPath: /mattermost/plugins
+          name: mattermost-server-plugins
+        - mountPath: /mattermost/client/plugins
+          name: mattermost-plugins
       containers:
       - name: mattermost
-        image: "docker.io/beclab/aboveos-mattermost-mattermost-team-edition:9.9.1"
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: IfNotPresent
         env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
         - name: TZ
           value: Etc/UTC
+        - name: MM_SQLSETTINGS_DRIVERNAME
+          value: postgres
+        - name: MM_SQLSETTINGS_DATASOURCE
+          value: {{ $pgDatasource | quote }}
+        - name: MM_SERVICESETTINGS_SITEURL
+          value: https://{{ $mattermostDomain }}
+        - name: MM_TEAMSETTINGS_SITENAME
+          value: Mattermost in Olares
+        - name: MM_LOGSETTINGS_ENABLEFILE
+          value: "false"
         envFrom:
         - secretRef:
             name: mattermost-team-edition-config
@@ -95,17 +101,17 @@ spec:
           name: mattermost-config
         - mountPath: /mattermost/data
           name: mattermost-data
+        - mountPath: /mattermost/plugins
+          name: mattermost-server-plugins
         - mountPath: /mattermost/client/plugins
           name: mattermost-plugins
         resources:
           requests:
             cpu: 50m
-            memory: 200Mi
+            memory: 512Mi
           limits:
             cpu: 1000m
-            memory: 2000Mi
-      securityContext:
-        runAsUser: 0
+            memory: 4Gi
       volumes:
       - hostPath:
           path: '{{ .Values.userspace.appData }}/mattermost/config'
@@ -115,6 +121,10 @@ spec:
           path: '{{ .Values.userspace.appData }}/mattermost/data'
           type: DirectoryOrCreate
         name: mattermost-data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/mattermost/server-plugins'
+          type: DirectoryOrCreate
+        name: mattermost-server-plugins
       - hostPath:
           path: '{{ .Values.userspace.appData }}/mattermost/plugins'
           type: DirectoryOrCreate
