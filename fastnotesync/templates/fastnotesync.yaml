@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastnotesync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fastnotesync
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: fastnotesync
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: fastnotesync
+    spec:
+      containers:
+        - name: fastnotesync
+          image: "haierkeys/fast-note-sync-service:{{ .Values.image.version | default "latest" }}"
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          ports:
+            - name: http
+              containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: fastnotesync-data
+              mountPath: /fast-note-sync/storage
+              subPath: storage
+            - name: fastnotesync-data
+              mountPath: /fast-note-sync/config
+              subPath: config
+      restartPolicy: Always
+      volumes:
+        - name: fastnotesync-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/fastnotesync'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastnotesync
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: fastnotesync
+spec:
+  ports:
+    - name: "9000"
+      port: 9000
+      targetPort: 9000
+  selector:
+    io.kompose.service: fastnotesync
