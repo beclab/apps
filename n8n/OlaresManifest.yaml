@@ -1,31 +1,22 @@
-olaresManifest.version: '0.10.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
 
+workloadReplicas:
+  n8n: 1
 metadata:
   name: n8n
   description: n8n is an extendable workflow automation tool.
   icon: https://app.cdn.olares.com/appstore/n8n/icon.png
   appid: n8n
-  version: '1.1.0'
+  version: '1.1.1'
   title: n8n
   categories:
     - Productivity_v112
-    - Productivity
+
 permission:
   appData: true
   appCache: true
-  sysData:
-    - dataType: legacy_ollama
-      appName: ollama
-      svc: ollama
-      port: 11434
-      group: api.ollama
-      version: v2
-      ops:
-        - All
-  provider:
-  - appName: ollama
-    providerName: ollamaclient
 middleware:
   postgres:
     username: n8n
@@ -79,25 +70,25 @@ spec:
     - Custom error workflows
 
   upgradeDescription: |
-    Upgrade n8n to 2.27.5 with official image and non-root deployment.
+    Upgrade n8n to 2.27.5 and enforce non-root deployment on Olares.
+
+    **Version Upgrade (chart 1.0.19 → 1.1.0, app 2.26.9 → 2.27.5)**
 
     **Deployment Changes**
-    - Switched from `beclab/n8nio-n8n` to official `n8nio/n8n:2.27.5`
-    - Removed root `securityContext` from the main container; it now runs as the image default user (`node`, UID 1000)
-    - Data volume mount path changed from `/root/.n8n` to `/home/node/.n8n`
-    - Added init container to `chown` appData to UID 1000 before startup
-    - n8n listens on port 5678 internally; Service exposes port 80 and forwards to 5678
-    - Added HTTPS reverse-proxy env vars (`N8N_PROTOCOL`, `WEBHOOK_URL`, `N8N_EDITOR_BASE_URL`, `N8N_PROXY_HOPS`, `N8N_SECURE_COOKIE`)
-    - Enabled `N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS`
-    - Raised resource limits for n8n 2.27 task runners (memory request 1Gi -> 2Gi, limit 4Gi -> 6Gi; CPU limit 2 -> 3 cores)
+    - Image updated to official `n8nio/n8n:2.27.5`
+    - Enforce pod-level `runAsUser` / `runAsGroup` 1000 so the main container no longer runs as root on Olares
+    - Main container sets `runAsNonRoot: true`; init container still chowns appData as root before startup
+    - Data volume remains at `/home/node/.n8n`; Service still exposes port 80 and forwards to 5678
+    - HTTPS reverse-proxy env vars retained (`N8N_PROTOCOL`, `WEBHOOK_URL`, `N8N_EDITOR_BASE_URL`, `N8N_PROXY_HOPS`, `N8N_SECURE_COOKIE`)
+
+    **Key Changes Since 2.26.9**
+    - Instance AI builder, MCP OAuth2, Anthropic streaming, and execution-list performance improvements (2.27)
+    - 2.27.0 adds a database index on `execution_entity` (may take several minutes on large instances)
+    - 2.27.5 fixes startup failure from partially-installed community packages
 
     **Important Notes**
-    - Database migrations run automatically on startup; 2.27.0 adds an index on `execution_entity` that may take several minutes on large instances
-    - `N8N_BLOCK_ENV_ACCESS_IN_NODE` remains `"true"`
-    - Task runners remain mandatory in n8n 2.x; do not re-add deprecated `N8N_RUNNERS_ENABLED`
-
-    **Bug Fixes in 2.27.5**
-    - Prevent startup failure from partially-installed community packages
+    - Database migrations run automatically on startup
+    - Review workflow compatibility using the migration tool (Settings > Migration Report)
 
     Check full release notes at: https://github.com/n8n-io/n8n/releases/tag/n8n%402.27.5
 
@@ -131,10 +122,7 @@ options:
   dependencies:
     - name: olares
       type: system
-      version: '>=1.10.1-0'
-    - name: ollama
-      type: application
-      version: '>=1.0.3'
+      version: '>=1.12.6-0'
   policies:
     - uriRegex: ^/(webhook)
       level: public
