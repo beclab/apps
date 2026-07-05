@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triliumnext
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: triliumnext
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: triliumnext
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: triliumnext
+    spec:
+      containers:
+        - name: triliumnext
+          image: docker.io/triliumnext/trilium:v0.103.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TRILIUM_DATA_DIR
+              value: "/home/node/trilium-data"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: triliumnext-data
+              mountPath: /home/node/trilium-data
+      restartPolicy: Always
+      volumes:
+        - name: triliumnext-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/triliumnext'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triliumnext-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: triliumnext
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    io.kompose.service: triliumnext
