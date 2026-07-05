@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: syncthing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: syncthing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: syncthing
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: syncthing
+    spec:
+      containers:
+        - name: syncthing
+          image: docker.io/syncthing/syncthing:2.1.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: STGUIADDRESS
+              value: "0.0.0.0:8384"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          ports:
+            - name: web
+              containerPort: 8384
+              protocol: TCP
+            - name: sync-tcp
+              containerPort: 22000
+              protocol: TCP
+            - name: sync-udp
+              containerPort: 22000
+              protocol: UDP
+          volumeMounts:
+            - name: syncthing-data
+              mountPath: /var/syncthing
+            - name: userspace-home
+              mountPath: /var/syncthing/Home
+      restartPolicy: Always
+      volumes:
+        - name: syncthing-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/syncthing'
+        - name: userspace-home
+          hostPath:
+            type: Directory
+            path: '{{ .Values.userspace.userData }}'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: syncthing-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: syncthing
+spec:
+  ports:
+    - name: web
+      port: 8384
+      targetPort: 8384
+      protocol: TCP
+    - name: sync-tcp
+      port: 22000
+      targetPort: 22000
+      protocol: TCP
+    - name: sync-udp
+      port: 22000
+      targetPort: 22000
+      protocol: UDP
+  selector:
+    io.kompose.service: syncthing
