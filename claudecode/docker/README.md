@@ -44,13 +44,13 @@ Claude Code bundles its own.
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-claudecode-base:0.5.4 .
+docker build -t beclab/harveyff-claudecode-base:0.5.6 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name claudecode-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-claudecode-base:0.5.4 \
+  -t beclab/harveyff-claudecode-base:0.5.6 \
   --push .
 ```
 
@@ -58,7 +58,7 @@ docker buildx build \
 
 When bumping apt dependencies or base Ubuntu:
 
-1. Increment the tag (e.g. `0.5.3 -> 0.5.4`).
+1. Increment the tag (e.g. `0.5.5 -> 0.5.6`).
 2. Update both references in `claudecode/templates/deployment.yaml`
    (initContainer + main container).
 3. Bump `version` in `claudecode/Chart.yaml` and `metadata.version` in
