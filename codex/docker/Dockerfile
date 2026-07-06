@@ -15,7 +15,7 @@
 # Build & push:
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     -t beclab/harveyff-codex-base:0.5.5 \
+#     -t beclab/harveyff-codex-base:0.5.7 \
 #     --push .
 # syntax=docker/dockerfile:1.7
 
@@ -23,7 +23,7 @@
 # @olares/cli postinstall downloads the Go binary; copy vendor binary (not JS
 # wrapper) so the full verb set is available. skills CLI needs git to clone.
 FROM node:24-bookworm-slim AS olares-assets
-ARG OLARES_CLI_NPM_VERSION=1.12.5-cli.8
+ARG OLARES_CLI_NPM_VERSION=1.12.6-cli.2
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
