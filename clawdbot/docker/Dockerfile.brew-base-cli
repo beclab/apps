@@ -1,0 +1,93 @@
+# Build & push (shared by clawdbot / hermesagent):
+#   docker buildx build \
+#     --platform linux/amd64,linux/arm64 \
+#     -f Dockerfile.brew-base-cli \
+#     -t beclab/harveyff-openclaw-brew-base:2026.7.6-cli \
+#     --push .
+# syntax=docker/dockerfile:1.7
+
+# ---- Stage 1: olares-cli binary + Olares skills ----
+# @olares/cli postinstall downloads the Go binary per arch
+# (arch detection + GitHub/cdn.olares.com fallback + extract + chmod).
+# skills CLI clones beclab/Olares via git, so git is required in this stage.
+# Copy the vendor binary (not the JS wrapper) so the full verb set is available
+# (wrapper forces OLARES_CLI_REMOTE_ONLY=1 and drops commands).
+FROM node:24-bookworm-slim AS olares-assets
+ARG OLARES_CLI_NPM_VERSION=1.12.6-cli.2
+
+# skills CLI needs git; bookworm-slim does not ship it
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# olares-cli: vendor binary (full verbs, no JS wrapper)
+RUN npm install -g @olares/cli@${OLARES_CLI_NPM_VERSION} \
+ && install -D "$(npm root -g)/@olares/cli/vendor/olares-cli" /out/bin/olares-cli \
+ && ( /out/bin/olares-cli --version || /out/bin/olares-cli version || true )
+
+# Olares skills: project scope + --copy => ./skills/ with real files, no symlinks
+WORKDIR /skills-build
+RUN npx -y skills add beclab/Olares -a openclaw -y --copy \
+ && test -d /skills-build/skills \
+ && mkdir -p /out/skills \
+ && cp -a /skills-build/skills/. /out/skills/ \
+ && ls -la /out/skills
+
+# ---- Stage 2: brew base (final image, no Node) ----
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ca-certificates curl file git build-essential procps \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 -s /bin/bash linuxbrew
+
+ENV HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew \
+    HOMEBREW_NO_AUTO_UPDATE=1
+
+RUN mkdir -p ${HOMEBREW_PREFIX}/Homebrew \
+ && git clone --depth=1 https://github.com/Homebrew/brew ${HOMEBREW_PREFIX}/Homebrew \
+ && mkdir -p ${HOMEBREW_PREFIX}/bin \
+ && ln -sf ../Homebrew/bin/brew ${HOMEBREW_PREFIX}/bin/brew \
+ && mkdir -p ${HOMEBREW_PREFIX}/etc \
+             ${HOMEBREW_PREFIX}/include \
+             ${HOMEBREW_PREFIX}/lib \
+             ${HOMEBREW_PREFIX}/opt \
+             ${HOMEBREW_PREFIX}/sbin \
+             ${HOMEBREW_PREFIX}/share \
+             ${HOMEBREW_PREFIX}/var/homebrew/linked \
+             ${HOMEBREW_PREFIX}/Cellar \
+ && chown -R 1000:1000 /home/linuxbrew
+
+USER 1000
+RUN export PATH="${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin:${PATH}" \
+ && brew --version \
+ && brew install python \
+ && PY="$(brew list --formula | grep -E '^python@' | sort -V | tail -n1)" \
+ && [ -n "$PY" ] \
+ && brew link --overwrite "$PY" \
+ && ln -sf python3 ${HOMEBREW_PREFIX}/bin/python \
+ && ln -sf pip3 ${HOMEBREW_PREFIX}/bin/pip \
+ && python3 --version \
+ && pip3 --version \
+ && find "${HOMEBREW_PREFIX}" -name EXTERNALLY-MANAGED -delete
+USER 0
+
+# olares-cli: copy vendor binary into brew bin.
+# The final `cp -a /home/linuxbrew /brew-staging` bundles it into
+# /brew-staging/.linuxbrew/bin/olares-cli (hermes init-install-brew search path).
+COPY --from=olares-assets /out/bin/olares-cli ${HOMEBREW_PREFIX}/bin/olares-cli
+RUN chown 1000:1000 ${HOMEBREW_PREFIX}/bin/olares-cli \
+ && ( ${HOMEBREW_PREFIX}/bin/olares-cli --version || ${HOMEBREW_PREFIX}/bin/olares-cli version || true )
+
+# skills: /skills-staging must live outside /home/linuxbrew; otherwise the
+# cp -a /home/linuxbrew /brew-staging below would fold it into the brew volume.
+# init-skills copies into /opt/data/skills/olares at runtime.
+COPY --from=olares-assets /out/skills /skills-staging
+RUN chown -R 1000:1000 /skills-staging
+
+RUN date -u +%Y%m%dT%H%M%S > /home/linuxbrew/.linuxbrew/.brew-base-build \
+ && chown 1000:1000 /home/linuxbrew/.linuxbrew/.brew-base-build
+RUN cp -a /home/linuxbrew /brew-staging
