@@ -11,7 +11,7 @@ metadata:
   description: The agent that grows with you
   appid: hermesagent
   title: Hermes Agent
-  version: 1.3.21
+  version: 1.3.22
   categories:
   - Productivity_v112
   - Developer Tools
@@ -38,13 +38,22 @@ entrances:
   invisible: true
   authLevel: internal
 spec:
-  versionName: '0.17.0'
+  versionName: '0.18.0'
   fullDescription: |
     **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
     **Tips**
     Gateway Restart
     - Run `hermes gateway restart` from the Hermes CLI terminal (same container as the supervised gateway). Config changes are picked up after restart.
+
+    Optional Python backends (Feishu, Honcho, Firecrawl, …)
+    - On first use, Hermes installs packages into `/opt/data/lazy-packages` (persistent; requires PyPI access on first install).
+    - Feishu/Lark gateway: configure credentials in `hermes setup` or `/opt/data/.env`, then `hermes gateway restart` — `lark-oapi` is installed automatically when the gateway connects.
+    - Honcho memory: if `hermes memory setup honcho` fails with a pip/permission error, pre-install in the CLI first:
+      `python3 -c "from tools.lazy_deps import ensure; ensure('memory.honcho', prompt=False)"` then re-run setup.
+
+    npm / Node packages
+    - Do not run `npm install` under `/opt/hermes` (read-only). Use `npx <package>` or `npm install --prefix /opt/data/.npm-global <package>`.
 
     Storage
     - All Hermes state — config, API keys, sessions (SQLite + FTS5), skills, memories, cron, logs, checkpoints — lives in `/opt/data` (`HERMES_HOME`). No external database is required. The directory is persisted across pod restarts and upgrades by the host volume.
@@ -67,13 +76,17 @@ spec:
     - Localized into 7 languages (中文 / 日本語 / Deutsch / Español / Français / Українська / Türkçe) plus a Chinese dashboard.
 
   upgradeDescription: |
-    Architecture change: merge gateway, dashboard, and CLI into one s6-supervised container (Hermes v0.17.0 upstream layout).
+    Upgrade to Hermes Agent v0.18.0 (1.3.22). Single supervised container; Dashboard auth is handled by Olares only.
 
     Change Details:
-    - Single container runs `gateway run` with s6 auto-restart and `HERMES_DASHBOARD=1`; Channels, Profiles, and Terminal now share the same gateway PID namespace and agree on status.
-    - Dashboard binds 0.0.0.0 without Hermes login (`HERMES_DASHBOARD_INSECURE=1` behind Olares internal ingress).
-    - Remove cross-container workarounds (`restart-gateway` sentinel, health-relay stub, `HERMES_GATEWAY_NO_SUPERVISE`). Use `hermes gateway restart` from the CLI instead.
-    - Raise resource limits to 8 CPU / 20 GiB for the combined workload.
+    - Image: `beclab/harveyff-hermes-agent:v2026.7.1-uid1000` (UID 1000 overlay only; opt-in Python deps use upstream lazy-install).
+    - Architecture: gateway, dashboard, and CLI share one s6-supervised pod. Use `hermes gateway restart` (no `restart-gateway` sentinel or multi-container layout).
+    - Dashboard: loopback `127.0.0.1:19119` + nginx sidecar on 9119; Host/Origin rewrite fixes "Invalid Host header". Olares `authLevel: internal` is the only login.
+    - Removed: `HERMES_DASHBOARD_INSECURE`, `HERMES_DASHBOARD_BASIC_AUTH_*`, Chart init-time honcho pip overlays.
+    - Optional backends (Feishu, Honcho, …): first use installs to `/opt/data/lazy-packages` (needs PyPI once). See app Tips if Honcho setup reports a pip error.
+    - Terminal sidecar: `beclab/terminal:v0.0.13`; brew base `openclaw-brew-base:2026.7.6-cli`.
+
+    After upgrade, open Dashboard via the Olares entrance. Existing `/opt/data` is preserved.
 
   developer: Nous Research
   website: https://hermes-agent.nousresearch.com
