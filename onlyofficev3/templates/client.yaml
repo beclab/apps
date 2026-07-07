@@ -2,6 +2,10 @@
 {{- $onlyofficeproxyDomain := index $onlyofficeproxyENV "_0" -}}
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: "{{ .Release.Namespace }}"
 data:
   default.json: |
     {
@@ -28,8 +32,8 @@ data:
         "apiUrl": "web-apps/apps/api/documents/api.js",
         "preloaderUrl": "web-apps/apps/api/documents/cache-scripts.html",
         "exampleUrl": "https://{{ $onlyofficeproxyDomain }}",
-        "storageFolder": "/home/Documents",
-        "storagePath": "/home/Documents",
+        "storageFolder": "/documents",
+        "storagePath": "/documents",
         "maxFileSize": 1073741824,
         "maxNameLength": 50,
         "mobileRegEx": "android|avantgo|playbook|blackberry|blazer|compal|elaine|fennec|hiptop|iemobile|ip(hone|od|ad)|iris|kindle|lge |maemo|midp|mmp|opera m(ob|in)i|palm( os)?|phone|p(ixi|re)\\/|plucker|pocket|psp|symbian|treo|up\\.(browser|link)|vodafone|wap|windows (ce|phone)|xda|xiino",
@@ -95,10 +99,6 @@ data:
       }
     }
 
-kind: ConfigMap
-metadata:
-  name: config
-  namespace: "{{ .Release.Namespace }}"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -130,19 +130,11 @@ spec:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /home
+            chown -R 1000:1000 /documents
         resources: {}
         volumeMounts:
-          - name: userdata
-            mountPath: /home
-          - mountPath: /data/drive/Home
-            name: userdatahome
-          - mountPath: /data/drive/Data
-            name: userdatadata
-          - mountPath: '/data/cache/{{ .Values.schedule.nodeName }}'
-            name: userdatacache
-          - mountPath: '/data/external/{{ .Values.schedule.nodeName }}'
-            name: userdataexternal
+          - name: appdata
+            mountPath: /documents
         securityContext:
           runAsUser: 0
       - name: wait-for-jwtgeter
@@ -176,33 +168,17 @@ spec:
             cpu: "0.1"
             memory: 0.1Gi
         volumeMounts:
-        - mountPath: /home
-          name: userdata
+        - mountPath: /documents
+          name: appdata
         - name: config
           mountPath: /default.json
           subPath: default.json
       restartPolicy: Always
       volumes:
       - hostPath:
-          path: '{{ .Values.userspace.userData }}'
+          path: '{{ .Values.userspace.appData }}/documents'
           type: DirectoryOrCreate
-        name: userdata
-      - hostPath:
-          path: '{{ .Values.userspace.userData }}'
-          type: DirectoryOrCreate
-        name: userdatahome
-      - hostPath:
-          path: '{{ .Values.userspace.appData }}'
-          type: DirectoryOrCreate
-        name: userdatadata
-      - hostPath:
-          path: '{{ .Values.userspace.appCache }}'
-          type: DirectoryOrCreate
-        name: userdatacache
-      - hostPath:
-          path: /olares/share
-          type: DirectoryOrCreate
-        name: userdataexternal
+        name: appdata
       - name: config
         configMap:
           name: config
