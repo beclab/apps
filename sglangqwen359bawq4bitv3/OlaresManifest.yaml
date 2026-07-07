@@ -1,0 +1,203 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: sglangqwen359bawq4bitv3
+  icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+  description: "Qwen3.5-9B (AWQ-4bit) served with SGLang."
+  appid: sglangqwen359bawq4bitv3
+  title: Qwen3.5-9B (SGLang)
+  version: '1.0.0'
+  categories:
+    - AI
+sharedEntrances:
+  - name: sglangqwen359bawq4bitv3
+    host: sharedentrances-api
+    port: 0
+    title: Qwen3.5-9B API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+entrances:
+  - name: sglangclient
+    port: 8090
+    host: download-svc
+    title: Qwen3.5-9B
+    icon: https://app.cdn.olares.com/appstore/sglang/icon.png
+    openMethod: window
+    authLevel: internal
+#   sglangqwen359bawq4bitv3 — engine Deployment (== appid / Release.Name)
+#   llminit          — llm-init / entrance Deployment
+workloadReplicas:
+  sglangqwen359bawq4bitv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: '0.5.14-cu130'
+  fullDescription: |
+    **Model Overview**
+    Qwen3.5-9B served with SGLang, using the `AWQ-4bit` quantized weights from `cyankiwi/Qwen3.5-9B-AWQ-4bit`. The model ships ready to run and supports thinking, tools, and vision.
+
+    **Preset Configuration**
+    - Model: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+    - Capabilities: thinking, tools, vision
+    - Engine args: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser qwen3 --tool-call-parser qwen3_coder`
+    - Required GPU memory: `23Gi`
+
+    **How It Works**
+    First, `llm-init` downloads the model and gets it ready, then SGLang starts serving the model when it's ready. These two parts run in separate Deployments but share the HF cache and run-state via App Common storage.
+
+    **Stack**
+    - **SGLang** (port 30000): runs the model and serves API requests
+    - **llm-init** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to SGLang
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; tune `--mem-fraction-static` in ENGINE_ARGS  |
+    | `nvidia-gb10`  | GPU (Spark)       | Same as `nvidia`: `23Gi` memory, managed by the pod                  |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - SGLang model loading can take several minutes for large models. Keep the app Running until ready.
+    - This model needs a GPU with at least 23Gi of memory.
+    - SGLang excels at prefix caching and structured output (JSON, tool calls, agents); prefix caching is enabled by default.
+
+  developer: SGLang
+  website: https://sglang.io/
+  sourceCode: https://github.com/sgl-project/sglang
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://github.com/sgl-project/sglang/blob/main/LICENSE
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects --device cpu, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; SGLANG_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  # Model is preset for this app; these values are fixed and not user-editable.
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://cyankiwi/Qwen3.5-9B-AWQ-4bit"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "cyankiwi/Qwen3.5-9B-AWQ-4bit"
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "chat"
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "thinking,tools,vision"
+  - envName: ENGINE_ARGS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser qwen3 --tool-call-parser qwen3_coder"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "info"
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: SGLANG_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: SGLANG_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "23Gi"
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    regex: "^[0-9]+(Gi|Mi)?$"
