@@ -38,48 +38,54 @@ spec:
 
     - Continuous Updates: We are committed to improving Open WebUI with regular updates, fixes, and new features.
   upgradeDescription: |
-    Upgrade Open WebUI to **v0.9.6** (chart **1.0.30**).
+    Upgrade Open WebUI to **v0.10.2** (chart **1.0.34**).
 
     Packaged (Olares chart)
-    - **Official image & persistent session key (default on):** this chart now uses the official `openwebui/open-webui` image, and **`ENABLE_WEBUI_SECRET_KEY_PERSIST`** defaults to **`true`**, persisting the WebUI secret key to `data/.webui_secret_key` on the appData volume (via `WEBUI_SECRET_KEY_FILE`) so logins survive restarts and future upgrades. Set it to **`false`** under Settings → Application → environment variables if you instead want every restart to regenerate the key and sign all users out. Because the key is initialized on this upgrade, you will be signed out once and need to log in again.
-    - **DB backup before upgrade (default on):** **`ENABLE_WEBUI_DB_BACKUP`** defaults to **`true`**. On each new chart version, before the app starts, if `webui.db` exists and `data/backups/webui_chart_<chart-version>.db` is not there yet, the init container copies it once (same appData volume). Same chart version restarts never duplicate that file. To **skip** backup for a rollout, set **`ENABLE_WEBUI_DB_BACKUP`** to **`false`** under Settings → Application → environment variables **before** upgrading.
-    - **Schema migration:** v0.9.6 includes database schema changes; the bundled backup is strongly recommended before rolling out. Multi-worker or load-balanced deployments must be updated together — rolling updates are not supported. Migrations are now resilient and skip tables/indexes/columns that already exist.
-    - **After upgrade:** Leave **`true`** to keep automatic backups on future chart bumps, or set **`false`** if you do not want further backups until you enable it again.
-    - **Helm without Olares UI:** use `backupWebuiDb.enabled` (defaults `false` in chart values); set `true` only when you want the backup init.
+    - **DB backup before upgrade (default on):** **`ENABLE_WEBUI_DB_BACKUP`** defaults to **`true`**. On each new chart version, before the app starts, if `webui.db` exists and `data/backups/webui_chart_<chart-version>.db` is not there yet, the init container copies it once (same appData volume). To **skip** backup for a rollout, set **`ENABLE_WEBUI_DB_BACKUP`** to **`false`** under Settings → Application → environment variables **before** upgrading.
+    - **Schema migration:** v0.10.x includes database schema changes (reworked memory system, folder sharing, events); the bundled backup is strongly recommended before rolling out. Multi-worker or load-balanced deployments must be updated together — rolling updates are not supported.
+    - **Persistent session key (default on):** **`ENABLE_WEBUI_SECRET_KEY_PERSIST`** remains **`true`**, keeping login sessions stable across restarts and upgrades via `data/.webui_secret_key` on the appData volume.
     - **Existing data:** Your database file under appData is kept; Open WebUI upgrades its schema automatically on startup.
 
-    Open WebUI v0.9.5 → v0.9.6 — main changes
+    Open WebUI v0.9.6 → v0.10.2 — main changes
 
-    **Security & access control (v0.9.6)**
-    - **Security advisory:** this release bundles multiple security and access-control fixes; updating production deployments promptly is recommended.
-    - **Cross-user data protection:** retrieval collections, knowledge-base search, chat file attachments, model knowledge files, and `image_url` file references now enforce per-file/per-knowledge access checks, blocking exfiltration of other users' files.
-    - **Tool server enforcement:** the inline tool-server permission is now enforced on chat-completion requests, and API-key endpoint allow-lists match the routed path directly.
-    - **SSRF & path hardening:** DNS-rebinding protection for outbound fetches, Playwright web-loader URL gating, OAuth profile-picture redirect control, terminal-proxy and cache-file path-traversal fixes, and collection-name validation.
-    - **Script-injection fixes:** Mermaid diagrams and model profile images are sanitized/validated before display; cross-origin iframe embeds can only drive chat input when explicitly opted in.
-    - **Reduced public exposure:** `/api/config` no longer leaks several feature flags to anonymous callers; system-prompt skip and code-interpreter permission bypasses are closed.
+    **Major features (v0.10.0)**
+    - **Share folders with your team:** share a folder and its chats with specific users, groups, or everyone (read/write); admins control this via a new "Folders Sharing" permission (off by default).
+    - **Automatic context compaction:** long conversations can be summarized automatically to stay within a model's context window (off by default; configurable threshold and prompt).
+    - **Open WebUI Computer agent support:** connect to Open WebUI Computer via its OpenAI-compatible gateway for full agent sessions with file, terminal, git, and web access.
+    - **Reworked memory system:** distinct long-lived personal memories and per-conversation context, managed through structured add/update/delete flows.
+    - **External knowledge bases:** back knowledge bases with external retrieval sources via configurable external knowledge connections.
+    - **Event functions & webhooks:** new Event function plugin primitive hooks into system events (sign-ups, config changes, file uploads, etc.); administrators can route events as outbound webhooks from a new event settings page.
+    - **Admin authentication panel:** LDAP and OAuth/OIDC settings now have a dedicated Authentication settings page.
+    - **Much faster hybrid search** on large knowledge bases (native pgvector queries instead of loading entire collections into memory).
 
-    **New & improved features**
-    - **Smart directory sync for knowledge bases:** sync a local directory into a KB in one action; only added/modified files upload, removed files are cleaned up, with structure mirrored and per-file progress. New companion tool `oikb` syncs from local dirs, GitHub, S3, Confluence, and 40+ sources.
-    - **Knowledge base folders & file renaming:** organize KB files into nested folders with breadcrumb navigation, and rename files in place.
-    - **Filesystem tool for knowledge bases:** new built-in tool (enabled via **`ENABLE_KB_EXEC`**) lets models browse KBs with `ls`, `cat`, `grep`, `find`, `head`, `tail`, `sed`, and pipes.
-    - **Emoji picker** in the rich-text toolbar, **per-chat skills toggle** from the Integrations menu, and **access preview** so admins can see which models/KBs/tools a user or group can reach.
-    - **New backends:** Valkey vector database (**`VALKEY_URL`**), Linkup web search provider, Azure AI Foundry v1 with Entra ID, and wildcard (`*`) OAuth role mapping with optional **`OAUTH_AUTO_REDIRECT`** to SSO.
-    - **MinerU file-type config (`MINERU_FILE_EXTENSIONS`)**, legacy `.doc` extraction, configurable MCP connect timeout (**`MCP_INITIALIZE_TIMEOUT`**), and a profile-image size cap (**`PROFILE_IMAGE_MAX_DATA_URI_SIZE`**).
+    **Security & access control (v0.10.0–v0.10.2)**
+    - **Security advisories:** v0.10.0 and v0.10.2 include security and access-control fixes; updating production deployments promptly is recommended.
+    - **Knowledge base write access enforced on upload;** API key, TTS, and image-edit permissions enforced on all endpoints; arena fallback respects model access rules.
+    - **Path traversal, DNS rebinding, and session hardening:** heavily encoded paths rejected; image URL and web fetch fetches re-check destination addresses; revoked sessions rejected on WebSocket connections.
+    - **Web search domain filtering (v0.10.2):** domain allow/block rules now match against the host, closing a gap where some URLs could slip past the filter.
 
-    **Performance**
-    - **Faster initial page loads, tool-enabled completions, and web search:** the config endpoint drops an unnecessary user-count query, referenced tools are batch-fetched, and SearXNG/Google PSE/Brave/Serper/Serpstack searches use non-blocking calls.
-    - **Lighter Ollama connections** via a shared connection pool, fewer redundant Redis model-list writes, and cheaper websocket disconnect cleanup on large deployments.
+    **New & improved (v0.10.0–v0.10.2)**
+    - **Streamed reasoning display (v0.10.2):** models that emit thinking/reasoning show that content as it streams, in chat overview and exports.
+    - **Folder uploads to knowledge bases (v0.10.2):** dragging or syncing a folder now recreates its subfolder structure instead of flattening files.
+    - **Memory system context toggle (v0.10.2):** admins can keep memory tools available while choosing not to add stored memories to system context.
+    - **API configs via environment:** per-connection Ollama and OpenAI API configs via **`OLLAMA_API_CONFIGS`** and **`OPENAI_API_CONFIGS`**; arena models via **`EVALUATION_ARENA_MODELS`**.
+    - **Argon2 password hashing option,** optional encryption of valve values at rest, AWS RDS IAM database authentication, and configurable secret key length.
+    - **New web search providers:** SERPHouse, Microsoft Web IQ; optional web search confirmation; speech-to-text multipart or base64 JSON format.
 
     **Reliability & fixes (selected)**
-    - **Web search reliability:** default loader fetches content again; the new **`USER_AGENT`** variable (set by this chart) avoids bot-detection blocks; Firecrawl and Kagi search fixed.
-    - **Chat recovery:** corrupted message graphs from failed regenerations now open and self-repair; imported chats with missing folders appear correctly.
-    - **ComfyUI image generation/editing** works again, including private/internal endpoints; image generation tolerates non-standard response headers.
-    - **MCP tool servers** stay connected (OAuth sessions no longer wrongly refreshed) and discover advertised OAuth scopes.
-    - **Knowledge search on PostgreSQL** handles very large documents; non-UTF-8 text/CSV uploads and null bytes in nested data are handled gracefully.
-    - **Startup on non-Unicode consoles** (e.g. Windows) no longer crashes; database health checks recover after transient errors; first-admin signup after a reset is unblocked.
+    - **Safer database upgrades (v0.10.2):** SQLite user-table migration no longer crashes or corrupts saved user settings.
+    - **Fewer unexpected logouts (v0.10.2):** a single authorization error no longer signs you out while the session is still valid.
+    - **Shared folder read-only chats (v0.10.1):** opening chats from shared folders no longer incorrectly signs users out.
+    - **Non-admin settings save (v0.10.2):** non-admin users can again save interface settings (default model, theme).
+    - **Python code execution (v0.10.2):** Pyodide sandbox startup failures fixed; tool dialogs no longer hang when dismissed.
+    - **Chat search, notifications, and default model (v0.10.2):** search finds structured-output messages; notification previews show clean text; selected model persists after page reload.
+    - **Sidebar chat timestamps (v0.10.2):** show last-active time instead of creation time.
 
-    **Changed**
-    - **Tool-call iteration cap renamed:** **`CHAT_RESPONSE_MAX_TOOL_CALL_ITERATIONS`** replaces `CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES` (kept as fallback); default raised 30 → 256, with `-1` for unlimited.
-    - **`WEBUI_SECRET_KEY` hard requirement:** unsupported start methods (e.g. invoking uvicorn directly) refuse to start without it. Supported start methods used by this image set it automatically, so this chart is unaffected.
+    **Performance**
+    - **Dramatically faster** knowledge-base file search, streaming, tool-call rendering, password hashing, model downloads, and hybrid search on large collections.
+    - **Non-blocking** audio model loading, URL safety checks, uploads, and link fetches keep the server responsive under load.
 
-    Full release notes: https://github.com/open-webui/open-webui/releases/tag/v0.9.6
+    Full release notes:
+    - https://github.com/open-webui/open-webui/releases/tag/v0.10.0
+    - https://github.com/open-webui/open-webui/releases/tag/v0.10.1
+    - https://github.com/open-webui/open-webui/releases/tag/v0.10.2
