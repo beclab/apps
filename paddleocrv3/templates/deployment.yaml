@@ -1,0 +1,121 @@
+{{- $gpuType := include "paddleocrv3.gpuType" . -}}
+{{- $isBlackwell := include "paddleocrv3.isBlackwell" . -}}
+{{- $engineImage := include "paddleocrv3.engineImage" . -}}
+{{- $isNvidia := eq $gpuType "nvidia" -}}
+{{- $gpuMemMi := include "paddleocrv3.gpuMiB" (.Values.engine.gpuMemory | default "8Gi") -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: paddleocrv3
+  annotations:
+    {{- if $isNvidia }}
+    applications.app.bytetrade.io/gpu-inject: "paddleocr"
+    {{- end }}
+    debug.paddleocrv3/gpu-type: {{ $gpuType | quote }}
+    debug.paddleocrv3/is-blackwell: {{ $isBlackwell | quote }}
+    debug.paddleocrv3/engine-image: {{ $engineImage | quote }}
+    debug.paddleocrv3/nodes-len: {{ len (.Values.nodes | default (list)) | quote }}
+    {{- with (first (.Values.nodes | default (list))) }}
+    {{- $n := (toJson .) | fromJson }}
+    debug.paddleocrv3/node0-kind: {{ kindOf . | quote }}
+    debug.paddleocrv3/node0-json: {{ toJson . | quote }}
+    debug.paddleocrv3/node0-gpus-len: {{ len ((index $n "gpus") | default (list)) | quote }}
+    {{- with (first ((index $n "gpus") | default (list))) }}
+    debug.paddleocrv3/gpu0-arch: {{ (index . "arch") | quote }}
+    debug.paddleocrv3/gpu0-vendor: {{ (index . "vendor") | quote }}
+    debug.paddleocrv3/gpu0-modelname: {{ (index . "modelName") | quote }}
+    {{- end }}
+    {{- end }}
+spec:
+  replicas: {{ .Values.workloads.paddleocrv3.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: paddleocrv3
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: paddleocrv3
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: pipeline-config
+          configMap:
+            name: pipeline-config
+            defaultMode: 0444
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 0444
+      containers:
+        - name: paddleocr
+          image: "{{ $engineImage }}"
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/paddlex
+            - --serve
+            - --pipeline
+            - /home/paddleocr/pipeline_config_fastdeploy.yaml
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,graphics,utility,video,display"
+          ports:
+            - name: http-api
+              containerPort: 8080
+          volumeMounts:
+            - name: pipeline-config
+              mountPath: /home/paddleocr/pipeline_config_fastdeploy.yaml
+              subPath: pipeline_config_fastdeploy.yaml
+              readOnly: true
+          resources:
+            requests:
+              cpu: {{ .Values.engine.resources.requests.cpu | quote }}
+              memory: {{ .Values.engine.resources.requests.memory | quote }}
+              nvidia.com/gpumem: {{ $gpuMemMi | quote }}
+            limits:
+              cpu: {{ .Values.engine.resources.limits.cpu | quote }}
+              memory: {{ .Values.engine.resources.limits.memory | quote }}
+        - name: nginx
+          image: "{{ .Values.frontend.image }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: NGINX_HOST
+              value: "0.0.0.0"
+            - name: NGINX_PORT
+              value: "80"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 3
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+              readOnly: true
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
