@@ -1,0 +1,233 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: llamacppqwen3627bggufv3
+  icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwen.png
+  description: "Qwen3.6-27B (GGUF Q4_K_M) served with llama.cpp."
+  appid: llamacppqwen3627bggufv3
+  title: Qwen3.6-27B (llama.cpp)
+  version: '1.0.1'
+  categories:
+    - AI
+sharedEntrances:
+  - name: llamacppqwen3627bggufv3
+    host: sharedentrances-api
+    port: 0
+    title: Qwen3.6-27B
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwen.png
+entrances:
+  - name: llamacppclient
+    port: 8090
+    host: download-svc
+    title: Qwen3.6-27B
+    icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwen.png
+    openMethod: window
+    authLevel: internal
+#   llamacppqwen3627bggufv3 — engine Deployment (== appid / Release.Name)
+#   llminit                  — llm-init / entrance Deployment
+workloadReplicas:
+  llamacppqwen3627bggufv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'unsloth/Qwen3.6-27B-GGUF:Q4_K_M'
+  fullDescription: |
+    **Model Overview**
+    Qwen3.6-27B is a vision-language model from the Qwen series (Alibaba). It integrates multimodal understanding with a built-in vision encoder, supports very long context windows, and ships with thinking, tool-calling, and vision capabilities. This app serves the `Q4_K_M` GGUF build from `unsloth/Qwen3.6-27B-GGUF` via llama.cpp.
+
+    Recommended as the default model for most scenarios, this model excels at agentic coding, multimodal vision, conversational interaction, and long-text processing. It also performs particularly well on automated terminal operations and code writing.
+
+    **Preset Configuration**
+    - Model: `unsloth/Qwen3.6-27B-GGUF:Q4_K_M` (with `mmproj-F16.gguf` projector for vision)
+    - Capabilities: thinking, tools, vision
+    - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1` (128K context, full GPU offload, KV cache quantized to q8_0)
+    - Required GPU memory: `23Gi`
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
+    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU                       |
+
+    **How It Works**
+    First, Model Console downloads the model and gets it ready, then `llama.cpp` starts serving the model when it's ready. These two parts run separately but share files and progress info.
+
+    **Stack**
+    - **llama.cpp**: Runs the model and serves API requests (port 8081)
+    - **Model Console**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`.
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - This model needs a GPU with at least 23Gi of memory for full acceleration.
+
+  developer: Alibaba
+  website: https://qwen.ai/home
+  sourceCode: https://github.com/QwenLM/Qwen3
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Apache-2.0
+      url: https://huggingface.co/unsloth/Qwen3.6-27B-GGUF
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects -ngl 0, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  # Model is preset for this app; these values are fixed and not user-editable.
+  - envName: MODEL_SOURCE        # example: hf://unsloth/Qwen3-0.6B-GGUF --include Qwen3-0.6B-Q4_K_M.gguf
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://unsloth/Qwen3.6-27B-GGUF --include Qwen3.6-27B-Q4_K_M.gguf,hf://unsloth/Qwen3.6-27B-GGUF --include mmproj-F16.gguf"
+    description:  "Example: hf://unsloth/Qwen3-0.6B-GGUF --include Qwen3-0.6B-Q4_K_M.gguf. The source to download your model. For models with split files, only include the first part; for vision-language models, add the projector with a comma, like `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: unsloth/Qwen3-0.6B-GGUF:Q4_K_M (-hf repo:quant)
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "unsloth/Qwen3.6-27B-GGUF:Q4_K_M"
+    description:  "Example: unsloth/Qwen3-0.6B-GGUF:Q4_K_M. The name of your model in `owner/repo:quant` format"
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "chat"
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "thinking,tools,vision"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # example: -c 8192 -ngl all -fa on
+    required: true
+    default: "-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1"
+    type: string
+    editable: true
+    applyOnChange: true
+    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`, for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`."
+  - envName: LOG_LEVEL           # single-select: debug | info | warn | error
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: LLAMACPP_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: LLAMACPP_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "23Gi"
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    regex: "^[0-9]+(Gi|Mi)?$"
