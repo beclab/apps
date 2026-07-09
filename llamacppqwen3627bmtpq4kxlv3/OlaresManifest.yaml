@@ -7,7 +7,7 @@ metadata:
   description: "Qwen3.6-27B MTP UD-Q4_K_XL served with llama.cpp."
   appid: llamacppqwen3627bmtpq4kxlv3
   title: Qwen3.6-27B MTP (llama.cpp)
-  version: '1.0.1'
+  version: '1.0.3'
   categories:
     - AI
 sharedEntrances:
@@ -44,6 +44,7 @@ spec:
     - Model: `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
     - Capabilities: thinking, tools
     - Engine args: `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (98K context, MTP draft-2, full GPU offload, q8_0 KV cache)
+    - MTP adds modest VRAM overhead; if OOM at full 98K context, reduce `-c` (e.g. `-c 65536`).
     - Required GPU memory: `23Gi`
 
     **Accelerator modes**
@@ -51,8 +52,7 @@ spec:
     |----------------|-------------------|--------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
-    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU and MTP speedup      |
-
+    
     **How It Works**
     First, Model Console downloads the model and gets it ready, then `llama.cpp` starts serving when ready. MTP (`--spec-type draft-mtp`) uses the model's built-in draft head to predict multiple tokens per step for higher decode throughput.
 
@@ -63,10 +63,6 @@ spec:
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
 
-    **Resource Tips**
-    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
-    - This model needs a GPU with at least 23Gi of memory for full acceleration.
-    - MTP adds modest VRAM overhead; if OOM at full 98K context, reduce `-c` (e.g. `-c 65536`).
 
   developer: Alibaba
   website: https://qwen.ai/home
@@ -80,32 +76,24 @@ spec:
       url: https://huggingface.co/unsloth/Qwen3.6-27B-MTP-GGUF
 
   accelerator:
-    #   cpu          — CPU-only inference; chart injects -ngl 0, no GPU inject / gpumem
     #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
     #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
-    - mode: cpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
     - mode: nvidia
-      limitedCpu: "-1"
-      requiredCpu: "-1"
+      limitedCpu: "15360m"
+      requiredCpu: "1100m"
       requiredDisk: 50Mi
       limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
-      requiredGPUMemory: "-1"
-      limitedGPUMemory: "-1"
+      limitedMemory: "40Gi"
+      requiredMemory: "25Gi"
+      requiredGPUMemory: "23Gi"
+      limitedGPUMemory: "24Gi"
     - mode: nvidia-gb10
-      limitedCpu: "-1"
-      requiredCpu: "-1"
+      limitedCpu: "15360m"
+      requiredCpu: "1100m"
       requiredDisk: 50Mi
       limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
+      limitedMemory: "48Gi"
+      requiredMemory: "32Gi"
 
   supportArch:
     - amd64
@@ -230,5 +218,5 @@ envs:
     editable: false
     applyOnChange: false
     default: "23Gi"
-    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
     regex: "^[0-9]+(Gi|Mi)?$"
