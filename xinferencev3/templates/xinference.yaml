@@ -1,4 +1,7 @@
 {{- $hfEndpoint := (.Values.olaresEnv | default dict).HF_ENDPOINT | default "" -}}
+{{- $hfCache := printf "%s/huggingface" .Values.userspace.appCommon -}}
+{{- $appData := .Values.userspace.appData -}}
+{{- $appCache := .Values.userspace.appCache -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -29,11 +32,30 @@ spec:
     spec:
       containers:
       - name: xinference
-        image: "xprobe/xinference:v2.10.0"
-        # `unset LD_PRELOAD` avoids a host-injected preload leaking into the
-        # engine; xinference-local binds :9997 (supervisor/REST + Web UI) and
-        # :8000 (VLLM_PORT). Port 9997 is the default, so no --port needed.
-        command: ["sh", "-c", "unset LD_PRELOAD;xinference-local -H 0.0.0.0 --log-level debug"]
+        image: "xprobe/xinference:v2.12.0"
+        # GPU memory quota is injected by the platform (gpu-inject webhook); do not
+        # set nvidia.com/gpumem in the chart. xinference-local binds :9997 and :8000.
+        # One-time copy from legacy appCache (/root) into appData, then start.
+        command:
+          - sh
+          - -c
+          - |
+            if [ -d /migrate-from-cache ] && [ -n "$(ls -A /migrate-from-cache 2>/dev/null)" ] && [ ! -f /root/.xinference-migrated-from-cache ]; then
+              cp -an /migrate-from-cache/. /root/ && touch /root/.xinference-migrated-from-cache
+            fi
+            if [ -d /root/.xinference/huggingface ] && [ -n "$(ls -A /root/.xinference/huggingface 2>/dev/null)" ] && [ ! -f {{ $hfCache }}/.migrated-from-xinference-home ]; then
+              cp -an /root/.xinference/huggingface/. {{ $hfCache }}/ && touch {{ $hfCache }}/.migrated-from-xinference-home
+            fi
+            # v2.12 image ships CUDA 13 runtime but bundles a CUDA-12-linked xllamacpp;
+            # reinstall cu132 wheel so llama.cpp can import (lost on every fresh pod otherwise).
+            mkdir -p /root/.xinference
+            echo "Reinstalling xllamacpp (cu132) for CUDA 13 runtime..."
+            pip install xllamacpp --force-reinstall \
+              --index-url https://xorbitsai.github.io/xllamacpp/whl/cu132 \
+              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
+            python3 -c "from xllamacpp import CommonParams, Server; print('xllamacpp ok')" \
+              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
+            exec xinference-local -H 0.0.0.0 --log-level debug
         ports:
           - containerPort: 9997
             protocol: TCP
@@ -54,17 +76,30 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
         env:
-          # Home for .xinference state/logs; HF + ModelScope caches default to
-          # /root/.cache/* — all under the mounted /root (appCache) volume, so
-          # downloaded models persist across restarts.
+          # Private durable state (logs, launch history, ModelScope cache) on appData.
+          # HF hub weights use the cross-app appCommon store.
           - name: XINFERENCE_HOME
             value: /root/.xinference
           - name: XINFERENCE_MODEL_SRC
             value: modelscope
+          - name: MODELSCOPE_CACHE
+            value: /root/.cache/modelscope
+          # HF hub cache: flat models--* under appCommon/huggingface (Olares convention;
+          # matches legacy $XINFERENCE_HOME/huggingface layout, not .../hub).
+          - name: HF_HOME
+            value: "{{ $hfCache }}"
+          - name: HF_HUB_CACHE
+            value: "{{ $hfCache }}"
           - name: VLLM_PORT
             value: "8000"
           - name: HF_ENDPOINT
             value: "{{ $hfEndpoint }}"
+          # CUDA 13 libs in image; helps torch/vllm/xllamacpp resolve libcudart.so.13.
+          - name: LD_LIBRARY_PATH
+            value: "/usr/local/cuda-13.0/targets/x86_64-linux/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+          # Use system xllamacpp (reinstalled above); avoid isolated venv missing cu132 wheel.
+          - name: XINFERENCE_ENABLE_VIRTUAL_ENV
+            value: "0"
         resources:
           limits:
             cpu: "5"
@@ -78,6 +113,11 @@ spec:
         volumeMounts:
         - mountPath: /root
           name: data
+        - mountPath: /migrate-from-cache
+          name: legacy-cache
+          readOnly: true
+        - mountPath: "{{ $hfCache }}"
+          name: hf-cache
         - name: shm
           mountPath: /dev/shm
         terminationMessagePath: /dev/termination-log
@@ -86,9 +126,17 @@ spec:
       restartPolicy: Always
       volumes:
       - hostPath:
-          path: '{{ .Values.userspace.appCache }}'
+          path: '{{ $appData }}'
           type: DirectoryOrCreate
         name: data
+      - hostPath:
+          path: '{{ $appCache }}'
+          type: DirectoryOrCreate
+        name: legacy-cache
+      - hostPath:
+          path: "{{ $hfCache }}"
+          type: DirectoryOrCreate
+        name: hf-cache
       - name: shm
         emptyDir:
           medium: Memory
