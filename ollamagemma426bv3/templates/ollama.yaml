@@ -1,0 +1,192 @@
+{{- /* ENGINE_ARGS is the v1.1.0 daemon-tuning surface: a KEY=VALUE list of
+       OLLAMA_* env that the ollama.sh wrapper exports before `ollama serve`.
+       Clone-configurable via olaresEnv.ENGINE_ARGS; chart defaults
+       OLLAMA_KEEP_ALIVE=-1 when omitted; CPU mode adds OLLAMA_NUM_GPU=0.
+       llm-init uses engineArgsForLlminit (same user args, no KEEP_ALIVE). */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $isCpuMode := eq $gpuType "cpu" -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $engineArgs := include "ollamagemma426bv3.engineArgs" (dict "Args" ($oe.ENGINE_ARGS | default "") "IsCpu" $isCpuMode) -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "chat" -}}
+{{- /* CPU/RAM via olaresEnv (manifest defaults); accelerator -1 sums rendered
+       workloads. Defaults: 200m/2Gi req, 6/35Gi lim (+ llm-init 200m/256Mi). */ -}}
+{{- $cpuRequest := trim ($oe.OLLAMA_CPU_REQUEST | default "200m") -}}
+{{- $memRequest := trim ($oe.OLLAMA_MEMORY_REQUEST | default "2Gi") -}}
+{{- $cpuLimit := trim ($oe.OLLAMA_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.OLLAMA_MEMORY_LIMIT | default "35Gi") -}}
+{{- /* Per-instance model memory quota. nvidia.com/gpumem needs a BARE MiB int;
+       Spark unified memory reuses the same value as pod memory ("<MiB>Mi").
+       CPU mode (accelerator mode: cpu) skips GPU inject and gpumem. */ -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.OLLAMA_REQUIRED_GPU_MEMORY | default "4096") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+---
+# Ollama daemon Pod (single container) so the Olares
+# applications.app.bytetrade.io/gpu-inject annotation cleanly targets just
+# this Pod. The companion llm-init Pod lives in templates/llm-init.yaml
+# and talks to the ollama daemon via ClusterIP Service "ollama".
+# NOTE: the Service MUST be named "ollama" because llm-init v1.1.0
+# derives the engine URL from ENGINE_KIND (http://ollama:11434) and
+# no longer accepts an ENGINE_URL override.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid ollamagemma426bv3) for v3
+  # allowMultipleInstall. Label/selector stays io.kompose.service: ollama so
+  # the ClusterIP Service below keeps resolving.
+  name: '{{ .Release.Name }}'
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ollama
+  {{- if not $isCpuMode }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.ollamagemma426bv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: ollama
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: ollama
+    spec:
+      restartPolicy: Always
+      volumes:
+        # App Common shared model store: all ollama-based apps mount the SAME
+        # appCommon/ollama dir so the blob store dedups by digest and there is
+        # a single unified view of pulled models. No per-release subPath — the
+        # ollama daemon namespaces models internally, so concurrent apps share
+        # safely. appCommon is SSD on single-node, JuiceFS on multi-node, and
+        # is shared across users/apps (requires permission.appCommon: true).
+        - name: ollama-data
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/ollama"
+            type: DirectoryOrCreate
+{{- if not $isCpuMode }}
+        # CUDA JIT compile cache lives alongside the models under appCommon/ollama
+        # (appCache is not available for this hostPath mount).
+        - name: cuda-compute-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/ollama/.nv"
+            type: DirectoryOrCreate
+{{- end }}
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: ollama
+          image: docker.io/ollama/ollama:0.31.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/ollama.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: ollama
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+            - name: OLLAMA_PRELOAD
+              value: "true"
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_NOPRUNE
+              value: "1"
+            - name: OLLAMA_ORIGINS
+              value: "*"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+{{- if $isCpuMode }}
+            # Olares cpu accelerator may still expose /dev/nvidia* on GPU nodes;
+            # hide devices from CUDA so Ollama cannot offload despite OLLAMA_NUM_GPU=0.
+            - name: OLLAMA_NUM_GPU
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: ""
+{{- else }}
+            - name: GGML_CUDA_DISABLE_GRAPHS
+              value: "1"
+{{- end }}
+          ports:
+            - name: ollama
+              containerPort: 11434
+          startupProbe:
+            tcpSocket:
+              port: 11434
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            failureThreshold: 10
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+{{- if not $isCpuMode }}
+            - name: cuda-compute-cache
+              mountPath: /root/.nv/ComputeCache
+              subPath: ComputeCache
+{{- end }}
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            # nvidia.com/gpumem is the per-instance GPU memory quota read by the
+            # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
+            # It's a non-overcommittable extended resource, so it must be in BOTH
+            # requests and limits with the same value. Dropped on gb10 (unified
+            # memory uses pod memory instead).
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ollama
+spec:
+  selector:
+    io.kompose.service: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+  type: ClusterIP
