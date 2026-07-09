@@ -4,34 +4,26 @@ metadata:
 
 spec:
   fullDescription: |
-    **EmbeddingGemma-300M** text embedding service powered by IREmbeddingServer. Serves OpenAI-compatible `/v1/embeddings` and `/v1/models` on port 8080.
+    **EmbeddingGemma-300M** text embedding service powered by EmbeddingServer. Serves OpenAI-compatible `/v1/embeddings` and `/v1/models` on port 8080.
 
     **Accelerator modes**
     | Olares mode | Image | Backend | `EMBED_DEVICE` |
     |-------------|-------|---------|----------------|
-    | `cpu` | `embed-server:*-ov-intel` | OpenVINO IR | `auto` (iGPU → CPU) |
-    | `nvidia` | `embed-server:*-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
-    | `nvidia-gb10` | `embed-server:*-onnx-cuda13` (unified memory) | ONNX CUDA EP | `cuda` |
-    | `strix-halo` | `embed-server:*-onnx-rocm-amd64` | ONNX ROCm EP | `rocm` |
-
-    CPU mode intentionally uses the **ov-intel** image (not onnx-cpu).
+    | `intel` | `embed-server:v0.1.0-ov-intel` | OpenVINO IR | `igpu` |
+    | `cpu` | `embed-server:v0.1.0-onnx-cpu` | ONNX CPU EP | `cpu` |
+    | `nvidia` | `embed-server:v0.1.0-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
+    | `nvidia-gb10` | `embed-server:v0.1.0-onnx-cuda13-gb10-arm64` | ONNX CUDA EP | `cuda` |
 
     **Model download**
-    On first start, llm-init downloads both Hugging Face repos into the shared App Common cache (`appCommon/huggingface` → `/cache/hf/hub`):
-    - [wangzhong/embeddinggemma-300m-ov](https://huggingface.co/wangzhong/embeddinggemma-300m-ov) — OpenVINO IR
-    - [wangzhong/embeddinggemma-300m-onnx-export](https://huggingface.co/wangzhong/embeddinggemma-300m-onnx-export) — ONNX
+    On first start, llm-init downloads from the unified Hugging Face repo into App Common cache:
+    - [beclab/embeddinggemma-300m](https://huggingface.co/beclab/embeddinggemma-300m)
+    - `intel` mode: `openvino/` subdirectory only
+    - All other modes: `onnx/` subdirectory only
 
     **Device mounts**
-    - `cpu` (ov-intel): `/dev/dri`, `/sys/class/drm` for Intel iGPU stack
-    - `strix-halo` (ROCm): `/dev/dri`, `/sys/class/drm`, `/dev/kfd`
+    - `intel`: `/dev/dri`, `/sys/class/drm` for Intel iGPU stack
     - `nvidia` / `nvidia-gb10`: GPU injection via Olares scheduler
 
     **Stack**
-    - **embed-server** (`beclab/embed-server`, port 8080): Rust embedding inference.
-    - **llm-init** (`beclab/llm-init`, port 8090): model download + progress UI.
-    - **embedconsole** (`beclab/embed-server:*-ui`, port 80): Web Console — Playground,
-      similarity compare, device diagnostics, and API settings. Browser requests use
-      same-origin `/api`, proxied by nginx to `embedserver:8080` (no direct backend URL
-      in the UI). Open the **Embedding Console** entrance after the engine is healthy;
-      use **embedclient** to monitor model download if the engine is still waiting.
-
+    - **embed-server** (`beclab/embed-server:v0.1.0`, internal port 8080): Rust embedding inference.
+    - **llm-init** (`beclab/llm-init:test_v1`, `ENGINE_KIND=embed`, port 8090): download, progress UI, and OpenAI API proxy.

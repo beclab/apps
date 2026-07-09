@@ -1,12 +1,16 @@
-{{- $embedclientDomainENV := split "," .Values.domain.embedclient -}}
+{{- $domain := .Values.domain | default dict -}}
+{{- $embedclientDomainENV := split "," ($domain.embedclient | default "embedclient.local") -}}
 {{- $embedclientDomain := index $embedclientDomainENV "_0" -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
 {{- $logLevel := $oe.LOG_LEVEL | default "info" -}}
 {{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $llmInitTag := include "embeddinggemmav3.llmInitTag" . -}}
+{{- $modelName := include "embeddinggemmav3.logicalModelName" . -}}
+{{- $modelSource := include "embeddinggemmav3.modelSource" . -}}
 ---
-# llm-init download-only: fetch OV + ONNX EmbeddingGemma repos into App Common HF cache.
+# llm-init (ENGINE_KIND=embed): model download + /v1/* proxy to sibling embed-server.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,17 +57,17 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/beclab/llm-init:v1.2.6
+          image: docker.io/beclab/llm-init:{{ $llmInitTag }}
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
-              value: ""
+              value: "embed"
             - name: MODEL_NAME
-              value: "wangzhong/embeddinggemma-300m-ov"
+              value: "{{ $modelName }}"
             - name: MODEL_MODE
               value: "embedding"
             - name: MODEL_SOURCE
-              value: "hf://wangzhong/embeddinggemma-300m-ov,hf://wangzhong/embeddinggemma-300m-onnx-export"
+              value: "{{ $modelSource }}"
 {{- if $hfEndpoint }}
             - name: HF_ENDPOINT
               value: "{{ $hfEndpoint }}"
@@ -134,12 +138,12 @@ metadata:
   name: sharedentrances-api
   namespace: {{ .Release.Namespace }}
   labels:
-    io.kompose.service: embed-server
+    io.kompose.service: llm-init
 spec:
   selector:
-    io.kompose.service: embed-server
+    io.kompose.service: llm-init
   ports:
     - name: http
       port: 80
-      targetPort: 8080
+      targetPort: 8090
   type: ClusterIP
