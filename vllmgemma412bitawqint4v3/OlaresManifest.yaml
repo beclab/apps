@@ -1,0 +1,233 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: vllmgemma412bitawqint4v3
+  icon: https://app.cdn.olares.com/appstore/llm/vllm/gemma.png
+  description: "Gemma-4-12B (AWQ-INT4) served with vLLM."
+  appid: vllmgemma412bitawqint4v3
+  title: Gemma-4-12B (vLLM)
+  version: '1.0.1'
+  categories:
+    - AI
+sharedEntrances:
+  - name: vllmgemma412bitawqint4v3
+    host: sharedentrances-api
+    port: 0
+    title: Gemma-4-12B
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/llm/vllm/gemma.png
+entrances:
+  - name: vllmclient
+    port: 8090
+    host: download-svc
+    title: Gemma-4-12B
+    icon: https://app.cdn.olares.com/appstore/llm/vllm/gemma.png
+    openMethod: window
+    authLevel: internal
+#   vllmgemma412bitawqint4v3 — engine Deployment (== appid / Release.Name)
+#   llminit        — llm-init / entrance Deployment
+workloadReplicas:
+  vllmgemma412bitawqint4v3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'cyankiwi/gemma-4-12B-it-AWQ-INT4'
+  fullDescription: |
+    **Model Overview**
+    Gemma-4-12B-it is an instruction-tuned vision-language model from Google's Gemma 4 family. It supports multimodal understanding, thinking, tool calling, and vision. This app serves the `AWQ-INT4` quantized weights from `cyankiwi/gemma-4-12B-it-AWQ-INT4` via vLLM.
+
+    Well suited for multimodal tasks that combine text and images. Gemma 4 models are designed for broad multimodal understanding across vision and language.
+
+    **Preset Configuration**
+    - Model: `cyankiwi/gemma-4-12B-it-AWQ-INT4`
+    - Capabilities: thinking, tools, vision
+    - Engine args: `--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser qwen3_coder --reasoning-parser qwen3 --enable-prefix-caching --enable-auto-tool-choice`
+    - Required GPU memory: `23Gi`
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `--gpu-memory-utilization` tuned in ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Same as `nvidia`: `23Gi` GPU memory; `--gpu-memory-utilization` in ENGINE_ARGS |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **How It Works**
+    First, Model Console downloads the model and gets it ready, then vLLM starts serving the model when it's ready. Both containers run in the same Pod and share the model directory and readiness sentinel.
+
+    **Stack**
+    - **vLLM** (port 8000): runs the model and serves API requests
+    - **Model Console** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to vLLM
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - vLLM model loading can take several minutes. Keep the app Running until ready.
+    - This model needs a GPU with at least 23Gi of memory.
+
+  developer: Google
+  website: https://ai.google.dev/gemma
+  sourceCode: https://huggingface.co/google/gemma-4-12b-it
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Gemma Terms of Use
+      url: https://ai.google.dev/gemma/terms
+
+  accelerator:
+    #   cpu          — CPU-only inference; chart injects --device cpu, no GPU inject / gpumem
+    #   nvidia       — discrete GPU; VLLM_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; VLLM_REQUIRED_GPU_MEMORY -> gpumem
+    - mode: cpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: nvidia
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: nvidia-gb10
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  # Model is preset for this app; these values are fixed and not user-editable.
+  - envName: MODEL_SOURCE        # example: hf://Qwen/Qwen3.5-2B
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://cyankiwi/gemma-4-12B-it-AWQ-INT4"
+    description: "Example: hf://Qwen/Qwen3.5-2B. The HuggingFace source to download your model. Use a repo with `.safetensors` weights. Optionally append `--include <file>` or `--revision <sha>`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: Qwen/Qwen3.5-2B
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "cyankiwi/gemma-4-12B-it-AWQ-INT4"
+    description: "Example: Qwen/Qwen3.5-2B. The name of your model — use the string after `hf://` in MODEL_SOURCE. This is also used as the OpenAI alias and vLLM `--model`."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "chat"
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "thinking,tools,vision"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description: "The model capabilities. Pick what your model supports. If no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # stability-first example for quantized Ornith 9B on 24GB: --max-model-len 131072 --gpu-memory-utilization 0.92 --tensor-parallel-size 1 --max-num-batched-tokens 4096 --kv-cache-dtype fp8 --quantization compressed-tensors --language-model-only --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml --trust-remote-code --enforce-eager
+    required: true
+    default: "--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser qwen3_coder --reasoning-parser qwen3 --enable-prefix-caching --enable-auto-tool-choice"
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Flags only — do not prefix with ENGINE_ARGS=. Example: --max-model-len 131072 --gpu-memory-utilization 0.92 .... On Spark (nvidia-gb10), use the same style; the chart does not rewrite --gpu-memory-utilization (visible CUDA memory is capped by VLLM_REQUIRED_GPU_MEMORY via gpu-inject)."
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: VLLM_CPU_REQUEST    # default: 200m
+    required: true
+    default: "200m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_MEMORY_REQUEST # default: 2Gi
+    required: true
+    default: "2Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_CPU_LIMIT      # default: 6
+    required: true
+    default: "6"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_MEMORY_LIMIT   # default: 35Gi
+    required: true
+    default: "35Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: VLLM_REQUIRED_GPU_MEMORY  # GPU modes: 8Gi/8192/8192Mi -> bare-MiB gpumem; cpu: ignored
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "23Gi"
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On GPU modes, gpu-inject caps visible CUDA memory to this value."
+    regex: "^[0-9]+(Gi|Mi)?$"
