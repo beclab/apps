@@ -1,0 +1,38 @@
+metadata:
+  description: "Qwen3.6-27B MTP UD-Q4_K_XL served with llama.cpp."
+  title: Qwen3.6-27B MTP (llama.cpp)
+
+spec:
+  fullDescription: |
+    **Model Overview**
+    Qwen3.6-27B MTP is a text model variant with built-in Multi-Token Prediction (MTP) heads from the Qwen series (Alibaba). MTP draft decoding predicts multiple tokens per step for higher generation throughput. It supports thinking and tool calling. This app serves the `UD-Q4_K_XL` GGUF build from `unsloth/Qwen3.6-27B-MTP-GGUF` via llama.cpp (text-only preset, no vision/mmproj).
+
+    Recommended when you need very high token generation speed. Models with MTP technology accelerate decode by drafting multiple tokens in each step.
+
+    **Preset Configuration**
+    - Model: `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
+    - Capabilities: thinking, tools
+    - Engine args: `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (98K context, MTP draft-2, full GPU offload, q8_0 KV cache)
+    - Required GPU memory: `23Gi`
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
+    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU and MTP speedup      |
+
+    **How It Works**
+    First, Model Console downloads the model and gets it ready, then `llama.cpp` starts serving when ready. MTP (`--spec-type draft-mtp`) uses the model's built-in draft head to predict multiple tokens per step for higher decode throughput.
+
+    **Stack**
+    - **llama.cpp**: Runs the model and serves API requests (port 8081)
+    - **Model Console**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - This model needs a GPU with at least 23Gi of memory for full acceleration.
+    - MTP adds modest VRAM overhead; if OOM at full 98K context, reduce `-c` (e.g. `-c 65536`).
