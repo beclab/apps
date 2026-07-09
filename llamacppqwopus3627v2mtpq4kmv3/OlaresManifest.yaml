@@ -6,15 +6,15 @@ metadata:
   icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwop.png
   description: "Qwopus3.6-27B-v2 MTP Q4_K_M served with llama.cpp."
   appid: llamacppqwopus3627v2mtpq4kmv3
-  title: Qwopus3.6 MTP Q4_K_M
-  version: '1.0.3'
+  title: Qwopus3.6-27B MTP (llama.cpp)
+  version: '1.0.4'
   categories:
     - AI
 sharedEntrances:
   - name: llamacppqwopus3627v2mtpq4kmv3
     host: sharedentrances-api
     port: 0
-    title: Qwopus3.6 MTP Q4_K_M
+    title: Qwopus3.6-27B MTP
     invisible: true
     authLevel: internal
     icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwop.png
@@ -22,7 +22,7 @@ entrances:
   - name: llamacppclient
     port: 8090
     host: download-svc
-    title: Qwopus3.6 MTP Q4_K_M
+    title: Qwopus3.6 MTP
     icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwop.png
     openMethod: window
     authLevel: internal
@@ -33,28 +33,26 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: 'b9879'
-  upgradeDescription: |
-    v1.0.3: allow editing ENGINE_ARGS.
-    v1.0.2: set context to 128K (`-c 131072`); lower nvidia requiredMemory to 12Gi.
-    v1.0.1: update app icon to qwop.png.
-    v1.0.0: Initial release with `Qwopus3.6-27B-v2-MTP-Q4_K_M.gguf` (replaces delisted IQ4_XS preset). llama.cpp b9879 + llm-init v1.2.9.
+  versionName: 'Jackrong/Qwopus3.6-27B-v2-MTP-GGUF:Q4_K_M'
   fullDescription: |
     **Model Overview**
     Qwopus3.6-27B-v2 with built-in Multi-Token Prediction (MTP) heads, `Q4_K_M` quantization from `Jackrong/Qwopus3.6-27B-v2-MTP-GGUF`, served via llama.cpp draft decoding. Fine-tuned Qwen3.6-27B variant for coding, math, and agent workloads. Text-only preset (no vision/mmproj).
+
+    Recommended when you need high token generation speed, or when your workload requires strict structured output and DevOps-style tasks. This community build is tuned for compact, well-formed outputs in those scenarios.
 
     **Preset Configuration**
     - Model: `Jackrong/Qwopus3.6-27B-v2-MTP-GGUF:Q4_K_M`
     - Capabilities: thinking, tools
     - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (128K context, MTP draft-2, full GPU offload, q8_0 KV cache)
+    - MTP adds modest VRAM overhead; if OOM at full 128K context, reduce `-c` (e.g. `-c 65536`).
     - Required GPU memory: `23Gi`
 
     **How It Works**
-    First, `llm-init` downloads the model and gets it ready, then `llama.cpp` starts serving when ready. MTP (`--spec-type draft-mtp`) uses the model's built-in draft head (layer 64) to predict multiple tokens per step for higher decode throughput.
+    First, `Model Console` downloads the model and gets it ready, then `llama.cpp` starts serving when ready. MTP (`--spec-type draft-mtp`) uses the model's built-in draft head (layer 64) to predict multiple tokens per step for higher decode throughput.
 
     **Stack**
     - **llama.cpp** (`server-cuda12-b9879`): Runs the model and serves API requests (port 8081)
-    - **llm-init** (`v1.2.9`): Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`
+    - **Model Console** (`v1.2.9`): Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`
 
     **Accelerator modes**
     | Mode           | Device            | Details                                          |
@@ -64,11 +62,6 @@ spec:
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
-
-    **Resource Tips**
-    - CPU, RAM, and GPU quotas are fixed for this preset; disk settings are fixed.
-    - `Q4_K_M` weights are ~16.8 GiB; this preset targets GPUs with at least 23Gi for 128K context + MTP.
-    - MTP adds modest VRAM overhead; if OOM at full 128K context, reduce `-c` (e.g. `-c 65536`).
 
   developer: Jackrong
   website: https://huggingface.co/Jackrong/Qwopus3.6-27B-v2-MTP-GGUF
@@ -120,31 +113,51 @@ options:
       type: system
 envs:
   # Model is preset for this app; these values are fixed and not user-editable.
-  - envName: MODEL_SOURCE
+  - envName: MODEL_SOURCE        # example: hf://Jackrong/Qwopus3.6-27B-v2-MTP-GGUF --include Qwopus3.6-27B-v2-MTP-Q4_K_M.gguf
     required: true
     type: string
     editable: false
     applyOnChange: false
     default: "hf://Jackrong/Qwopus3.6-27B-v2-MTP-GGUF --include Qwopus3.6-27B-v2-MTP-Q4_K_M.gguf"
-  - envName: MODEL_NAME
+    description:  "Example: hf://unsloth/Qwen3-0.6B-GGUF --include Qwen3-0.6B-Q4_K_M.gguf. The source to download your model. For models with split files, only include the first part; for vision-language models, add the projector with a comma, like `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # example: Jackrong/Qwopus3.6-27B-v2-MTP-GGUF:Q4_K_M (-hf repo:quant)
     required: true
     type: string
     editable: false
     applyOnChange: false
     default: "Jackrong/Qwopus3.6-27B-v2-MTP-GGUF:Q4_K_M"
+    description:  "Example: unsloth/Qwen3-0.6B-GGUF:Q4_K_M. The name of your model in `owner/repo:quant` format"
   - envName: MODEL_MODE
     required: true
     type: string
     editable: false
     applyOnChange: false
     default: "chat"
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
   - envName: MODEL_SUPPORTS
     required: true
     type: string
     editable: false
     applyOnChange: false
     default: "thinking,tools"
-  - envName: ENGINE_ARGS
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
+  - envName: ENGINE_ARGS         # example: -c 8192 -ngl all -fa on
     required: true
     type: string
     editable: true
@@ -154,9 +167,18 @@ envs:
   - envName: LOG_LEVEL
     required: false
     type: string
-    editable: false
-    applyOnChange: false
+    editable: true
+    applyOnChange: true
     default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
   - envName: HF_ENDPOINT
     required: false
     applyOnChange: true
