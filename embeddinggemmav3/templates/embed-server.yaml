@@ -7,62 +7,36 @@
 {{- $memLimit := "3Gi" -}}
 {{- $gpuMem := "2048Mi" -}}
 {{- $gpuMemMi := include "embeddinggemmav3.gpuMiB" $gpuMem -}}
-{{- $gpuObj := .Values.GPU | default dict -}}
-{{- $gpuType := .Values.gpu | default "" -}}
-{{- if not $gpuType -}}
-{{- $gpuType = $gpuObj.Type | default "cpu" -}}
-{{- end -}}
-{{- /* SoC unified memory: GB10 / Strix Halo have no discrete GDDR; Pod memory caps CUDA+CPU on UMA. */ -}}
-{{- $unifiedMem := or (eq $gpuType "nvidia-gb10") (eq $gpuType "strix-halo") -}}
-{{- if $unifiedMem -}}
-{{- if eq $gpuType "nvidia-gb10" -}}
-{{- /* GB10: model.onnx ~1.2Gi + ORT CUDA session; 2Gi OOMKilled in production. */ -}}
-{{- $memRequest = "3Gi" -}}
-{{- $memLimit = "6Gi" -}}
-{{- else -}}
-{{- $memRequest = printf "%sMi" $gpuMemMi -}}
-{{- $memLimit = printf "%sMi" $gpuMemMi -}}
-{{- end -}}
-{{- end -}}
+{{- $gpuType := include "embeddinggemmav3.gpuType" . -}}
+{{- $useOpenVino := eq (include "embeddinggemmav3.useOpenVino" .) "true" -}}
 {{- $isNvidia := or (eq $gpuType "nvidia") (eq $gpuType "nvidia-gb10") -}}
 {{- $isGb10 := eq $gpuType "nvidia-gb10" -}}
-{{- $isStrixHalo := eq $gpuType "strix-halo" -}}
-{{- $isCpuMode := eq $gpuType "cpu" -}}
 {{- $isIntelMode := eq $gpuType "intel" -}}
-
-{{- $useOpenVino := $isIntelMode -}}
-{{- $useRocm := $isStrixHalo -}}
+{{- $gpuObj := .Values.GPU | default dict -}}
 {{- $cudaMajor := $gpuObj.Cuda | default 12 -}}
-{{- $embedTag := "v0.0.9" -}}
-{{- $embedImage := printf "docker.io/beclab/embed-server:%s-onnx-cuda12" $embedTag -}}
+{{- $embedTag := include "embeddinggemmav3.embedTag" . -}}
+{{- $modelId := include "embeddinggemmav3.modelId" . -}}
+{{- $embedImage := printf "docker.io/beclab/embed-server:%s-onnx-cpu" $embedTag -}}
 {{- if $useOpenVino -}}
 {{- $embedImage = printf "docker.io/beclab/embed-server:%s-ov-intel" $embedTag -}}
-{{- else if $useRocm -}}
-# {{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-rocm-amd64" $embedTag -}}
-{{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cpu" $embedTag -}}
 {{- else if $isNvidia -}}
 {{- if $isGb10 -}}
-{{- /* GB10 (DGX Spark): Blackwell sm_121 ORT, arm64-only image. */ -}}
 {{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda13-gb10-arm64" $embedTag -}}
+{{- $memRequest = "3Gi" -}}
+{{- $memLimit = "6Gi" -}}
 {{- else if ge (float64 $cudaMajor) 13.0 -}}
 {{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda13" $embedTag -}}
 {{- else -}}
 {{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda12" $embedTag -}}
 {{- end -}}
 {{- end -}}
-{{- $embedBackend := "onnx" -}}
-{{- $modelId := "embeddinggemma-300m-onnx" -}}
-{{- $embedDevice := "cuda" -}}
+{{- $embedDevice := "cpu" -}}
 {{- if $useOpenVino -}}
-{{- $embedBackend = "openvino" -}}
-{{- $modelId = "embeddinggemma-300m-ov" -}}
 {{- $embedDevice = "igpu" -}}
-{{- else if $useRocm -}}
-# {{- $embedDevice = "rocm" -}}
-{{- $embedDevice = "cpu" -}}
+{{- else if $isNvidia -}}
+{{- $embedDevice = "cuda" -}}
 {{- end -}}
-{{- $needDri := not $isCpuMode -}}
-{{- $needKfd := $useRocm -}}
+{{- $needDri := $isIntelMode -}}
 {{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 apiVersion: apps/v1
@@ -113,20 +87,12 @@ spec:
             path: /sys/class/drm
             type: Directory
 {{- end }}
-{{- if $needKfd }}
-        - name: kfd
-          hostPath:
-            path: /dev/kfd
-            type: CharDevice
-{{- end }}
       containers:
         - name: embed-server
           image: "{{ $embedImage }}"
           imagePullPolicy: IfNotPresent
-          command: ["/bin/sh", "/llm-init/wrappers/embed-server.sh"]
+          command: ["/bin/sh", "/llm-init/wrappers/embed.sh"]
           env:
-            - name: EMBED_BACKEND
-              value: "{{ $embedBackend }}"
             - name: MODEL_ID
               value: "{{ $modelId }}"
             - name: EMBED_DEVICE
@@ -172,11 +138,7 @@ spec:
             - name: drm
               mountPath: /sys/class/drm
 {{- end }}
-{{- if $needKfd }}
-            - name: kfd
-              mountPath: /dev/kfd
-{{- end }}
-{{- if or $useRocm (and $useOpenVino $needDri) }}
+{{- if $needDri }}
           securityContext:
             privileged: true
 {{- end }}
@@ -184,7 +146,7 @@ spec:
             requests:
               cpu: "{{ $cpuRequest }}"
               memory: "{{ $memRequest }}"
-{{- if and $isNvidia (not $unifiedMem) }}
+{{- if and $isNvidia (not $isGb10) }}
               nvidia.com/gpumem: "{{ $gpuMemMi }}"
 {{- end }}
             limits:
@@ -195,6 +157,23 @@ apiVersion: v1
 kind: Service
 metadata:
   name: embedserver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: embed-server
+spec:
+  selector:
+    io.kompose.service: embed-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# Compose service-name alias: llm-init ENGINE_KIND=embed derives http://embed:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: embed-server
