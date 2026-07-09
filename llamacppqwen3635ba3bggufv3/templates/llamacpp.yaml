@@ -1,0 +1,161 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- /* MODEL_MODE=embedding -> auto-add llama.cpp's --embedding so it works out
+       of the box; skipped if the user already passed it in ENGINE_ARGS. */ -}}
+{{- $modelMode := $oe.MODEL_MODE | default "" -}}
+{{- if and (eq $modelMode "embedding") (not (contains "--embedding" $engineArgs)) -}}
+{{- $engineArgs = trim (printf "%s --embedding" $engineArgs) -}}
+{{- end -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := trim ($oe.LLAMACPP_CPU_REQUEST | default "200m") -}}
+{{- $memRequest := trim ($oe.LLAMACPP_MEMORY_REQUEST | default "2Gi") -}}
+{{- $cpuLimit := trim ($oe.LLAMACPP_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.LLAMACPP_MEMORY_LIMIT | default "35Gi") -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $isCpuMode := eq $gpuType "cpu" -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $engineArgs = include "llamacppqwen3635ba3bggufv3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) -}}
+{{- /* nvidia.com/gpumem needs a BARE MiB int; Spark unified memory reuses the
+       same value as pod memory ("<MiB>Mi"). CPU mode skips GPU inject and gpumem. */ -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.LLAMACPP_REQUIRED_GPU_MEMORY | default "4096") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+---
+# llama.cpp engine Deployment. wrappers/llamacpp.sh blocks on the sentinel
+# (download ready), then execs llama-server -hf "$MODEL_NAME".
+# llm-init reverse-proxies at http://llamacpp:8081 — Service name MUST be
+# "llamacpp". GPU base: CUDA server build + gpu-inject; put `-ngl all` in
+# ENGINE_ARGS to offload all layers to the GPU.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid llamacppqwen3635ba3bggufv3) for v3
+  # allowMultipleInstall. Label/selector stays io.kompose.service: llamacpp.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llamacpp
+  {{- if not $isCpuMode }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "llamacpp"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.llamacppqwen3635ba3bggufv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llamacpp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llamacpp
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: llamacpp
+          image: docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b9870
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: llamacpp
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: LLAMACPP_PORT
+              value: "8081"
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+{{- if $isCpuMode }}
+            - name: CUDA_VISIBLE_DEVICES
+              value: ""
+{{- end }}
+          ports:
+            - name: llamacpp
+              containerPort: 8081
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            # nvidia.com/gpumem is the per-instance GPU memory quota read by the
+            # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
+            # It's a non-overcommittable extended resource, so it must be in BOTH
+            # requests and limits with the same value. Dropped on gb10 (unified
+            # memory uses pod memory instead) and cpu (no GPU inject).
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llamacpp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llamacpp
+spec:
+  selector:
+    io.kompose.service: llamacpp
+  ports:
+    - name: llamacpp
+      port: 8081
+      targetPort: 8081
+  type: ClusterIP
