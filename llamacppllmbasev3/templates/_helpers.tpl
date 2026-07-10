@@ -17,18 +17,9 @@
 {{- int $g -}}
 {{- end -}}
 {{- end -}}
-{{- /* llamacppllmbasev3.engineArgs: CPU mode auto-adds -ngl 0 unless user set -ngl.
-       Usage: {{ include "llamacppllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) }} */ -}}
+{{- /* llamacppllmbasev3.engineArgs: pass ENGINE_ARGS through unchanged.
+       Usage: {{ include "llamacppllmbasev3.engineArgs" (dict "Args" $engineArgs) }} */ -}}
 {{- define "llamacppllmbasev3.engineArgs" -}}
 {{- $in := . -}}
-{{- $args := trim ($in.Args | default "") -}}
-{{- $isCpu := $in.IsCpu | default false -}}
-{{- if and $isCpu (not (contains "-ngl" $args)) -}}
-{{- if $args -}}
-{{- $args = printf "%s -ngl 0" $args -}}
-{{- else -}}
-{{- $args = "-ngl 0" -}}
-{{- end -}}
-{{- end -}}
-{{- $args -}}
+{{- trim ($in.Args | default "") -}}
 {{- end -}}

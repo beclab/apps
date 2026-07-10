@@ -7,7 +7,7 @@ metadata:
   description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
   appid: llamacppllmbasev3
   title: llama.cpp Engine Base
-  version: '1.2.21'
+  version: '1.2.22'
   categories:
     - AI
 sharedEntrances:
@@ -35,7 +35,7 @@ spec:
   onlyAdmin: true
   versionName: 'b9879'
   upgradeDescription: |
-    v1.2.21: bump llm-init to v1.3.1; llama.cpp remains server-cuda12-b9879.
+    Drop accelerator mode `cpu` (GPU-only: `nvidia` / `nvidia-gb10`). Chart 1.2.22.
   fullDescription: |
     **IMPORTANT NOTE**  
     This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
@@ -45,9 +45,9 @@ spec:
     - `MODEL_NAME`: `owner/repo:quant`. The name of your model in `owner/repo:quant` format, for example `unsloth/Qwen3.5-2B-GGUF:UD-Q4_K_XL`. This is also used as the OpenAI alias.
     - `MODEL_MODE`: `chat` or `embedding`. If you pick embedding, the chart adds `--embedding` automatically.
     - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. This is required.
-    - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`; for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`.
+    - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`.
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level: choose from `debug`, `info`, `warn`, or `error`.
-    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed (for GPU only; ignored on CPU). Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
     
     **How It Works**
     First, `llm-init` downloads your model and gets it ready, then `llama.cpp` starts serving the model when it’s ready. These two parts run separately but share files and progress info.
@@ -61,14 +61,13 @@ spec:
     |----------------|-------------------|---------------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Set `LLAMACPP_REQUIRED_GPU_MEMORY`; use `-ngl all` for full GPU use |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                        |
-    | `cpu`          | CPU only          | Adds `-ngl 0`; disables GPU                                         |
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
 
     **Resource Tips**
     - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
-    - To use the GPU, set `-ngl all` in `ENGINE_ARGS`. Without it, the model will run on CPU.
+    - To use the GPU, set `-ngl all` in `ENGINE_ARGS`. Use `-ngl all` for full GPU offload.
 
   developer: ggml-org
   website: https://llama.app/
@@ -82,16 +81,8 @@ spec:
       url: https://github.com/ggml-org/llama.cpp?tab=MIT-1-ov-file
 
   accelerator:
-    #   cpu          — CPU-only inference; chart injects -ngl 0, no GPU inject / gpumem
     #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
     #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
-    - mode: cpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
     - mode: nvidia
       limitedCpu: "-1"
       requiredCpu: "-1"
@@ -175,7 +166,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`, for CPU, it adds `-ngl 0` automatically. You can also use values like `LLAMA_ARG_*=val`."
+    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`."
   - envName: LOG_LEVEL           # single-select: debug | info | warn | error
     required: false
     type: string
@@ -230,5 +221,5 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
     regex: "^[0-9]+(Gi|Mi)?$"

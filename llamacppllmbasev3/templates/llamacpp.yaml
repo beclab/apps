@@ -17,11 +17,10 @@
 {{- if not $gpuType -}}
 {{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
 {{- end -}}
-{{- $isCpuMode := eq $gpuType "cpu" -}}
 {{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
-{{- $engineArgs = include "llamacppllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) -}}
+{{- $engineArgs = include "llamacppllmbasev3.engineArgs" (dict "Args" $engineArgs) -}}
 {{- /* nvidia.com/gpumem needs a BARE MiB int; Spark unified memory reuses the
-       same value as pod memory ("<MiB>Mi"). CPU mode skips GPU inject and gpumem. */ -}}
+       same value as pod memory ("<MiB>Mi"). */ -}}
 {{- $gpuMiB := include "llmbase.gpuMiB" ($oe.LLAMACPP_REQUIRED_GPU_MEMORY | default "4096") -}}
 {{- if $unifiedMem -}}
 {{- $memRequest = printf "%sMi" $gpuMiB -}}
@@ -43,10 +42,8 @@ metadata:
   namespace: '{{ .Release.Namespace }}'
   labels:
     io.kompose.service: llamacpp
-  {{- if not $isCpuMode }}
   annotations:
     applications.app.bytetrade.io/gpu-inject: "llamacpp"
-  {{- end }}
 spec:
   replicas: {{ .Values.workloads.llamacppllmbasev3.replicaCount }}
   selector:
@@ -108,10 +105,6 @@ spec:
               value: "1000"
             - name: TZ
               value: Etc/UTC
-{{- if $isCpuMode }}
-            - name: CUDA_VISIBLE_DEVICES
-              value: ""
-{{- end }}
           ports:
             - name: llamacpp
               containerPort: 8081
@@ -130,17 +123,17 @@ spec:
             # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
             # It's a non-overcommittable extended resource, so it must be in BOTH
             # requests and limits with the same value. Dropped on gb10 (unified
-            # memory uses pod memory instead) and cpu (no GPU inject).
+            # memory uses pod memory instead) .
             requests:
               cpu: "{{ $cpuRequest }}"
               memory: "{{ $memRequest }}"
-{{- if and (not $isCpuMode) (not $unifiedMem) }}
+{{- if not $unifiedMem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
             limits:
               cpu: "{{ $cpuLimit }}"
               memory: "{{ $memLimit }}"
-{{- if and (not $isCpuMode) (not $unifiedMem) }}
+{{- if not $unifiedMem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
 ---
