@@ -1,0 +1,36 @@
+metadata:
+  description: "GPT-OSS-20B served with vLLM."
+  title: GPT-OSS-20B (vLLM)
+
+spec:
+  fullDescription: |
+    **Model Overview**
+    GPT-OSS-20B served with vLLM, using the open-weight `openai/gpt-oss-20b` model. The model ships ready to run and supports thinking and tools.
+
+    **Preset Configuration**
+    - Model: `openai/gpt-oss-20b`
+    - Capabilities: thinking, tools
+    - Engine args: `--max-model-len 131072 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser openai --reasoning-parser openai_gptoss --enable-prefix-caching --enable-auto-tool-choice`
+    - Required GPU memory: `23Gi`
+
+    **How It Works**
+    First, `llm-init` downloads the model and gets it ready, then vLLM starts serving the model when it's ready. Both containers run in the same Pod and share the model directory and readiness sentinel.
+
+    **Stack**
+    - **vLLM** (port 8000): runs the model and serves API requests
+    - **llm-init** (port 8090): downloads the model, shows progress, and provides the OpenAI API, proxying to vLLM
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `--gpu-memory-utilization` tuned in ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Same as `nvidia`: `23Gi` GPU memory; `--gpu-memory-utilization` in ENGINE_ARGS |
+    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
+
+    **Model Storage**
+    All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
+
+    **Resource Tips**
+    - CPU, RAM, and GPU auto-configure based on the chart; disk settings are fixed.
+    - vLLM model loading can take several minutes. Keep the app Running until ready.
+    - This model needs a GPU with at least 23Gi of memory.
