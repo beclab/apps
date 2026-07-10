@@ -17,18 +17,9 @@
 {{- int $g -}}
 {{- end -}}
 {{- end -}}
-{{- /* sglangllmbasev3.engineArgs: CPU mode auto-adds --device cpu unless already set.
-       Usage: {{ include "sglangllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) }} */ -}}
+{{- /* sglangllmbasev3.engineArgs: pass ENGINE_ARGS through unchanged.
+       Usage: {{ include "sglangllmbasev3.engineArgs" (dict "Args" $engineArgs) }} */ -}}
 {{- define "sglangllmbasev3.engineArgs" -}}
 {{- $in := . -}}
-{{- $args := trim ($in.Args | default "") -}}
-{{- $isCpu := $in.IsCpu | default false -}}
-{{- if and $isCpu (not (contains "--device" $args)) -}}
-{{- if $args -}}
-{{- $args = printf "%s --device cpu" $args -}}
-{{- else -}}
-{{- $args = "--device cpu" -}}
-{{- end -}}
-{{- end -}}
-{{- $args -}}
+{{- trim ($in.Args | default "") -}}
 {{- end -}}
