@@ -17,21 +17,13 @@
 {{- int $g -}}
 {{- end -}}
 {{- end -}}
-{{- /* vllmllmbasev3.engineArgs: pass ENGINE_ARGS through; CPU mode strips --device cpu
-       (vllm-openai-cpu v0.24 rejects device_ids=['cpu']). Embedding on CPU: set
-       --runner pooling in ENGINE_ARGS yourself (see llm-init integration README).
-       Usage: {{ include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) }} */ -}}
+{{- /* vllmllmbasev3.engineArgs: pass ENGINE_ARGS through unchanged.
+       Usage: {{ include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs) }} */ -}}
 {{- define "vllmllmbasev3.engineArgs" -}}
 {{- $in := . -}}
-{{- $args := trim ($in.Args | default "") -}}
-{{- $isCpu := $in.IsCpu | default false -}}
-{{- if $isCpu -}}
-{{- $args = trim (replace "--device cpu" "" $args) -}}
-{{- $args = trim (replace "--device=cpu" "" $args) -}}
+{{- trim ($in.Args | default "") -}}
 {{- end -}}
-{{- $args -}}
-{{- end -}}
-{{- /* Olares GPU mode at install: cpu | nvidia | nvidia-gb10 (from .Values.gpu / .Values.GPU.Type). */ -}}
+{{- /* Olares GPU mode at install: nvidia | nvidia-gb10 (from .Values.gpu / .Values.GPU.Type). */ -}}
 {{- define "llmbase.gpuType" -}}
 {{- $gpuObj := .Values.GPU | default dict -}}
 {{- $gpuType := .Values.gpu | default "" -}}
@@ -64,13 +56,7 @@ amd64
 {{- $isGb10 := or (eq $gpuType "nvidia-gb10") (eq (include "llmbase.isGb10" .) "true") -}}
 {{- $arch := include "llmbase.hostArch" . -}}
 {{- $img := .Values.engine.images | default dict -}}
-{{- if eq $gpuType "cpu" -}}
-{{- if eq $arch "arm64" -}}
-{{- $img.cpuArm64 | default "docker.io/vllm/vllm-openai-cpu:v0.24.0-arm64" -}}
-{{- else -}}
-{{- $img.cpuAmd64 | default "docker.io/vllm/vllm-openai-cpu:v0.24.0-x86_64" -}}
-{{- end -}}
-{{- else if $isGb10 -}}
+{{- if $isGb10 -}}
 {{- $img.nvidiaGb10 | default "docker.io/vllm/vllm-openai:latest-aarch64-cu130" -}}
 {{- else if eq $arch "arm64" -}}
 {{- $img.nvidiaArm64 | default "docker.io/vllm/vllm-openai:v0.24.0-aarch64-cu129" -}}

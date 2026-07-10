@@ -7,7 +7,7 @@ metadata:
   description: "Generic vLLM engine base. Pick any HuggingFace Safetensors model at install via env."
   appid: vllmllmbasev3
   title: vLLM Engine Base
-  version: '1.2.23'
+  version: '1.2.24'
   categories:
     - AI
 sharedEntrances:
@@ -35,7 +35,7 @@ spec:
   onlyAdmin: true
   versionName: '0.24.0'
   upgradeDescription: |
-    v1.2.23: bump llm-init to v1.3.1.
+    Drop accelerator mode `cpu` (GPU-only: `nvidia` / `nvidia-gb10`). Chart 1.2.24.
   fullDescription: |
     **IMPORTANT NOTE**  
     This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
@@ -47,7 +47,7 @@ spec:
     - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports.
     - `ENGINE_ARGS`: `--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --enable-prefix-caching --kv-cache-dtype fp8`. Extra vLLM CLI flags. Separate multiple `--key value` pairs with spaces. See https://docs.vllm.ai/en/v0.17.0/configuration/engine_args/.
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
-    - `VLLM_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On GPU modes (`nvidia`, `nvidia-gb10`), gpu-inject caps visible CUDA memory to this quota; tune `--gpu-memory-utilization` in ENGINE_ARGS against that budget.
+    - `VLLM_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. On GPU modes (`nvidia`, `nvidia-gb10`), gpu-inject caps visible CUDA memory to this quota; tune `--gpu-memory-utilization` in ENGINE_ARGS against that budget.
 
     **How It Works**
     First, `llm-init` downloads your model and gets it ready, then vLLM starts serving the model when it's ready. Both containers run in the same Pod and share the model directory and readiness sentinel.
@@ -61,7 +61,6 @@ spec:
     |----------------|-------------------|----------------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Set `VLLM_REQUIRED_GPU_MEMORY`; tune `--gpu-memory-utilization` in ENGINE_ARGS |
     | `nvidia-gb10`  | GPU (Spark)       | Same as `nvidia`: set `VLLM_REQUIRED_GPU_MEMORY`; tune `--gpu-memory-utilization` in ENGINE_ARGS (no auto remapping) |
-    | `cpu`          | CPU only          | Uses `vllm-openai-cpu` image; no `--device cpu` (embedding: add `--runner pooling` in ENGINE_ARGS) |
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
@@ -83,16 +82,8 @@ spec:
       url: https://github.com/vllm-project/vllm/blob/main/LICENSE
 
   accelerator:
-    #   cpu          — CPU-only; vllm-openai-cpu image, no gpu-inject; do not pass --device cpu
     #   nvidia       — discrete GPU; VLLM_REQUIRED_GPU_MEMORY -> gpumem
     #   nvidia-gb10  — DGX Spark unified memory; VLLM_REQUIRED_GPU_MEMORY -> gpumem
-    - mode: cpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
     - mode: nvidia
       limitedCpu: "-1"
       requiredCpu: "-1"
@@ -228,5 +219,5 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On GPU modes, gpu-inject caps visible CUDA memory to this value."
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On GPU modes, gpu-inject caps visible CUDA memory to this value."
     regex: "^[0-9]+(Gi|Mi)?$"
