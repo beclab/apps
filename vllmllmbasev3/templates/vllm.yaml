@@ -11,10 +11,9 @@
 {{- $memLimit := trim ($oe.VLLM_MEMORY_LIMIT | default "35Gi") -}}
 {{- $gpuType := include "llmbase.gpuType" . -}}
 {{- $engineImage := include "vllmllmbasev3.engineImage" . -}}
-{{- $isCpuMode := eq $gpuType "cpu" -}}
 {{- $gb10FromNodes := eq (include "llmbase.isGb10" .) "true" -}}
 {{- $unifiedMem := or $gb10FromNodes (eq $gpuType "nvidia-gb10") -}}
-{{- $engineArgs = include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) -}}
+{{- $engineArgs = include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs) -}}
 {{- /* nvidia.com/gpumem: nvidia -> explicit in chart; gb10 -> pod memory quota only,
        gpu-inject sets matching requests/limits (chart gpumem on gb10 breaks K8s
        validation: requests has gpumem but limits stripped by platform). */ -}}
@@ -41,11 +40,9 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: vllm
-  {{- if not $isCpuMode }}
   annotations:
     applications.app.bytetrade.io/gpu-inject: "vllm"
     vllmllmbasev3.io/engine-image: {{ $engineImage | quote }}
-  {{- end }}
 spec:
   replicas: {{ .Values.workloads.vllmllmbasev3.replicaCount }}
   selector:
@@ -105,10 +102,6 @@ spec:
             - name: VLLM_SPARK_AUTO_GPU_UTIL
               value: "false"
 {{- end }}
-{{- if $isCpuMode }}
-            - name: CUDA_VISIBLE_DEVICES
-              value: ""
-{{- end }}
           ports:
             - name: vllm
               containerPort: 8000
@@ -123,11 +116,9 @@ spec:
             - name: hf-cache
               mountPath: /cache/vllm
               subPath: vllm-cache
-{{- if not $isCpuMode }}
             - name: hf-cache
               mountPath: /root/.nv/ComputeCache
               subPath: .nv/ComputeCache
-{{- end }}
             - name: run-state
               mountPath: /run/llm-init
               readOnly: true
@@ -139,13 +130,13 @@ spec:
             requests:
               cpu: "{{ $cpuRequest }}"
               memory: "{{ $memRequest }}"
-{{- if and (not $isCpuMode) (not $unifiedMem) }}
+{{- if not $unifiedMem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
             limits:
               cpu: "{{ $cpuLimit }}"
               memory: "{{ $memLimit }}"
-{{- if and (not $isCpuMode) (not $unifiedMem) }}
+{{- if not $unifiedMem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
 ---
