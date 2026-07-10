@@ -1,0 +1,132 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: jupyternotebook
+  {{- if eq .Values.gpu "nvidia" }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.jupyternotebook.replicaCount }}
+  selector:
+    matchLabels:
+      app: jupyternotebook
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: jupyternotebook
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+      - name: init-workdir
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        command:
+        - sh
+        - -c
+        - |
+          mkdir -p /work/.jupyter/runtime /work/.jupyter/data /work/.jupyter/config
+          chown -R 1000:1000 /work || true
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: work
+          mountPath: /work
+      containers:
+      - name: jupyternotebook
+        {{- $gpu := .Values.gpu | default .Values.GPU.Type | default "cpu" }}
+        {{- if eq $gpu "nvidia" }}
+        # Hardcoded: helm upgrade reuses first-install values; .Values.image.nvidia.tag stays stale otherwise.
+        image: "beclab/jupyter-pytorch-notebook:cuda13-notebook-7.6.0"
+        {{- else }}
+        image: "{{ .Values.image.cpu.repository }}:{{ .Values.image.cpu.tag }}"
+        {{- end }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8888
+        env:
+        - name: DOCKER_STACKS_JUPYTER_CMD
+          value: notebook
+        - name: JUPYTER_ENABLE_LAB
+          value: "no"
+        - name: NB_UID
+          value: "1000"
+        - name: NB_GID
+          value: "1000"
+        - name: CHOWN_HOME
+          value: "yes"
+        - name: CHOWN_HOME_OPTS
+          value: "-R"
+        - name: CHOWN_EXTRA
+          value: "/home/jovyan/work"
+        - name: CHOWN_EXTRA_OPTS
+          value: "-R"
+        - name: JUPYTER_RUNTIME_DIR
+          value: /home/jovyan/work/.jupyter/runtime
+        - name: JUPYTER_DATA_DIR
+          value: /home/jovyan/work/.jupyter/data
+        - name: JUPYTER_CONFIG_DIR
+          value: /home/jovyan/work/.jupyter/config
+        command:
+        - start-notebook.py
+        args:
+        - --ServerApp.token=
+        - --ServerApp.password=
+        - --ServerApp.allow_origin=*
+        - --ServerApp.root_dir=/home/jovyan/work
+        {{- if eq .Values.gpu "nvidia" }}
+        resources:
+          requests:
+            cpu: {{ .Values.resources.nvidia.requests.cpu | quote }}
+            memory: {{ .Values.resources.nvidia.requests.memory }}
+          limits:
+            cpu: {{ .Values.resources.nvidia.limits.cpu | quote }}
+            memory: {{ .Values.resources.nvidia.limits.memory }}
+        {{- else }}
+        resources:
+          requests:
+            cpu: {{ .Values.resources.cpu.requests.cpu | quote }}
+            memory: {{ .Values.resources.cpu.requests.memory }}
+          limits:
+            cpu: {{ .Values.resources.cpu.limits.cpu | quote }}
+            memory: {{ .Values.resources.cpu.limits.memory }}
+        {{- end }}
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8888
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 5
+        volumeMounts:
+        - name: work
+          mountPath: /home/jovyan/work
+        - name: home
+          mountPath: /home/jovyan/work/Home
+      volumes:
+      - name: work
+        hostPath:
+          path: {{ .Values.userspace.appData }}/work
+          type: DirectoryOrCreate
+      - name: home
+        hostPath:
+          path: {{ .Values.userspace.userData }}
+          type: DirectoryOrCreate
