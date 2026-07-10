@@ -17,20 +17,66 @@
 {{- int $g -}}
 {{- end -}}
 {{- end -}}
-{{- /* vllmllmbasev3.engineArgs: CPU mode auto-adds --device cpu unless already set.
+{{- /* vllmllmbasev3.engineArgs: pass ENGINE_ARGS through; CPU mode strips --device cpu
+       (vllm-openai-cpu v0.24 rejects device_ids=['cpu']). Embedding on CPU: set
+       --runner pooling in ENGINE_ARGS yourself (see llm-init integration README).
        Usage: {{ include "vllmllmbasev3.engineArgs" (dict "Args" $engineArgs "IsCpu" $isCpuMode) }} */ -}}
 {{- define "vllmllmbasev3.engineArgs" -}}
 {{- $in := . -}}
 {{- $args := trim ($in.Args | default "") -}}
 {{- $isCpu := $in.IsCpu | default false -}}
-{{- if and $isCpu (not (contains "--device" $args)) -}}
-{{- if $args -}}
-{{- $args = printf "%s --device cpu" $args -}}
-{{- else -}}
-{{- $args = "--device cpu" -}}
-{{- end -}}
+{{- if $isCpu -}}
+{{- $args = trim (replace "--device cpu" "" $args) -}}
+{{- $args = trim (replace "--device=cpu" "" $args) -}}
 {{- end -}}
 {{- $args -}}
+{{- end -}}
+{{- /* Olares GPU mode at install: cpu | nvidia | nvidia-gb10 (from .Values.gpu / .Values.GPU.Type). */ -}}
+{{- define "llmbase.gpuType" -}}
+{{- $gpuObj := .Values.GPU | default dict -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = $gpuObj.Type | default "nvidia" -}}
+{{- end -}}
+{{- $gpuType -}}
+{{- end -}}
+{{- /* Host CPU arch for per-arch image tags: amd64 (default) | arm64. */ -}}
+{{- define "llmbase.hostArch" -}}
+{{- $arch := lower (toString (.Values.arch | default "")) -}}
+{{- if not $arch -}}
+{{- $arch = lower (toString (.Values.Arch | default "")) -}}
+{{- end -}}
+{{- if or (eq $arch "arm64") (eq $arch "aarch64") -}}
+arm64
+{{- else if or (eq $arch "amd64") (eq $arch "x86_64") -}}
+amd64
+{{- else if eq (include "llmbase.gpuType" .) "nvidia-gb10" -}}
+arm64
+{{- else if eq (include "llmbase.isGb10" .) "true" -}}
+arm64
+{{- else -}}
+amd64
+{{- end -}}
+{{- end -}}
+{{- /* vLLM engine image by accelerator — see terminus-apps-docs/vllmllmbasev3/VLLM_OFFICIAL_IMAGES.md */ -}}
+{{- define "vllmllmbasev3.engineImage" -}}
+{{- $gpuType := include "llmbase.gpuType" . -}}
+{{- $isGb10 := or (eq $gpuType "nvidia-gb10") (eq (include "llmbase.isGb10" .) "true") -}}
+{{- $arch := include "llmbase.hostArch" . -}}
+{{- $img := .Values.engine.images | default dict -}}
+{{- if eq $gpuType "cpu" -}}
+{{- if eq $arch "arm64" -}}
+{{- $img.cpuArm64 | default "docker.io/vllm/vllm-openai-cpu:v0.24.0-arm64" -}}
+{{- else -}}
+{{- $img.cpuAmd64 | default "docker.io/vllm/vllm-openai-cpu:v0.24.0-x86_64" -}}
+{{- end -}}
+{{- else if $isGb10 -}}
+{{- $img.nvidiaGb10 | default "docker.io/vllm/vllm-openai:latest-aarch64-cu130" -}}
+{{- else if eq $arch "arm64" -}}
+{{- $img.nvidiaArm64 | default "docker.io/vllm/vllm-openai:v0.24.0-aarch64-cu129" -}}
+{{- else -}}
+{{- $img.nvidia | default "docker.io/vllm/vllm-openai:v0.24.0-cu129" -}}
+{{- end -}}
 {{- end -}}
 {{- /* Spark/GB10: detect from GPU.Type or node hardware (install-time .Values.nodes). */ -}}
 {{- define "llmbase.isGb10" -}}

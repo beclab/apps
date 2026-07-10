@@ -9,10 +9,8 @@
 {{- $memRequest := trim ($oe.VLLM_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.VLLM_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.VLLM_MEMORY_LIMIT | default "35Gi") -}}
-{{- $gpuType := .Values.gpu | default "" -}}
-{{- if not $gpuType -}}
-{{- $gpuType = (.Values.GPU | default dict).Type | default "nvidia" -}}
-{{- end -}}
+{{- $gpuType := include "llmbase.gpuType" . -}}
+{{- $engineImage := include "vllmllmbasev3.engineImage" . -}}
 {{- $isCpuMode := eq $gpuType "cpu" -}}
 {{- $gb10FromNodes := eq (include "llmbase.isGb10" .) "true" -}}
 {{- $unifiedMem := or $gb10FromNodes (eq $gpuType "nvidia-gb10") -}}
@@ -46,6 +44,7 @@ metadata:
   {{- if not $isCpuMode }}
   annotations:
     applications.app.bytetrade.io/gpu-inject: "vllm"
+    vllmllmbasev3.io/engine-image: {{ $engineImage | quote }}
   {{- end }}
 spec:
   replicas: {{ .Values.workloads.vllmllmbasev3.replicaCount }}
@@ -76,7 +75,7 @@ spec:
             defaultMode: 0555
       containers:
         - name: vllm
-          image: docker.io/vllm/vllm-openai:v0.24.0-cu129
+          image: "{{ $engineImage }}"
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/llm-init/wrappers/vllm.sh"]
           env:
