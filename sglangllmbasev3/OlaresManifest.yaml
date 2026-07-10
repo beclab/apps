@@ -7,7 +7,7 @@ metadata:
   description: "Generic SGLang engine base. Pick any HuggingFace Safetensors model at install via env."
   appid: sglangllmbasev3
   title: SGLang Engine Base
-  version: '1.2.22'
+  version: '1.2.23'
   categories:
     - AI
 sharedEntrances:
@@ -35,7 +35,7 @@ spec:
   onlyAdmin: true
   versionName: '0.5.14-cu130'
   upgradeDescription: |
-    v1.2.22: bump llm-init to v1.3.1.
+    Drop accelerator mode `cpu` (GPU-only: `nvidia` / `nvidia-gb10`). Chart 1.2.23.
   fullDescription: |
     **IMPORTANT NOTE**  
     This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
@@ -47,7 +47,7 @@ spec:
     - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports.
     - `ENGINE_ARGS`: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser gpt-oss --tool-call-parser gpt-oss`. Extra SGLang CLI flags. Separate multiple `--key value` pairs with spaces. Adjust `--reasoning-parser` and `--tool-call-parser` to match your model family. See https://docs.sglang.io/docs/advanced_features/server_arguments.
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level for the llm-init container.
-    - `SGLANG_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed, enter `0` for CPU mode. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+    - `SGLANG_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
 
     **How It Works**
     First, `llm-init` downloads your model and gets it ready, then SGLang starts serving the model when it's ready. These two parts run in separate Deployments but share the HF cache and run-state via App Common storage.
@@ -61,7 +61,6 @@ spec:
     |----------------|-------------------|----------------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Set `SGLANG_REQUIRED_GPU_MEMORY`; tune `--mem-fraction-static` in ENGINE_ARGS |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                         |
-    | `cpu`          | CPU only          | Chart injects `--device cpu`; disables GPU                           |
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
@@ -83,16 +82,8 @@ spec:
       url: https://github.com/sgl-project/sglang/blob/main/LICENSE
 
   accelerator:
-    #   cpu          — CPU-only inference; chart injects --device cpu, no GPU inject / gpumem
     #   nvidia       — discrete GPU; SGLANG_REQUIRED_GPU_MEMORY -> gpumem
     #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
-    - mode: cpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
     - mode: nvidia
       limitedCpu: "-1"
       requiredCpu: "-1"
@@ -229,5 +220,5 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. Use `0` on CPU. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    description: "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
     regex: "^[0-9]+(Gi|Mi)?$"
