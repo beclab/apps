@@ -202,6 +202,44 @@ spec:
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
+      # Seed user-editable extra_model_paths.yaml once. Never overwrite on upgrade.
+      - name: seed-extra-model-paths
+        image: {{ $image }}
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            USER_CFG=/root/ComfyUI/user/extra_model_paths.yaml
+            DEFAULT_CFG=/runner-config/extra_model_paths.yaml
+            if [ ! -d /root/ComfyUI ]; then
+              echo "seed-extra-model-paths: /root/ComfyUI missing, skip"
+              exit 0
+            fi
+            if [ -f "$USER_CFG" ]; then
+              echo "seed-extra-model-paths: already exists, skip ($USER_CFG)"
+              exit 0
+            fi
+            if [ ! -f "$DEFAULT_CFG" ]; then
+              echo "seed-extra-model-paths: default missing, skip ($DEFAULT_CFG)"
+              exit 0
+            fi
+            mkdir -p /root/ComfyUI/user
+            cp "$DEFAULT_CFG" "$USER_CFG"
+            echo "seed-extra-model-paths: seeded $USER_CFG from image default"
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /root
+          - name: output
+            mountPath: /root/ComfyUI/output
+          - name: input
+            mountPath: /root/ComfyUI/input
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
       - name: migrate-models-appcommon
         image: {{ $image }}
         command:
@@ -216,44 +254,103 @@ spec:
               exit 0
             fi
             mkdir -p "$NEW"
-            echo "migrate-models: rsync sharedlib/ai/model -> appCommon/comfyui/model"
-            rsync -a --ignore-existing "$LEGACY/" "$NEW/"
-            # Legacy SD-shared layout used "main" for checkpoint models; ComfyUI
-            # expects "checkpoints" (see extra_model_paths / folder_paths).
-            if [ -d "$NEW/main" ]; then
-              if [ ! -e "$NEW/checkpoints" ]; then
-                echo "migrate-models: rename main -> checkpoints"
-                mv "$NEW/main" "$NEW/checkpoints"
-              else
-                echo "migrate-models: merge main/ into checkpoints/"
-                rsync -a "$NEW/main/" "$NEW/checkpoints/"
-                rm -rf "$NEW/main"
-              fi
-            fi
-            echo "migrate-models: verifying every legacy file exists in App Common with same size"
-            find "$LEGACY" -type f -exec sh -c '
-              src="$1"
-              NEW="$2"
-              LEGACY="$3"
-              rel="${src#$LEGACY/}"
+            # Move file-by-file (mv or rsync+delete) to avoid needing 2x disk during migration.
+            # Legacy "main/" maps to "checkpoints/" for ComfyUI.
+            # Match existing dst by size + mtime (within a few seconds); re-sync otherwise.
+            MTIME_TOLERANCE=5
+            map_dst_rel() {
+              rel="$1"
               case "$rel" in
-                main/*) dst="$NEW/checkpoints/${rel#main/}" ;;
-                main) dst="$NEW/checkpoints" ;;
-                *) dst="$NEW/$rel" ;;
+                main/*) printf 'checkpoints/%s\n' "${rel#main/}" ;;
+                main) printf 'checkpoints\n' ;;
+                *) printf '%s\n' "$rel" ;;
               esac
-              if [ ! -f "$dst" ]; then
-                echo "migrate-models: verify failed, missing in new store: $rel (expected $dst)"
-                exit 1
+            }
+            file_size() {
+              wc -c < "$1" | tr -d ' '
+            }
+            file_mtime() {
+              stat -c %Y "$1"
+            }
+            mtime_close() {
+              src_m="$1"
+              dst_m="$2"
+              diff=$(( src_m > dst_m ? src_m - dst_m : dst_m - src_m ))
+              [ "$diff" -le "$MTIME_TOLERANCE" ]
+            }
+            same_file_meta() {
+              src="$1"
+              dst="$2"
+              src_size=$(file_size "$src")
+              dst_size=$(file_size "$dst")
+              [ "$src_size" = "$dst_size" ] || return 1
+              src_mtime=$(file_mtime "$src")
+              dst_mtime=$(file_mtime "$dst")
+              mtime_close "$src_mtime" "$dst_mtime"
+            }
+            # rsync src -> dst, verify size; retry once if size still differs
+            sync_and_remove() {
+              src="$1"
+              dst="$2"
+              rel="$3"
+              mkdir -p "$(dirname "$dst")"
+              rsync -a "$src" "$dst"
+              src_size=$(file_size "$src")
+              dst_size=$(file_size "$dst")
+              if [ "$src_size" = "$dst_size" ]; then
+                rm -f "$src"
+                return 0
               fi
-              src_size=$(wc -c < "$src" | tr -d " ")
-              dst_size=$(wc -c < "$dst" | tr -d " ")
+              echo "migrate-models: size mismatch after rsync, re-sync $rel -> $(map_dst_rel "$rel")"
+              rsync -a "$src" "$dst"
+              dst_size=$(file_size "$dst")
               if [ "$src_size" != "$dst_size" ]; then
-                echo "migrate-models: verify failed, size mismatch: $rel ($src_size vs $dst_size)"
+                echo "migrate-models: size still mismatch after re-sync: $rel ($src_size vs $dst_size)"
                 exit 1
               fi
-            ' _ {} "$NEW" "$LEGACY" \;
-            echo "migrate-models: verification passed, removing legacy model files"
-            find "$LEGACY" -mindepth 1 -depth -exec rm -rf {} +
+              rm -f "$src"
+            }
+            move_legacy_file() {
+              src="$1"
+              rel="${src#"$LEGACY"/}"
+              dst_rel=$(map_dst_rel "$rel")
+              dst="$NEW/$dst_rel"
+              if [ -e "$dst" ]; then
+                if [ ! -f "$dst" ]; then
+                  echo "migrate-models: destination exists and is not a file: $dst_rel"
+                  exit 1
+                fi
+                if same_file_meta "$src" "$dst"; then
+                  echo "migrate-models: already present (size+mtime ok), removing legacy: $rel"
+                  rm -f "$src"
+                  return 0
+                fi
+                src_size=$(file_size "$src")
+                dst_size=$(file_size "$dst")
+                if [ "$src_size" = "$dst_size" ]; then
+                  echo "migrate-models: size match but mtime differs, re-sync $rel -> $dst_rel"
+                else
+                  echo "migrate-models: size differs, syncing $rel -> $dst_rel"
+                fi
+                sync_and_remove "$src" "$dst" "$rel"
+                return 0
+              fi
+              echo "migrate-models: move $rel -> $dst_rel"
+              if mv "$src" "$dst" 2>/dev/null; then
+                return 0
+              fi
+              sync_and_remove "$src" "$dst" "$rel"
+            }
+            echo "migrate-models: moving files one-by-one sharedlib/ai/model -> appCommon/comfyui/model"
+            FILE_LIST=/tmp/migrate-models-files.$$
+            find "$LEGACY" -type f > "$FILE_LIST"
+            while IFS= read -r src; do
+              [ -n "$src" ] || continue
+              move_legacy_file "$src"
+            done < "$FILE_LIST"
+            rm -f "$FILE_LIST"
+            find "$LEGACY" -depth -type d ! -path "$LEGACY" -exec rmdir {} + 2>/dev/null || true
+            find "$LEGACY" -mindepth 1 -depth -exec rm -rf {} + 2>/dev/null || true
             echo "migrate-models: done"
         resources: {}
         volumeMounts:
@@ -350,8 +447,9 @@ spec:
               value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
             - name: MODELS_DIR
               value: '/root/ComfyUI/models'
+            # User-editable copy under appData (seeded once by seed-extra-model-paths init)
             - name: EXTRA_MODEL_PATHS_CONFIG
-              value: /runner-config/extra_model_paths.yaml
+              value: /root/ComfyUI/user/extra_model_paths.yaml
             - name: SHARED_MODEL_HUB_PATH
               value: /mnt/olares-shared-model
             - name: PLUGIN_PATH
