@@ -61,7 +61,7 @@ amd64
 {{- else if eq $arch "arm64" -}}
 {{- $img.nvidiaArm64 | default "docker.io/vllm/vllm-openai:v0.24.0-aarch64-cu129" -}}
 {{- else -}}
-{{- $img.nvidia | default "docker.io/vllm/vllm-openai:v0.24.0-cu129" -}}
+{{- $img.nvidia | default "docker.io/vllm/vllm-openai:v0.25.0" -}}
 {{- end -}}
 {{- end -}}
 {{- /* Spark/GB10: detect from GPU.Type or node hardware (install-time .Values.nodes). */ -}}
