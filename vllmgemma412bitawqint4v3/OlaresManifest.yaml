@@ -7,7 +7,7 @@ metadata:
   description: "Gemma-4-12B (AWQ-INT4) served with vLLM."
   appid: vllmgemma412bitawqint4v3
   title: Gemma-4-12B (vLLM)
-  version: '1.0.6'
+  version: '1.0.8'
   categories:
     - AI
 sharedEntrances:
@@ -35,8 +35,10 @@ spec:
   onlyAdmin: true
   versionName: 'cyankiwi/gemma-4-12B-it-AWQ-INT4'
   upgradeDescription: |
-    v1.0.6: upgrade vLLM engine image to v0.25.0, change engine args to --tool-call-parser gemma4 --reasoning-parser gemma4.
-    v1.0.6: point vLLM at the shared HF Hub cache (HF_HUB_CACHE=/cache/hf/hub) so it reuses the model llm-init already downloaded instead of re-downloading over the network on every start.
+    v1.0.8: VLLM_MEMORY_LIMIT 30Gi; llm-init limit 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.7: nvidia host memory — requiredMemory 22Gi, VLLM_MEMORY_REQUEST 21Gi, VLLM_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.6: nvidia host memory — requiredMemory 16Gi, VLLM_MEMORY_REQUEST 15Gi, VLLM_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.5: bump llm-init to v1.3.1.
   fullDescription: |
     **Model Overview**
     Gemma-4-12B-it is an instruction-tuned vision-language model from Google's Gemma 4 family. It supports multimodal understanding, thinking, tool calling, and vision. This app serves the `AWQ-INT4` quantized weights from `cyankiwi/gemma-4-12B-it-AWQ-INT4` via vLLM.
@@ -85,8 +87,9 @@ spec:
       requiredCpu: "1200m"
       requiredDisk: 50Mi
       limitedDisk: 500Gi
-      limitedMemory: "40Gi"
-      requiredMemory: "7Gi"
+      # Engine MEMORY_REQUEST 21Gi + llm-init <= requiredMemory 22Gi; MEMORY_LIMIT 30Gi + llm-init 2Gi <= limitedMemory 32Gi
+      limitedMemory: "32Gi"
+      requiredMemory: "22Gi"
       requiredGPUMemory: "23Gi"
       limitedGPUMemory: "24Gi"
     - mode: nvidia-gb10
@@ -159,7 +162,7 @@ envs:
     description: "The model capabilities. Pick what your model supports. If no extra capabilities, pick None."
   - envName: ENGINE_ARGS         # stability-first example for quantized Ornith 9B on 24GB: --max-model-len 131072 --gpu-memory-utilization 0.92 --tensor-parallel-size 1 --max-num-batched-tokens 4096 --kv-cache-dtype fp8 --quantization compressed-tensors --language-model-only --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_xml --trust-remote-code --enforce-eager
     required: true
-    default: "--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser gemma4 --reasoning-parser gemma4 --enable-prefix-caching --enable-auto-tool-choice"
+    default: "--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser qwen3_coder --reasoning-parser qwen3 --enable-prefix-caching --enable-auto-tool-choice"
     type: string
     editable: true
     applyOnChange: true
@@ -195,9 +198,9 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-  - envName: VLLM_MEMORY_REQUEST # default: 6Gi
+  - envName: VLLM_MEMORY_REQUEST # sum with llm-init <= requiredMemory 22Gi
     required: true
-    default: "6Gi"
+    default: "21Gi"
     type: string
     editable: false
     applyOnChange: false
@@ -207,9 +210,9 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-  - envName: VLLM_MEMORY_LIMIT   # default: 35Gi
+  - envName: VLLM_MEMORY_LIMIT # 30Gi + llm-init 2Gi <= limitedMemory 32Gi
     required: true
-    default: "35Gi"
+    default: "30Gi"
     type: string
     editable: false
     applyOnChange: false
