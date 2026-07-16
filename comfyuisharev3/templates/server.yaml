@@ -18,9 +18,9 @@
 {{- if $isGb10 -}}
 {{- $memRequest = "22Gi" -}}
 {{- end -}}
-{{- $image := "beclab/comfyui:v0.26.0-fe1.47.6-launcher0.2.49" -}}
+{{- $image := "beclab/comfyui:v0.28.0-fe1.48.3-launcher0.2.49" -}}
 {{- if $isGb10 -}}
-{{- $image = "beclab/comfyui_launcher-arm64:v0.26.0-fe1.47.6-launcher0.2.49-arm64" -}}
+{{- $image = "beclab/comfyui_launcher-arm64:v0.28.0-fe1.48.3-launcher0.2.49-arm64" -}}
 {{- end -}}
 
 ---
@@ -202,7 +202,7 @@ spec:
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
-      # Seed user-editable extra_model_paths.yaml once. Never overwrite on upgrade.
+      # Seed or merge extra_model_paths.yaml: keep user edits, fill missing default keys.
       - name: seed-extra-model-paths
         image: {{ $image }}
         command:
@@ -212,12 +212,9 @@ spec:
             set -e
             USER_CFG=/root/ComfyUI/user/extra_model_paths.yaml
             DEFAULT_CFG=/runner-config/extra_model_paths.yaml
+            SEED_SCRIPT=/runner-config/seed_or_merge_extra_model_paths.py
             if [ ! -d /root/ComfyUI ]; then
               echo "seed-extra-model-paths: /root/ComfyUI missing, skip"
-              exit 0
-            fi
-            if [ -f "$USER_CFG" ]; then
-              echo "seed-extra-model-paths: already exists, skip ($USER_CFG)"
               exit 0
             fi
             if [ ! -f "$DEFAULT_CFG" ]; then
@@ -225,6 +222,15 @@ spec:
               exit 0
             fi
             mkdir -p /root/ComfyUI/user
+            if [ -f "$SEED_SCRIPT" ]; then
+              python3 "$SEED_SCRIPT" --user "$USER_CFG" --default "$DEFAULT_CFG"
+              exit 0
+            fi
+            # Legacy image without merge script: seed only when missing.
+            if [ -f "$USER_CFG" ]; then
+              echo "seed-extra-model-paths: already exists, skip ($USER_CFG)"
+              exit 0
+            fi
             cp "$DEFAULT_CFG" "$USER_CFG"
             echo "seed-extra-model-paths: seeded $USER_CFG from image default"
         resources: {}
@@ -432,7 +438,7 @@ spec:
             - name: TZ
               value: Etc/UTC
             - name: CLI_ARGS
-              value: '--disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.47.6'
+              value: '--disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.48.3'
             - name: HOME
               value: /root
             - name: PIP_CACHE_DIR
@@ -447,7 +453,7 @@ spec:
               value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
             - name: MODELS_DIR
               value: '/root/ComfyUI/models'
-            # User-editable copy under appData (seeded once by seed-extra-model-paths init)
+            # User-editable copy under appData (seeded/merged by seed-extra-model-paths init)
             - name: EXTRA_MODEL_PATHS_CONFIG
               value: /root/ComfyUI/user/extra_model_paths.yaml
             - name: SHARED_MODEL_HUB_PATH
