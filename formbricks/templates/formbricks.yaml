@@ -1,5 +1,7 @@
 ﻿{{- $formbricksDomainENV := split  ","  .Values.domain.formbricks -}}
 {{- $formbricksDomain := index $formbricksDomainENV "_0" -}}
+{{- $databaseUrl := printf "postgresql://%s:%s@%s:%s/%s?schema=public" .Values.postgres.username .Values.postgres.password .Values.postgres.host (.Values.postgres.port | toString) .Values.postgres.databases.formbricksdb -}}
+{{- $hubDatabaseUrl := printf "postgresql://%s:%s@%s:%s/%s?sslmode=disable" .Values.postgres.username .Values.postgres.password .Values.postgres.host (.Values.postgres.port | toString) .Values.postgres.databases.formbricksdb -}}
 
 ---
 
@@ -22,9 +24,52 @@ spec:
       labels:
         io.kompose.service: formbricks
     spec:
+      initContainers:
+        - name: formbricks-migrate
+          image: docker.io/beclab/formbricks-formbricks:5.1.4
+          command: ["sh", "-c"]
+          args:
+            - |
+              if command -v timeout >/dev/null 2>&1; then
+                timeout 300 node packages/database/dist/scripts/apply-migrations.js
+              else
+                node packages/database/dist/scripts/apply-migrations.js
+              fi
+          env:
+            - name: DATABASE_URL
+              value: {{ $databaseUrl | quote }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+        - name: hub-migrate
+          image: docker.io/beclab/formbricks-hub:0.8.1
+          command: ["sh", "-c"]
+          args:
+            - |
+              if [ -x /usr/local/bin/goose ] && [ -x /usr/local/bin/river ]; then
+                /usr/local/bin/goose -dir /app/migrations postgres "$DATABASE_URL" up &&
+                /usr/local/bin/river migrate-up --database-url "$DATABASE_URL"
+              else
+                echo 'Migration tools (goose/river) not in image.'
+                exit 1
+              fi
+          env:
+            - name: DATABASE_URL
+              value: {{ $hubDatabaseUrl | quote }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
       containers:
         - name: formbricks
-          image: docker.io/beclab/formbricks-formbricks:4.4.3
+          image: docker.io/beclab/formbricks-formbricks:5.1.4
           readinessProbe:
             httpGet:
               path: /
@@ -40,7 +85,7 @@ spec:
             - name: NEXTAUTH_URL
               value: "https://{{ $formbricksDomain }}"
             - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.formbricksdb }}?schema=public"
+              value: {{ $databaseUrl | quote }}
             - name: NEXTAUTH_SECRET
               valueFrom:
                 secretKeyRef:
@@ -57,31 +102,69 @@ spec:
                   name: formbricks-secrets
                   key: CRON_SECRET
             - name: REDIS_URL
+              {{- if .Values.redis.password }}
+              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+              {{- else }}
               value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+              {{- end }}
             - name: LOG_LEVEL
               value: info
+            - name: HUB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: HUB_API_KEY
+            - name: HUB_API_URL
+              value: "http://127.0.0.1:8080"
+            - name: CUBEJS_API_URL
+              value: "http://127.0.0.1:4000"
+            - name: CUBEJS_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: CUBEJS_API_SECRET
+            - name: CUBEJS_JWT_ISSUER
+              value: formbricks-web
+            - name: CUBEJS_JWT_AUDIENCE
+              value: formbricks-cube
+            - name: SKIP_STARTUP_MIGRATION
+              value: "true"
+            {{- if .Values.olaresEnv.MAIL_FROM }}
             - name: MAIL_FROM
               value: "{{ .Values.olaresEnv.MAIL_FROM }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.MAIL_FROM_NAME }}
             - name: MAIL_FROM_NAME
               value: "{{ .Values.olaresEnv.MAIL_FROM_NAME }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_HOST }}
             - name: SMTP_HOST
               value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PORT }}
             - name: SMTP_PORT
               value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_USER }}
             - name: SMTP_USER
               value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PASSWORD }}
             - name: SMTP_PASSWORD
               value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+            {{- end }}
             - name: EMAIL_VERIFICATION_DISABLED
               value: "1"
             - name: PASSWORD_RESET_DISABLED
               value: "1"
+            {{- if .Values.olaresEnv.SMTP_HOST }}
             - name: SMTP_AUTHENTICATED
               value: "1"
             - name: SMTP_SECURE_ENABLED
               value: "{{ ternary "1" "0" (eq (.Values.olaresEnv.SMTP_PORT | toString) "465") }}"
             - name: SMTP_REJECT_UNAUTHORIZED_TLS
               value: "1"
+            {{- end }}
           resources:
             requests:
               cpu: 1500m
@@ -95,21 +178,96 @@ spec:
             - mountPath: /home/nextjs/apps/web/saml-connection
               name: formbricks-data
               subPath: formbricks
+        - name: hub
+          image: docker.io/beclab/formbricks-hub:0.8.1
+          env:
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: HUB_API_KEY
+            - name: DATABASE_URL
+              value: {{ $hubDatabaseUrl | quote }}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+        - name: cube
+          image: cubejs/cube:v1.7.3
+          env:
+            - name: CUBEJS_DB_TYPE
+              value: postgres
+            - name: CUBEJS_DB_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: CUBEJS_DB_NAME
+              value: "{{ .Values.postgres.databases.formbricksdb }}"
+            - name: CUBEJS_DB_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: CUBEJS_DB_PASS
+              value: "{{ .Values.postgres.password }}"
+            - name: CUBEJS_DB_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: CUBEJS_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: CUBEJS_API_SECRET
+            - name: CUBEJS_JWT_ISSUER
+              value: formbricks-web
+            - name: CUBEJS_JWT_AUDIENCE
+              value: formbricks-cube
+            - name: CUBEJS_DEFAULT_API_SCOPES
+              value: meta,data
+            - name: CUBEJS_CACHE_AND_QUEUE_DRIVER
+              value: memory
+          ports:
+            - containerPort: 4000
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 4000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 768Mi
+          volumeMounts:
+            - name: cube-config
+              mountPath: /cube/conf/cube.js
+              subPath: cube.js
+              readOnly: true
+            - name: cube-config
+              mountPath: /cube/conf/model/FeedbackRecords.js
+              subPath: FeedbackRecords.js
+              readOnly: true
 
       restartPolicy: Always
       volumes:
         - name: formbricks-data
           hostPath:
             type: DirectoryOrCreate
-                  {{- if .Values.sysVersion }}
-                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appCache }}'
-                    {{- else }}
-            path: '{{ .Values.userspace.appCache }}/formbricks'
-                    {{- end }}
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/formbricks'
-                  {{- end }}
+        - name: cube-config
+          configMap:
+            name: formbricks-cube-config
 
 ---
 apiVersion: v1
@@ -141,3 +299,5 @@ data:
   NEXTAUTH_SECRET: YzZiYmE4MDljZjU2YTc2OGUxMTRlZTZmYjRiY2FjZTViZDEzYzFmM2EzNWQ1MWQzZDZiOTNjZDViYTY1YjNiMQ==
   ENCRYPTION_KEY: OWFiZDFkMGM1MDRiYzAyNzQxOWFmYmZjMzJiZmYwZjJlYTU3ODgwNmVlNGM2ZjY4NmZhZTUzOWI2NTk0MzNkZA==
   CRON_SECRET: NGE3ZWRhY2M5MDBhYTgxZjNjYzA2NDgwNWFhMzIxMGVmYjA1NGRjYzVkYWY2MDBmZjVlYmU2ZmYwNmNlZGUxYg==
+  HUB_API_KEY: MTdlNmY0NGUxNTQ0MWE3NmFhMDNjNmViNTZmYTE3MjFlMTNjNzExYmM1NjlhY2JkMWRhYmFmYjQ4Yjg1OGQyNQ==
+  CUBEJS_API_SECRET: ZTJjZWFlNzdiNjY4MGMzNDc5MzJiMjdiYjQ2NGM0Njc3Y2M5MTJlMGM2ZGRhNjliZmMwNzUyMjg1OGQ1MjMxYw==
