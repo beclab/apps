@@ -1,4 +1,6 @@
-﻿---
+﻿{{- $ralllyDomainENV := split "," .Values.domain.rallly -}}
+{{- $ralllyDomain := index $ralllyDomainENV "_0" -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,18 +22,39 @@ spec:
     spec:
       containers:
         - name: rallly
-          image: "docker.io/beclab/lukevella-rallly:4.3.1"
+          image: "docker.io/lukevella/rallly:4.11.1"
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.rallly }}"
+            - name: SUPPORT_EMAIL
+              {{- if .Values.olaresEnv.SUPPORT_EMAIL }}
+              value: "{{ .Values.olaresEnv.SUPPORT_EMAIL }}"
+              {{- else }}
+              value: "noreply@{{ $ralllyDomain }}"
+              {{- end }}
+            {{- if .Values.olaresEnv.SMTP_HOST }}
+            - name: SMTP_HOST
+              value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PORT }}
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_USER }}
+            - name: SMTP_USER
+              value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PWD }}
+            - name: SMTP_PWD
+              value: "{{ .Values.olaresEnv.SMTP_PWD }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_SECURE }}
+            - name: SMTP_SECURE
+              value: "{{ .Values.olaresEnv.SMTP_SECURE }}"
+            {{- else if .Values.olaresEnv.SMTP_HOST }}
+            - name: SMTP_SECURE
+              value: "{{ ternary "true" "false" (eq (.Values.olaresEnv.SMTP_PORT | toString) "465") }}"
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: rallly-config
