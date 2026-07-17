@@ -26,8 +26,15 @@ spec:
           value: "1000"
         - name: TZ
           value: Asia/Shanghai
-        image: "docker.io/beclab/soulter-astrbot:v3.5.26"
+        - name: ASTRBOT_DASHBOARD_INITIAL_PASSWORD
+          value: "{{ .Values.olaresEnv.ASTRBOT_DASHBOARD_INITIAL_PASSWORD }}"
+        - name: ASTRBOT_RESET_DASHBOARD_PASSWORD
+          value: "{{ .Values.olaresEnv.ASTRBOT_RESET_DASHBOARD_PASSWORD }}"
+        image: "docker.io/soulter/astrbot:v4.26.6"
         name: astrbot
+        command: ["/bin/sh", "-c"]
+        args:
+          - python /bootstrap/bootstrap.py && exec python main.py
         ports:
         - containerPort: 6185
         resources:
@@ -42,32 +49,22 @@ spec:
           name: app-data-data
         - mountPath: /etc/localtime:ro
           name: app-data-etc-localtime
+        - mountPath: /bootstrap
+          name: astrbot-bootstrap
+          readOnly: true
       restartPolicy: Always
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: '{{ .Values.userspace.appData }}/data'
-            {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
-          {{- end }}
           type: DirectoryOrCreate
         name: app-data-data
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: '{{ .Values.userspace.appData }}/etc/localtime'
-            {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/etc/localtime'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/etc/localtime'
-          {{- end }}
           type: DirectoryOrCreate
         name: app-data-etc-localtime
+      - configMap:
+          name: astrbot-bootstrap
+        name: astrbot-bootstrap
 status: {}
 
 ---
