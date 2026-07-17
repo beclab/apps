@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: astrbot-bootstrap
+  namespace: '{{ .Release.Namespace }}'
+data:
+  bootstrap.py: |
+    """Apply install-time dashboard password without forcing a second change."""
+    import json
+    import os
+    from pathlib import Path
+
+    CONFIG = Path("/AstrBot/data/cmd_config.json")
+    password = os.environ.get("ASTRBOT_DASHBOARD_INITIAL_PASSWORD")
+    reset_raw = os.environ.get("ASTRBOT_RESET_DASHBOARD_PASSWORD", "")
+    reset = reset_raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    # Prevent AstrBot from consuming RESET itself (it always sets
+    # password_change_required=true when regenerating).
+    os.environ.pop("ASTRBOT_RESET_DASHBOARD_PASSWORD", None)
+
+    if not password:
+      raise SystemExit(0)
+
+    from astrbot.core.utils.auth_password import (
+        hash_dashboard_password,
+        hash_md5_dashboard_password,
+        validate_dashboard_password,
+    )
+
+    validate_dashboard_password(password)
+
+    conf = {}
+    if CONFIG.exists():
+      conf = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    else:
+      CONFIG.parent.mkdir(parents=True, exist_ok=True)
+
+    dashboard = conf.setdefault("dashboard", {})
+    has_password = bool(dashboard.get("pbkdf2_password") or dashboard.get("password"))
+    need_write = False
+
+    if reset or not has_password:
+      dashboard["username"] = dashboard.get("username") or "astrbot"
+      dashboard["pbkdf2_password"] = hash_dashboard_password(password)
+      dashboard["password"] = hash_md5_dashboard_password(password)
+      dashboard["password_storage_upgraded"] = True
+      dashboard["password_change_required"] = False
+      dashboard.setdefault("enable", True)
+      dashboard.setdefault("host", "0.0.0.0")
+      dashboard.setdefault("port", 6185)
+      need_write = True
+    elif dashboard.get("password_change_required"):
+      # Install dialog already chose the password; do not force another change.
+      dashboard["password_change_required"] = False
+      need_write = True
+
+    if need_write:
+      CONFIG.write_text(
+          json.dumps(conf, indent=2, ensure_ascii=False) + "\n",
+          encoding="utf-8",
+      )
+      print("dashboard password ready; password_change_required=false")
