@@ -23,9 +23,16 @@
 # identity (1000) can write the Olares user-data mounts.
 #
 # Opt-in Python deps (Feishu, Honcho, Firecrawl, …): rely on upstream
-# HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages (baked in v2026.7.1
+# HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages (baked in v2026.7.7.2
 # image). Chart only sets HERMES_HOME=/opt/data; no init-time pip overlays.
-{{- $hermesImage := "beclab/harveyff-hermes-agent:v2026.7.1-uid1000" -}}
+#
+# /opt/hermes is an immutable install tree (read-only). Node/npm writes there
+# fail with EACCES by design. Per upstream Docker guidance, all mutable state
+# goes to /opt/data: we point npm's global prefix at /opt/data/npm-global
+# (NPM_CONFIG_PREFIX) so `npm install -g` and `npx` work and persist, and add
+# that prefix bin to PATH. Local `npm install` works from any writable cwd
+# (e.g. HOME=/opt/data). We do NOT mount over or re-open /opt/hermes.
+{{- $hermesImage := "beclab/harveyff-hermes-agent:v2026.7.7.2-uid1000" -}}
 {{- $oe := .Values.olaresEnv | default dict }}
 ---
 # Loopback dashboard (no Hermes auth gate) + nginx sidecar on :9119.
@@ -113,6 +120,8 @@ spec:
             - "-c"
             - |
               mkdir -p /opt/data/.olares-cli/data
+              # Writable npm global prefix on the data volume (npm install -g / npx).
+              mkdir -p /opt/data/npm-global/lib/node_modules /opt/data/npm-global/bin
               chown -R 1000:1000 /opt/data || true
               chmod -R u+rwX,g+rwX /opt/data || true
               # Hook interactive shells into drop-to-hermes (kubectl exec is root).
@@ -126,7 +135,7 @@ spec:
                   } >> "$rc"
                 fi
               done
-              # Keep brew + hermes on PATH after bash -l resets profile (hermes uid shells).
+              # Keep brew + hermes + npm-global on PATH after bash -l resets profile.
               PATH_MARKER="# hermesagent: brew-path"
               for rc in /opt/data/.bashrc /opt/data/.profile; do
                 if ! grep -qF "$PATH_MARKER" "$rc" 2>/dev/null; then
@@ -135,7 +144,9 @@ spec:
                     echo "$PATH_MARKER"
                     echo 'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"'
                     echo 'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"'
-                    echo 'export PATH="/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+                    echo 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/opt/data/npm-global}"'
+                    echo 'export NODE_PATH="${NODE_PATH:-/opt/data/npm-global/lib/node_modules:/opt/data/node_modules}"'
+                    echo 'export PATH="/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
                   } >> "$rc"
                 fi
               done
@@ -184,7 +195,9 @@ spec:
                 'export OLARES_CLI_DATA_DIR="${OLARES_CLI_DATA_DIR:-/opt/data/.olares-cli/data}"' \
                 'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"' \
                 'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"' \
-                'export PATH="/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+                'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/opt/data/npm-global}"' \
+                'export NODE_PATH="${NODE_PATH:-/opt/data/npm-global/lib/node_modules:/opt/data/node_modules}"' \
+                'export PATH="/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
                 'DROP_SHELL=/bin/bash' \
                 '[ -x "$DROP_SHELL" ] || DROP_SHELL=/bin/sh' \
                 'exec "$S6_SUID" hermes "$DROP_SHELL" -l' \
@@ -269,8 +282,12 @@ spec:
               value: /home/linuxbrew/.linuxbrew
             - name: HOMEBREW_NO_AUTO_UPDATE
               value: "1"
+            - name: NPM_CONFIG_PREFIX
+              value: /opt/data/npm-global
+            - name: NODE_PATH
+              value: /opt/data/npm-global/lib/node_modules:/opt/data/node_modules
             - name: PATH
-              value: "/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: OLARES_CLI_HOME
               value: /opt/data/.olares-cli
             - name: OLARES_CLI_DATA_DIR
