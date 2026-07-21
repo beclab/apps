@@ -24,31 +24,62 @@ spec:
         io.kompose.service: fishspeech
     spec:
       initContainers:
-      - name: init-chmod-data
-        image: 'docker.io/beclab/aboveos-busybox:1.37.0'
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
-            chmod -R 755 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
-        resources: {}
-        volumeMounts:
-          - name: checkpoints
-            mountPath: /app-checkpoints
-          - name: references
-            mountPath: /app-references
-          - name: data
-            mountPath: /app-data-root
-          - name: output
-            mountPath: /tmp-gradio
-          - name: app-cache
-            mountPath: /app-cache
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+              if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: data
+              mountPath: /new-data
+        - name: init-chmod-data
+          image: 'docker.io/beclab/aboveos-busybox:1.37.0'
+          command:
+            - sh
+            - '-c'
+            - |
+              chown -R 1000:1000 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
+              chmod -R 755 /app-checkpoints /app-references /app-data-root /tmp-gradio /app-cache
+          resources: {}
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app-checkpoints
+            - name: references
+              mountPath: /app-references
+            - name: data
+              mountPath: /app-data-root
+            - name: output
+              mountPath: /tmp-gradio
+            - name: app-cache
+              mountPath: /app-cache
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
       containers:
       - name: fishspeech
         image: "docker.io/beclab/harveyff-fishaudio-fish-speech:webui-cuda-cu129-20260422"
@@ -184,6 +215,10 @@ spec:
       - hostPath:
           path: '{{ .Values.userspace.appCache }}/data'
           type: DirectoryOrCreate
+        name: data-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
         name: data
       # checkpoints/s2-pro is now an ephemeral symlink into the shared HF cache,
       # rebuilt on every start; the real model bytes live in hf-cache below.
@@ -269,17 +304,16 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          # v1.2.4: nullengine download-only, default LFS (hf_xet off unless
+          # v1.3.1: nullengine download-only, default LFS (hf_xet off unless
           # HF_ENABLE_XET=true) for stable download memory.
-          image: docker.io/beclab/llm-init:v1.2.4
+          image: docker.io/beclab/llm-init:v1.3.1
           imagePullPolicy: IfNotPresent
           env:
             # Empty ENGINE_KIND selects download-only mode (nullengine).
             - name: ENGINE_KIND
               value: ""
-            # TEMPORARY (llm-init v1.2.4 image): download-only still requires
-            # MODEL_NAME + MODEL_MODE placeholders; the repo to fetch comes
-            # entirely from MODEL_SOURCE. Drop both once the make-optional patch ships.
+            # Download-only still requires MODEL_NAME + MODEL_MODE placeholders;
+            # the repo to fetch comes entirely from MODEL_SOURCE.
             - name: MODEL_NAME
               value: "fishaudio/s2-pro"
             - name: MODEL_MODE
@@ -294,7 +328,7 @@ spec:
             - name: HF_TOKEN
               value: "{{ $hfToken }}"
 {{- end }}
-            # Keep concurrency low; LFS is the image default in v1.2.4.
+            # Keep concurrency low; LFS is the image default.
             - name: MAX_CONCURRENT_DOWNLOADS
               value: "1"
             - name: RUN_DIR
