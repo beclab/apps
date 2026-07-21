@@ -21,6 +21,43 @@ spec:
         io.kompose.service: pds
     spec:
       initContainers:
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/pds -> appData/pds..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: pdsdata-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: pdsdata
+            mountPath: /new-data
       - name: init-chmod-pds
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
@@ -116,17 +153,13 @@ spec:
       restartPolicy: Always
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/pds'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/pds/pds'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/pds/pds'
-          {{- end }}
+          path: '{{ .Values.userspace.appData }}/pds'
           type: DirectoryOrCreate
         name: pdsdata
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/pds'
+          type: DirectoryOrCreate
+        name: pdsdata-legacy
 ---
 apiVersion: v1
 kind: Service
