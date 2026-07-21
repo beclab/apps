@@ -24,6 +24,38 @@ spec:
       labels:
         io.kompose.service: worker
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+              if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: worker-claim0-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: worker-claim0
+              mountPath: /new-data
       containers:
         - name: worker
           image: "docker.io/beclab/dify-api:1.13.3"
@@ -48,10 +80,14 @@ spec:
           command: ["/entrypoint.sh"]
       restartPolicy: Always
       volumes:
-        - name: worker-claim0
+        - name: worker-claim0-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/volumes/app/storage
+        - name: worker-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/app/storage
         - name: redis-extension
           configMap:
             name: dify-redis-extension
