@@ -13,10 +13,26 @@ data:
     http:
       use_x_forwarded_for: true
       use_x_frame_options: false
+      # Requests reach HA through the Olares in-cluster proxy and the local
+      # nginx sidecar, so the forwarded-for chain contains in-cluster/private
+      # IPs (e.g. 10.233.0.0/16). Trust all private / loopback / link-local /
+      # CGNAT ranges (IPv4 + IPv6) so HA walks back the whole infrastructure
+      # chain and resolves the real public client. Public IPs are intentionally
+      # NOT trusted, otherwise clients could spoof X-Forwarded-For.
       trusted_proxies:
-        - "127.0.0.1"
-      ip_ban_enabled: true
-      login_attempts_threshold: 5
+        - "127.0.0.0/8"
+        - "::1"
+        - "10.0.0.0/8"
+        - "172.16.0.0/12"
+        - "192.168.0.0/16"
+        - "100.64.0.0/10"
+        - "169.254.0.0/16"
+        - "fc00::/7"
+        - "fe80::/10"
+      # Keep IP banning off: the app already sits behind Olares authentication,
+      # and because clients share the in-cluster proxy IP a few failed logins
+      # could otherwise ban that shared IP and lock everyone out of the app.
+      ip_ban_enabled: false
     automation: !include automations.yaml
     script: !include scripts.yaml
     scene: !include scenes.yaml
