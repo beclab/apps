@@ -19,6 +19,46 @@ spec:
       labels:
         io.kompose.service: frigate
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data/media
+              DEST=/new-data/media
+              MARKER="${DEST}/.migration_from_appcache_done_media"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done_media$' || true)" ]; then
+                echo "[migrate] appData/media already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache/media -> appData/media..."
+                mkdir -p "$DEST"
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy media data, fresh install."
+                mkdir -p "$DEST"
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: frigate-media-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: frigate-config
+              mountPath: /new-data
       containers:
         - name: frigate
           image: "docker.io/beclab/blakeblackshear-frigate:0.17.0"
@@ -76,6 +116,10 @@ spec:
         - name: frigate-media
           hostPath:
             type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: frigate-media-legacy
+          hostPath:
+            type: DirectoryOrCreate
             path: '{{ .Values.userspace.appCache }}'
         - name: frigate-cache
           emptyDir:
@@ -114,4 +158,3 @@ spec:
     io.kompose.service: frigate
 status:
   loadBalancer: {}
-
