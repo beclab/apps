@@ -41,6 +41,44 @@ spec:
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            # Destination already has content (ignore our marker name if present).
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache -> appData..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: appcache-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: appcache
+            mountPath: /new-data
       - name: init-chmod-data
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
@@ -61,17 +99,19 @@ spec:
           runAsUser: 0
       containers:
       - name: twenty-worker
-        image: "docker.io/beclab/twentycrm-twenty:v1.15.0"
+        image: "docker.io/twentycrm/twenty:v2.22.0"
         command: ["yarn", "worker:prod"]
         env:
         - name: PG_DATABASE_URL
-          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.twenty }}"
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: PG_DATABASE_URL
         - name: REDIS_URL
-          {{- if .Values.redis.password }}
-          value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
-          {{- else }}
-          value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
-          {{- end }}
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: REDIS_URL
         - name: SERVER_URL
           {{- if $appDomain }}
           value: "https://{{ $appDomain }}"
@@ -79,7 +119,10 @@ spec:
           value: "http://twenty:3000"
           {{- end }}
         - name: APP_SECRET
-          value: "{{ .Values.appSecret }}"
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: APP_SECRET
         - name: DISABLE_DB_MIGRATIONS
           value: "true"
         - name: DISABLE_CRON_JOBS_REGISTRATION
@@ -102,7 +145,10 @@ spec:
         {{- end }}
         {{- if .Values.olaresEnv.SMTP_PASSWORD }}
         - name: EMAIL_SMTP_PASSWORD
-          value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: EMAIL_SMTP_PASSWORD
         {{- end }}
         {{- if .Values.olaresEnv.MAIL_DEFAULT_SEND_FROM }}
         - name: EMAIL_FROM_ADDRESS
@@ -138,15 +184,11 @@ spec:
           name: appcache
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
           path: '{{ .Values.userspace.appCache }}/data'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/twenty/data'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/twenty/data'
-          {{- end }}
+          type: DirectoryOrCreate
+        name: appcache-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
           type: DirectoryOrCreate
         name: appcache
 
