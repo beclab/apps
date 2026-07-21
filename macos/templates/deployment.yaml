@@ -44,6 +44,39 @@ spec:
         app: macos
     spec:
       initContainers:
+        - name: migrate-appcache-to-appdata-storage
+          image: docker.io/beclab/busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_storage_done"
+              if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_storage_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: storage-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: storage
+              mountPath: /new-data
+
         - name: sync-env-to-pvc
           image: docker.io/beclab/aboveos-busybox:1.37.0
           imagePullPolicy: IfNotPresent
@@ -135,6 +168,10 @@ spec:
       volumes:
         - hostPath:
             path: '{{ .Values.userspace.appCache }}'
+            type: DirectoryOrCreate
+          name: storage-legacy
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/storage'
             type: DirectoryOrCreate
           name: storage
         - hostPath:
