@@ -22,9 +22,48 @@ spec:
       labels:
         io.kompose.service: answer
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              # Destination already has content (ignore our marker name if present).
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: answer-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: answer-data
+              mountPath: /new-data
       containers:
         - name: answer
-          image: "docker.io/beclab/apache-answer:1.7.1"
+          image: "docker.io/apache/answer:2.0.1"
           env:
             - name: INSTALL_PORT
               value: "80"
@@ -77,15 +116,11 @@ spec:
         - name: answer-data
           hostPath:
             type: DirectoryOrCreate
-                  {{- if .Values.sysVersion }}
-                    {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}'
+        - name: answer-data-legacy
+          hostPath:
+            type: DirectoryOrCreate
             path: '{{ .Values.userspace.appCache }}'
-                    {{- else }}
-            path: '{{ .Values.userspace.appCache }}/answer'
-                    {{- end }}
-                  {{- else }}
-            path: '{{ .Values.userspace.appCache }}/answer'
-                  {{- end }}
 ---
 apiVersion: v1
 kind: Service
