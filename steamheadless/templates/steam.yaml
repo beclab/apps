@@ -25,6 +25,83 @@ spec:
       labels:
         io.kompose.service: steam-headless
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata-c0
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_c0_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_c0_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache/c0 -> appData/c0..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: steam-headless-claim0-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: steam-headless-claim0
+              mountPath: /new-data
+
+        - name: migrate-appcache-to-appdata-c1
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_c1_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_c1_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache/c1 -> appData/c1..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: steam-headless-claim1-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: steam-headless-claim1
+              mountPath: /new-data
+
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -191,14 +268,22 @@ spec:
         {{- end }}
       restartPolicy: Always
       volumes:
-        - name: steam-headless-claim0
+        - name: steam-headless-claim0-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c0
-        - name: steam-headless-claim1
+        - name: steam-headless-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/{{ .Release.Name }}/c0
+        - name: steam-headless-claim1-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c1
+        - name: steam-headless-claim1
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/{{ .Release.Name }}/c1
         - name: input-devices
           hostPath:
             path: /dev/input/
