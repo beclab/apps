@@ -24,6 +24,38 @@ spec:
         io.kompose.service: nginx
     spec:
       initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              migrate_pair() {
+                SOURCE="$1"; DEST="$2"; MARKER="${DEST}/.migration_from_appcache_done"
+                if [ -f "$MARKER" ]; then return 0; fi
+                if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then echo skipped > "$MARKER"; return 0; fi
+                if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then cp -a "$SOURCE"/. "$DEST"/; echo migrated > "$MARKER"; else echo fresh > "$MARKER"; fi
+              }
+              migrate_pair /old6 /new6
+              migrate_pair /old7 /new7
+              migrate_pair /old8 /new8
+          volumeMounts:
+            - name: nginx-claim6-legacy
+              mountPath: /old6
+              readOnly: true
+            - name: nginx-claim6
+              mountPath: /new6
+            - name: nginx-claim7-legacy
+              mountPath: /old7
+              readOnly: true
+            - name: nginx-claim7
+              mountPath: /new7
+            - name: nginx-claim8-legacy
+              mountPath: /old8
+              readOnly: true
+            - name: nginx-claim8
+              mountPath: /new8
         - name: check-ready-web
           image: "docker.io/beclab/wait-for:0.1.0"
           args:
@@ -141,15 +173,27 @@ spec:
         - configMap:
             name: nginx-cm5
           name: nginx-cm5
-        - name: nginx-claim6
+        - name: nginx-claim6-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/volumes/nginx/claim6
-        - name: nginx-claim7
+        - name: nginx-claim6
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/nginx/claim6
+        - name: nginx-claim7-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/volumes/nginx/claim7
-        - name: nginx-claim8
+        - name: nginx-claim7
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/nginx/claim7
+        - name: nginx-claim8-legacy
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}/volumes/nginx/claim8
+        - name: nginx-claim8
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/nginx/claim8
