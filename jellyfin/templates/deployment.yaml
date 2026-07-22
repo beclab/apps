@@ -38,11 +38,24 @@ spec:
         app: jellyfin
         applications.app.bytetrade.io/macvlan-init: "true"
     spec:
+      {{- $hwAccel := eq (toString (.Values.olaresEnv.ENABLE_HW_ACCEL | default "false")) "true" }}
+      {{- if $hwAccel }}
+      securityContext:
+        supplementalGroups:
+          - {{ .Values.olaresEnv.VIDEO_GID | default "44" | int }}
+          - {{ .Values.olaresEnv.RENDER_GID | default "994" | int }}
+      {{- end }}
       volumes:
         - name: home
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
+        {{- if $hwAccel }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        {{- end }}
         - hostPath:
             {{- if .Values.sysVersion }}
               {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
@@ -92,7 +105,7 @@ spec:
               path: copy-config.sh
       initContainers:
         - name: init-config
-          image: "docker.io/beclab/jellyfin-jellyfin:10.11.6"
+          image: "docker.io/beclab/jellyfin-jellyfin:10.11.11"
           resources: {}
           command: ["/bin/bash", "-c", "chmod +x /scripts/copy-config.sh & bash /scripts/copy-config.sh"]
           volumeMounts:
@@ -110,7 +123,8 @@ spec:
             - sh
             - '-c'
             - |
-              chown -R 1000:1000 /olares/userdata/home; chown -R 1000:1000 /app-data-root
+              # appData only — do not recurse the whole Home (user media libraries).
+              chown -R 1000:1000 /app-data-root
           resources: {}
           volumeMounts:
             - name: home
@@ -123,8 +137,14 @@ spec:
 
       containers:
         - name: jellyfin
-          image: "docker.io/beclab/jellyfin-jellyfin:10.11.6"
+          image: "docker.io/beclab/jellyfin-jellyfin:10.11.11"
           imagePullPolicy: IfNotPresent
+          {{- if $hwAccel }}
+          # hostPath makes /dev/dri visible; privileged is required on Olares/k3s
+          # so the device cgroup allows open() on the DRM render node.
+          securityContext:
+            privileged: true
+          {{- end }}
           resources:
             requests:
               cpu: 100m
@@ -147,6 +167,10 @@ spec:
             mountPath: /olares/userdata/external
           - name: external
             mountPath: /external
+          {{- if $hwAccel }}
+          - name: dri
+            mountPath: /dev/dri
+          {{- end }}
           env:
           - name: PGID
             value: "1000" 
