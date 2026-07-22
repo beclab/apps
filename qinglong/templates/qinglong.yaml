@@ -17,6 +17,81 @@ spec:
       labels:
         app: {{ .Release.Name }}
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata-root
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: appcache-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: appcache
+              mountPath: /new-data
+        - name: migrate-appcache-to-appdata-data
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_data_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_data_done$' || true)" ]; then
+                echo "[migrate] appData/data already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache/data -> appData/data..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: qinglong-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: qinglong-data
+              mountPath: /new-data
       containers:
       - name: {{ .Release.Name }}
         env:
@@ -52,29 +127,21 @@ spec:
           name: qinglong-data
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: {{ .Values.userspace.appCache }}
-            {{- else }}
-          path: {{ .Values.userspace.appCache }}/qinglong
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appCache }}/qinglong
-          {{- end }}
+          path: {{ .Values.userspace.appData }}
           type: DirectoryOrCreate
         name: appcache
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: {{ .Values.userspace.appCache }}/data
-            {{- else }}
-          path: {{ .Values.userspace.appCache }}/qinglong/data
-            {{- end }}
-          {{- else }}
-          path: {{ .Values.userspace.appCache }}/qinglong/data
-          {{- end }}
+          path: {{ .Values.userspace.appCache }}
+          type: DirectoryOrCreate
+        name: appcache-legacy
+      - hostPath:
+          path: {{ .Values.userspace.appData }}/data
           type: DirectoryOrCreate
         name: qinglong-data
+      - hostPath:
+          path: {{ .Values.userspace.appCache }}/data
+          type: DirectoryOrCreate
+        name: qinglong-data-legacy
 
 ---
 apiVersion: v1
