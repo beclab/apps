@@ -23,11 +23,11 @@ spec:
     ‌- 可靠性优先设计‌：针对高难度爬取场景（动态加载、反爬策略）优化
 
   upgradeDescription: |
-    升级至 Firecrawl v2.9.0: https://github.com/firecrawl/firecrawl/releases/tag/v2.9.0
-    
-    配置优化：
-    **关键 Bug 修复**
-    - **恢复 Playwright 服务连通性：** 共享的 `firecrawl-config` ConfigMap 通过 `envFrom` 把 `PORT: "3002"` 泄漏给了 playwright-service 容器，导致 playwright 应用监听在 **3002** 端口而不是预期的 **3000**。worker 调用 `playwright-svc:3000` 时会静默失败并报 `other side closed`，每次抓取都会瀑布降级到 fetch 引擎。本次升级在 playwright-service deployment 显式设置 `PORT=3000` 覆盖 ConfigMap 的值。升级后 `kubectl logs deploy/playwright-service` 应打印 `Server is running on port 3000`（而不是 3002）。
+    存储：持久卷从 `appCache` 迁移到 `appData`。升级后首次启动时，若 appData 为空，initContainer 会将旧 appCache 内容复制到 appData（标记文件：`.migration_from_appcache_done`）；旧 appCache 数据保留以便回滚。
+
+    移除针对 Olares < 1.12.3 的 appCache 路径分支逻辑；当前最低支持版本为 1.12.6。
+
+    Redis 持久数据从 appCache 迁移到 appData。
 
     **数据持久化**
     - **nuq-postgres 现在持久化任务数据：** 新增 `hostPath` 卷挂载到 `appData/<release>/nuq-postgres`，并加了 `init-permissions` 初始化容器（创建数据目录、`chown 999:999`、`chmod 700`）让 postgres 进程有权写入。在此之前，nuq-postgres 每次重启都会丢失所有 NuQ 任务、crawl 进度和 pg_cron 历史。同时 `strategy` 改为 `Recreate` 防止升级时两个 PG 实例同时操作同一份数据。
