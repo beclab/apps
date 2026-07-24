@@ -1,6 +1,5 @@
 {{- $seatableDomainENV := split "," .Values.domain.seatable -}}
 {{- $seatableDomain := index $seatableDomainENV "_0" -}}
-{{- $localDomain := $seatableDomain -}}
 
 ---
 apiVersion: v1
@@ -9,28 +8,29 @@ metadata:
   name: seatable-config
   namespace: {{ .Release.Namespace }}
 data:
-  DB_HOST: "seatable-mysql"
-  DB_ROOT_PASSWD: "seatable"
-  MARIADB_HOST: 'seatable-mysql'
-  MARIADB_PORT: '3306'
-  MARIADB_PASSWORD: 'seatable'
-  
-  SEATABLE_SERVER_HOSTNAME: "{{$seatableDomain}}"
+  # SeaTable >=5.3 / 6.x env (replaces DB_HOST / DB_ROOT_PASSWD / MARIADB_*)
+  SEATABLE_MYSQL_DB_HOST: "seatable-mysql"
+  SEATABLE_MYSQL_DB_PORT: "3306"
+  SEATABLE_MYSQL_DB_USER: "root"
+  SEATABLE_MYSQL_DB_DTABLE_DB_NAME: "dtable_db"
+  SEATABLE_MYSQL_DB_CCNET_DB_NAME: "ccnet_db"
+  SEATABLE_MYSQL_DB_SEAFILE_DB_NAME: "seafile_db"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  SEATABLE_SERVER_HOSTNAME: "{{ $seatableDomain }}"
   SEATABLE_SERVER_PROTOCOL: "https"
-  SEATABLE_SERVER_LETSENCRYPT: "false"
   SEATABLE_ADMIN_EMAIL: "{{ .Values.olaresEnv.ADMIN_EMAIL }}"
-  SEATABLE_ADMIN_PASSWORD: "{{ .Values.olaresEnv.ADMIN_PASSWORD }}"
   TIME_ZONE: "Etc/UTC"
-  SEATABLE_DONT_CHECK_USER_NUMBER_ON_ADD: "false"
 
   PYTHON_SCHEDULER_URL: "http://python-scheduler"
   PYTHON_SCHEDULER_AUTH_TOKEN: ""
-  REQUESTS_CA_BUNDLE: ""
+  REQUESTS_CA_BUNDLE: "/etc/ssl/certs/ca-certificates.crt"
 
   SEATABLE_EMAIL_USE_TLS: "{{ .Values.olaresEnv.EMAIL_USE_TLS }}"
+  SEATABLE_EMAIL_USE_SSL: "{{ .Values.olaresEnv.EMAIL_USE_SSL | default "" }}"
   SEATABLE_EMAIL_HOST: "{{ .Values.olaresEnv.EMAIL_HOST }}"
   SEATABLE_EMAIL_HOST_USER: "{{ .Values.olaresEnv.EMAIL_HOST_USER }}"
-  SEATABLE_EMAIL_HOST_PASSWORD: "{{ .Values.olaresEnv.EMAIL_HOST_PASSWORD }}"
   SEATABLE_EMAIL_PORT: "{{ .Values.olaresEnv.EMAIL_PORT }}"
   SEATABLE_DEFAULT_FROM_EMAIL: "{{ .Values.olaresEnv.DEFAULT_FROM_EMAIL }}"
   SEATABLE_SERVER_EMAIL: "{{ .Values.olaresEnv.SERVER_EMAIL }}"
@@ -39,11 +39,21 @@ data:
   SEATABLE_TEMPLATE_BASE_API_TOKEN: ""
   SEATABLE_TEMPLATE_TABLE_NAME: ""
   SEATABLE_ENABLE_CREATE_BASE_FROM_TEMPLATE: ""
-  SEATABLE_HELP_LINK: "https://docs.seatable.cn/published/seatable-user-manual/home.md"
-  SEATABLE_LOG_LEVEL: "INFO"
+  SEATABLE_HELP_LINK: "https://help.seatable.com"
+  LOG_LEVEL: "INFO"
+  # Optional add-ons (off by default; need extra compose services if enabled)
+  ENABLE_PYTHON_SCRIPT: "false"
+  ENABLE_SEATABLE_AI: "false"
+  INNER_SEATABLE_AI_SERVER_URL: "http://seatable-ai:8888"
+  ENABLE_SEADOC: "false"
 
-  SEATABLE_MARKET_URL: 'https://market-dev.seatable.cn/'
-
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seatable-license
+  namespace: {{ .Release.Namespace }}
+data:
   seatable-license.txt: |-
     #SeaTable server licence
 
@@ -57,10 +67,120 @@ data:
 
     Hash = "1e674d8cd49a755f8a282758034a9c540e8e63f0f1550568a1c0b402607eed9f3932ea3b98744bff1d61ee57670a8ab1ad01c88618db5187a893176efd72f57513de8d86664eeafc4a42ae88b608d5ccaeb6e21563b282b3f7f47416cbcf8035219eeb6c528699f1475ccc0e528ec388d59f1fed1e61fd454343b8d4b9d4ca78247e9939bc7e765b0343686d82bf9eeffc7299da1fbe33f5921adecf5a9ebc300793f317380e7d4523dbc5ac23b335970814506b484904ae1b25186432de05e4862c1624de4168158d4b7156a8e654106afe222df99fb738e6372c45d6550227645bef016db727b072c1b862732504b4692ab75301b31d59ef0f485890a9fe0f"
 
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: seatable-nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  # From seatable-release compose/config/seatable-nginx.conf (API Gateway for >=5.3)
+  default: |
+    log_format seatableformat '$http_x_forwarded_for $remote_addr [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $upstream_response_time';
 
+    server {
+      listen 80;
+      listen [::]:80;
+      server_name _;
 
+      proxy_set_header X-Forwarded-For $remote_addr;
 
+      proxy_hide_header 'Access-Control-Allow-Origin';
+      add_header 'Access-Control-Allow-Origin' 'https://api.seatable.com' always;
+      add_header 'Access-Control-Allow-Methods' 'GET,POST,PUT,DELETE,OPTIONS' always;
+      add_header 'Access-Control-Allow-Headers' 'Content-Type, Accept, authorization, token, deviceType, x-seafile-otp' always;
+      if ($request_method = 'OPTIONS') {
+        return 204;
+      }
 
+      location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $server_name;
+        proxy_read_timeout 1200s;
+        client_max_body_size 0;
 
+        access_log /opt/nginx-logs/dtable-web.access.log seatableformat;
+        error_log /opt/nginx-logs/dtable-web.error.log;
+      }
 
+      location /seafhttp {
+        rewrite ^/seafhttp(.*)$ $1 break;
+        proxy_pass http://127.0.0.1:8082;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_request_buffering off;
+        proxy_connect_timeout 36000s;
+        proxy_read_timeout 36000s;
+        proxy_send_timeout 36000s;
+        send_timeout 36000s;
+        client_max_body_size 0;
+        access_log /opt/nginx-logs/seafhttp.access.log seatableformat;
+        error_log /opt/nginx-logs/seafhttp.error.log;
+      }
 
+      location /media {
+        root /opt/seatable/seatable-server-latest/dtable-web;
+        access_log off;
+        error_log off;
+      }
+
+      location /api-gateway/ {
+        proxy_pass http://127.0.0.1:7780/;
+        proxy_redirect off;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $server_name;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        client_max_body_size 10m;
+        access_log /opt/nginx-logs/api-gateway.access.log seatableformat;
+        error_log /opt/nginx-logs/api-gateway.error.log;
+      }
+
+      location /api-gateway/socket.io/ {
+        proxy_pass http://127.0.0.1:7780/socket.io/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection upgrade;
+        proxy_redirect off;
+        proxy_buffers 8 32k;
+        proxy_buffer_size 64k;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-NginX-Proxy true;
+        access_log /opt/nginx-logs/socket-io.access.log seatableformat;
+        error_log /opt/nginx-logs/socket-io.error.log;
+      }
+
+      location /internal-thumbnails/ {
+        internal;
+        alias /opt/seatable/seahub-data/thumbnail/;
+        add_header X-Served-By "Nginx-via-X-Accel";
+        expires 7d;
+        add_header Cache-Control "public, no-transform";
+        access_log /opt/nginx-logs/internal-thumbnails.access.log seatableformat;
+        error_log /opt/nginx-logs/internal-thumbnails.error.log;
+      }
+
+      location /dtable-server {
+        return 404 'This endpoint is deprecated. Please migrate to the API Gateway.';
+      }
+
+      location /dtable-db {
+        return 404 'This endpoint is deprecated. Please migrate to the API Gateway.';
+      }
+
+      location = /dtable-server/ping/ {
+        proxy_pass http://127.0.0.1:5000/ping/;
+      }
+
+      location = /dtable-db/ping/ {
+        proxy_pass http://127.0.0.1:7777/ping/;
+      }
+    }

@@ -1,6 +1,5 @@
-﻿{{- $seatableDomainENV := split "," .Values.domain.seatable -}}
+{{- $seatableDomainENV := split "," .Values.domain.seatable -}}
 {{- $seatableDomain := index $seatableDomainENV "_0" -}}
-{{- $localDomain := $seatableDomain -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -53,50 +52,62 @@ spec:
               readOnly: true
       containers:
         - name: seatable
-          image: "docker.io/beclab/seatable-seatable-enterprise:5.2.7"
+          image: "docker.io/seatable/seatable-enterprise:6.2.12"
           ports:
             - containerPort: 80
           env:
-            - name: PGID
-              value: "0"
-            - name: PUID
-              value: "0"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
           envFrom:
             - configMapRef:
                 name: seatable-config
+            - secretRef:
+                name: seatable-secrets
+          # Probe nginx (:80), not dtable-web (:8000). First boot runs DB SQL
+          # upgrades for minutes; a liveness on :8000 restarts the container mid-init.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 40
+          livenessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests:
-              cpu: 500m
-              memory: 2Gi
+              cpu: "1"
+              memory: 3Gi
             limits:
-              cpu: 2000m
-              memory: 8Gi
+              cpu: "4"
+              memory: 10Gi
           volumeMounts:
             - name: seatable-data
               mountPath: /shared
+            - name: seatable-nginx
+              mountPath: /etc/nginx/sites-enabled/default
+              subPath: default
+              readOnly: true
       volumes:
         - name: seatable-data
           hostPath:
             type: DirectoryOrCreate
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appData }}/opt/seatable/seatable-data'
-              {{- else }}
-            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
-              {{- end }}
-            {{- else }}
-            path: '{{ .Values.userspace.appData }}/seatable/opt/seatable/seatable-data'
-            {{- end }}
         - name: seatable-license-cm
           configMap:
-            name: seatable-config
+            name: seatable-license
             items:
               - key: seatable-license.txt
                 path: seatable-license.txt
+        - name: seatable-nginx
+          configMap:
+            name: seatable-nginx-config
       restartPolicy: Always
 ---
 apiVersion: v1

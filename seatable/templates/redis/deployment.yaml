@@ -1,4 +1,4 @@
-﻿---
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +7,7 @@ metadata:
   labels:
     app: seatable-redis
 spec:
-  replicas: {{ .Values.workloads.seatable.replicaCount }}
+  replicas: {{ (index .Values.workloads "seatable-redis").replicaCount }}
   selector:
     matchLabels:
       app: seatable-redis
@@ -21,25 +21,41 @@ spec:
       containers:
         - name: seatable-redis
           image: "docker.io/beclab/redis:7.2.7-bookworm"
+          command:
+            - /bin/sh
+            - -c
+            - exec redis-server --requirepass "$REDIS_PASSWORD" --maxmemory 500mb --maxmemory-policy allkeys-lru
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: seatable-secrets
+                  key: REDIS_PASSWORD
           resources:
             requests:
               cpu: 10m
-              memory: 10Mi
+              memory: 64Mi
             limits:
               cpu: 200m
-              memory: 200Mi
+              memory: 512Mi
           ports:
             - containerPort: 6379
           livenessProbe:
             exec:
-              command: [ "redis-cli", "ping" ]
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping
             initialDelaySeconds: 5
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
           readinessProbe:
             exec:
-              command: [ "redis-cli", "ping" ]
+              command:
+                - sh
+                - -c
+                - redis-cli -a "$REDIS_PASSWORD" ping
             initialDelaySeconds: 5
             periodSeconds: 20
             timeoutSeconds: 5
