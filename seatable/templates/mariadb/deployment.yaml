@@ -1,4 +1,4 @@
-﻿---
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -20,6 +20,7 @@ spec:
       containers:
         - name: seatable-mysql
           image: "docker.io/beclab/mariadb:11.4.3-noble"
+          args: ["--innodb_snapshot_isolation=OFF"]
           lifecycle:
             preStop:
               exec:
@@ -33,20 +34,17 @@ spec:
                       shutdown || \
                     pkill -SIGTERM mariadbd
           env:
-            - name: PGID
-              value: "0"
-            - name: PUID
-              value: "0"
             - name: TZ
               value: "Etc/UTC"
-            - name: DISPLAY
-              value: ":0"
             - name: MYSQL_ROOT_PASSWORD
-              value: "seatable"
+              valueFrom:
+                secretKeyRef:
+                  name: seatable-secrets
+                  key: MYSQL_ROOT_PASSWORD
             - name: MYSQL_LOG_CONSOLE
               value: "true"
             - name: MARIADB_AUTO_UPGRADE
-              value: "0"
+              value: "1"
           ports:
             - name: mysql
               containerPort: 3306
@@ -56,11 +54,11 @@ spec:
               mountPath: /var/lib/mysql
           resources:
             requests:
-              cpu: 50m
-              memory: 512Mi
+              cpu: 100m
+              memory: 1Gi
             limits:
-              cpu: 1000m
-              memory: 2000Mi
+              cpu: "1"
+              memory: 3Gi
           livenessProbe:
             exec:
               command:
@@ -72,18 +70,20 @@ spec:
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - "/usr/local/bin/healthcheck.sh"
+                - "--connect"
+                - "--innodb_initialized"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           securityContext:
             runAsUser: 0
       volumes:
         - name: mysql-data
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: "{{ .Values.userspace.appData }}/opt/seatable/mysql-data"
-              {{- else }}
-            path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/mysql-data"
-              {{- end }}
-            {{- else }}
-            path: "{{ .Values.userspace.appData }}/seatable/opt/seatable/mysql-data"
-            {{- end }}
             type: DirectoryOrCreate
