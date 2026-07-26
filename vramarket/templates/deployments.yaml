@@ -1,0 +1,94 @@
+# Deployment control plane : m01(K8s-side)+m03+m04+m05+m09+m10, une image,
+# modules lancés en coroutines dans le même process (main.py assembleur).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vramarket
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ (index .Values.workloads "vramarket").replicaCount }}
+  selector:
+    matchLabels: {app: vramarket-control}
+  template:
+    metadata:
+      labels: {app: vramarket-control}
+    spec:
+      serviceAccountName: vramarket-control
+      securityContext:
+        runAsUser: 1000
+        runAsNonRoot: true
+      containers:
+        - name: control
+          image: {{ .Values.control.image }}
+          imagePullPolicy: Always
+          ports:
+            - {containerPort: 8080, name: http}
+          env:
+            - {name: PAYMENT_RAIL, value: {{ .Values.payment.rail | quote }}}
+            - name: ESCROW_MARGIN
+              value: '{{ .Values.olaresEnv.ESCROW_MARGIN | default "1.20" }}'
+            - name: X402_ESCROW_ADDRESS
+              value: '{{ .Values.olaresEnv.X402_ESCROW_ADDRESS }}'
+            - name: X402_ESCROW_KEY
+              value: '{{ .Values.olaresEnv.X402_ESCROW_KEY }}'
+            - name: BASE_RPC_URL
+              value: '{{ .Values.olaresEnv.BASE_RPC_URL | default "https://mainnet.base.org" }}'
+            - name: VRAMARKET_NS
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          resources:
+            requests:
+              cpu: {{ .Values.control.resources.requests.cpu }}
+              memory: {{ .Values.control.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.control.resources.limits.cpu }}
+              memory: {{ .Values.control.resources.limits.memory }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 10
+---
+# DaemonSet agent : m02+m06+m07+m08 sur chaque nœud GPU (label HAMi/Olares).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: vramarket-agent
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: {app: vramarket-agent}
+  template:
+    metadata:
+      labels:
+        app: vramarket-agent
+        # labels requis par hami-scheduler / app-service (pattern apps GPU Olares)
+        applications.app.bytetrade.io/name: vramarket
+        applications.app.bytetrade.io/raw-app-name: vramarket
+        applications.app.bytetrade.io/owner: {{ .Release.Namespace | trimPrefix "vramarket-" }}
+        io.bytetrade.app: "true"
+    spec:
+      serviceAccountName: vramarket-agent
+      # pas de nodeSelector ni nvidia.com/gpumem : le GPU est injecté par
+      # l'enveloppe accelerator du manifest via le compute-binding de l'app
+      containers:
+        - name: agent
+          image: {{ .Values.agent.image }}
+          imagePullPolicy: Always
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            - name: PROVIDER_DID
+              value: "{{ .Values.olaresEnv.PROVIDER_DID }}"
+            - name: NODE_ED25519_KEY
+              value: "{{ .Values.olaresEnv.NODE_ED25519_KEY }}"
+          securityContext:
+            runAsUser: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi

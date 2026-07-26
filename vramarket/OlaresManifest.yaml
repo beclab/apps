@@ -1,0 +1,83 @@
+# OlaresManifest.yaml — vramarket (apiVersion v3, cible Olares >= 1.12.6)
+# Modèle MVP : install mono-utilisateur (l'owner Olares = le provider qui
+# loue son GPU). Les locataires externes passent par l'entrée + x402.
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: v3
+metadata:
+  name: vramarket
+  appid: vramarket
+  title: VRAMarket
+  description: Peer-to-peer VRAM rental marketplace orchestrated over Olares GPU memory-slicing
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  version: 0.1.13
+  categories:
+    - AI
+entrances:
+  - name: vramarket
+    host: vramarket              # Service templates/service.yaml
+    port: 8080
+    title: VRAMarket
+    authLevel: private
+spec:
+  versionName: '0.1.0'
+  developer: vramarket
+  website: https://github.com/jeffreyturov-dev/vramarket
+  sourceCode: https://github.com/jeffreyturov-dev/vramarket
+  submitter: vramarket
+  runAsUser: true
+  supportArch:
+    - amd64
+  # Enveloppe = somme des 2 workloads (control CPU + agent GPU 2 GiB réserve).
+  # Mode cpu : scheduling de repli ; mode nvidia : requis pour le DaemonSet agent.
+  accelerator:
+    - mode: cpu
+      requiredCpu: "1"
+      limitedCpu: "4"
+      requiredMemory: 1Gi
+      limitedMemory: 4Gi
+      requiredDisk: 2Gi
+      limitedDisk: 10Gi
+    - mode: nvidia
+      supportMultiCard: false      # le slicing multi-cartes est géré par m06, pas par le chart
+      supportMultiNodes: true      # DaemonSet agent sur tous les nœuds GPU (cross-node m08)
+      requiredCpu: "1"
+      limitedCpu: "4"
+      requiredMemory: 1Gi
+      limitedMemory: 4Gi
+      requiredDisk: 2Gi
+      limitedDisk: 10Gi
+      requiredGPUMemory: 2Gi       # réserve provider (PROVIDER_RESERVE_MIB de m06)
+      limitedGPUMemory: 4Gi
+permission:
+  appData: true
+  appCache: true
+options:
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+  apiTimeout: 0      # WebSocket longs (m10) : le proxy d'entrée ne coupe pas
+envs:
+  - envName: PAYMENT_RAIL
+    default: internal            # internal | x402_usdc
+  - envName: PROVIDER_DID
+    required: true               # did:olares:... saisi à l'install
+  - envName: ESCROW_MARGIN
+    default: '1.20'
+  - envName: X402_ESCROW_ADDRESS # adresse escrow Base (rail x402)
+    default: ''
+  - envName: X402_ESCROW_KEY     # hot wallet settle — injecté via --env, JAMAIS de défaut
+  - envName: PAYPAL_CLIENT_ID    # app REST PayPal (rail paypal) — developer.paypal.com
+    default: ''
+  - envName: PAYPAL_CLIENT_SECRET # injecté via --env, JAMAIS de défaut
+  - envName: PAYPAL_MODE         # live | sandbox
+    default: 'live'
+  - envName: PAYPAL_CURRENCY
+    default: 'EUR'
+  - envName: NODE_ED25519_KEY    # seed ed25519 base64 (identité nœud m02) — généré à l'install
+  - envName: BASE_RPC_URL
+    default: 'https://mainnet.base.org'
+# Uniquement les Deployment/StatefulSet — le DaemonSet agent est exclu (1/nœud).
+workloadReplicas:
+  vramarket: 1
