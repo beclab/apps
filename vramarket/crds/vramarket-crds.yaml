@@ -1,0 +1,212 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vramleases.vramarket.olares
+spec:
+  group: vramarket.olares
+  scope: Namespaced
+  names:
+    plural: vramleases
+    singular: vramlease
+    kind: VRAMLease
+    shortNames: [vrlease]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: VRAM_MiB
+          type: integer
+          jsonPath: .spec.vramMib
+        - name: Node
+          type: string
+          jsonPath: .spec.nodeName
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [lesseeDid, providerDid, vramMib, agreedPricePerGibHour]
+              properties:
+                lesseeDid: {type: string}
+                providerDid: {type: string}
+                nodeName: {type: string}
+                gpuUuid: {type: string}
+                vramMib: {type: integer, minimum: 256, maximum: 30720}
+                agreedPricePerGibHour: {type: number, minimum: 0}
+                durationS: {type: integer, minimum: 300}
+                maxLatencyMs: {type: number}
+                imageDigest:
+                  type: string
+                  pattern: '^sha256:[0-9a-f]{64}$'
+                lesseeZone: {type: string}
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [INTENT, FUNDED, RUNNING, MIGRATING, SETTLING, CLOSED, SLASHED]
+                history:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      from: {type: string}
+                      to: {type: string}
+                      ts: {type: number}
+                failoverCount: {type: integer}
+                settleReason: {type: string}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vramoffers.vramarket.olares
+spec:
+  group: vramarket.olares
+  scope: Namespaced
+  names:
+    plural: vramoffers
+    singular: vramoffer
+    kind: VRAMOffer
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [providerDid, nodeName, gpuUuid, vramMib, pricePerGibHour]
+              properties:
+                providerDid: {type: string}
+                nodeName: {type: string}
+                gpuUuid: {type: string}
+                vramMib: {type: integer, minimum: 256, maximum: 30720}
+                pricePerGibHour: {type: number, minimum: 0, exclusiveMinimum: true}
+                minLeaseS: {type: integer}
+                maxLeaseS: {type: integer}
+                exclusive: {type: boolean, default: false}
+            status:
+              type: object
+              properties:
+                phase: {type: string, enum: [OPEN, MATCHED, SUSPENDED, CLOSED]}
+                allocatedMib: {type: integer, minimum: 0}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vrambids.vramarket.olares
+spec:
+  group: vramarket.olares
+  scope: Namespaced
+  names: {plural: vrambids, singular: vrambid, kind: VRAMBid}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [lesseeDid, vramMib, maxPricePerGibHour, durationS, imageDigest]
+              properties:
+                lesseeDid: {type: string}
+                lesseeZone: {type: string}
+                vramMib: {type: integer, minimum: 256}
+                maxPricePerGibHour: {type: number, minimum: 0, exclusiveMinimum: true}
+                maxLatencyMs: {type: number, default: 50}
+                minGpuModelRank: {type: integer, default: 0}
+                durationS: {type: integer, minimum: 300}
+                imageDigest: {type: string, pattern: '^sha256:[0-9a-f]{64}$'}
+            status:
+              type: object
+              properties:
+                phase: {type: string, enum: [OPEN, MATCHED, CANCELLED]}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vramnodes.vramarket.olares
+spec:
+  group: vramarket.olares
+  scope: Namespaced
+  names: {plural: vramnodes, singular: vramnode, kind: VRAMNode}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: VRAM_Free_MiB
+          type: integer
+          jsonPath: .status.freeVramMib
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                providerDid: {type: string}
+                nodeName: {type: string}
+            status:
+              type: object
+              properties:
+                phase: {type: string, enum: [REGISTERING, ACTIVE, SUSPECT, DOWN, DRAINING]}
+                lastHeartbeatUnix: {type: number}
+                freeVramMib: {type: integer}
+                inventoryFingerprint: {type: string}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vramaccounts.vramarket.olares
+spec:
+  group: vramarket.olares
+  scope: Namespaced
+  names: {plural: vramaccounts, singular: vramaccount, kind: VRAMAccount}
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources: {status: {}}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                ownerDid: {type: string}
+            status:
+              type: object
+              properties:
+                balance: {type: number}
+                entries:                 # append-only, double-entrée
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      ts: {type: number}
+                      dr: {type: number}
+                      cr: {type: number}
+                      memo: {type: string}
+                      txHash: {type: string}   # preuve on-chain (rail x402)
+                      network: {type: string}  # "base" | ""
