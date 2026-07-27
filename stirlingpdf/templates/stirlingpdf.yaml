@@ -1,4 +1,5 @@
-﻿{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+﻿{{- $enableLogin := .Values.olaresEnv.SECURITY_ENABLELOGIN | default "true" | toString -}}
+{{- $enableStorage := .Values.olaresEnv.STORAGE_ENABLED | default "true" | toString -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -21,9 +22,12 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: stirlingpdf
+      annotations:
+        # Force rollout when login/storage app envs change.
+        checksum/login-env: {{ printf "%s:%s:%s" $enableLogin $enableStorage (.Values.olaresEnv.SECURITY_INITIALLOGIN_USERNAME | default "admin" | toString) | sha256sum }}
     spec:
       containers:
-        - image: docker.io/beclab/stirling-tools-stirling-pdf:2.4.5-fat
+        - image: docker.io/stirlingtools/stirling-pdf:2.14.2-fat
           name: stirlingpdf
           ports:
             - containerPort: 8080
@@ -36,6 +40,25 @@ spec:
               value: Etc/UTC
             - name: DISPLAY
               value: ':0'
+            # Direct env bindings so applyOnChange re-renders + restarts this workload.
+            - name: SECURITY_ENABLELOGIN
+              value: {{ $enableLogin | quote }}
+            - name: DOCKER_ENABLE_SECURITY
+              value: {{ $enableLogin | quote }}
+            - name: STORAGE_ENABLED
+              value: {{ $enableStorage | quote }}
+            - name: STORAGE_PROVIDER
+              value: "local"
+            - name: STORAGE_LOCAL_BASEPATH
+              value: "/storage"
+            {{- if eq $enableLogin "true" }}
+            - name: SECURITY_INITIALLOGIN_USERNAME
+              value: {{ .Values.olaresEnv.SECURITY_INITIALLOGIN_USERNAME | default "admin" | quote }}
+            {{- if .Values.olaresEnv.SECURITY_INITIALLOGIN_PASSWORD }}
+            - name: SECURITY_INITIALLOGIN_PASSWORD
+              value: {{ .Values.olaresEnv.SECURITY_INITIALLOGIN_PASSWORD | quote }}
+            {{- end }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: stirlingpdf-config
@@ -57,9 +80,12 @@ spec:
               name: logs
             - mountPath: /pipeline/
               name: pipeline
+            - mountPath: /storage
+              name: file-storage
           livenessProbe:
             httpGet:
-              path: /
+              # / returns 401 when SECURITY_ENABLELOGIN=true; status endpoint stays public.
+              path: /api/v1/info/status
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
@@ -68,11 +94,11 @@ spec:
             timeoutSeconds: 5
           readinessProbe:
             httpGet:
-              path: /
+              path: /api/v1/info/status
               port: 8080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 6
             successThreshold: 1
             timeoutSeconds: 5
 
@@ -80,23 +106,27 @@ spec:
         - name: training-data
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/trainingData{{ else }}{{ .Values.userspace.appData }}/{{ .Release.Name }}/trainingData{{ end }}'
+            path: '{{ .Values.userspace.appData }}/trainingData'
         - name: extra-configs
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/extraConfigs{{ else }}{{ .Values.userspace.appData }}/{{ .Release.Name }}/extraConfigs{{ end }}'
+            path: '{{ .Values.userspace.appData }}/extraConfigs'
         - name: custom-files
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/customFiles{{ else }}{{ .Values.userspace.appData }}/{{ .Release.Name }}/customFiles{{ end }}'
+            path: '{{ .Values.userspace.appData }}/customFiles'
         - name: logs
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/logs{{ else }}{{ .Values.userspace.appData }}/{{ .Release.Name }}/logs{{ end }}'
+            path: '{{ .Values.userspace.appData }}/logs'
         - name: pipeline
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/pipeline{{ else }}{{ .Values.userspace.appData }}/{{ .Release.Name }}/pipeline{{ end }}'
+            path: '{{ .Values.userspace.appData }}/pipeline'
+        - name: file-storage
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/storage'
       restartPolicy: Always
 
 ---
