@@ -1,7 +1,6 @@
 {{- $appDomainENV := split "," .Values.domain.openwebui -}}
 {{- $appDomain := index $appDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
-{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $persistSecretKey := true -}}
 {{- if hasKey $oe "ENABLE_WEBUI_SECRET_KEY_PERSIST" -}}
@@ -133,7 +132,7 @@ spec:
               mountPath: /scripts
               readOnly: true
         - name: openwebui
-          image: 'docker.io/openwebui/open-webui:0.10.2'
+          image: 'docker.io/openwebui/open-webui:0.11.0'
           ports:
             - containerPort: 8080
 
@@ -168,8 +167,13 @@ spec:
               value: "0"
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
+            {{- if .Values.olaresEnv.HF_TOKEN }}
             - name: HF_TOKEN
-              value: "{{ .Values.olaresEnv.HF_TOKEN }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+            {{- end }}
 {{- else }}
             - name: HF_HUB_OFFLINE
               value: "1"
@@ -179,7 +183,7 @@ spec:
             - name: CORS_ALLOW_ORIGIN
               value: "*"
             - name: USER_AGENT
-              value: "OpenWebUI/0.10.2"
+              value: "OpenWebUI/0.11.0"
             - name: WEBSOCKET_EVENT_CALLER_TIMEOUT
               value: "600"
             - name: RAG_EMBEDDING_ENGINE
