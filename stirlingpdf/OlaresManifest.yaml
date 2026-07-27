@@ -9,7 +9,7 @@ metadata:
   description: A locally hosted one-stop shop for all your PDF needs.
   icon: https://app.cdn.olares.com/appstore/stirlingpdf/icon.png
   appid: stirlingpdf
-  version: '1.0.11'
+  version: '1.0.12'
   title: Stirling-PDF
   categories:
   - Productivity_v112  
@@ -21,7 +21,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '2.4.5-fat'
+  versionName: '2.14.2-fat'
   featuredImage: https://app.cdn.olares.com/appstore/stirlingpdf/1.jpg
   promoteImage:
   - https://app.cdn.olares.com/appstore/stirlingpdf/1.jpg
@@ -45,23 +45,28 @@ spec:
 
     Find complete feature list at: https://github.com/Stirling-Tools/Stirling-PDF?tab=readme-ov-file#features
   upgradeDescription: |
-    Stirling-PDF version 2.4.5
+    v1.0.12: Upgrade Stirling-PDF from 2.4.5 to 2.14.2-fat.
 
-    Desktop Changes:
-    - Windows desktop MSI now supports headless installation with custom parameters to set up server URL and login mode
-    - SSO UI improvements and styling changes
-    - Support for login method restrictions in desktop
-    - Remembers last entered self-host URL for easy reconnection
+    Chart / runtime:
+    - Default entrance authLevel=internal (VPN/LAN); set public in Settings for Internet access without VPN
+    - SECURITY_ENABLELOGIN default true; login/storage envs bound on the container so Settings applyOnChange restarts the pod
+    - Drop SYSTEM_FRONTENDURL; health probes use /api/v1/info/status; persist /storage under appData
+    - Drop Olares 1.12.3 hostPath branching (always use appData/<dir> paths)
 
-    General Changes:
-    - SSO functionality cleanups (more improvements coming soon)
-    - New strict mode for PDF/A conversion for cases where conversion isn't perfect
-    - Redaction improvements with updated embedPDF v2.4.0 and unified redaction mode support
+    Highlights since 2.4.5:
+    - New file management UI (files on the left, tools on the right) and optional server-side folder storage / My Files
+    - JPDFium-powered merge and split with up to ~99% less memory usage; JDK 25 runtime
+    - Shared signing UI restored; login disclaimer for business deployments
+    - MCP page (WIP), Ctrl+A text selection in the PDF viewer, default language en-US
+    - Settings page listing third-party frontend/backend licenses
+    - Docker image cleanup (unused deps removed) and assorted security fixes
+    - Hotfix for certain Postgres environments failing to load user data (2.14.2)
+    - Fixes for certificate signing visibility, rearrange-pages failures, Multi Tool rotation, and more
 
-    Bug Fixes:
-    - SSO auto login mode now working correctly
+    Note: Upstream recommends a backup before large jumps (especially around 2.12.0).
 
-    Full release note at: https://github.com/Stirling-Tools/Stirling-PDF/releases/tag/v2.4.5
+    Full release notes: https://github.com/Stirling-Tools/Stirling-PDF/releases
+    Latest tag: https://github.com/Stirling-Tools/Stirling-PDF/releases/tag/v2.14.2
   developer: Stirling PDF
   website: https://www.stirlingpdf.com/
   sourceCode: https://github.com/Stirling-Tools/Stirling-PDF
@@ -87,10 +92,41 @@ options:
   - name: olares
     type: system
     version: '>=1.12.6-0'
+envs:
+  - envName: SECURITY_ENABLELOGIN
+    type: bool
+    required: false
+    default: "true"
+    editable: true
+    applyOnChange: true
+    description: "Enable login/auth on the Stirling-PDF server. Default true (needed for Windows/desktop and My Files). Do not edit the stirlingpdf-config ConfigMap in Control Hub — change this setting here."
+  - envName: SECURITY_INITIALLOGIN_USERNAME
+    type: string
+    required: false
+    default: "admin"
+    editable: true
+    applyOnChange: true
+    description: "Initial admin username used when login is first enabled."
+  - envName: SECURITY_INITIALLOGIN_PASSWORD
+    type: password
+    required: false
+    editable: true
+    applyOnChange: true
+    description: "Initial admin password used when login is first enabled. Leave empty to skip setting a password via env."
+  - envName: STORAGE_ENABLED
+    type: bool
+    required: false
+    default: "true"
+    editable: true
+    applyOnChange: true
+    description: "Enable server-side My Files storage so web and desktop clients share the same files (requires SECURITY_ENABLELOGIN=true). Session-only uploads stay local and will not sync."
 entrances:
 - name: stirlingpdf
   port: 8080
   host: stirlingpdf
   title: Stirling-PDF
   icon: https://app.cdn.olares.com/appstore/stirlingpdf/icon.png
+  # internal: VPN/LAN access without Olares SSO (expected for Windows/desktop).
+  # For direct Internet access without VPN, change entrance authLevel to public in Settings.
+  authLevel: internal
   openMethod: window
