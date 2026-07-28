@@ -13,20 +13,21 @@ data:
     SIMILARITY_MEASURE = "cosine" # "cosine" or "dot"
     KEEP_ALIVE = "30m" # How long to keep Ollama models loaded into memory. Increased from 5m to reduce model reload overhead. (Instead of using -1 use "-1m")
 
+    # API keys are injected at pod start from Secret {{ .Release.Name }}-secrets (not stored in ConfigMap).
     [MODELS.OPENAI]
-    API_KEY = "{{ .Values.olaresEnv.OPENAI_APIKEY }}"
+    API_KEY = ""
 
     [MODELS.GROQ]
-    API_KEY = "{{ .Values.olaresEnv.GROQ_APIKEY }}"
+    API_KEY = ""
 
     [MODELS.ANTHROPIC]
-    API_KEY = "{{ .Values.olaresEnv.ANTHROPIC_APIKEY }}"
+    API_KEY = ""
 
     [MODELS.GEMINI]
-    API_KEY = "{{ .Values.olaresEnv.GEMINI_APIKEY }}"
+    API_KEY = ""
 
     [MODELS.CUSTOM_OPENAI]
-    API_KEY = "{{ .Values.olaresEnv.CUSTOM_OPENAI_APIKEY }}"
+    API_KEY = ""
     API_URL = "{{ .Values.olaresEnv.CUSTOM_OPENAI_URL }}"
     MODEL_NAME = "{{ .Values.olaresEnv.CUSTOM_OPENAI_MODEL_NAME }}"
 
@@ -37,11 +38,7 @@ data:
     {{- else }}
     NAME = "Ollama" # Default connection name for Ollama
     {{- end }}
-    {{- if .Values.olaresEnv.OLLAMA_API_KEY }}
-    API_KEY = "{{ .Values.olaresEnv.OLLAMA_API_KEY }}" # Ollama API key (if required)
-    {{- else }}
-    API_KEY = "" # Ollama typically doesn't require API key, leave empty
-    {{- end }}
+    API_KEY = ""
 
     [MODELS.DEEPSEEK]
     API_KEY = ""
@@ -195,9 +192,71 @@ spec:
         - name: app-cache-root
           mountPath: /new-data
       - name: getconfigfile
-        image: "docker.io/itzcrazykns1337/vane:main"
+        image: "docker.io/itzcrazykns1337/vane:v1.12.2"
         imagePullPolicy: IfNotPresent
-        command: ["sh", "-c", "if [ ! -f '/home/vane/config.toml' ]; then cp '/home/vane-config/config.toml' '/home/vane/config.toml'; fi"]
+        command: ["node", "-e"]
+        args:
+          - |
+            const fs = require('fs');
+            const cfgPath = '/home/vane/config.toml';
+            const tplPath = '/home/vane-config/config.toml';
+            if (!fs.existsSync(cfgPath)) {
+              fs.copyFileSync(tplPath, cfgPath);
+            }
+            let t = fs.readFileSync(cfgPath, 'utf8');
+            const sections = {
+              'MODELS.OPENAI': 'OPENAI_APIKEY',
+              'MODELS.GROQ': 'GROQ_APIKEY',
+              'MODELS.ANTHROPIC': 'ANTHROPIC_APIKEY',
+              'MODELS.GEMINI': 'GEMINI_APIKEY',
+              'MODELS.CUSTOM_OPENAI': 'CUSTOM_OPENAI_APIKEY',
+              'MODELS.OLLAMA': 'OLLAMA_API_KEY',
+            };
+            for (const [section, envName] of Object.entries(sections)) {
+              const raw = process.env[envName] || '';
+              // Skip empty values so UI-managed keys are not wiped on restart.
+              if (!raw) continue;
+              const escaped = raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+              const secRe = section.replace(/\./g, '\\.');
+              const re = new RegExp(
+                '(\\[' + secRe + '\\][\\s\\S]*?API_KEY\\s*=\\s*)(?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\')'
+              );
+              if (re.test(t)) {
+                t = t.replace(re, '$1"' + escaped + '"');
+              }
+            }
+            fs.writeFileSync(cfgPath, t);
+        env:
+        - name: OPENAI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: OPENAI_APIKEY
+        - name: GROQ_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: GROQ_APIKEY
+        - name: ANTHROPIC_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ANTHROPIC_APIKEY
+        - name: GEMINI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: GEMINI_APIKEY
+        - name: CUSTOM_OPENAI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: CUSTOM_OPENAI_APIKEY
+        - name: OLLAMA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: OLLAMA_API_KEY
         volumeMounts:
         - mountPath: /home/vane
           name: appconfig
@@ -228,7 +287,7 @@ spec:
           runAsUser: 0
       containers:
       - name: vane
-        image: "docker.io/itzcrazykns1337/vane:main"
+        image: "docker.io/itzcrazykns1337/vane:v1.12.2"
         env:
         - name: SEARXNG_API_URL
           value: {{ .Values.olaresEnv.SEARXNG_API_URL | default "" | quote }}
@@ -243,7 +302,10 @@ spec:
           value: "{{ .Values.olaresEnv.OLLAMA_MODEL }}"
         {{- end }}
         - name: DATABASE_URL
-          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.vane }}"
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: DATABASE_URL
         - name: HOME
           value: "/home/vane"
         - name: HF_HOME
