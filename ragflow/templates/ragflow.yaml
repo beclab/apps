@@ -16,17 +16,52 @@ spec:
         app: ragflow
     spec:
       initContainers:
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_ragflow_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_ragflow_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/ragflow -> appData/ragflow..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: ragflow-logs-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: ragflow-logs
+            mountPath: /new-data
       - name: init-chmod-data
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /appcache /ragflow/logs
+            chown -R 1000:1000 /ragflow/logs
         resources: {}
         volumeMounts:
-          - name: appcache
-            mountPath: /appcache
           - name: ragflow-logs
             mountPath: /ragflow/logs
         terminationMessagePath: /dev/termination-log
@@ -59,19 +94,28 @@ spec:
         - name: MYSQL_USER
           value: "{{ .Values.mysql.username }}"
         - name: MYSQL_PASSWORD
-          value: "{{ .Values.mysql.password }}"
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: MYSQL_PASSWORD
         - name: MYSQL_DBNAME
           value: "{{ .Values.mysql.databases.rag_flow }}"
         - name: ES_HOST
           value: 'es01'
         - name: ELASTIC_PASSWORD
-          value: 'infini_rag_flow'
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ELASTIC_PASSWORD
         - name: REDIS_HOST
           value: 'redis'
         - name: REDIS_PORT
           value: '6379'
         - name: REDIS_PASSWORD
-          value: 'infini_rag_flow'
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: REDIS_PASSWORD
         - name: MINIO_HOST
           value: 'minio'
         - name: MINIO_PORT
@@ -79,7 +123,10 @@ spec:
         - name: MINIO_USER
           value: 'rag_flow'
         - name: MINIO_PASSWORD
-          value: 'infini_rag_flow'
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: MINIO_PASSWORD
         resources:
           limits:
             cpu: "4"
@@ -115,29 +162,13 @@ spec:
             mountPath: /ragflow/logs
       volumes:
       - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/ragflow'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/ragflow'
-          {{- end }}
-          type: DirectoryOrCreate
-        name: appcache
-      - hostPath:
-          {{- if .Values.sysVersion }}
-            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
-          path: '{{ .Values.userspace.appCache }}/ragflow'
-            {{- else }}
-          path: '{{ .Values.userspace.appCache }}/ragflow/ragflow'
-            {{- end }}
-          {{- else }}
-          path: '{{ .Values.userspace.appCache }}/ragflow/ragflow'
-          {{- end }}
+          path: '{{ .Values.userspace.appData }}/ragflow'
           type: DirectoryOrCreate
         name: ragflow-logs
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/ragflow'
+          type: DirectoryOrCreate
+        name: ragflow-logs-legacy
 ---
 apiVersion: v1
 kind: Service
