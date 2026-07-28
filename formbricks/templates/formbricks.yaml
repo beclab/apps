@@ -74,7 +74,10 @@ spec:
               fi
           env:
             - name: DATABASE_URL
-              value: {{ $databaseUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: DATABASE_URL
           resources:
             requests:
               cpu: 50m
@@ -96,7 +99,10 @@ spec:
               fi
           env:
             - name: DATABASE_URL
-              value: {{ $hubDatabaseUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: HUB_DATABASE_URL
           resources:
             requests:
               cpu: 50m
@@ -122,7 +128,10 @@ spec:
             - name: NEXTAUTH_URL
               value: "https://{{ $formbricksDomain }}"
             - name: DATABASE_URL
-              value: {{ $databaseUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: DATABASE_URL
             - name: NEXTAUTH_SECRET
               valueFrom:
                 secretKeyRef:
@@ -139,11 +148,10 @@ spec:
                   name: formbricks-secrets
                   key: CRON_SECRET
             - name: REDIS_URL
-              {{- if .Values.redis.password }}
-              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}"
-              {{- else }}
-              value: "redis://{{ .Values.redis.host }}:{{ .Values.redis.port }}"
-              {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: REDIS_URL
             - name: LOG_LEVEL
               value: info
             - name: HUB_API_KEY
@@ -188,7 +196,10 @@ spec:
             {{- end }}
             {{- if .Values.olaresEnv.SMTP_PASSWORD }}
             - name: SMTP_PASSWORD
-              value: "{{ .Values.olaresEnv.SMTP_PASSWORD }}"
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: SMTP_PASSWORD
             {{- end }}
             - name: EMAIL_VERIFICATION_DISABLED
               value: "1"
@@ -224,7 +235,10 @@ spec:
                   name: formbricks-secrets
                   key: HUB_API_KEY
             - name: DATABASE_URL
-              value: {{ $hubDatabaseUrl | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: HUB_DATABASE_URL
           ports:
             - containerPort: 8080
           readinessProbe:
@@ -253,7 +267,10 @@ spec:
             - name: CUBEJS_DB_USER
               value: "{{ .Values.postgres.username }}"
             - name: CUBEJS_DB_PASS
-              value: "{{ .Values.postgres.password }}"
+              valueFrom:
+                secretKeyRef:
+                  name: formbricks-secrets
+                  key: CUBEJS_DB_PASS
             - name: CUBEJS_DB_PORT
               value: "{{ .Values.postgres.port }}"
             - name: CUBEJS_API_SECRET
@@ -336,6 +353,18 @@ metadata:
   name: formbricks-secrets
   namespace: {{ .Release.Namespace }}
 type: Opaque
+stringData:
+  DATABASE_URL: {{ $databaseUrl | quote }}
+  HUB_DATABASE_URL: {{ $hubDatabaseUrl | quote }}
+  {{- if .Values.redis.password }}
+  REDIS_URL: {{ printf "redis://:%s@%s:%s" .Values.redis.password .Values.redis.host (.Values.redis.port | toString) | quote }}
+  {{- else }}
+  REDIS_URL: {{ printf "redis://%s:%s" .Values.redis.host (.Values.redis.port | toString) | quote }}
+  {{- end }}
+  CUBEJS_DB_PASS: {{ .Values.postgres.password | quote }}
+  {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+  SMTP_PASSWORD: {{ .Values.olaresEnv.SMTP_PASSWORD | quote }}
+  {{- end }}
 data:
   NEXTAUTH_SECRET: YzZiYmE4MDljZjU2YTc2OGUxMTRlZTZmYjRiY2FjZTViZDEzYzFmM2EzNWQ1MWQzZDZiOTNjZDViYTY1YjNiMQ==
   ENCRYPTION_KEY: OWFiZDFkMGM1MDRiYzAyNzQxOWFmYmZjMzJiZmYwZjJlYTU3ODgwNmVlNGM2ZjY4NmZhZTUzOWI2NTk0MzNkZA==
