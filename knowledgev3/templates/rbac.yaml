@@ -1,0 +1,130 @@
+{{- /*
+  Cluster-wide permissions required by the knowledge backend at runtime.
+
+  This file defines two groups of resources:
+
+  1. The `knowledge-cluster-view` ServiceAccount, ClusterRole and matching
+     ClusterRoleBinding for in-cluster Kubernetes API access (see
+     "Why a ClusterRole" below).
+  2. Per-provider ClusterRoleBindings that bind that same SA to the
+     provider-proxy ClusterRoles defined by other Olares framework
+     components (cookie / download / search3). See "Provider bindings"
+     below.
+
+  Why a ClusterRole (not a namespace Role):
+  The knowledge container mints short-lived ServiceAccount tokens for
+  per-user `user-backend` SAs that live in `user-system-<username>` namespaces:
+
+      POST /api/v1/namespaces/user-system-<u>/serviceaccounts/user-backend/token
+      => verb=create on resources=serviceaccounts/token (apiGroup="") in <foreign ns>
+
+  A namespace-scoped Role can only grant access in its own namespace; minting
+  tokens in *every* user-system namespace requires cluster scope.
+
+  The other resources (statefulsets/daemonsets/namespaces) match the v2
+  wise/knowledge sub-chart so existing read-paths in the knowledge code keep
+  working. Trim later if/when we audit which APIs are actually used.
+
+  Provider bindings:
+  The knowledge / vectorcrawl containers call three Olares framework
+  upstreams that sit behind a provider-proxy sidecar. The sidecar gates
+  the request with a TokenReview + nonResourceURLs SubjectAccessReview,
+  so the SA needs an explicit ClusterRoleBinding to each upstream's
+  ClusterRole. Currently in scope:
+
+      ClusterRole                                  → consumed via
+      backend:integration-provider-svc-cookie      COOKIE_URL
+      backend:download-provider                    DOWNLOAD_URL
+      backend:search3-provider                     SEARCH_URL
+
+  Do NOT delete any of these bindings without also retargeting the
+  matching *_URL env in templates/deployment.yaml to a sharedentrances-*
+  Service — the symptom of a missing binding is a hard-to-diagnose 5s
+  client-side timeout in vectorcrawl (its cookie HTTP client uses a
+  tight 5s budget for provider-proxy + apiserver SAR round-trips).
+
+  The v2 wise/knowledge sub-chart additionally bound ytdlp / rssubscribe
+  / twitter providers; those were intentionally removed during the v3
+  split because their URLs now resolve through v3 `sharedentrances-*`
+  Services (no provider-proxy hop, no RBAC needed). See the
+  upgradeDescription in OlaresManifest.yaml.
+
+  knowledge is a v3 shared app (installed once cluster-wide), so static
+  cluster-unique names are safe.
+*/ -}}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: knowledge-cluster-view
+  namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: knowledge-cluster-view
+rules:
+  - apiGroups: ['*']
+    resources:
+      - statefulsets
+      - daemonsets
+      - namespaces
+      - serviceaccounts/token
+    verbs: ['*']
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: knowledge-cluster-view
+subjects:
+  - kind: ServiceAccount
+    name: knowledge-cluster-view
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: knowledge-cluster-view
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backend:{{ .Release.Namespace }}:integration-provider-svc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backend:integration-provider-svc-cookie
+subjects:
+  - kind: ServiceAccount
+    name: knowledge-cluster-view
+    namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backend:{{ .Release.Namespace }}:download-provider-svc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backend:download-provider
+subjects:
+  - kind: ServiceAccount
+    name: knowledge-cluster-view
+    namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: backend:{{ .Release.Namespace }}:search3-provider-svc
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: backend:search3-provider
+subjects:
+  - kind: ServiceAccount
+    name: knowledge-cluster-view
+    namespace: {{ .Release.Namespace }}

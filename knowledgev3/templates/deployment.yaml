@@ -1,0 +1,401 @@
+{{- /*
+  knowledge — shared knowledge backend for Wise (v3 shared app, admin-only).
+
+  Three containers in one Pod:
+    - knowledge      (knowledge-base-api, port 3010)
+    - vectorcrawl    (vector indexing worker, port 8080)
+    - flaresolverr   (Cloudflare/CAPTCHA bypass, used in-pod via localhost)
+
+  Service `rss-svc` keeps the v2 wise/knowledge name so the Wise frontend
+  image (TermiPass docker/wise/wise.conf) works unchanged — it hardcodes
+  `rss-svc.knowledge-shared:{3010,3100}` as nginx upstreams.
+
+  Cross-app calls to ytdlpv3 / rssubscribev3 / twitterv3 go via their
+  v3 shared entrance Services over Kubernetes DNS. Namespace pattern
+  follows `<appid>-shared` (per platform v3 install convention); adjust if
+  the actual install namespace differs.
+*/ -}}
+{{ $dbbackup_rootpath := printf "%s%s" .Values.rootPath "/rootfs/middleware-backup" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: knowledge
+    applications.app.bytetrade.io/author: bytetrade.io
+spec:
+  replicas: {{ .Values.workloads.knowledgev3.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: knowledge
+  template:
+    metadata:
+      labels:
+        app: knowledge
+      annotations:
+        # Roll the Pod whenever the sidecar's proxy config changes.
+        checksum/nginx-config: {{ include (print $.Template.BasePath "/nginx-configmap.yaml") . | sha256sum }}
+    spec:
+      # The knowledge container mints tokens for per-user `user-backend`
+      # ServiceAccounts in `user-system-<username>` namespaces; that needs
+      # a SA bound to the knowledge-cluster-view ClusterRole. See rbac.yaml.
+      # Name matches what the knowledge code expects.
+      serviceAccountName: knowledge-cluster-view
+      securityContext:
+        runAsUser: 0
+        runAsNonRoot: false
+      initContainers:
+        - name: init-container
+          image: "beclab/postgres:16.0-alpine3.18"
+          command:
+            - sh
+            - '-c'
+            - >-
+              echo -e "Checking for the availability of PostgreSQL Server deployment";
+              until psql -h $PGHOST -p $PGPORT -U $PGUSER -d $PGDB -c "SELECT 1"; do
+                sleep 1; printf "-";
+              done; sleep 5;
+              echo -e " >> PostgreSQL DB Server has started";
+          env:
+            - name: PGHOST
+              value: {{ .Values.postgres.host }}
+            - name: PGPORT
+              value: "{{ .Values.postgres.port }}"
+            - name: PGUSER
+              value: "{{ .Values.postgres.username }}"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-secrets
+                  key: PG_PASSWORD
+            - name: PGDB
+              value: {{ .Values.postgres.databases.knowledge }}
+      containers:
+        - name: knowledge
+          image: "beclab/knowledge-base-api:v1.0.10"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          ports:
+            - containerPort: 3010
+              name: api
+            - containerPort: 3100
+              name: ws
+          env:
+            - name: BACKEND_URL
+              value: http://127.0.0.1:8080
+            # System services live in platform namespaces; no app-level RBAC
+            # is required to reach them via DNS.
+            - name: COOKIE_URL
+              value: http://integration-provider-svc.os-protected:28080
+            # v3 shared-app cross-call over cluster DNS. Namespace pattern: <appid>-shared.
+            - name: SUBSCRIBE_URL
+              value: http://sharedentrances-rssubscribe.rssubscribev3-shared
+            - name: UPLOAD_SAVE_PATH
+              value: '/data/'
+            - name: SEARCH_URL
+              value: 'http://search3-provider-svc.os-framework:28080'
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-secrets
+                  key: REDIS_PASSWORD
+            - name: REDIS_ADDR
+              value: "{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+            - name: PG_USERNAME
+              value: "{{ .Values.postgres.username }}"
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-secrets
+                  key: PG_PASSWORD
+            - name: PG_HOST
+              value: {{ .Values.postgres.host }}
+            - name: PG_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: PG_DATABASE
+              value: {{ .Values.postgres.databases.knowledge }}
+            - name: DOWNLOAD_URL
+              value: http://download-provider-svc.os-framework:28080
+            - name: YTDLP_DOWNLOAD_URL
+              value: http://sharedentrances-ytdlp.ytdlpv3-shared
+            - name: NATS_HOST
+              value: nats.os-platform
+            - name: NATS_PORT
+              value: "4222"
+            - name: NATS_USERNAME
+              value: {{ .Release.Namespace }}-knowledge
+            - name: NATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: nats_password
+                  name: knowledge-secrets
+            - name: NATS_DOWNLOAD_SUBJECT
+              value: os.download_status
+            - name: NATS_RSSUBSCRIBE_SUBJECT
+              value: os.rssubscribe_status
+            - name: SOCKET_URL
+              value: 'http://localhost:40010'
+            - name: BACKUP_PATH
+              value: /backup/
+            - name: BACKUP_EXTERNAL_PATH
+              value: /olares/rootfs/middleware-backup/pg_backup/
+          volumeMounts:
+            - name: pgbackup
+              mountPath: /backup
+            - name: domain-config
+              mountPath: /domain-config
+            - name: ytdlp-supportedsites
+              mountPath: /ytdlp-supportedsites
+          startupProbe:
+            tcpSocket:
+              port: 3010
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 3010
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          readinessProbe:
+            tcpSocket:
+              port: 3010
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 20m
+              memory: 50Mi
+            limits:
+              cpu: "3.5"
+              memory: 6Gi
+
+        - name: vectorcrawl
+          image: "beclab/vectorcrawl:v1.0.4"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1000
+          env:
+            - name: LISTEN_ADDR
+              value: 0.0.0.0:8080
+            - name: K8S_NAMESPACE
+              value: knowledgev3-shared
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-secrets
+                  key: REDIS_PASSWORD
+            - name: REDIS_ADDR
+              value: "{{ .Values.redis.host }}:{{ .Values.redis.port }}"
+            - name: PG_USERNAME
+              value: {{ .Values.postgres.username }}
+            - name: PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: knowledge-secrets
+                  key: PG_PASSWORD
+            - name: PG_HOST
+              value: {{ .Values.postgres.host }}
+            - name: PG_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: PG_DATABASE
+              value: {{ .Values.postgres.databases.knowledge }}
+            - name: YT_DLP_API_URL
+              value: http://sharedentrances-ytdlp.ytdlpv3-shared/api
+            - name: TWITTER_API_URL
+              value: http://sharedentrances-twitter.twitterv3-shared/api
+          ports:
+            - containerPort: 8080
+              name: backend
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 20m
+              memory: 50Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+
+        - name: flaresolverr
+          image: "beclab/flaresolverr:v0.0.2"
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 20m
+              memory: 60Mi
+            limits:
+              cpu: "2"
+              memory: 500Mi
+
+        # Reverse-proxy front door for the knowledge HTTP API. rss-svc:3010
+        # targets this sidecar (3009), which serves /download/* from the
+        # download provider-proxy and everything else from the knowledge
+        # container on 127.0.0.1:3010. See templates/nginx-configmap.yaml.
+        - name: nginx
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3009
+              name: proxy
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 3009
+            initialDelaySeconds: 5
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3009
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            # Replace the image's default main config (which also listens on
+            # 8080, colliding with vectorcrawl in this Pod). run.sh loads this
+            # exact path via `openresty -c`.
+            - name: knowledge-nginx-config
+              mountPath: /opt/bitnami/openresty/nginx/conf/nginx.conf
+              subPath: nginx.conf
+            # Dedicated SA token for the /download provider-proxy call. The
+            # Pod's auto-mounted token is 0600 root-only, unreadable by the
+            # non-root nginx worker; this projected copy is world-readable
+            # (0644) and lets us pin the audience the provider-proxy expects.
+            - name: knowledge-sa-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+
+      volumes:
+        - name: knowledge-nginx-config
+          configMap:
+            name: knowledge-nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: knowledge-sa-token
+          projected:
+            # 0644 so the nginx worker (runs as non-root) can read it.
+            defaultMode: 420
+            sources:
+              - serviceAccountToken:
+                  path: knowledge-token
+                  expirationSeconds: 3600
+                  audience: https://kubernetes.default.svc.cluster.local
+        - name: pgbackup
+          hostPath:
+            path: '{{ $dbbackup_rootpath }}/pg_backup'
+            type: DirectoryOrCreate
+        - name: domain-config
+          configMap:
+            name: domain-config
+            items:
+              - key: domain.conf
+                path: domain.conf
+        - name: ytdlp-supportedsites
+          configMap:
+            name: ytdlp-supportedsites
+            items:
+              - key: ytdlpsupported.conf
+                path: ytdlpsupported.conf
+
+---
+# Backs the (invisible, admin-only) Olares entrance for direct API access.
+# Name kept as `rss-svc` for compatibility with the Wise frontend image
+# (TermiPass `docker/wise/wise.conf` hardcodes
+# `rss-svc.knowledge-shared:{3010,3100}` as nginx upstreams).
+# Ports mirror the v2 wise/knowledge rss-svc layout.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rss-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: knowledge
+spec:
+  type: ClusterIP
+  selector:
+    app: knowledge
+  ports:
+    # HTTP API now enters through the nginx sidecar (3009) so /download/*
+    # can be split off to the download provider-proxy; everything else is
+    # forwarded to the knowledge container. Service port stays 3010 so the
+    # Wise frontend upstream (rss-svc.<ns>:3010) is unchanged.
+    - name: "knowledge-base-api"
+      protocol: TCP
+      port: 3010
+      targetPort: 3009
+    - name: "knowledge-ws-api"
+      protocol: TCP
+      port: 3100
+      targetPort: 3100
+
+---
+# v3 sharedentrance: cluster-internal canonical hop other v3 apps SHOULD
+# use to reach knowledge (port 80 -> knowledge-base-api 3010).
+# Kept separate from `rss-svc` so the legacy hostname keeps working
+# unchanged while v3 callers use the standardised endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-knowledge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: knowledge
+spec:
+  type: ClusterIP
+  selector:
+    app: knowledge
+  ports:
+    - name: "http"
+      protocol: TCP
+      port: 80
+      targetPort: 3010
