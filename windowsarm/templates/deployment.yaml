@@ -1,6 +1,6 @@
 # windowsarm config lifecycle:
 # 1) ConfigMap windows-env: first install from .Values; upgrade preserves existing (lookup).
-# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appData/windowsarm/config/.env.
+# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appCache/config/.env.
 # 3) Runtime: VERSION/CDN_HOST from /config/.env; RAM_SIZE/CPU_CORES/DISK_SIZE etc from env.
 ---
 apiVersion: v1
@@ -44,6 +44,13 @@ spec:
       labels:
         name: windows
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       initContainers:
         - name: sync-env-to-pvc
           image: docker.io/beclab/aboveos-busybox:1.37.0
@@ -107,7 +114,10 @@ spec:
             - name: USERNAME
               value: "{{ .Values.olaresEnv.USERNAME }}"
             - name: PASSWORD
-              value: "{{ .Values.olaresEnv.PASSWORD }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: PASSWORD
         {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
             - name: GPU
               value: "Y"
@@ -147,11 +157,11 @@ spec:
       terminationGracePeriodSeconds: 300
       volumes:
         - hostPath:
-            path: '{{ .Values.userspace.appCache }}'
+            path: '{{ .Values.userspace.appCache }}/storage'
             type: DirectoryOrCreate
           name: storage
         - hostPath:
-            path: '{{ .Values.userspace.appData }}/config'
+            path: '{{ .Values.userspace.appCache }}/config'
             type: DirectoryOrCreate
           name: windows-config
         - hostPath:
