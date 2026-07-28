@@ -1,0 +1,161 @@
+{{- /*
+  Full nginx.conf for the `nginx` sidecar in the knowledge Pod.
+
+  This REPLACES the bitnami-openresty image's default main config
+  (/opt/bitnami/openresty/nginx/conf/nginx.conf, which run.sh loads via
+  `openresty -c`). We ship a complete config instead of a server_blocks
+  snippet on purpose: the stock config also defines a `server { listen
+  8080; }`, and this sidecar shares the Pod's network namespace with the
+  vectorcrawl container which already binds 8080 — so keeping the default
+  would fail with "bind() to 0.0.0.0:8080 (address already in use)". Our
+  config only listens on 3009.
+
+  The sidecar is the front door for the knowledge HTTP API (rss-svc:3010
+  targets it) and splits traffic by path:
+    /download/*  -> download-server (manager) via the os-framework
+                    download provider-proxy.
+    everything   -> knowledge-base-api on 127.0.0.1:3010 (same Pod).
+
+  Why the SA token is injected for /download:
+  `download-provider-svc.os-framework:28080` gates every request with a
+  Kubernetes TokenReview + SubjectAccessReview. The sidecar attaches the
+  Pod's auto-mounted `knowledge-cluster-view` SA token (bound to the
+  `backend:download-provider` ClusterRole in rbac.yaml) — the same
+  identity the knowledge backend used when it still proxied these routes.
+  The tenant header `X-Bfl-User` is injected upstream by the BFL gateway
+  and passes straight through.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: knowledge-nginx-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: knowledge
+data:
+  nginx.conf: |
+    worker_processes  auto;
+    error_log  "/opt/bitnami/openresty/nginx/logs/error.log";
+    pid        "/opt/bitnami/openresty/nginx/tmp/nginx.pid";
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       mime.types;
+        default_type  application/octet-stream;
+
+        client_body_temp_path  "/opt/bitnami/openresty/nginx/tmp/client_body" 1 2;
+        proxy_temp_path        "/opt/bitnami/openresty/nginx/tmp/proxy" 1 2;
+        fastcgi_temp_path      "/opt/bitnami/openresty/nginx/tmp/fastcgi" 1 2;
+        scgi_temp_path         "/opt/bitnami/openresty/nginx/tmp/scgi" 1 2;
+        uwsgi_temp_path        "/opt/bitnami/openresty/nginx/tmp/uwsgi" 1 2;
+
+        sendfile           on;
+        keepalive_timeout  65;
+        server_tokens      off;
+
+        # WebSocket upgrade plumbing for /download/api/download/ws (the
+        # per-user push channel). Regular requests have an empty Upgrade
+        # header and get Connection: close; a real WS handshake carries
+        # Upgrade: websocket and gets Connection: upgrade.
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
+        }
+
+        # wise uploads (opml / cookie batch / multipart attachments) can be a
+        # few MB; mirror the backend's 100 MB cap so the proxy never truncates
+        # a request the backend would otherwise accept.
+        client_max_body_size 100m;
+
+        server {
+            listen 3009;
+
+            proxy_http_version 1.1;
+
+            # Base forwarding headers, inherited by `location /` (knowledge).
+            # NOTE: nginx stops inheriting the whole proxy_set_header set the
+            # moment a location declares its own — `location /download/` below
+            # therefore RE-declares the ones it needs.
+            proxy_set_header Host              $host;
+            proxy_set_header X-Real-IP         $remote_addr;
+            proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            # Tenant identity for the knowledge backend; forwarded as-is from
+            # the incoming request (injected upstream by the BFL gateway).
+            proxy_set_header X-Bfl-User        $http_x_bfl_user;
+
+            # Local health endpoint for the sidecar's k8s probes.
+            location = /healthz {
+                access_log off;
+                add_header Content-Type text/plain;
+                return 200 'ok\n';
+            }
+
+            # /download/* -> download-server (manager) behind the os-framework
+            # download provider-proxy — NOT knowledge. Inject the Pod's
+            # knowledge-cluster-view SA token so the provider-proxy TokenReview
+            # passes. The trailing slash strips the /download prefix, e.g.
+            # /download/api/user/preferences -> /api/user/preferences.
+            location /download/ {
+                access_by_lua_block {
+                    -- Read from the dedicated projected token (mode 0644, so the
+                    -- non-root nginx worker can read it) instead of the Pod's
+                    -- auto-mounted 0600 token which only root containers can read.
+                    local f = io.open("/var/run/secrets/tokens/knowledge-token", "r")
+                    if f then
+                        local tok = f:read("*a")
+                        f:close()
+                        if tok then
+                            tok = tok:gsub("%s+$", "")
+                            ngx.req.set_header("Authorization", "Bearer " .. tok)
+                        end
+                    end
+                    -- Pin the provider ref to a SINGLE clean value. The provider-
+                    -- proxy resolves which provider to authorize from
+                    -- X-Provider-Proxy / X-Forwarded-Host, and matches that ref
+                    -- against the backend:download-provider ClusterRole annotation.
+                    -- proxy_set_header does NOT reliably drop the gateway's inbound
+                    -- X-Forwarded-Host here (its external domain survives and our
+                    -- value gets comma-appended, which the proxy's url.Parse then
+                    -- rejects on the space -> 400). ngx.req.set_header replaces ALL
+                    -- existing instances, guaranteeing one clean value.
+                    ngx.req.set_header("X-Forwarded-Host", "download-provider-svc.os-framework:28080")
+                    ngx.req.set_header("X-Provider-Proxy", "download-provider-svc.os-framework:28080")
+                    -- The app is authenticated by the SA bearer token above; the
+                    -- browser's auth_token cookie must not leak downstream.
+                    ngx.req.clear_header("Cookie")
+                }
+
+                # Host MUST equal the provider's `provider-service-ref`
+                # (download-provider-svc.os-framework:28080) — the provider-proxy
+                # authorizer only evaluates the ClusterRole rules when the request
+                # Host matches that annotation; forwarding the browser Host yields
+                # a 403. Declaring proxy_set_header here also stops inheritance of
+                # the server-level set, so re-declare the ones we still need.
+                proxy_set_header Host              download-provider-svc.os-framework:28080;
+                proxy_set_header X-Real-IP         $remote_addr;
+                proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header X-Bfl-User        $http_x_bfl_user;
+                # WebSocket support for /download/api/download/ws. Browsers can't
+                # set X-Bfl-User on a WS handshake, but the BFL gateway injects it
+                # on the upgrade request, so the header path above still applies.
+                proxy_set_header Upgrade           $http_upgrade;
+                proxy_set_header Connection        $connection_upgrade;
+
+                proxy_pass http://download-provider-svc.os-framework:28080/;
+                proxy_read_timeout 300s;
+                proxy_send_timeout 300s;
+            }
+
+            # Everything else is the knowledge-base-api in the same Pod.
+            location / {
+                proxy_pass http://127.0.0.1:3010;
+                proxy_read_timeout 120s;
+                proxy_send_timeout 120s;
+            }
+        }
+    }

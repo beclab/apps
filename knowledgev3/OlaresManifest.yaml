@@ -1,0 +1,165 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: knowledgev3
+  appid: knowledgev3
+  icon: https://app.cdn.olares.com/appstore/wise/icon.png
+  description: Shared knowledge backend for Wise
+  title: Knowledge Backend V3 for test
+  version: '1.2.6'
+  categories:
+    - Productivity_v112
+
+# Exposed to other v3 apps (primarily wisev3 frontend) over Service DNS:
+#   http://sharedentrances-knowledge.knowledge-shared.svc.cluster.local:80
+#     -> knowledge-base-api (3010)
+# Additional in-pod ports (8080 backend-server, 3100 ws) are also exposed on
+# the same Service for callers that need them.
+sharedEntrances:
+  - name: knowledge
+    host: sharedentrances-knowledge
+    port: 0
+    title: Knowledge API
+    icon: https://app.cdn.olares.com/appstore/wise/icon.png
+    invisible: true
+    authLevel: internal
+
+# Admin-only entrance, registered with the Olares gateway for direct API
+# access (debugging, admin tooling). Not shown in the user app launcher.
+# Backed by the `rss-svc` Service (name kept for compatibility with the
+# Wise frontend image, which hardcodes `rss-svc.<knowledge-ns>` as nginx
+# upstreams).
+# Wise frontends (per-user) reach this backend over in-cluster DNS
+# directly, NOT through this entrance.
+entrances:
+  - name: knowledge
+    port: 3010
+    host: rss-svc
+    title: Knowledge API
+    icon: https://app.cdn.olares.com/appstore/wise/icon.png
+    authLevel: private
+    invisible: true
+
+# Declares every workload's replica count (v3 schema). Keys MUST match the
+# rendered Deployment metadata.name and values.yaml workloads.<name>:
+#   knowledgev3 — knowledge backend Deployment
+#               (== appid / Release.Name; 4 containers in one Pod:
+#                knowledge + vectorcrawl + flaresolverr + nginx sidecar)
+workloadReplicas:
+  knowledgev3: 1
+
+permission:
+  appData: true
+  appCache: true
+
+middleware:
+  redis:
+    namespace: knowledge
+  postgres:
+    username: knowledge
+    databases:
+      - name: knowledge
+        extensions:
+          - pg_trgm
+          - btree_gin
+
+spec:
+  versionName: '1.0.1'
+  featuredImage: https://app.cdn.olares.com/appstore/wise/1.webp
+  promoteImage:
+    - https://app.cdn.olares.com/appstore/wise/1.webp
+    - https://app.cdn.olares.com/appstore/wise/2.webp
+  fullDescription: |
+    **IMPORTANT NOTE**
+    This is a shared backend. Once installed by the Olares Admin, every Wise
+    user instance on this cluster will route its API calls to this single
+    backend via the shared entrance `sharedentrances-knowledge`.
+
+    **COMPONENTS**
+    - knowledge-base-api (port 3010): main HTTP API for the knowledge base.
+    - vectorcrawl (port 8080): vector indexing and crawl worker.
+    - flaresolverr: CAPTCHA / Cloudflare bypass companion (in-pod, localhost).
+    - nginx (port 3009): reverse-proxy front door. rss-svc targets it; it
+      serves /download/* from the download provider-proxy and everything
+      else from knowledge-base-api on 127.0.0.1:3010.
+
+    **STORAGE & MIDDLEWARE**
+    - Postgres database `knowledge` (extensions: pg_trgm, btree_gin).
+    - Redis (shared via platform middleware, namespace: knowledge).
+    - NATS subjects: rssubscribe_status, download_status, knowledge.*.
+  upgradeDescription: |
+    v1.2.5: Move `PG_PASSWORD` / `PGPASSWORD` / `REDIS_PASSWORD` into Secret (`secretKeyRef`).
+
+    Adds an nginx (openresty) reverse-proxy sidecar (port 3009) in front of
+    the knowledge API. rss-svc now targets the sidecar, which routes
+    /download/* to the os-framework download provider-proxy (injecting the
+    knowledge-cluster-view SA token) and everything else to
+    knowledge-base-api on 127.0.0.1:3010. The sidecar ships a complete
+    nginx.conf (only listens on 3009) to avoid the image's default
+    `listen 8080` server colliding with vectorcrawl in the same Pod.
+    The /download hop also pins Host to the provider-service-ref and clears
+    the gateway's X-Forwarded-Host/X-Provider-Proxy so the provider-proxy
+    resolves the right provider (fixes the 403/400 on /download/*).
+
+    **Previously (v3 split-out)**
+    Split the legacy `wise/knowledge` sub-chart into a standalone v3 shared
+    application.
+
+    **What's Changed**
+    - **Architecture**: extracted from `wise/knowledge` sub-chart, now a
+      first-class v3 shared app installable only by Admin.
+    - **Schema**: apiVersion v3, `options.shared: true`, declared
+      `workloadReplicas: { knowledgev3: 1 }`; Deployment uses
+      `{{ .Release.Name }}` so allowMultipleInstall stays safe.
+    - **Routing**: provider-proxy ClusterRoleBindings for
+      ytdlp / rssubscribe / twitter dropped — those cross-app calls
+      migrated to v3 `sharedentrances-*` Services over Kubernetes DNS.
+      Cookie / download / search3 still route through provider-proxy
+      and keep their `knowledge-cluster-view` ClusterRoleBindings
+      (see templates/rbac.yaml).
+    - **Probes**: startup / liveness / readiness probes added for each
+      container (knowledge: 3010, vectorcrawl: 8080).
+  developer: Olares
+  website: https://www.olares.com/
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  doc: https://docs.olares.com/manual/olares/wise/
+
+  # Σ across the 4 application containers (initContainers excluded):
+  #   knowledge      req 20m / 50Mi   lim 3500m / 6Gi
+  #   vectorcrawl    req 20m / 50Mi   lim 1000m / 2Gi
+  #   flaresolverr   req 20m / 60Mi   lim 2000m / 500Mi
+  #   nginx          req 10m / 32Mi   lim 500m  / 256Mi
+  #   ------------------------------------------------
+  #   Σ              req 70m / 192Mi  lim 7000m / 8.75Gi
+  requiredCpu: 100m
+  limitedCpu: 7
+  requiredMemory: 256Mi
+  limitedMemory: 9Gi
+  requiredDisk: 50Mi
+  limitedDisk: 500Gi
+  supportArch:
+    - amd64
+    - arm64
+  onlyAdmin: true
+
+options:
+  shared: true
+  apiTimeout: 0
+  # No `conflicts:` against `wise` anymore.
+  #
+  # The old v2 wise (<= 1.1.51) used to bundle the knowledge sub-chart and
+  # claim the same postgres user `knowledge` / db `knowledge` / redis
+  # namespace `knowledge` that this shared backend now claims. Conflict
+  # entries only support `name` + `type` (no version range), so a blanket
+  # `conflicts: wise` would also block the new v3 wise (1.1.52+), which
+  # is exactly the per-user frontend that REQUIRES this backend. We rely
+  # on Olares' middleware-claim collision check to refuse install when an
+  # older v2 wise is still around.
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
