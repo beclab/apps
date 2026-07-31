@@ -1,21 +1,19 @@
-﻿apiVersion: apps/v1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    io.kompose.service: firecrawl
+    io.kompose.service: nuq-prefetch-worker
   namespace: "{{ .Release.Namespace }}"
-  name: firecrawl
+  name: nuq-prefetch-worker
 spec:
-  replicas: {{ .Values.workloads.firecrawl.replicaCount }}
+  replicas: {{ (index .Values.workloads "nuq-prefetch-worker").replicaCount }}
   selector:
     matchLabels:
-      io.kompose.service: firecrawl
-  strategy:
-    type: Recreate
+      io.kompose.service: nuq-prefetch-worker
   template:
     metadata:
       labels:
-        io.kompose.service: firecrawl
+        io.kompose.service: nuq-prefetch-worker
     spec:
       initContainers:
         - name: check-depends
@@ -23,19 +21,19 @@ spec:
           args:
             - "-it"
             - >-
-              firecrawl-redis-svc:6379,playwright-svc:3000,nuq-postgres:5432,rabbitmq:5672
+              firecrawl-redis-svc:6379,nuq-postgres:5432,rabbitmq:5672
           resources: {}
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
       containers:
-        - command:
+        - name: nuq-prefetch-worker
+          command:
             - node
-            - dist/src/index.js
-          name: api
+            - dist/src/services/worker/nuq-prefetch-worker.js
           image: "docker.io/beclab/firecrawl-firecrawl:2.11.158"
           ports:
-            - containerPort: 3002
+            - containerPort: 3011
           envFrom:
             - configMapRef:
                 name: firecrawl-config
@@ -43,21 +41,19 @@ spec:
                 name: {{ .Release.Name }}-secrets
           env:
             - name: FLY_PROCESS_GROUP
-              value: "app"
+              value: "nuq-prefetch-worker"
+            - name: NUQ_PREFETCH_WORKER_PORT
+              value: "3011"
             - name: NUQ_POD_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          readinessProbe:
-            tcpSocket:
-              port: 3002
-            initialDelaySeconds: 15
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
           livenessProbe:
-            tcpSocket:
-              port: 3002
+            exec:
+              command:
+                - sh
+                - -c
+                - "pgrep -f nuq-prefetch-worker.js >/dev/null"
             initialDelaySeconds: 60
             periodSeconds: 30
             timeoutSeconds: 10
@@ -65,23 +61,8 @@ spec:
           resources:
             requests:
               cpu: 100m
-              memory: 1Gi
+              memory: 512Mi
             limits:
-              memory: 2Gi
-              cpu: 2
+              memory: 1Gi
+              cpu: 1
       restartPolicy: Always
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    io.kompose.service: firecrawl
-  name: firecrawl-api-svc
-  namespace: "{{ .Release.Namespace }}"
-spec:
-  selector:
-    io.kompose.service: firecrawl
-  ports:
-    - protocol: TCP
-      port: 3002
-      targetPort: 3002
