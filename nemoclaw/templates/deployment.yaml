@@ -1309,8 +1309,17 @@ spec:
                     continue
                   fi
                   _nemoclaw_preflight_sandbox_base || true
-                  echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw onboard --from $NEMOCLAW_SRC_DIR/Dockerfile --fresh"
-                  nemoclaw onboard --from "$NEMOCLAW_SRC_DIR/Dockerfile" --fresh \
+                  # Non-interactive onboard refuses a leftover not-ready sandbox unless recreate is set
+                  # (NVIDIA/NemoClaw: --recreate-sandbox / NEMOCLAW_RECREATE_SANDBOX). Default 1 so
+                  # resume / retry after a partial install can overwrite my-assistant.
+                  export NEMOCLAW_RECREATE_SANDBOX="${NEMOCLAW_RECREATE_SANDBOX:-1}"
+                  _ONBOARD_RECREATE_FLAG=""
+                  case "${NEMOCLAW_RECREATE_SANDBOX}" in
+                    1|true|TRUE|yes|YES|on|ON) _ONBOARD_RECREATE_FLAG="--recreate-sandbox" ;;
+                  esac
+                  echo "[5b/5] onboard attempt $onboard_attempt via nemoclaw onboard --from $NEMOCLAW_SRC_DIR/Dockerfile --fresh ${_ONBOARD_RECREATE_FLAG} (NEMOCLAW_RECREATE_SANDBOX=${NEMOCLAW_RECREATE_SANDBOX})"
+                  # shellcheck disable=SC2086
+                  nemoclaw onboard --from "$NEMOCLAW_SRC_DIR/Dockerfile" --fresh ${_ONBOARD_RECREATE_FLAG} \
                     2>&1 | tee -a /tmp/nemoclaw-onboard.log
                   _nem_pipe_rc="${PIPESTATUS[0]}"
                   if [ "$_nem_pipe_rc" = "0" ]; then
@@ -1326,7 +1335,7 @@ spec:
                 if [ "$onboard_ok" = "1" ]; then
                 export NEMOCLAW_ONBOARD_OK_THIS_BOOT=1
                 touch /workspace/.nemoclaw-installed
-                echo "[5b/5] onboard complete; upgrading runtime openclaw to ${NEMOCLAW_OPENCLAW_VERSION:-2026.5.20} (parallel with policy-tier / gateway start)"
+                echo "[5b/5] onboard complete; upgrading runtime openclaw to ${NEMOCLAW_OPENCLAW_VERSION:-2026.6.9} (parallel with policy-tier / gateway start)"
                 (
                   for _pin_wait in $(seq 1 90); do
                     docker exec "$CLUSTER_CTR" kubectl -n "$NS" get pod "$SBX" \
@@ -1842,13 +1851,16 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_GATEWAY_SCHEME | default "http" }}"
             - name: NEMOCLAW_GATEWAY_RECREATE
               value: "{{ .Values.olaresEnv.NEMOCLAW_GATEWAY_RECREATE | default "0" }}"
+            # Default 1: overwrite leftover not-ready sandbox on non-interactive onboard (resume-safe).
+            - name: NEMOCLAW_RECREATE_SANDBOX
+              value: "{{ .Values.olaresEnv.NEMOCLAW_RECREATE_SANDBOX | default "1" }}"
             - name: NEMOCLAW_OPENCLAW_INFERENCE_API
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_INFERENCE_API | default "" }}"
             - name: NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT | default "" }}"
             # Pin OpenClaw inside the sandbox; empty falls back to the NemoClaw-baked version.
             - name: NEMOCLAW_OPENCLAW_VERSION
-              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.5.20" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.6.9" }}"
             # Build-time OpenClaw pin (Dockerfile Patch 4 / rcf_patch.py). Not the runtime pin above.
             - name: NEMOCLAW_OPENCLAW_BUILD_VERSION
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_BUILD_VERSION | default "2026.4.24" }}"
