@@ -20,27 +20,30 @@ spec:
     spec:
       containers:
         - name: gitea
-          image: "docker.io/beclab/gitea-gitea:1.24.5"
+          image: "docker.io/gitea/gitea:1.27.0"
           ports:
             - containerPort: 3000
             - containerPort: 22
           env:
-            - name: PGID
+            - name: USER_UID
               value: "1000"
-            - name: PUID
+            - name: USER_GID
               value: "1000"
             - name: TZ
               value: Etc/UTC
             - name: GITEA__database__DB_TYPE
               value: postgres
             - name: GITEA__database__HOST
-              value: "{{ .Values.postgres.host }}:{{ .Values.postgres.port }}"
+              value: "{{ .Values.postgres.host }}:{{ .Values.postgres.port | toString }}"
             - name: GITEA__database__NAME
               value: "{{ .Values.postgres.databases.gitea }}"
             - name: GITEA__database__USER
               value: "{{ .Values.postgres.username }}"
             - name: GITEA__database__PASSWD
-              value: "{{ .Values.postgres.password }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: GITEA__database__PASSWD
           resources:
             requests:
               cpu: "500m"
@@ -60,15 +63,7 @@ spec:
       volumes:
         - name: data
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: "{{ .Values.userspace.appData }}/data"
-              {{- else }}
-            path: "{{ .Values.userspace.appData }}/gitea/data"
-              {{- end }}
-            {{- else }}
-            path: "{{ .Values.userspace.appData }}/gitea/data"
-            {{- end }}
             type: DirectoryOrCreate
         - name: timezone
           hostPath:
