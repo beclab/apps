@@ -1,3 +1,5 @@
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $serverPassword := index $env "OPENCODE_SERVER_PASSWORD" | default "" }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -8,8 +10,8 @@ data:
   nginx.conf: |
     server {
       listen 8080;
-      access_log /opt/bitnami/openresty/nginx/logs/access.log;
-      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+      access_log /usr/local/openresty/nginx/logs/access.log;
+      error_log /usr/local/openresty/nginx/logs/error.log;
 
       client_max_body_size 100m;
 
@@ -31,6 +33,13 @@ data:
       # WebSocket support for SSE/live updates
       proxy_set_header upgrade $http_upgrade;
       proxy_set_header connection "upgrade";
+
+      # Local health for k8s readiness (never hit upstream basic-auth)
+      location = /healthz {
+          access_log off;
+          default_type text/plain;
+          return 200 'ok';
+      }
 
       # Redirect /__preview/PORT to /__preview/PORT/
       location ~ ^/__preview/(\d+)$ {
@@ -57,6 +66,8 @@ data:
       }
 
       # OpenCode Web UI (default)
+      # When OPENCODE_SERVER_PASSWORD is set, upstream returns Basic Auth challenge;
+      # do not inject credentials here so the browser login prompt appears.
       location / {
           proxy_pass http://127.0.0.1:3000;
           proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
@@ -64,14 +75,17 @@ data:
           proxy_read_timeout 300s;
           proxy_send_timeout 300s;
           client_max_body_size 100m;
+{{- if $serverPassword }}
+          proxy_pass_header WWW-Authenticate;
+{{- end }}
       }
     }
 
     # Terminal entrance (:8081)
     server {
       listen 8081;
-      access_log /opt/bitnami/openresty/nginx/logs/access.log;
-      error_log /opt/bitnami/openresty/nginx/logs/error.log;
+      access_log /usr/local/openresty/nginx/logs/access.log;
+      error_log /usr/local/openresty/nginx/logs/error.log;
 
       client_max_body_size 10m;
 
@@ -84,6 +98,10 @@ data:
       proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
 
       proxy_http_version 1.1;
+      proxy_buffering off;
+      proxy_cache off;
+      add_header X-Accel-Buffering "no" always;
+
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
 
@@ -91,8 +109,9 @@ data:
           resolver coredns.kube-system.svc.cluster.local valid=10s;
           proxy_pass http://terminal.{{ .Release.Namespace }}:80;
           proxy_connect_timeout 60s;
-          proxy_read_timeout 300s;
-          proxy_send_timeout 300s;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+          client_max_body_size 10m;
       }
     }
 
