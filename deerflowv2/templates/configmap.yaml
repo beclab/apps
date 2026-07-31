@@ -155,7 +155,7 @@ data:
     # The version number itself is purely a "your config is outdated, run
     # config-upgrade" warning trigger in deer-flow's startup log -- it does
     # not unlock or restrict any features.
-    config_version: 8
+    config_version: 31
 
     # Logger threshold for the `deerflow` and `app` loggers. Third-party
     # libraries (uvicorn, sqlalchemy, langgraph, ...) keep their own levels.
@@ -342,10 +342,10 @@ data:
     # database provisioned automatically by the Olares postgres
     # middleware (declared in OlaresManifest.yaml as `middleware.postgres`).
     #
-    # Connection strings are built from .Values.postgres.* in deployment.yaml:
-    #   DATABASE_URL              → SQLAlchemy ORM (asyncpg) — **no** libpq-only params
-    #   CHECKPOINTER_DATABASE_URL → LangGraph checkpointer (psycopg) — TCP keepalives OK
-    # deer-flow resolves both via AppConfig.resolve_env_variables() at startup.
+    # Connection string is built from .Values.postgres.* in deployment.yaml:
+    #   DATABASE_URL → SQLAlchemy ORM (asyncpg) + LangGraph checkpointer (psycopg)
+    # Do not put libpq-only keepalive params in DATABASE_URL (asyncpg rejects them).
+    # deer-flow resolves via AppConfig.resolve_env_variables() at startup.
     #
     # To switch back to sqlite (single-tenant, no postgres dependency):
     #   1. Remove the `middleware.postgres` block from OlaresManifest.yaml
@@ -359,7 +359,6 @@ data:
     database:
       backend: postgres
       postgres_url: $DATABASE_URL
-      checkpointer_postgres_url: $CHECKPOINTER_DATABASE_URL
 
     # =============================================
     # SUBAGENT LIMITS
@@ -449,35 +448,26 @@ data:
         "\n"
         "# Auto-injected by init-container (chart >= 1.0.9). The Olares\n"
         "# `middleware.postgres` provisioner exposes connection details via\n"
-        "# DATABASE_URL (asyncpg ORM) and CHECKPOINTER_DATABASE_URL (psycopg\n"
-        "# LangGraph saver with TCP keepalives). To switch back to sqlite,\n"
-        "# remove the postgres middleware block from OlaresManifest.yaml and\n"
-        "# edit this section by hand.\n"
+        "# DATABASE_URL (SQLAlchemy + LangGraph checkpointer). To switch\n"
+        "# back to sqlite, remove the postgres middleware block from\n"
+        "# OlaresManifest.yaml and edit this section by hand.\n"
         "database:\n"
         "  backend: postgres\n"
         "  postgres_url: $DATABASE_URL\n"
-        "  checkpointer_postgres_url: $CHECKPOINTER_DATABASE_URL\n"
     )
 
 
-    def ensure_checkpointer_postgres_url(cfg: Path) -> None:
-        """Inject checkpointer_postgres_url for chart 1.0.11+ without full rewrite."""
+    def strip_checkpointer_postgres_url(cfg: Path) -> None:
+        """Remove dual-URL leftover from chart < 1.0.7."""
         text = cfg.read_text(encoding="utf-8")
-        if "checkpointer_postgres_url:" in text:
+        if "checkpointer_postgres_url:" not in text:
             return
-        if "backend: postgres" not in text or "postgres_url:" not in text:
-            return
-        lines = text.splitlines(keepends=True)
-        out: list[str] = []
-        inserted = False
-        for line in lines:
-            out.append(line)
-            if not inserted and re.match(r"^[ \t]+postgres_url:[ \t]", line):
-                out.append("  checkpointer_postgres_url: $CHECKPOINTER_DATABASE_URL\n")
-                inserted = True
-        if inserted:
-            cfg.write_text("".join(out), encoding="utf-8")
-            print(f"migrate: injected checkpointer_postgres_url into {cfg}")
+        lines = [
+            ln for ln in text.splitlines(keepends=True)
+            if "checkpointer_postgres_url:" not in ln
+        ]
+        cfg.write_text("".join(lines), encoding="utf-8")
+        print(f"migrate: removed checkpointer_postgres_url from {cfg}")
 
     # Match a top-level YAML block whose key is `database` or the legacy
     # upstream `checkpointer`. The body is any consecutive run of indented
@@ -505,12 +495,12 @@ data:
 
         if new == original:
             print(f"migrate: {cfg} already on postgres backend; no change")
-            ensure_checkpointer_postgres_url(cfg)
+            strip_checkpointer_postgres_url(cfg)
             return 0
 
         cfg.write_text(new, encoding="utf-8")
         print(f"migrate: rewrote {cfg} database block -> postgres")
-        ensure_checkpointer_postgres_url(cfg)
+        strip_checkpointer_postgres_url(cfg)
         return 0
 
 

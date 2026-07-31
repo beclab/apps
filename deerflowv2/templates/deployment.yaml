@@ -63,7 +63,7 @@ spec:
       terminationGracePeriodSeconds: 45
       initContainers:
         - name: init-config
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.1.1
           command:
             - sh
             - -c
@@ -145,13 +145,21 @@ spec:
                     '  failure_threshold: 5' \
                     '  recovery_timeout_sec: 60' >> /config/config.yaml
                 fi
-                # Pin config_version: 8 so deer-flow stops logging the
-                # outdated-config warning on every startup.
+                # Pin config_version to match upstream config.example.yaml
+                # so deer-flow stops logging the outdated-config warning.
                 if grep -qE '^config_version:' /config/config.yaml; then
-                  sed -i 's/^config_version:.*/config_version: 8/' /config/config.yaml
+                  sed -i 's/^config_version:.*/config_version: 31/' /config/config.yaml
                 else
-                  printf '\n%s\n' 'config_version: 8  # chart 1.0.8: matches upstream config.example.yaml' >> /config/config.yaml
+                  printf '\n%s\n' 'config_version: 31  # chart 1.0.7: matches upstream config.example.yaml' >> /config/config.yaml
                 fi
+
+                # Chart 1.0.7 / deer-flow v2.1.1: drop dual checkpointer URL;
+                # gateway embeds LangGraph and uses database.postgres_url only.
+                if grep -qE 'checkpointer_postgres_url:' /config/config.yaml; then
+                  echo "Migrating /config/config.yaml: removing checkpointer_postgres_url"
+                  sed -i '/checkpointer_postgres_url:/d' /config/config.yaml
+                fi
+
               fi
 
               if [ ! -f /config/extensions_config.json ]; then
@@ -163,7 +171,6 @@ spec:
 
               mkdir -p /data/deer-flow
               mkdir -p /skills/public /skills/custom
-              mkdir -p /langgraph-api
               # Chart >= 1.0.9: db lives in postgres now, the legacy sqlite
               # dir under /data/deer-flow/db is no longer mkdir'd. We do
               # NOT delete the existing file (if any) so operators can
@@ -179,15 +186,15 @@ spec:
               mkdir -p /skills/custom/image-ocr
               cp /init-config/image-ocr-skill.md /skills/custom/image-ocr/SKILL.md
 
-              # The gateway/langgraph containers run as PUID/PGID=1000 (the
+              # The gateway container runs as PUID/PGID=1000 (the
               # image flips to a non-root account at startup). hostPath dirs
               # created here as uid 0 stay owned by root, so the runtime
               # process cannot write memory.json / per-thread user-data /
-              # .langgraph_api/ scratch files. chown unconditionally --
+              # runtime scratch files. chown unconditionally --
               # cheap, and harmless if the image actually stays as root.
               # (Database state lives in postgres now; only filesystem
               # state needs this treatment.)
-              chown -R 1000:1000 /data/deer-flow /skills /config /langgraph-api
+              chown -R 1000:1000 /data/deer-flow /skills /config
 
               echo "Init complete."
           volumeMounts:
@@ -199,17 +206,15 @@ spec:
               mountPath: /data/deer-flow
             - name: skills-volume
               mountPath: /skills
-            - name: langgraph-api-volume
-              mountPath: /langgraph-api
           securityContext:
             runAsUser: 0
       containers:
         - name: gateway
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.1.1
           command:
             - sh
             - -c
-            - "cd /app/backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
+            - "cd /app/backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
           # Delay SIGTERM by 5s so K8s has time to (1) flip the pod's
           # readiness off, (2) propagate the endpoint removal to
           # kube-proxy / clientproxy, and (3) drain any in-flight
@@ -309,120 +314,14 @@ spec:
             # Olares postgres middleware — connection details populated by
             # the Olares chart values injector at install/upgrade time.
             #
-            # DATABASE_URL — SQLAlchemy + **asyncpg** only. Do NOT add libpq
-            # query params such as keepalives_* here; asyncpg rejects them and
-            # the gateway will crash on startup (TypeError: unexpected keyword
-            # argument 'keepalives').
+            # DATABASE_URL — SQLAlchemy (asyncpg) + LangGraph checkpointer
+            # (psycopg) via the same URL. Do NOT add libpq-only query params
+            # such as keepalives_* here; asyncpg rejects them and the gateway
+            # will crash on startup. Upstream v2.1.1 pools manage reconnects.
             #
-            # CHECKPOINTER_DATABASE_URL — LangGraph AsyncPostgresSaver +
-            # **psycopg** (libpq). Same server/db as DATABASE_URL but with TCP
-            # keepalive query params so idle connections are not silently dropped
-            # by kube-proxy / NAT before psycopg's pool notices.
-            #
-            # config.yaml sets `database.postgres_url: $DATABASE_URL` and
-            # `checkpointer_postgres_url: $CHECKPOINTER_DATABASE_URL`.
+            # config.yaml sets `database.postgres_url: $DATABASE_URL`.
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}"
-            - name: CHECKPOINTER_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}?keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
-          envFrom:
-            - configMapRef:
-                name: deerflowv2-env-config
-          resources:
-            requests:
-              cpu: "50m"
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-          volumeMounts:
-            - name: config-volume
-              mountPath: /config
-            - name: data-volume
-              mountPath: /data/deer-flow
-            - name: skills-volume
-              mountPath: /app/skills
-            # On-demand legacy SQLite -> postgres migration tool. Mounted
-            # only into the gateway container (not langgraph) since the
-            # operator runs it via `kubectl exec deploy/... -c gateway`.
-            # Uses items: projection so only the two migration files
-            # appear under /migrate -- the rest of init-config (config.yaml,
-            # the OCR skill, the database backend rewriter) does not leak
-            # into the runtime filesystem. See configmap.yaml for the
-            # script source and operator usage instructions.
-            - name: migrate-vol
-              mountPath: /migrate
-        - name: langgraph
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
-          command:
-            - sh
-            - -c
-            - "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
-          # See gateway preStop for rationale.
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "sleep 5"]
-          ports:
-            - containerPort: 2024
-              name: langgraph
-          # See gateway readinessProbe for rationale. langgraph dev
-          # exposes /ok (not /health) -- doc'd in deer-flow's
-          # deployment-guide and operations-and-troubleshooting pages.
-          # initialDelaySeconds is higher than gateway's because
-          # `langgraph dev --no-reload --allow-blocking` does its
-          # graph compilation + checkpoint pool warmup synchronously
-          # at startup; on cold pulls this can take 20-30s before /ok
-          # responds. failureThreshold:6 (= 30s of /ok failures)
-          # tolerates a slow PG checkpointer pool initialisation.
-          readinessProbe:
-            httpGet:
-              path: /ok
-              port: 2024
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 6
-          livenessProbe:
-            httpGet:
-              path: /ok
-              port: 2024
-            periodSeconds: 60
-            timeoutSeconds: 10
-            failureThreshold: 5
-          env:
-            - name: CI
-              value: "true"
-            - name: DEER_FLOW_HOME
-              value: "/data/deer-flow"
-            - name: DEER_FLOW_CONFIG_PATH
-              value: "/config/config.yaml"
-            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
-              value: "/config/extensions_config.json"
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: AUTH_JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: deerflowv2-auth-secret
-                  key: AUTH_JWT_SECRET
-            # See gateway container for rationale.
-            - name: AUTH_TRUSTED_PROXIES
-              value: "10.233.0.0/16"
-            {{- if gt (len $gatewayOrigins) 0 }}
-            - name: GATEWAY_CORS_ORIGINS
-              value: {{ join "," $gatewayOrigins | quote }}
-            {{- end }}
-            # Mirror gateway env: plain DATABASE_URL for ORM, keepalive URL for
-            # LangGraph checkpointer. See gateway container comments above.
-            - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}"
-            - name: CHECKPOINTER_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}?keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
           envFrom:
             - configMapRef:
                 name: deerflowv2-env-config
@@ -440,8 +339,16 @@ spec:
               mountPath: /data/deer-flow
             - name: skills-volume
               mountPath: /app/skills
-            - name: langgraph-api-volume
-              mountPath: /app/backend/.langgraph_api
+            # On-demand legacy SQLite -> postgres migration tool. Mounted
+            # into the gateway container; the operator runs it via
+            # `kubectl exec deploy/... -c gateway`.
+            # Uses items: projection so only the two migration files
+            # appear under /migrate -- the rest of init-config (config.yaml,
+            # the OCR skill, the database backend rewriter) does not leak
+            # into the runtime filesystem. See configmap.yaml for the
+            # script source and operator usage instructions.
+            - name: migrate-vol
+              mountPath: /migrate
       volumes:
         - name: init-config-vol
           configMap:
@@ -473,10 +380,6 @@ spec:
           hostPath:
             path: '{{ .Values.userspace.appData }}/skills'
             type: DirectoryOrCreate
-        - name: langgraph-api-volume
-          hostPath:
-            path: '{{ .Values.userspace.appData }}/langgraph_api'
-            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
@@ -490,7 +393,4 @@ spec:
     - name: gateway
       port: 8001
       targetPort: 8001
-    - name: langgraph
-      port: 2024
-      targetPort: 2024
   type: ClusterIP
