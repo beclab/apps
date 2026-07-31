@@ -6,7 +6,7 @@ metadata:
   description: A Web UI for easy subtitle using whisper model.
   icon: https://app.cdn.olares.com/appstore/whisperwebui/icon.png
   appid: whisperwebuiv3
-  version: '1.1.9'
+  version: '1.1.12'
   title: Whisper-WebUI
   categories:
   - AI
@@ -105,33 +105,21 @@ spec:
     Post-processing with speaker diarization using the pyannote model
 
   upgradeDescription: |
-    v1.1.9: Map `HF_TOKEN` / `HF_ENDPOINT` from `OLARES_SYSTEM_HUGGINGFACE_*` (shared app); `HF_TOKEN` `required: false`.
+    Fix HF cache symlink path (chart 1.1.12).
 
-    Bump llm-init image to `beclab/llm-init:v1.3.1`.
+    Engine startup used `tr '/' '--'` to build Hugging Face hub dir names, but
+    `tr` maps characters one-to-one, so the second `-` was dropped. The lookup
+    became `models--org-repo` instead of `models--org--repo`, every `link_repo`
+    missed the cache, and logs showed three `[warn] missing HF cache dir` lines
+    even though llm-init had already downloaded the models. Existing HF cache
+    is reused — this does not re-download weights.
 
-    Migrated Whisper-WebUI to the apiVersion v3 shared app pattern and switched
-    model provisioning to the shared llm-init downloader (whisperwebuiv2 →
-    whisperwebuiv3).
+    Change Details:
+    - Replace `tr '/' '--'` with `sed 's|/|--|g'` so softlinks under
+      `/Whisper-WebUI/models/...` point at the real HF hub dirs.
 
-    **What's Changed**
-
-    - **Model download**: replaced the CDN `downloader-init` tar.zst bundle with
-      an `llm-init:v1.3.1` download-only Deployment (`whisperwebuiv3download`)
-      that fetches `Systran/faster-whisper-large-v2`, `pyannote/speaker-diarization-3.1`,
-      and `pyannote/segmentation-3.0` into the shared cross-app HF cache (App Common,
-      `/cache/hf/hub`). The engine symlinks the cached repos into the Whisper-WebUI
-      layout and gates on `/readyz`. Diarization (pyannote) is gated — the admin HF
-      token must have accepted its terms.
-    - **Entrance routing**: nginx gates the Gradio UI on model download + engine
-      readiness with auto-reload; llm-init API paths pin to `download-svc`.
-    - **Architecture**: flattened the whisperwebuiv2 / whisperwebuiv2server
-      sub-charts into a single chart; backends resolve within the release namespace
-      (dropping the `*-shared` admin / non-admin split).
-    - **Accelerator**: moved the GPU requirement into the accelerator modes list
-      (nvidia only; amd64-only app).
-    - **Scaling**: `workloadReplicas` declares the engine, downloader, nginx client,
-      and terminal workloads.
-
+    v1.1.11: Lightweight `/__entrance_ready` probe (no Gradio homepage GET).
+    v1.1.10: Switch reverse-proxy to official OpenResty `1.29.2.5-bookworm-fat`.
   developer: jhj0517
   website: https://github.com/jhj0517/Whisper-WebUI
   sourceCode: https://github.com/jhj0517/Whisper-WebUI
