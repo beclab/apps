@@ -21,24 +21,22 @@ spec:
     - Actions: click, scroll, input, wait and more before extracting data
     - Batching (New): scrape thousands of URLs at the same time with a new async endpoint.
   upgradeDescription: |
-    v1.0.25: Move `OPENAI_API_KEY`, `BULL_AUTH_KEY`, `NUQ_DATABASE_URL`, and `POSTGRES_PASSWORD` into Kubernetes Secret (`secretRef` / `secretKeyRef`).
+    Upgrade Firecrawl to upstream **2.11.158** (from 2.9.0).
 
-    Storage: durable volumes moved from `appCache` to `appData`. On first start after upgrade, initContainers copy legacy appCache contents into appData when the destination is empty (marker: `.migration_from_appcache_done`). Old appCache data is left intact for rollback.
+    **Images**
+    - API / queue-worker / nuq-worker / extract-worker / nuq-prefetch-worker: `docker.io/beclab/firecrawl-firecrawl:2.11.158` (mirrored from `ghcr.io/firecrawl/firecrawl:2.11.158`; replaces `beclab/firecrawl-api:v2.9.0`).
+    - Playwright: `beclab/harveyff-firecrawl-playwright-service:2.11.158` (upstream GHCR has no versioned tag; retagged from latest).
+    - NuQ Postgres: `beclab/harveyff-firecrawl-nuq-postgres:2.11.158` (upstream GHCR has no versioned tag; retagged from latest).
+    - RabbitMQ: `beclab/rabbitmq:3.13.7-management` (in-chart).
 
-    Drop legacy `sysVersion >= 1.12.3` appCache path branching; Olares minimum is now 1.12.6.
+    **Architecture (align with upstream Helm / NuQ)**
+    - Add RabbitMQ Service/Deployment and ConfigMap `NUQ_RABBITMQ_URL=amqp://rabbitmq:5672`.
+    - Add `extract-worker` (`dist/src/services/extract-worker.js`) and `nuq-prefetch-worker` (`nuq-prefetch-worker.js`).
+    - Keep split API (`index.js`) + `queue-worker` + `nuq-worker` (do **not** use `harness.js --start-docker` in K8s).
+    - Wire worker ports / `NUQ_*` env, `IS_KUBERNETES=true`, `NUQ_DATABASE_URL_LISTEN`, and `NUQ_POD_NAME` fieldRef.
+    - Redis replica key fix: use `workloads.firecrawl-redis` instead of `firecrawl`.
+    - Raise `requiredMemory` to 6Gi for the extra workloads.
 
-    Redis durable data migrated from appCache to appData.
-
-    Config optimized:
-    **Critical bug fix**
-    - **Playwright service connectivity restored:** the shared `firecrawl-config` ConfigMap was leaking `PORT: "3002"` into the playwright-service container via `envFrom`, causing the playwright app to listen on **3002** instead of the expected **3000**. Worker requests to `playwright-svc:3000` would silently fail with `other side closed` and waterfall to the fetch engine on every scrape. The deployment now sets `PORT=3000` explicitly to override the ConfigMap value. After upgrade, `kubectl logs deploy/playwright-service` should print `Server is running on port 3000` (not 3002).
-
-    **Data persistence**
-    - **nuq-postgres now persists data:** added a `hostPath` volume under `appData/<release>/nuq-postgres` and an init container (`init-permissions`) that creates the data directory, `chown 999:999`, and `chmod 700` so the postgres process can write to it. Before this change every nuq-postgres restart wiped all NuQ tasks, crawl progress, and pg_cron job history. Strategy switched to `Recreate` to prevent two PG instances racing on the same directory during upgrades.
-
-    **Reliability**
-    - **Liveness / readiness probes added** to `firecrawl-api`, `worker`, `nuq-worker`, `nuq-postgres`, and `playwright-service`:
-      - `firecrawl-api`, `playwright-service`: TCP probes on the service port.
-      - `nuq-postgres`: `pg_isready` exec probes.
-      - `worker`, `nuq-worker`: `pgrep` liveness probes against the main Node process.
-    - Stuck or crashed containers are now automatically restarted by Kubernetes instead of silently hanging.
+    **Notes**
+    - Desktop entrance is still Bull Queue Manager (`/admin/CHANGEME/queues`). Crawl/scrape jobs use **NuQ** and will not appear there; poll `GET /v2/crawl/{id}` / `GET /v2/scrape/{id}` instead.
+    - Optional LLM envs (`OPENAI_*` / `OLLAMA_*` / `MODEL_NAME`) remain for AI extract features.
