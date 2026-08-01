@@ -1,8 +1,13 @@
 # windows config lifecycle (like macos):
 # 1) ConfigMap windows-env: first install from .Values; upgrade preserves existing (lookup).
 #    Migration: first upgrade uses legacy windows-config CDN_HOST so existing users unchanged.
-# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appCache/config/.env.
-# 3) Runtime: VERSION/CDN_HOST from /config/.env; RAM_SIZE/CPU_CORES/DISK_SIZE etc from env.
+# 2) Init migrate (marker: .migration_from_appdata_applied):
+#    - if appData/storage has a VM disk -> quarantine appCache/storage, copy from appData
+#    - else if appCache root has data.img (1.1.6 layout) -> quarantine storage (incl. tmp),
+#      copy root -> storage (1.1.6->1.1.8 recovery; do not let tmp/ block this)
+#    - config: appData/config -> appCache/config when present
+# 3) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appCache/config/.env.
+# 4) Runtime: VERSION/CDN_HOST from /config/.env; RAM_SIZE/CPU_CORES/DISK_SIZE etc from env.
 ---
 apiVersion: v1
 kind: Service
@@ -53,6 +58,225 @@ spec:
               - key: node-role.kubernetes.io/control-plane
                 operator: Exists
       initContainers:
+        # Reverse of 1.1.7: appData having real data means the forward migrate ran — force copy
+        # back onto appCache (overwrite). Do NOT skip just because appCache already has files
+        # (1.1.8 may have created a fresh empty VM there).
+        - name: migrate-appdata-to-appcache
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SRC_STORAGE=/appdata-storage
+              SRC_CONFIG=/appdata-config
+              DEST_STORAGE=/appcache-storage
+              DEST_CONFIG=/appcache-config
+              # v2 marker: 1.1.9 first pass used .migration_from_appdata_done even when it skipped
+              MARKER="${DEST_STORAGE}/.migration_from_appdata_applied"
+              # Keep prior appCache files here until copy succeeds. Do NOT rm appCache outright
+              # (user upgrade safety). hostPath pins the storage inode, so we cannot rename the
+              # mount dir itself — quarantine into a subdir inside the mount instead.
+              BACKUP_NAME=".pre-reverse-migrate"
+
+              has_config_data() {
+                # any non-marker file/dir (e.g. .env)
+                ls -A "$1" 2>/dev/null \
+                  | grep -v '^\.migration_from_' \
+                  | grep -v '^\.pre-reverse-migrate$' \
+                  || true
+              }
+
+              # True VM disk at directory top-level (ignore tmp/storage/config placeholders).
+              has_vm_disk() {
+                dir="$1"
+                [ -f "${dir}/data.img" ] && return 0
+                for f in "${dir}"/*.img "${dir}"/*.qcow2 "${dir}"/*.qcow; do
+                  [ -f "$f" ] || continue
+                  return 0
+                done
+                return 1
+              }
+
+              # Size from ls -l (metadata only). NEVER use wc -c on multi-GB disks —
+              # that reads the whole file and can take as long as the copy itself.
+              file_size_label() {
+                # $1 = path; print e.g. "64G" / "3.5M" from ls -lh, fallback ls -l bytes
+                f="$1"
+                if [ ! -e "$f" ]; then echo "?"; return; fi
+                # busybox ls -lh: ... 64.0G ... filename
+                h=$(ls -lh "$f" 2>/dev/null | awk '{print $5}')
+                if [ -n "$h" ]; then echo "$h"; return; fi
+                ls -l "$f" 2>/dev/null | awk '{print $5}'
+              }
+
+              quarantine_existing() {
+                dest="$1"
+                bak="${dest}/${BACKUP_NAME}"
+                echo "[migrate] quarantine existing -> ${bak}/ (rename, not delete)"
+                mkdir -p "$dest"
+                # Stale quarantine from a previous successful migrate: drop before making a new one.
+                if [ -d "$bak" ]; then
+                  echo "[migrate] remove stale ${BACKUP_NAME}/ from earlier migrate before re-quarantine"
+                  rm -rf "$bak"
+                fi
+                mkdir -p "$bak"
+                for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
+                  [ -e "$entry" ] || continue
+                  base=$(basename "$entry")
+                  case "$base" in
+                    .pre-reverse-migrate|.migration_from_appdata_applied|.migration_from_appdata_done) continue ;;
+                  esac
+                  if [ -f "$entry" ]; then
+                    echo "[migrate]   mv ${base} (size=$(file_size_label "$entry")) -> ${BACKUP_NAME}/"
+                  else
+                    echo "[migrate]   mv ${base} -> ${BACKUP_NAME}/"
+                  fi
+                  mv "$entry" "$bak"/
+                done
+                echo "[migrate] quarantine done. backup listing:"
+                ls -lah "$bak" 2>/dev/null || ls -la "$bak" 2>/dev/null || true
+              }
+
+              cleanup_quarantine_deferred() {
+                # Called on later starts once marker exists — keep backup for this upgrade cycle.
+                for dest in "$DEST_STORAGE" "$DEST_CONFIG"; do
+                  bak="${dest}/${BACKUP_NAME}"
+                  if [ -d "$bak" ]; then
+                    echo "[migrate] deferred cleanup ${bak}/ (kept after last migrate for safety)"
+                    rm -rf "$bak"
+                    echo "[migrate] deferred cleanup done: ${bak}/"
+                  fi
+                done
+              }
+
+              # Sets COPY_COUNT; logs go to stdout (not captured).
+              copy_entries() {
+                src="$1"
+                dest="$2"
+                label="$3"
+                mode="$4" # appdata | root
+                COPY_COUNT=0
+                for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+                  [ -e "$entry" ] || continue
+                  base=$(basename "$entry")
+                  case "$base" in
+                    .migration_from_appcache_done|.migration_from_appdata_*|.pre-reverse-migrate) continue ;;
+                  esac
+                  if [ "$mode" = "root" ]; then
+                    # do not nest appCache submounts or runtime junk into storage/
+                    case "$base" in
+                      storage|config|tmp) continue ;;
+                    esac
+                  fi
+                  COPY_COUNT=$((COPY_COUNT+1))
+                  if [ -f "$entry" ]; then
+                    echo "[migrate] ${label}: [$COPY_COUNT] START file ${base} size=$(file_size_label "$entry") at $(date -Iseconds 2>/dev/null || date)"
+                  elif [ -d "$entry" ]; then
+                    echo "[migrate] ${label}: [$COPY_COUNT] START dir  ${base}/ at $(date -Iseconds 2>/dev/null || date)"
+                  else
+                    echo "[migrate] ${label}: [$COPY_COUNT] START ${base} at $(date -Iseconds 2>/dev/null || date)"
+                  fi
+                  t0=$(date +%s 2>/dev/null || echo 0)
+                  cp -a "$entry" "$dest"/
+                  t1=$(date +%s 2>/dev/null || echo 0)
+                  if [ "$t0" != 0 ] && [ "$t1" != 0 ]; then
+                    echo "[migrate] ${label}: [$COPY_COUNT] DONE  ${base} in $((t1-t0))s size=$(file_size_label "$dest/$base")"
+                  else
+                    echo "[migrate] ${label}: [$COPY_COUNT] DONE  ${base}"
+                  fi
+                done
+              }
+
+              force_copy_from_appdata() {
+                src="$1"
+                dest="$2"
+                label="$3"
+                kind="$4" # disk | config
+                if [ "$kind" = "disk" ]; then
+                  if ! has_vm_disk "$src"; then
+                    echo "[migrate] ${label}: no appData VM disk (data.img/qcow), skip. (src=${src})"
+                    return 0
+                  fi
+                else
+                  if [ -z "$(has_config_data "$src")" ]; then
+                    echo "[migrate] ${label}: no appData config, skip. (src=${src})"
+                    return 0
+                  fi
+                fi
+                echo "[migrate] ${label}: appData has data -> force copy"
+                echo "[migrate] ${label}: src=${src}"
+                echo "[migrate] ${label}: dest=${dest}"
+                echo "[migrate] ${label}: source listing:"
+                ls -lah "$src" 2>/dev/null || ls -la "$src" 2>/dev/null || true
+                quarantine_existing "$dest"
+                copy_entries "$src" "$dest" "$label" "appdata"
+                rm -f "$dest"/.migration_from_appcache_done
+                if [ -d "${dest}/${BACKUP_NAME}" ]; then
+                  echo "[migrate] ${label}: copy ok -> KEEP quarantine ${BACKUP_NAME}/ until next update"
+                fi
+                echo "[migrate] ${label}: done (${COPY_COUNT} entries). dest listing:"
+                ls -lah "$dest" 2>/dev/null || ls -la "$dest" 2>/dev/null || true
+              }
+
+              recover_from_appcache_root() {
+                # 1.1.6 -> 1.1.8: disks remain at appCache root; storage/ may only have tmp/.
+                # Prefer root VM disk over any placeholder/junk under storage/.
+                if has_vm_disk "$SRC_STORAGE"; then
+                  echo "[migrate] storage: appData has VM disk, skip root recovery."
+                  return 0
+                fi
+                if ! has_vm_disk /appcache-root; then
+                  echo "[migrate] storage: no VM disk at appCache root, skip root recovery."
+                  return 0
+                fi
+                echo "[migrate] storage: appData has no VM disk; appCache root has data.img -> recover root into storage/"
+                echo "[migrate] storage: root listing:"
+                ls -lah /appcache-root 2>/dev/null || ls -la /appcache-root 2>/dev/null || true
+                echo "[migrate] storage: dest listing (before quarantine):"
+                ls -lah "$DEST_STORAGE" 2>/dev/null || ls -la "$DEST_STORAGE" 2>/dev/null || true
+                quarantine_existing "$DEST_STORAGE"
+                copy_entries /appcache-root "$DEST_STORAGE" "storage-root" "root"
+                if [ -d "${DEST_STORAGE}/${BACKUP_NAME}" ]; then
+                  echo "[migrate] storage-root: copy ok -> KEEP quarantine ${BACKUP_NAME}/ until next update"
+                fi
+                echo "[migrate] storage-root: done (${COPY_COUNT} entries). dest listing:"
+                ls -lah "$DEST_STORAGE" 2>/dev/null || ls -la "$DEST_STORAGE" 2>/dev/null || true
+              }
+
+              echo "[migrate] reverse migrate start at $(date -Iseconds 2>/dev/null || date)"
+              echo "[migrate] marker path: ${MARKER}"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present ($(cat "$MARKER" 2>/dev/null)), skip copy."
+                cleanup_quarantine_deferred
+                exit 0
+              fi
+
+              # drop obsolete skip marker from earlier 1.1.9 logic
+              rm -f "${DEST_STORAGE}/.migration_from_appdata_done"
+
+              force_copy_from_appdata "$SRC_STORAGE" "$DEST_STORAGE" "storage" "disk"
+              force_copy_from_appdata "$SRC_CONFIG" "$DEST_CONFIG" "config" "config"
+              recover_from_appcache_root
+
+              echo "applied at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] wrote marker ${MARKER}"
+              echo "[migrate] finished at $(date -Iseconds 2>/dev/null || date)"
+          volumeMounts:
+            - name: storage-appdata
+              mountPath: /appdata-storage
+              readOnly: true
+            - name: config-appdata
+              mountPath: /appdata-config
+              readOnly: true
+            - name: storage
+              mountPath: /appcache-storage
+            - name: windows-config
+              mountPath: /appcache-config
+            - name: storage-appcache-root
+              mountPath: /appcache-root
+              readOnly: true
         - name: sync-env-to-pvc
           image: docker.io/beclab/aboveos-busybox:1.37.0
           imagePullPolicy: IfNotPresent
@@ -165,6 +389,18 @@ spec:
             path: '{{ .Values.userspace.appCache }}/config'
             type: DirectoryOrCreate
           name: windows-config
+        - hostPath:
+            path: '{{ .Values.userspace.appCache }}'
+            type: DirectoryOrCreate
+          name: storage-appcache-root
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/storage'
+            type: DirectoryOrCreate
+          name: storage-appdata
+        - hostPath:
+            path: '{{ .Values.userspace.appData }}/config'
+            type: DirectoryOrCreate
+          name: config-appdata
         - hostPath:
             path: /dev/kvm
           name: dev-kvm
