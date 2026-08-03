@@ -87,6 +87,116 @@ spec:
         sysctls: []
 
       initContainers:
+        # Reverse of 1.1.12: if appData still holds WordPress files after the Cache<-Data flip
+        # (1.1.13+), force-copy them back onto appCache. Do NOT skip just because appCache
+        # already has a fresh/empty tree.
+        - name: migrate-appdata-to-appcache
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/appdata
+              DEST=/appcache
+              MARKER="${DEST}/.migration_from_appdata_applied"
+              BACKUP_NAME=".pre-reverse-migrate"
+
+              has_wordpress_files() {
+                dir="$1/wordpress"
+                [ -d "$dir" ] || return 1
+                # any regular file under wordpress/ (uploads, themes, plugins, wp-config, ...)
+                find "$dir" -type f 2>/dev/null | head -n 1 | grep -q .
+              }
+
+              quarantine_existing() {
+                dest="$1"
+                bak="${dest}/${BACKUP_NAME}"
+                echo "[migrate] quarantine existing -> ${bak}/ (rename, not delete)"
+                mkdir -p "$dest"
+                if [ -d "$bak" ]; then
+                  echo "[migrate] remove stale ${BACKUP_NAME}/ from earlier migrate before re-quarantine"
+                  rm -rf "$bak"
+                fi
+                mkdir -p "$bak"
+                for entry in "$dest"/* "$dest"/.[!.]* "$dest"/..?*; do
+                  [ -e "$entry" ] || continue
+                  base=$(basename "$entry")
+                  case "$base" in
+                    .pre-reverse-migrate|.migration_from_appdata_applied|.migration_from_appdata_done) continue ;;
+                  esac
+                  echo "[migrate]   mv ${base} -> ${BACKUP_NAME}/"
+                  mv "$entry" "$bak"/
+                done
+                echo "[migrate] quarantine done. backup listing:"
+                ls -lah "$bak" 2>/dev/null || ls -la "$bak" 2>/dev/null || true
+              }
+
+              cleanup_quarantine_deferred() {
+                bak="${DEST}/${BACKUP_NAME}"
+                if [ -d "$bak" ]; then
+                  echo "[migrate] deferred cleanup ${bak}/ (kept after last migrate for safety)"
+                  rm -rf "$bak"
+                  echo "[migrate] deferred cleanup done: ${bak}/"
+                fi
+              }
+
+              echo "[migrate] reverse migrate start at $(date -Iseconds 2>/dev/null || date)"
+              echo "[migrate] marker path: ${MARKER}"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present ($(cat "$MARKER" 2>/dev/null)), skip copy."
+                cleanup_quarantine_deferred
+                exit 0
+              fi
+
+              rm -f "${DEST}/.migration_from_appdata_done"
+
+              if ! has_wordpress_files "$SOURCE"; then
+                echo "[migrate] no WordPress files in appData, skip. (src=${SOURCE})"
+                echo "no appData wordpress at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              echo "[migrate] appData has WordPress files -> force copy onto appCache"
+              echo "[migrate] src=${SOURCE}"
+              echo "[migrate] dest=${DEST}"
+              echo "[migrate] source listing:"
+              ls -lah "$SOURCE" 2>/dev/null || ls -la "$SOURCE" 2>/dev/null || true
+              if [ -d "${SOURCE}/wordpress/wp-content/uploads" ]; then
+                echo "[migrate] source uploads listing:"
+                find "${SOURCE}/wordpress/wp-content/uploads" -type f 2>/dev/null | head -n 20 || true
+              fi
+
+              quarantine_existing "$DEST"
+              mkdir -p "$DEST"
+              echo "[migrate] copying appData -> appCache..."
+              cp -a "$SOURCE"/. "$DEST"/
+              rm -f "$DEST"/.migration_from_appcache_done
+              # do not treat the reverse marker from a nested copy as done-before-write
+              rm -f "$DEST"/.migration_from_appdata_applied
+
+              echo "applied at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] wrote marker ${MARKER}"
+              if [ -d "${DEST}/${BACKUP_NAME}" ]; then
+                echo "[migrate] copy ok -> KEEP quarantine ${BACKUP_NAME}/ until next update"
+              fi
+              echo "[migrate] dest listing:"
+              ls -lah "$DEST" 2>/dev/null || ls -la "$DEST" 2>/dev/null || true
+              if [ -d "${DEST}/wordpress/wp-content/uploads" ]; then
+                echo "[migrate] dest uploads listing:"
+                find "${DEST}/wordpress/wp-content/uploads" -type f 2>/dev/null | head -n 20 || true
+              fi
+              echo "[migrate] finished at $(date -Iseconds 2>/dev/null || date)"
+          volumeMounts:
+            - name: wordpress-data-appdata
+              mountPath: /appdata
+              readOnly: true
+            - name: wordpress-data
+              mountPath: /appcache
+
         - name: init-chmod-data
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
@@ -328,6 +438,10 @@ spec:
               name: wordpress-data
               subPath: wordpress
       volumes:
+        - name: wordpress-data-appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}
         - name: wordpress-data
           hostPath:
             type: DirectoryOrCreate
