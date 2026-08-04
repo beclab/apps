@@ -1,4 +1,3 @@
-{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,21 +18,47 @@ spec:
         app: homeassistant
         applications.app.bytetrade.io/macvlan-init: "true"
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
       initContainers:
         - name: init-chmod-data
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
-            - >
-              cp /config/configuration.yaml
-              /homeassistant-config/configuration.yaml;
-              mkdir -p /homeassistant-config/themes;
-              [ -f /homeassistant-config/automations.yaml ] || echo "[]" > /homeassistant-config/automations.yaml;
+            - |
+              set -e
+              DEST=/homeassistant-config
+              LEGACY="${DEST}/homeassistant"
+
+              # One-time migrate from pre-1.12.3 layout: appData/homeassistant -> appData
+              if [ ! -d "${DEST}/.storage" ] && [ -d "${LEGACY}/.storage" ]; then
+                echo "[migrate] copying legacy appData/homeassistant -> appData..."
+                cp -a "${LEGACY}"/. "${DEST}"/
+                echo "[migrate] done; legacy directory left intact for rollback."
+              fi
+
+              # Empty/invalid .HA_VERSION crashes Core (AwesomeVersionCompareException).
+              if [ -f "${DEST}/.HA_VERSION" ]; then
+                ver="$(tr -d '[:space:]' < "${DEST}/.HA_VERSION" 2>/dev/null || true)"
+                if [ -z "${ver}" ]; then
+                  echo "[init] removing empty .HA_VERSION"
+                  rm -f "${DEST}/.HA_VERSION"
+                fi
+              fi
+
+              cp /config/configuration.yaml "${DEST}/configuration.yaml"
+              mkdir -p "${DEST}/themes"
+              [ -f "${DEST}/automations.yaml" ] || echo "[]" > "${DEST}/automations.yaml"
               for f in scripts.yaml scenes.yaml; do
-              [ -f "/homeassistant-config/$f" ] || touch "/homeassistant-config/$f";
-              done;
-              chown -R 1000:1000 /homeassistant-config
+                [ -f "${DEST}/$f" ] || touch "${DEST}/$f"
+              done
+              chown -R 1000:1000 "${DEST}"
           resources: {}
           volumeMounts:
             - name: config
@@ -142,11 +167,11 @@ spec:
         - name: homeassistant-config
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}{{ else }}{{ .Values.userspace.appData }}/homeassistant{{ end }}'
+            path: '{{ .Values.userspace.appData }}'
         - name: homeassistant-localtime
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/localtime{{ else }}{{ .Values.userspace.appData }}/homeassistant/localtime{{ end }}'
+            path: '{{ .Values.userspace.appData }}/localtime'
         - name: config
           configMap:
             name: {{ .Release.Name }}-config
