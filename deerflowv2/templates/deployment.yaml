@@ -25,6 +25,9 @@ since Olares always terminates TLS upstream.
     {{- $gatewayOrigins = append $gatewayOrigins (printf "https://%s" $h) -}}
   {{- end -}}
 {{- end -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $sandboxImage := index $oe "SANDBOX_IMAGE" | default "beclab/agent-infra-sandbox:1.11.0" -}}
+{{- $enableSandbox := eq (toString (index $oe "ENABLE_SANDBOX" | default "true")) "true" -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -63,7 +66,7 @@ spec:
       terminationGracePeriodSeconds: 45
       initContainers:
         - name: init-config
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.1.1
           command:
             - sh
             - -c
@@ -87,17 +90,6 @@ spec:
                 # migrated config.yaml is a no-op. The deer-flow image
                 # already ships python3.12, no extra deps needed.
                 python3 /init-config/migrate_database_to_postgres.py /config/config.yaml
-                # Idempotent migration for chart >= 1.0.6: upstream PR #1547
-                # gates the bash tool behind sandbox.allow_host_bash; without
-                # the flag the LLM cannot pip/apt install runtime helpers and
-                # OCR on uploaded images silently breaks. Existing users with
-                # a 1.0.5-or-earlier config.yaml on persistent storage need
-                # the flag injected here, since the new ConfigMap default
-                # never touches their on-disk file.
-                if grep -qE '^sandbox:' /config/config.yaml && ! grep -qE 'allow_host_bash' /config/config.yaml; then
-                  echo "Migrating /config/config.yaml: enabling sandbox.allow_host_bash"
-                  sed -i '/^sandbox:$/a\  allow_host_bash: true  # auto-added by chart 1.0.6 init: restores OCR/runtime-install path (upstream PR #1547)' /config/config.yaml
-                fi
 
                 # Chart 1.0.8 additions -- aligns existing config.yaml with
                 # upstream's config.example.yaml v8. Each top-level key is
@@ -145,14 +137,28 @@ spec:
                     '  failure_threshold: 5' \
                     '  recovery_timeout_sec: 60' >> /config/config.yaml
                 fi
-                # Pin config_version: 8 so deer-flow stops logging the
-                # outdated-config warning on every startup.
+                # Pin config_version to match upstream config.example.yaml
+                # so deer-flow stops logging the outdated-config warning.
                 if grep -qE '^config_version:' /config/config.yaml; then
-                  sed -i 's/^config_version:.*/config_version: 8/' /config/config.yaml
+                  sed -i 's/^config_version:.*/config_version: 31/' /config/config.yaml
                 else
-                  printf '\n%s\n' 'config_version: 8  # chart 1.0.8: matches upstream config.example.yaml' >> /config/config.yaml
+                  printf '\n%s\n' 'config_version: 31  # chart 1.0.7: matches upstream config.example.yaml' >> /config/config.yaml
                 fi
+
+                # Chart 1.0.7 / deer-flow v2.1.1: drop dual checkpointer URL;
+                # gateway embeds LangGraph and uses database.postgres_url only.
+                if grep -qE 'checkpointer_postgres_url:' /config/config.yaml; then
+                  echo "Migrating /config/config.yaml: removing checkpointer_postgres_url"
+                  sed -i '/checkpointer_postgres_url:/d' /config/config.yaml
+                fi
+
               fi
+
+              # Chart >= 1.0.12: always apply ENABLE_SANDBOX (default true) so a
+              # fresh copy of the AIO template is rewritten to Local when the
+              # toggle is off, and existing installs flip between AIO/Local.
+              ENABLE_SANDBOX="{{ if $enableSandbox }}true{{ else }}false{{ end }}" \
+                python3 /init-config/migrate_sandbox_to_aio.py /config/config.yaml
 
               if [ ! -f /config/extensions_config.json ]; then
                 echo "Copying initial extensions_config.json..."
@@ -163,7 +169,6 @@ spec:
 
               mkdir -p /data/deer-flow
               mkdir -p /skills/public /skills/custom
-              mkdir -p /langgraph-api
               # Chart >= 1.0.9: db lives in postgres now, the legacy sqlite
               # dir under /data/deer-flow/db is no longer mkdir'd. We do
               # NOT delete the existing file (if any) so operators can
@@ -179,15 +184,15 @@ spec:
               mkdir -p /skills/custom/image-ocr
               cp /init-config/image-ocr-skill.md /skills/custom/image-ocr/SKILL.md
 
-              # The gateway/langgraph containers run as PUID/PGID=1000 (the
+              # The gateway container runs as PUID/PGID=1000 (the
               # image flips to a non-root account at startup). hostPath dirs
               # created here as uid 0 stay owned by root, so the runtime
               # process cannot write memory.json / per-thread user-data /
-              # .langgraph_api/ scratch files. chown unconditionally --
+              # runtime scratch files. chown unconditionally --
               # cheap, and harmless if the image actually stays as root.
               # (Database state lives in postgres now; only filesystem
               # state needs this treatment.)
-              chown -R 1000:1000 /data/deer-flow /skills /config /langgraph-api
+              chown -R 1000:1000 /data/deer-flow /skills /config
 
               echo "Init complete."
           volumeMounts:
@@ -199,17 +204,35 @@ spec:
               mountPath: /data/deer-flow
             - name: skills-volume
               mountPath: /skills
-            - name: langgraph-api-volume
-              mountPath: /langgraph-api
           securityContext:
             runAsUser: 0
+        {{- if $enableSandbox }}
+        # Copy docker CLI so the gateway can wait on DinD (`docker info`).
+        - name: init-docker-cli
+          image: docker.io/beclab/docker:29.3.0-dind
+          imagePullPolicy: IfNotPresent
+          command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
+          resources: {}
+          volumeMounts:
+            - name: docker-cli-bin
+              mountPath: /docker-cli
+        {{- end }}
       containers:
         - name: gateway
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
+          image: docker.io/beclab/harveyff-deerflow-backend:v2.1.1
           command:
             - sh
             - -c
-            - "cd /app/backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
+            - |
+              set -e
+              {{- if $enableSandbox }}
+              echo "Waiting for DinD (DOCKER_HOST=$DOCKER_HOST)..."
+              until docker info >/dev/null 2>&1; do sleep 1; done
+              echo "DinD ready; starting gateway"
+              {{- else }}
+              echo "ENABLE_SANDBOX=false; starting gateway without DinD"
+              {{- end }}
+              cd /app/backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2
           # Delay SIGTERM by 5s so K8s has time to (1) flip the pod's
           # readiness off, (2) propagate the endpoint removal to
           # kube-proxy / clientproxy, and (3) drain any in-flight
@@ -268,10 +291,20 @@ spec:
               value: "true"
             - name: DEER_FLOW_HOME
               value: "/data/deer-flow"
+            # Same path in gateway + DinD so AioSandboxProvider bind-mounts
+            # (host_base_dir/threads/... → sandbox /mnt/user-data) resolve
+            # inside dockerd. Classic DooD uses a different host path; with
+            # in-pod DinD the "host" IS the DinD filesystem.
+            - name: DEER_FLOW_HOST_BASE_DIR
+              value: "/data/deer-flow"
             - name: DEER_FLOW_CONFIG_PATH
               value: "/config/config.yaml"
             - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
               value: "/config/extensions_config.json"
+            {{- if $enableSandbox }}
+            - name: DOCKER_HOST
+              value: "tcp://127.0.0.1:2375"
+            {{- end }}
             - name: PGID
               value: "1000"
             - name: PUID
@@ -309,120 +342,14 @@ spec:
             # Olares postgres middleware — connection details populated by
             # the Olares chart values injector at install/upgrade time.
             #
-            # DATABASE_URL — SQLAlchemy + **asyncpg** only. Do NOT add libpq
-            # query params such as keepalives_* here; asyncpg rejects them and
-            # the gateway will crash on startup (TypeError: unexpected keyword
-            # argument 'keepalives').
+            # DATABASE_URL — SQLAlchemy (asyncpg) + LangGraph checkpointer
+            # (psycopg) via the same URL. Do NOT add libpq-only query params
+            # such as keepalives_* here; asyncpg rejects them and the gateway
+            # will crash on startup. Upstream v2.1.1 pools manage reconnects.
             #
-            # CHECKPOINTER_DATABASE_URL — LangGraph AsyncPostgresSaver +
-            # **psycopg** (libpq). Same server/db as DATABASE_URL but with TCP
-            # keepalive query params so idle connections are not silently dropped
-            # by kube-proxy / NAT before psycopg's pool notices.
-            #
-            # config.yaml sets `database.postgres_url: $DATABASE_URL` and
-            # `checkpointer_postgres_url: $CHECKPOINTER_DATABASE_URL`.
+            # config.yaml sets `database.postgres_url: $DATABASE_URL`.
             - name: DATABASE_URL
               value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}"
-            - name: CHECKPOINTER_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}?keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
-          envFrom:
-            - configMapRef:
-                name: deerflowv2-env-config
-          resources:
-            requests:
-              cpu: "50m"
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
-          volumeMounts:
-            - name: config-volume
-              mountPath: /config
-            - name: data-volume
-              mountPath: /data/deer-flow
-            - name: skills-volume
-              mountPath: /app/skills
-            # On-demand legacy SQLite -> postgres migration tool. Mounted
-            # only into the gateway container (not langgraph) since the
-            # operator runs it via `kubectl exec deploy/... -c gateway`.
-            # Uses items: projection so only the two migration files
-            # appear under /migrate -- the rest of init-config (config.yaml,
-            # the OCR skill, the database backend rewriter) does not leak
-            # into the runtime filesystem. See configmap.yaml for the
-            # script source and operator usage instructions.
-            - name: migrate-vol
-              mountPath: /migrate
-        - name: langgraph
-          image: docker.io/beclab/harveyff-deerflow-backend:v2.0.7-pg
-          command:
-            - sh
-            - -c
-            - "cd /app/backend && uv run langgraph dev --no-browser --allow-blocking --no-reload --host 0.0.0.0 --port 2024"
-          # See gateway preStop for rationale.
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "sleep 5"]
-          ports:
-            - containerPort: 2024
-              name: langgraph
-          # See gateway readinessProbe for rationale. langgraph dev
-          # exposes /ok (not /health) -- doc'd in deer-flow's
-          # deployment-guide and operations-and-troubleshooting pages.
-          # initialDelaySeconds is higher than gateway's because
-          # `langgraph dev --no-reload --allow-blocking` does its
-          # graph compilation + checkpoint pool warmup synchronously
-          # at startup; on cold pulls this can take 20-30s before /ok
-          # responds. failureThreshold:6 (= 30s of /ok failures)
-          # tolerates a slow PG checkpointer pool initialisation.
-          readinessProbe:
-            httpGet:
-              path: /ok
-              port: 2024
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            timeoutSeconds: 3
-            failureThreshold: 6
-          livenessProbe:
-            httpGet:
-              path: /ok
-              port: 2024
-            periodSeconds: 60
-            timeoutSeconds: 10
-            failureThreshold: 5
-          env:
-            - name: CI
-              value: "true"
-            - name: DEER_FLOW_HOME
-              value: "/data/deer-flow"
-            - name: DEER_FLOW_CONFIG_PATH
-              value: "/config/config.yaml"
-            - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
-              value: "/config/extensions_config.json"
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
-            - name: TZ
-              value: Etc/UTC
-            - name: AUTH_JWT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: deerflowv2-auth-secret
-                  key: AUTH_JWT_SECRET
-            # See gateway container for rationale.
-            - name: AUTH_TRUSTED_PROXIES
-              value: "10.233.0.0/16"
-            {{- if gt (len $gatewayOrigins) 0 }}
-            - name: GATEWAY_CORS_ORIGINS
-              value: {{ join "," $gatewayOrigins | quote }}
-            {{- end }}
-            # Mirror gateway env: plain DATABASE_URL for ORM, keepalive URL for
-            # LangGraph checkpointer. See gateway container comments above.
-            - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}"
-            - name: CHECKPOINTER_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.deerflow }}?keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
           envFrom:
             - configMapRef:
                 name: deerflowv2-env-config
@@ -440,8 +367,114 @@ spec:
               mountPath: /data/deer-flow
             - name: skills-volume
               mountPath: /app/skills
-            - name: langgraph-api-volume
-              mountPath: /app/backend/.langgraph_api
+            {{- if $enableSandbox }}
+            - name: docker-cli-bin
+              mountPath: /usr/local/bin/docker
+              subPath: docker
+              readOnly: true
+            {{- end }}
+            # On-demand legacy SQLite -> postgres migration tool. Mounted
+            # into the gateway container; the operator runs it via
+            # `kubectl exec deploy/... -c gateway`.
+            # Uses items: projection so only the two migration files
+            # appear under /migrate -- the rest of init-config (config.yaml,
+            # the OCR skill, the database backend rewriter) does not leak
+            # into the runtime filesystem. See configmap.yaml for the
+            # script source and operator usage instructions.
+            - name: migrate-vol
+              mountPath: /migrate
+
+        {{- if $enableSandbox }}
+        # Docker-in-Docker sidecar for AioSandboxProvider.
+        # dockerd becomes Ready quickly; SANDBOX_IMAGE is pulled in the
+        # background with retries so a cold ~3.5GiB pull never blocks
+        # gateway / other features. Sandbox tools work once the image lands.
+        - name: docker-dind
+          image: docker.io/beclab/docker:29.3.0-dind
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+            - name: SANDBOX_IMAGE
+              value: {{ $sandboxImage | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # --tls=false skips Docker 29's intentional ~15s insecure-TCP
+              # startup delay. Clear stale containerd locks from a previous
+              # Recreate/kill.
+              rm -f /var/lib/docker/containerd/daemon/io.containerd.metadata.v1.bolt/meta.db-lock \
+                    /var/lib/docker/containerd/daemon/io.containerd.metadata.v1.bolt/*.lock 2>/dev/null || true
+              dockerd \
+                --host tcp://0.0.0.0:2375 \
+                --host unix:///var/run/docker.sock \
+                --mtu=1450 \
+                --tls=false &
+              DOCKERD_PID=$!
+              i=0
+              until docker info >/dev/null 2>&1; do
+                i=$((i+1))
+                if [ "$i" -ge 90 ]; then
+                  echo "[dind] dockerd failed to become ready within 90s" >&2
+                  kill "$DOCKERD_PID" 2>/dev/null || true
+                  exit 1
+                fi
+                sleep 1
+              done
+              echo "[dind] dockerd ready; pulling sandbox image in background ($SANDBOX_IMAGE)"
+              (
+                if docker image inspect "$SANDBOX_IMAGE" >/dev/null 2>&1; then
+                  echo "[dind] sandbox image already present"
+                  exit 0
+                fi
+                attempt=0
+                while true; do
+                  attempt=$((attempt+1))
+                  echo "[dind] pulling $SANDBOX_IMAGE (attempt $attempt)..."
+                  if docker pull "$SANDBOX_IMAGE"; then
+                    echo "[dind] sandbox image ready"
+                    exit 0
+                  fi
+                  echo "[dind] pull failed; sandbox unavailable until next retry (30s)"
+                  sleep 30
+                done
+              ) &
+              wait $DOCKERD_PID
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1500m"
+              memory: 3Gi
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            - name: data-volume
+              mountPath: /data/deer-flow
+            - name: skills-volume
+              mountPath: /app/skills
+        {{- end }}
       volumes:
         - name: init-config-vol
           configMap:
@@ -473,10 +506,14 @@ spec:
           hostPath:
             path: '{{ .Values.userspace.appData }}/skills'
             type: DirectoryOrCreate
-        - name: langgraph-api-volume
+        {{- if $enableSandbox }}
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
           hostPath:
-            path: '{{ .Values.userspace.appData }}/langgraph_api'
+            path: '{{ .Values.userspace.appData }}/docker'
             type: DirectoryOrCreate
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -490,7 +527,4 @@ spec:
     - name: gateway
       port: 8001
       targetPort: 8001
-    - name: langgraph
-      port: 2024
-      targetPort: 2024
   type: ClusterIP
