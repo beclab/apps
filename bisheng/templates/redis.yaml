@@ -1,0 +1,105 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bisheng-redis
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: bisheng-redis
+spec:
+  replicas: {{ (index .Values.workloads "bisheng-redis").replicaCount }}
+  selector:
+    matchLabels:
+      app: bisheng-redis
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: bisheng-redis
+    spec:
+      initContainers:
+        - name: sync-bisheng-files
+          image: "docker.io/beclab/bisheng-init:v1.0.3"
+          command:
+            - sh
+            - -c
+            - |
+              rsync -a --ignore-existing /docker/redis/ /mnt/docker/redis/
+          volumeMounts:
+            - name: bisheng-docker
+              mountPath: /mnt/docker
+      securityContext:
+        runAsUser: 0
+      containers:
+        - name: redis
+          image: "docker.io/beclab/redis:7.0.4"
+          ports:
+            - containerPort: 6379
+          env:
+            - name: TZ
+              value: Asia-Shanghai
+          command: ["redis-server", "/etc/redis.conf"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 100Mi
+            limits:
+              cpu: "500m"
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /data
+              name: redis-data
+            - mountPath: /etc/redis.conf
+              name: redis-conf
+              subPath: redis.conf
+
+      volumes:
+        - name: bisheng-docker
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/docker"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker"
+            {{- end }}
+            type: DirectoryOrCreate
+        - name: redis-data
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/data/redis"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/redis"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/data/redis"
+            {{- end }}
+            type: DirectoryOrCreate
+        - name: redis-conf
+          hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}/docker/redis"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/redis"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}/docker/redis"
+            {{- end }}
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: bisheng-redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+      name: redis

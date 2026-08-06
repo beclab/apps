@@ -1,0 +1,236 @@
+{{- $appDomainENV := split "," .Values.domain.crm -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: twenty
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: twenty
+spec:
+  replicas: {{ .Values.workloads.twenty.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: twenty
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: twenty
+    spec:
+      initContainers:
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: wait-for-redis
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.redis.host }}:{{ .Values.redis.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            # Destination already has content (ignore our marker name if present).
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache -> appData..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: appcache-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: appcache
+            mountPath: /new-data
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /app-data-root
+            chown -R 1000:1000 /app-data-root || true
+            chmod -R 755 /app-data-root || true
+        resources: {}
+        volumeMounts:
+          - name: appcache
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: twenty
+        image: "docker.io/twentycrm/twenty:v2.22.0"
+        env:
+        - name: NODE_PORT
+          value: "3000"
+        - name: PG_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: PG_DATABASE_URL
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: REDIS_URL
+        - name: SERVER_URL
+          {{- if $appDomain }}
+          value: "https://{{ $appDomain }}"
+          {{- else }}
+          value: "http://localhost:3000"
+          {{- end }}
+        - name: FRONT_BASE_URL
+          {{- if $appDomain }}
+          value: "https://{{ $appDomain }}"
+          {{- else }}
+          value: "http://localhost:3000"
+          {{- end }}
+        - name: APP_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: APP_SECRET
+        - name: DISABLE_DB_MIGRATIONS
+          value: "{{ .Values.disableDbMigrations | default false }}"
+        - name: DISABLE_CRON_JOBS_REGISTRATION
+          value: "{{ .Values.disableCronJobsRegistration | default false }}"
+        {{- if .Values.olaresEnv.MAIL_TYPE }}
+        - name: EMAIL_DRIVER
+          value: "{{ .Values.olaresEnv.MAIL_TYPE }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_SERVER }}
+        - name: EMAIL_SMTP_HOST
+          value: "{{ .Values.olaresEnv.SMTP_SERVER }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PORT }}
+        - name: EMAIL_SMTP_PORT
+          value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_USERNAME }}
+        - name: EMAIL_SMTP_USER
+          value: "{{ .Values.olaresEnv.SMTP_USERNAME }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PASSWORD }}
+        - name: EMAIL_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: twenty-secrets
+              key: EMAIL_SMTP_PASSWORD
+        {{- end }}
+        {{- if .Values.olaresEnv.MAIL_DEFAULT_SEND_FROM }}
+        - name: EMAIL_FROM_ADDRESS
+          value: "{{ .Values.olaresEnv.MAIL_DEFAULT_SEND_FROM }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_USE_TLS }}
+        - name: EMAIL_SMTP_USE_TLS
+          value: "{{ .Values.olaresEnv.SMTP_USE_TLS }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.SMTP_PORT }}
+        {{- if eq .Values.olaresEnv.SMTP_PORT "465" }}
+        - name: EMAIL_SMTP_SECURE
+          value: "true"
+        {{- end }}
+        {{- end }}
+        {{- if .Values.olaresEnv.EMAIL_FROM_NAME }}
+        - name: EMAIL_FROM_NAME
+          value: "{{ .Values.olaresEnv.EMAIL_FROM_NAME }}"
+        {{- end }}
+        {{- if .Values.olaresEnv.EMAIL_SYSTEM_ADDRESS }}
+        - name: EMAIL_SYSTEM_ADDRESS
+          value: "{{ .Values.olaresEnv.EMAIL_SYSTEM_ADDRESS }}"
+        {{- end }}
+        ports:
+        - containerPort: 3000
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2000Mi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /app/packages/twenty-server/.local-storage
+          name: appcache
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/data'
+          type: DirectoryOrCreate
+        name: appcache-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+        name: appcache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: twenty
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: twenty
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: twenty
+

@@ -1,0 +1,115 @@
+{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llama
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: llama
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llama
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: llama
+          image: "docker.io/beclab/ggml-org-llama.cpp:server-cuda-b8643"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              DONE_FILE="/models/.gpt-oss-120b-GGUF.done"
+              echo "[wait] Waiting for $DONE_FILE ..."
+              until [ -f "$DONE_FILE" ]; do
+                sleep 2
+              done
+              echo "[wait] Detected $DONE_FILE, starting server."
+              exec ./llama-server "$@"
+          args:
+            - "--server"
+            - "-m"
+            - "/models/gpt-oss-120b-mxfp4-00001-of-00003.gguf"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8080"
+            - "-c"
+            - "8000"
+            - "--flash-attn"
+            - "auto"
+            - "--jinja"
+            - "--reasoning-format"
+            - "none"
+            - "--n-gpu-layers"
+            - "60"
+            - "--n-cpu-moe"
+            - "24"
+            - "--temp"
+            - "1.0"
+            - "--top-p"
+            - "1.0"
+            - "--top-k"
+            - "0"
+            - "--threads"
+            - "20"
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: LLAMA_CACHE
+              value: "/models/cache"
+            - name: HF_HOME
+              value: "/models/.cache/huggingface"
+            - name: HUGGINGFACE_HUB_CACHE
+              value: "/models/hub"
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            limits:
+              cpu: "19"
+              memory: 69Gi
+            requests:
+              cpu: "6"
+              memory: 20Gi
+          volumeMounts:
+            - name: data
+              mountPath: /models
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/gptoss120bgguf"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llama
+spec:
+  selector:
+    io.kompose.service: llama
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+{{- end }}

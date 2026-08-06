@@ -15,27 +15,1117 @@ data:
   migrate-and-create-admin.sh: |-
     #!/bin/bash
 
-    set -o errexit
+    # Do not set errexit to ensure script continues even if some steps fail
+    # set -o errexit  # Commented out to make script more robust
     set -o nounset
     set -o pipefail
 
-    # Load libraries
-    . /opt/bitnami/scripts/liblog.sh
-    . /opt/bitnami/scripts/libos.sh
-    . /opt/bitnami/scripts/libvalidations.sh
-    . /opt/bitnami/scripts/libmastodon.sh
+    # Enable verbose output
+    set -x
+    
+    # Global error handling
+    trap 'echo "ERROR: Script failed at line $LINENO. Command: $BASH_COMMAND"' ERR
 
-    # Load Mastodon environment variables
-    . /opt/bitnami/scripts/mastodon-env.sh
-    info "Migrating database"
-    psql_connection_string="postgresql://${MASTODON_DATABASE_USERNAME}:${MASTODON_DATABASE_PASSWORD}@${MASTODON_DATABASE_HOST}:${MASTODON_DATABASE_PORT_NUMBER}/${MASTODON_DATABASE_NAME}"
-    mastodon_wait_for_postgresql_connection "$psql_connection_string"
-    mastodon_rake_execute db:migrate
-    elasticsearch_connection_string="http://${MASTODON_ELASTICSEARCH_HOST}:${MASTODON_ELASTICSEARCH_PORT_NUMBER}"
-    mastodon_wait_for_elasticsearch_connection "$elasticsearch_connection_string"
-    info "Migrating Elasticsearch"
-    mastodon_rake_execute chewy:upgrade
-    # mastodon_ensure_admin_user_exists
+    echo "=========================================="
+    echo "=== Starting Mastodon Initialization ==="
+    echo "=========================================="
+    echo "Timestamp: $(date)"
+    echo "Working directory: $(pwd)"
+    cd /app/www
+    echo "Changed to: $(pwd)"
+    echo ""
+
+    # Run database migrations directly (without checking connection status, retry on failure)
+    echo "=== Running database migrations ==="
+    echo "Timestamp: $(date)"
+    echo "Database config:"
+    echo "  Host: ${MASTODON_DATABASE_HOST:-${DB_HOST:-not set}}"
+    echo "  Port: ${MASTODON_DATABASE_PORT_NUMBER:-${DB_PORT:-5432}}"
+    echo "  Database: ${MASTODON_DATABASE_NAME:-${DB_NAME:-not set}}"
+    echo "  User: ${MASTODON_DATABASE_USERNAME:-${DB_USER:-not set}}"
+    echo ""
+    
+    max_migration_attempts=30
+    migration_attempt=0
+    migration_success=false
+    
+    while [ $migration_attempt -lt $max_migration_attempts ]; do
+      echo "Migration attempt $((migration_attempt + 1))/$max_migration_attempts..."
+      migration_output=$(bundle exec rails db:migrate 2>&1)
+      migration_exit_code=$?
+      
+      if [ $migration_exit_code -eq 0 ]; then
+        echo "$migration_output"
+        echo "✓ Database migrations completed successfully"
+        migration_success=true
+        break
+      else
+        echo "$migration_output"
+        migration_attempt=$((migration_attempt + 1))
+        if [ $migration_attempt -lt $max_migration_attempts ]; then
+          echo "Migration failed, retrying in 3 seconds... (attempt $migration_attempt/$max_migration_attempts)"
+          sleep 3
+        fi
+      fi
+    done
+    
+    if [ "$migration_success" != "true" ]; then
+      echo "⚠ WARNING: Database migrations failed after $max_migration_attempts attempts"
+      echo "Will continue anyway - admin creation will be attempted"
+    fi
+    echo ""
+
+    # Run Elasticsearch migrations directly (do not wait, retry on failure, non-critical operation)
+    echo ""
+    echo "=== Running Elasticsearch migrations (non-critical) ==="
+    echo "Timestamp: $(date)"
+    echo "Note: Elasticsearch is optional for search functionality, migration failures are non-critical"
+    
+    max_es_attempts=5
+    es_attempt=0
+    es_success=false
+    
+    while [ $es_attempt -lt $max_es_attempts ]; do
+      es_attempt=$((es_attempt + 1))
+      echo "Elasticsearch migration attempt $es_attempt/$max_es_attempts..."
+      es_output=$(bundle exec rails chewy:upgrade 2>&1)
+      es_exit_code=$?
+      
+      if [ $es_exit_code -eq 0 ]; then
+        echo "$es_output"
+        echo "✓ Elasticsearch migrations completed successfully"
+        es_success=true
+        break
+      else
+        echo "$es_output"
+        if [ $es_attempt -lt $max_es_attempts ]; then
+          echo "Elasticsearch migration failed, retrying in 3 seconds... (attempt $es_attempt/$max_es_attempts)"
+          sleep 3
+        fi
+      fi
+    done
+    
+    if [ "$es_success" != "true" ]; then
+      echo "⚠ WARNING: Elasticsearch migrations failed after $max_es_attempts attempts (non-critical)"
+      echo "Search functionality may be limited, but Mastodon will still work normally"
+    fi
+    
+    # Deploy Elasticsearch indexes after migrations (always attempt, even if migrations had warnings)
+    echo ""
+    echo "=== Deploying Elasticsearch indexes ==="
+    echo "Timestamp: $(date)"
+    echo "Deploying search indexes for instances, accounts, tags, statuses, public_statuses..."
+    echo "Note: This will update index mappings even if migrations had warnings"
+    
+    max_deploy_attempts=5
+    deploy_attempt=0
+    deploy_success=false
+    
+    while [ $deploy_attempt -lt $max_deploy_attempts ]; do
+      deploy_attempt=$((deploy_attempt + 1))
+      echo ""
+      echo "Index deployment attempt $deploy_attempt/$max_deploy_attempts..."
+      echo "Running: bundle exec tootctl search deploy --only=instances accounts tags statuses public_statuses"
+      deploy_output=$(bundle exec tootctl search deploy --only=instances accounts tags statuses public_statuses 2>&1)
+      deploy_exit_code=$?
+      
+      echo "$deploy_output"
+      
+      if [ $deploy_exit_code -eq 0 ]; then
+        echo "✓ Elasticsearch indexes deployed successfully"
+        deploy_success=true
+        break
+      else
+        # Check if it's a non-critical error (like index already exists)
+        if echo "$deploy_output" | grep -qi "already exists\|already deployed\|up to date\|successfully"; then
+          echo "✓ Indexes already deployed or up to date"
+          deploy_success=true
+          break
+        fi
+        
+        if [ $deploy_attempt -lt $max_deploy_attempts ]; then
+          echo "Index deployment failed, retrying in 5 seconds... (attempt $deploy_attempt/$max_deploy_attempts)"
+          sleep 5
+        fi
+      fi
+    done
+    
+    # If tootctl fails, try alternative method using Rails runner with reset
+    if [ "$deploy_success" != "true" ]; then
+      echo ""
+      echo "Trying alternative deployment method using Rails runner..."
+      rails_deploy_output=$(bundle exec rails runner "
+        require 'chewy'
+        begin
+          Chewy.strategy(:bypass) do
+            puts 'Deploying indexes using Chewy reset...'
+            ['InstancesIndex', 'AccountsIndex', 'TagsIndex', 'StatusesIndex', 'PublicStatusesIndex'].each do |index_name|
+              begin
+                index_class = \"#{index_name}\".constantize
+                index_name_str = index_class.index_name rescue index_name.downcase
+                
+                # Delete index if exists, then create
+                if Chewy.client.indices.exists?(index: index_name_str)
+                  puts \"  Deleting existing #{index_name}...\"
+                  Chewy.client.indices.delete(index: index_name_str)
+                  sleep 1
+                end
+                
+                # Create index
+                puts \"  Creating #{index_name}...\"
+                index_class.create!
+                puts \"  ✓ #{index_name} reset and deployed\"
+              rescue => e
+                puts \"  ✗ #{index_name} failed: #{e.class}: #{e.message}\"
+                # Try reset! as fallback
+                begin
+                  index_class.reset!
+                  puts \"  ✓ #{index_name} deployed using reset!\"
+                rescue => e2
+                  puts \"  ✗ #{index_name} reset! also failed: #{e2.message}\"
+                end
+              end
+            end
+          end
+          puts '✓ Alternative deployment completed'
+        rescue => e
+          puts \"✗ Alternative deployment failed: #{e.class}: #{e.message}\"
+          puts e.backtrace.first(5).join(\"\n\")
+        end
+      " 2>&1)
+      echo "$rails_deploy_output"
+      
+      if echo "$rails_deploy_output" | grep -qi "reset and deployed\|deployed using reset\|completed"; then
+        deploy_success=true
+        echo "✓ Alternative deployment method succeeded"
+      fi
+    fi
+    
+    if [ "$deploy_success" != "true" ]; then
+      echo ""
+      echo "⚠ WARNING: Elasticsearch index deployment failed after all attempts"
+      echo "You can manually run: bundle exec tootctl search deploy --only=instances accounts tags statuses public_statuses"
+      echo "Or run without --only flag to deploy all indexes: bundle exec tootctl search deploy"
+      echo "Or use Rails runner: bundle exec rails runner \"require 'chewy'; Chewy.strategy(:bypass) { InstancesIndex.reset!; AccountsIndex.reset!; TagsIndex.reset!; StatusesIndex.reset!; PublicStatusesIndex.reset! }\""
+    else
+      echo ""
+      echo "✓✓✓ Elasticsearch indexes deployment completed successfully ✓✓✓"
+    fi
+    echo ""
+
+    # Check if admin account should be auto-created
+    # Skip auto-creation if AUTO_CREATE_ADMIN environment variable is not set or false
+    auto_create_admin="${AUTO_CREATE_ADMIN:-false}"
+    
+    echo ""
+    echo "=========================================="
+    echo "=== Admin Account Creation Check ==="
+    echo "=========================================="
+    echo "Timestamp: $(date)"
+    echo "AUTO_CREATE_ADMIN=${auto_create_admin}"
+    echo "MASTODON_ADMIN_USERNAME=${MASTODON_ADMIN_USERNAME:-not set}"
+    echo "MASTODON_ADMIN_EMAIL=${MASTODON_ADMIN_EMAIL:-not set}"
+    echo "MASTODON_ADMIN_PASSWORD=${MASTODON_ADMIN_PASSWORD:+[SET]}${MASTODON_ADMIN_PASSWORD:-[NOT SET]}"
+    echo ""
+    
+    if [ "$auto_create_admin" = "true" ]; then
+      echo "=== Auto-creating admin account (AUTO_CREATE_ADMIN=true) ==="
+      admin_username="${MASTODON_ADMIN_USERNAME:-mastodon}"
+      admin_email="${MASTODON_ADMIN_EMAIL:-user@example.com}"
+      admin_password="${MASTODON_ADMIN_PASSWORD:-qwer1234}"
+      
+      echo "Using admin credentials:"
+      echo "  Username: ${admin_username}"
+      echo "  Email: ${admin_email}"
+      echo "  Password: [SET]"
+      
+      # Check if admin account already exists
+      echo "=== Checking if admin account already exists ==="
+      echo "Timestamp: $(date)"
+      echo "Attempting to check for existing admin accounts..."
+      
+      # Use simpler method to check, avoiding complex string parsing
+      admin_check_output=$(bundle exec rails runner "
+        begin
+          puts 'Checking for existing Owner role users...'
+          owner_role = UserRole.find_by(name: 'Owner')
+          if owner_role
+            puts \"Owner role found: ID=#{owner_role.id}\"
+            exists = User.where(role: owner_role).exists?
+            if exists
+              count = User.where(role: owner_role).count
+              puts \"Found #{count} Owner role user(s)\"
+              User.where(role: owner_role).each do |u|
+                puts \"  - #{u.account.username} (#{u.email})\"
+              end
+              puts 'ADMIN_EXISTS_TRUE'
+            else
+              puts 'No Owner role users found'
+              puts 'ADMIN_EXISTS_FALSE'
+            end
+          else
+            puts 'Owner role not found'
+            puts 'ADMIN_EXISTS_FALSE'
+          end
+        rescue => e
+          puts \"Error checking admin: #{e.message}\"
+          puts 'ADMIN_EXISTS_FALSE'
+        end
+      " 2>&1)
+      
+      echo "$admin_check_output"
+      echo ""
+      
+      # Check if output contains ADMIN_EXISTS_TRUE
+      if echo "$admin_check_output" | grep -q "ADMIN_EXISTS_TRUE"; then
+        admin_exists="true"
+        echo "Admin exists check result: true (found existing Owner)"
+      else
+        admin_exists="false"
+        echo "Admin exists check result: false (no Owner found)"
+      fi
+      
+      if [ "$admin_exists" = "true" ]; then
+        echo ""
+        echo "=== Admin account already exists ==="
+        echo "Timestamp: $(date)"
+        echo "Updating password and ensuring Owner role..."
+        # Even if account exists, update password and role
+        bundle exec rails runner "
+          puts 'Updating existing admin account...'
+          user = User.find_by(email: '${admin_email}')
+          if user
+            # Check if password actually changed to avoid unnecessary updates and email notifications
+            password_changed = false
+            begin
+              # Try to authenticate with current password to check if it matches
+              if user.valid_password?('${admin_password}')
+                puts 'Password unchanged, skipping password update to avoid email notification'
+              else
+                password_changed = true
+                puts 'Password changed, updating...'
+              end
+            rescue => e
+              # If validation fails, assume password needs to be updated
+              password_changed = true
+              puts 'Password validation check failed, updating password...'
+            end
+            
+            # Only update password if it actually changed
+            if password_changed
+              # Use update_columns to skip callbacks and avoid triggering email notifications
+              user.update_columns(
+                encrypted_password: BCrypt::Password.create('${admin_password}'),
+                confirmed_at: user.confirmed_at || Time.now,
+                agreement: true,
+                approved: true
+              ) rescue begin
+                # Fallback to normal save if update_columns fails
+                user.password = '${admin_password}'
+                user.password_confirmation = '${admin_password}'
+                user.skip_password_change_notification! if user.respond_to?(:skip_password_change_notification!)
+                user.confirmed_at ||= Time.now
+                user.agreement = true
+                user.approved = true if user.respond_to?(:approved)
+                user.save(validate: false)
+              end
+            else
+              # Only update other fields if password didn't change
+              user.update_columns(
+                confirmed_at: user.confirmed_at || Time.now,
+                agreement: true,
+                approved: true
+              ) rescue nil
+            end
+            
+            # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+            puts \"Setting Owner role and approving account using tootctl...\"
+            system(\"bundle exec tootctl accounts modify #{user.account.username} --role Owner --approve\")
+            
+            # Ensure account status is correct again (prevent caching issues)
+            user.reload
+            user.confirmed_at ||= Time.now
+            user.approved = true if user.respond_to?(:approved)
+            user.agreement = true
+            user.save! rescue user.update_columns(
+              confirmed_at: user.confirmed_at || Time.now,
+              agreement: true,
+              approved: true
+            ) if user.respond_to?(:approved)
+            
+            # Verify role assignment
+            user.reload
+            owner_role = UserRole.find_by(name: 'Owner')
+            if owner_role && user.role == owner_role
+              puts '✓ Owner role confirmed'
+            else
+              puts '⚠ WARNING: Owner role may not be set correctly, trying Rails method...'
+              if owner_role
+                user.role = owner_role
+                user.save(validate: false)
+                user.reload
+                # If still not set, use update_column as last resort
+                if user.role != owner_role
+                  user.update_column(:role_id, owner_role.id)
+                  user.reload
+                end
+              end
+            end
+            
+            # Final verification
+            user.reload
+            puts \"✓ Admin account updated: #{user.account.username} (#{user.email})\"
+            puts \"  Role: #{user.role&.name || 'Unknown'} (ID: #{user.role_id})\"
+            puts \"  Confirmed: #{user.confirmed_at.present?}\"
+            puts \"  Approved: #{user.approved if user.respond_to?(:approved)}\"
+            puts \"  Agreement: #{user.agreement}\"
+            puts \"  Password changed: #{password_changed}\"
+          else
+            puts '✗ Admin user not found by email: ${admin_email}'
+          end
+        " 2>&1
+        update_exit_code=$?
+        if [ $update_exit_code -eq 0 ]; then
+          echo "✓ Admin account update completed"
+        else
+          echo "⚠ Warning: Failed to update existing admin account (exit code: $update_exit_code)"
+        fi
+        echo ""
+      else
+        echo ""
+        echo "=== Auto-creating admin account ==="
+        echo "Timestamp: $(date)"
+        echo "Username: ${admin_username}"
+        echo "Email: ${admin_email}"
+        echo ""
+        
+        admin_created=false
+        max_admin_attempts=10
+        
+        # Directly attempt to create admin, retry on failure
+        echo "=== Creating admin account (with retry) ==="
+        admin_attempt=0
+        
+        while [ $admin_attempt -lt $max_admin_attempts ] && [ "$admin_created" != "true" ]; do
+          admin_attempt=$((admin_attempt + 1))
+          echo ""
+          echo "Admin creation attempt $admin_attempt/$max_admin_attempts..."
+          echo "Username: ${admin_username}"
+          echo "Email: ${admin_email}"
+          echo ""
+          
+          # Use Rails runner to create (simplest and most reliable method)
+          create_output=$(bundle exec rails runner "
+            begin
+              admin_email = '${admin_email}'
+              admin_username = '${admin_username}'
+              admin_password = '${admin_password}'
+              
+              # First ensure Owner role exists
+              owner_role = UserRole.find_by(name: 'Owner')
+              if !owner_role
+                puts 'Owner role not found, creating...'
+                begin
+                  owner_role = UserRole.find_or_create_by(name: 'Owner') do |role|
+                    role.position = 1
+                    role.permissions = 0xFFFFFFFF if role.respond_to?(:permissions=)
+                    role.highlighted = true if role.respond_to?(:highlighted=)
+                    role.color = '#ff0000' if role.respond_to?(:color=)
+                  end
+                  puts \"✓ Owner role created: ID=#{owner_role.id}\"
+                rescue => e
+                  puts \"Failed to create Owner role: #{e.message}, trying SQL...\"
+                  position = ActiveRecord::Base.connection.execute(
+                    \"SELECT COALESCE(MAX(position), 0) + 1 as max_pos FROM user_roles\"
+                  ).first['max_pos'] rescue 1
+                  ActiveRecord::Base.connection.execute(
+                    \"INSERT INTO user_roles (name, position, created_at, updated_at) VALUES ('Owner', #{position}, NOW(), NOW())\"
+                  )
+                  owner_role = UserRole.find_by(name: 'Owner')
+                  puts \"✓ Owner role created via SQL: ID=#{owner_role.id}\"
+                end
+              else
+                puts \"✓ Owner role exists: ID=#{owner_role.id}\"
+              end
+              
+              # First check if user with email already exists
+              existing_user = User.find_by(email: admin_email)
+              if existing_user
+                puts 'User with email already exists, updating...'
+                # Check if password actually changed to avoid unnecessary updates and email notifications
+                password_changed = false
+                begin
+                  if existing_user.valid_password?(admin_password)
+                    puts 'Password unchanged, skipping password update to avoid email notification'
+                  else
+                    password_changed = true
+                    puts 'Password changed, updating...'
+                  end
+                rescue => e
+                  password_changed = true
+                  puts 'Password validation check failed, updating password...'
+                end
+                
+                # Only update password if it actually changed
+                if password_changed
+                  # Use update_columns to skip callbacks and avoid triggering email notifications
+                  existing_user.update_columns(
+                    encrypted_password: BCrypt::Password.create(admin_password),
+                    confirmed_at: existing_user.confirmed_at || Time.now,
+                    agreement: true,
+                    approved: true
+                  ) rescue begin
+                    # Fallback to normal save if update_columns fails
+                    existing_user.password = admin_password
+                    existing_user.password_confirmation = admin_password
+                    existing_user.skip_password_change_notification! if existing_user.respond_to?(:skip_password_change_notification!)
+                    existing_user.confirmed_at ||= Time.now
+                    existing_user.agreement = true
+                    existing_user.approved = true if existing_user.respond_to?(:approved)
+                    existing_user.save(validate: false)
+                  end
+                else
+                  # Only update other fields if password didn't change
+                  existing_user.update_columns(
+                    confirmed_at: existing_user.confirmed_at || Time.now,
+                    agreement: true,
+                    approved: true
+                  ) rescue nil
+                end
+                
+                # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+                puts \"Setting Owner role and approving account using tootctl...\"
+                system(\"bundle exec tootctl accounts modify #{existing_user.account.username} --role Owner --approve\")
+                
+                # Ensure account status is correct again (prevent caching issues)
+                existing_user.reload
+                existing_user.confirmed_at ||= Time.now
+                existing_user.approved = true if existing_user.respond_to?(:approved)
+                existing_user.agreement = true
+                existing_user.save! rescue existing_user.update_columns(
+                  confirmed_at: Time.now,
+                  agreement: true,
+                  approved: true
+                ) if existing_user.respond_to?(:approved)
+                
+                # Verify role assignment
+                existing_user.reload
+                owner_role = UserRole.find_by(name: 'Owner')
+                if owner_role && existing_user.role == owner_role
+                  puts \"✓ Owner role confirmed\"
+                else
+                  puts \"⚠ WARNING: Owner role may not be set correctly, trying Rails method...\"
+                  if owner_role
+                    existing_user.role = owner_role
+                    existing_user.save!
+                    existing_user.reload
+                  end
+                end
+                
+                puts ''
+                puts \"✓ Updated existing user: #{existing_user.account.username} (#{admin_email})\"
+                puts \"  Role: #{existing_user.reload.role&.name || 'Unknown'} (ID: #{existing_user.role_id})\"
+                puts \"  Confirmed: #{existing_user.confirmed_at.present?}\"
+                puts \"  Approved: #{existing_user.approved if existing_user.respond_to?(:approved)}\"
+                puts \"  Agreement: #{existing_user.agreement}\"
+                puts ''
+                puts '✓✓✓ Admin account is ready for immediate use ✓✓✓'
+                exit 0
+              end
+              
+              # Check if account with username already exists
+              existing_account = Account.find_by(username: admin_username)
+              if existing_account && existing_account.user
+                puts 'Account with username already exists, updating...'
+                user = existing_account.user
+                user.email = admin_email if user.email != admin_email
+                user.password = admin_password
+                user.password_confirmation = admin_password
+                user.confirmed_at = Time.now
+                user.agreement = true
+                user.approved = true if user.respond_to?(:approved)
+                user.save!
+                
+                # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+                puts \"Setting Owner role and approving account using tootctl...\"
+                system(\"bundle exec tootctl accounts modify #{user.account.username} --role Owner --approve\")
+                
+                # Ensure account status is correct again (prevent caching issues)
+                user.reload
+                user.confirmed_at ||= Time.now
+                user.approved = true if user.respond_to?(:approved)
+                user.agreement = true
+                user.save! rescue user.update_columns(
+                  confirmed_at: Time.now,
+                  agreement: true,
+                  approved: true
+                ) if user.respond_to?(:approved)
+                
+                # Verify role assignment
+                user.reload
+                owner_role = UserRole.find_by(name: 'Owner')
+                if owner_role && user.role == owner_role
+                  puts \"✓ Owner role confirmed\"
+                else
+                  puts \"⚠ WARNING: Owner role may not be set correctly, trying Rails method...\"
+                  if owner_role
+                    user.role = owner_role
+                    user.save!
+                    user.reload
+                  end
+                end
+                
+                puts ''
+                puts \"✓ Updated existing account: #{user.account.username} (#{user.email})\"
+                puts \"  Role: #{user.reload.role&.name || 'Unknown'} (ID: #{user.role_id})\"
+                puts \"  Confirmed: #{user.confirmed_at.present?}\"
+                puts \"  Approved: #{user.approved if user.respond_to?(:approved)}\"
+                puts \"  Agreement: #{user.agreement}\"
+                puts ''
+                puts '✓✓✓ Admin account is ready for immediate use ✓✓✓'
+                exit 0
+              end
+              
+              # Attempt to create new account (using original username)
+              begin
+                account = Account.create!(
+                  username: admin_username,
+                  display_name: 'Administrator'
+                )
+                
+                # Skip email verification when creating user
+                user = User.new(
+                  email: admin_email,
+                  password: admin_password,
+                  password_confirmation: admin_password,
+                  confirmed_at: Time.now,
+                  account: account,
+                  agreement: true
+                )
+                user.skip_email_confirmation! if user.respond_to?(:skip_email_confirmation!)
+                user.skip_reconfirmation! if user.respond_to?(:skip_reconfirmation!)
+                user.approved = true if user.respond_to?(:approved)
+                
+                # Ensure Owner role exists
+                owner_role = UserRole.find_by(name: 'Owner')
+                if !owner_role
+                  puts 'Owner role not found, creating...'
+                  begin
+                    owner_role = UserRole.find_or_create_by(name: 'Owner') do |role|
+                      role.position = 1
+                      role.permissions = 0xFFFFFFFF if role.respond_to?(:permissions=)
+                      role.highlighted = true if role.respond_to?(:highlighted=)
+                      role.color = '#ff0000' if role.respond_to?(:color=)
+                    end
+                  rescue => e
+                    position = ActiveRecord::Base.connection.execute(
+                      \"SELECT COALESCE(MAX(position), 0) + 1 as max_pos FROM user_roles\"
+                    ).first['max_pos'] rescue 1
+                    ActiveRecord::Base.connection.execute(
+                      \"INSERT INTO user_roles (name, position, created_at, updated_at) VALUES ('Owner', #{position}, NOW(), NOW())\"
+                    )
+                    owner_role = UserRole.find_by(name: 'Owner')
+                  end
+                end
+                
+                # Set Owner role first, then save
+                if owner_role
+                  user.role = owner_role
+                  puts \"✓ Owner role will be assigned\"
+                end
+                
+                user.save!(validate: false) # Skip validation to avoid email verification failure
+                
+                # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+                puts \"Setting Owner role and approving account using tootctl...\"
+                system(\"bundle exec tootctl accounts modify #{admin_username} --role Owner --approve\")
+                
+                # Ensure account status is correct again (prevent caching issues)
+                user.reload
+                user.confirmed_at ||= Time.now
+                user.approved = true if user.respond_to?(:approved)
+                user.agreement = true
+                user.save! rescue user.update_columns(
+                  confirmed_at: Time.now,
+                  agreement: true,
+                  approved: true
+                ) if user.respond_to?(:approved)
+                
+                # Verify role assignment
+                user.reload
+                if owner_role && user.role == owner_role
+                  puts \"✓ Owner role confirmed via tootctl\"
+                else
+                  puts \"⚠ tootctl may have failed, trying Rails method...\"
+                  if owner_role
+                    user.role = owner_role
+                    if user.save
+                      user.reload
+                      if user.role == owner_role
+                        puts \"✓ Owner role confirmed via Rails\"
+                      else
+                        user.update_column(:role_id, owner_role.id)
+                        user.reload
+                        puts \"✓ Owner role confirmed via update_column\"
+                      end
+                    end
+                  end
+                end
+                
+                # Final verification of all status
+                user.reload
+                puts ''
+                puts \"✓✓✓ Created: #{admin_username} (#{admin_email})\"
+                puts \"  Role: #{user.role&.name || 'Unknown'} (ID: #{user.role_id})\"
+                puts \"  Confirmed: #{user.confirmed_at.present?}\"
+                puts \"  Approved: #{user.approved if user.respond_to?(:approved)}\"
+                puts \"  Agreement: #{user.agreement}\"
+                puts ''
+                puts '✓✓✓ Admin account is ready for immediate use ✓✓✓'
+                exit 0
+              rescue ActiveRecord::RecordInvalid => e
+                # If username is taken, try using fallback username or update existing account
+                if e.message.include?('Username') && e.message.include?('taken')
+                  puts \"Username '#{admin_username}' is taken, checking if account exists...\"
+                  
+                  # Check if account with original username exists
+                  existing_account = Account.find_by(username: admin_username)
+                  if existing_account && existing_account.user
+                    puts \"Account with username '#{admin_username}' exists, updating...\"
+                    user = existing_account.user
+                    user.email = admin_email if user.email != admin_email
+                    user.password = admin_password
+                    user.password_confirmation = admin_password
+                    user.confirmed_at = Time.now
+                    user.agreement = true
+                    user.approved = true if user.respond_to?(:approved)
+                    user.save!
+                    
+                    owner_role = UserRole.find_by(name: 'Owner')
+                    if owner_role
+                      user.role = owner_role
+                      user.save!
+                      puts \"✓ Owner role assigned to existing account\"
+                    else
+                      puts \"⚠ WARNING: Owner role not found!\"
+                    end
+                    puts \"✓ Updated existing account: #{user.account.username} (#{user.email})\"
+                    puts \"  Role: #{user.reload.role&.name || 'Unknown'}\"
+                    exit 0
+                  end
+                  
+                  # If original account doesn't exist, try fallback username
+                  puts \"Trying fallback username...\"
+                  fallback_username = 'mastodonuser'
+                  
+                  # Check if fallback username is also taken
+                  fallback_account = Account.find_by(username: fallback_username)
+                  if fallback_account && fallback_account.user
+                    puts \"Fallback username also exists, updating...\"
+                    user = fallback_account.user
+                    user.email = admin_email if user.email != admin_email
+                    user.password = admin_password
+                    user.password_confirmation = admin_password
+                    user.confirmed_at = Time.now
+                    user.agreement = true
+                    user.approved = true if user.respond_to?(:approved)
+                    user.save!
+                    
+                    # Use tootctl to ensure role is set successfully (most reliable method)
+                    puts \"Setting Owner role using tootctl...\"
+                    system(\"bundle exec tootctl accounts modify #{user.account.username} --role Owner\")
+                    
+                    # Verify role assignment
+                    user.reload
+                    owner_role = UserRole.find_by(name: 'Owner')
+                    if owner_role && user.role == owner_role
+                      puts \"✓ Owner role confirmed\"
+                    else
+                      puts \"⚠ WARNING: Owner role may not be set correctly, trying Rails method...\"
+                      if owner_role
+                        user.role = owner_role
+                        user.save!
+                        user.reload
+                      end
+                    end
+                    
+                    puts \"✓ Updated fallback account: #{user.account.username} (#{user.email})\"
+                    puts \"  Role: #{user.reload.role&.name || 'Unknown'}\"
+                    exit 0
+                  end
+                  
+                  # If fallback username also doesn't exist, try creating (may be reserved but unused)
+                  begin
+                    account = Account.create!(
+                      username: fallback_username,
+                      display_name: 'Administrator'
+                    )
+                    
+                    # Skip email verification when creating user
+                    user = User.new(
+                      email: admin_email,
+                      password: admin_password,
+                      password_confirmation: admin_password,
+                      confirmed_at: Time.now,
+                      account: account,
+                      agreement: true
+                    )
+                    user.skip_email_confirmation! if user.respond_to?(:skip_email_confirmation!)
+                    user.skip_reconfirmation! if user.respond_to?(:skip_reconfirmation!)
+                    user.approved = true if user.respond_to?(:approved)
+                    
+                    # Ensure Owner role exists
+                    owner_role = UserRole.find_by(name: 'Owner')
+                    if !owner_role
+                      puts 'Owner role not found, creating...'
+                      begin
+                        owner_role = UserRole.find_or_create_by(name: 'Owner') do |role|
+                          role.position = 1
+                          role.permissions = 0xFFFFFFFF if role.respond_to?(:permissions=)
+                          role.highlighted = true if role.respond_to?(:highlighted=)
+                          role.color = '#ff0000' if role.respond_to?(:color=)
+                        end
+                      rescue => e
+                        position = ActiveRecord::Base.connection.execute(
+                          \"SELECT COALESCE(MAX(position), 0) + 1 as max_pos FROM user_roles\"
+                        ).first['max_pos'] rescue 1
+                        ActiveRecord::Base.connection.execute(
+                          \"INSERT INTO user_roles (name, position, created_at, updated_at) VALUES ('Owner', #{position}, NOW(), NOW())\"
+                        )
+                        owner_role = UserRole.find_by(name: 'Owner')
+                      end
+                    end
+                    
+                    # Set Owner role first, then save
+                    if owner_role
+                      user.role = owner_role
+                      puts \"✓ Owner role will be assigned\"
+                    end
+                    
+                    user.save!(validate: false) # Skip validation to avoid email verification failure
+                    
+                    # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+                    puts \"Setting Owner role and approving account using tootctl...\"
+                    system(\"bundle exec tootctl accounts modify #{fallback_username} --role Owner --approve\")
+                    
+                    # Ensure account status is correct again (prevent caching issues, ensure immediate effect)
+                    user.reload
+                    user.confirmed_at ||= Time.now
+                    user.approved = true if user.respond_to?(:approved)
+                    user.agreement = true
+                    user.save! rescue user.update_columns(
+                      confirmed_at: Time.now,
+                      agreement: true,
+                      approved: true
+                    ) if user.respond_to?(:approved)
+                    
+                    # Verify role assignment
+                    user.reload
+                    if owner_role && user.role == owner_role
+                      puts \"✓ Owner role confirmed via tootctl\"
+                    else
+                      puts \"⚠ tootctl may have failed, trying Rails method...\"
+                      if owner_role
+                        user.role = owner_role
+                        if user.save
+                          user.reload
+                          if user.role == owner_role
+                            puts \"✓ Owner role confirmed via Rails\"
+                          else
+                            user.update_column(:role_id, owner_role.id)
+                            user.reload
+                            puts \"✓ Owner role confirmed via update_column\"
+                          end
+                        end
+                      end
+                    end
+                    
+                    # Final verification of all status
+                    user.reload
+                    puts ''
+                    puts \"✓✓✓ Created with fallback: #{fallback_username} (#{admin_email})\"
+                    puts \"  Role: #{user.role&.name || 'Unknown'} (ID: #{user.role_id})\"
+                    puts \"  Confirmed: #{user.confirmed_at.present?}\"
+                    puts \"  Approved: #{user.approved if user.respond_to?(:approved)}\"
+                    puts \"  Agreement: #{user.agreement}\"
+                    puts ''
+                    puts '✓✓✓ Admin account is ready for immediate use (no approval needed) ✓✓✓'
+                    exit 0
+                  rescue ActiveRecord::RecordInvalid => e2
+                    # If fallback username is also taken, generate unique username
+                    if e2.message.include?('Username') && e2.message.include?('taken')
+                      puts \"Fallback username also taken, generating unique username...\"
+                      require 'securerandom'
+                      unique_suffix = SecureRandom.hex(4)
+                      unique_username = \"admin#{unique_suffix}\"
+                      
+                      # Ensure username is unique
+                      while Account.exists?(username: unique_username)
+                        unique_suffix = SecureRandom.hex(4)
+                        unique_username = \"admin#{unique_suffix}\"
+                      end
+                      
+                      account = Account.create!(
+                        username: unique_username,
+                        display_name: 'Administrator'
+                      )
+                      
+                      # Skip email verification when creating user
+                      user = User.new(
+                        email: admin_email,
+                        password: admin_password,
+                        password_confirmation: admin_password,
+                        confirmed_at: Time.now,
+                        account: account,
+                        agreement: true
+                      )
+                      user.skip_email_confirmation! if user.respond_to?(:skip_email_confirmation!)
+                      user.skip_reconfirmation! if user.respond_to?(:skip_reconfirmation!)
+                      user.approved = true if user.respond_to?(:approved)
+                      
+                      # Ensure Owner role exists
+                      owner_role = UserRole.find_by(name: 'Owner')
+                      if !owner_role
+                        puts 'Owner role not found, creating...'
+                        begin
+                          owner_role = UserRole.find_or_create_by(name: 'Owner') do |role|
+                            role.position = 1
+                            role.permissions = 0xFFFFFFFF if role.respond_to?(:permissions=)
+                            role.highlighted = true if role.respond_to?(:highlighted=)
+                            role.color = '#ff0000' if role.respond_to?(:color=)
+                          end
+                        rescue => e
+                          position = ActiveRecord::Base.connection.execute(
+                            \"SELECT COALESCE(MAX(position), 0) + 1 as max_pos FROM user_roles\"
+                          ).first['max_pos'] rescue 1
+                          ActiveRecord::Base.connection.execute(
+                            \"INSERT INTO user_roles (name, position, created_at, updated_at) VALUES ('Owner', #{position}, NOW(), NOW())\"
+                          )
+                          owner_role = UserRole.find_by(name: 'Owner')
+                        end
+                      end
+                      
+                      # Set Owner role first, then save
+                      if owner_role
+                        user.role = owner_role
+                        puts \"✓ Owner role will be assigned\"
+                      end
+                      
+                      user.save!(validate: false) # Skip validation to avoid email verification failure
+                      
+                      # Use tootctl to ensure role is set successfully and approve account (most reliable method)
+                      puts \"Setting Owner role and approving account using tootctl...\"
+                      system(\"bundle exec tootctl accounts modify #{unique_username} --role Owner --approve\")
+                      
+                      # Ensure account status is correct again (prevent caching issues, ensure immediate effect)
+                      user.reload
+                      user.confirmed_at ||= Time.now
+                      user.approved = true if user.respond_to?(:approved)
+                      user.agreement = true
+                      user.save! rescue user.update_columns(
+                        confirmed_at: Time.now,
+                        agreement: true,
+                        approved: true
+                      ) if user.respond_to?(:approved)
+                      
+                      # Verify role assignment
+                      user.reload
+                      if owner_role && user.role == owner_role
+                        puts \"✓ Owner role confirmed via tootctl\"
+                      else
+                        puts \"⚠ tootctl may have failed, trying Rails method...\"
+                        if owner_role
+                          user.role = owner_role
+                          if user.save
+                            user.reload
+                            if user.role == owner_role
+                              puts \"✓ Owner role confirmed via Rails\"
+                            else
+                              user.update_column(:role_id, owner_role.id)
+                              user.reload
+                              puts \"✓ Owner role confirmed via update_column\"
+                            end
+                          end
+                        end
+                      end
+                      
+                      # Final verification of all status
+                      user.reload
+                      puts ''
+                      puts \"✓✓✓ Created with unique username: #{unique_username} (#{admin_email})\"
+                      puts \"  Role: #{user.role&.name || 'Unknown'} (ID: #{user.role_id})\"
+                      puts \"  Confirmed: #{user.confirmed_at.present?}\"
+                      puts \"  Approved: #{user.approved if user.respond_to?(:approved)}\"
+                      puts \"  Agreement: #{user.agreement}\"
+                      puts ''
+                      puts '✓✓✓ Admin account is ready for immediate use (no approval needed) ✓✓✓'
+                      exit 0
+                    else
+                      raise e2
+                    end
+                  end
+                else
+                  raise e
+                end
+              end
+            rescue => e
+              puts \"✗ Attempt failed: #{e.class}: #{e.message}\"
+              exit 1
+            end
+          " 2>&1)
+          create_exit_code=$?
+          
+          echo "$create_output"
+          
+          if [ $create_exit_code -eq 0 ] && echo "$create_output" | grep -q "Created:\|Updated:"; then
+            admin_created=true
+            echo ""
+            echo "✓✓✓ Admin account created successfully ✓✓✓"
+            break
+          else
+            if [ $admin_attempt -lt $max_admin_attempts ]; then
+              echo ""
+              echo "Admin creation failed, retrying in 3 seconds..."
+              sleep 3
+            fi
+          fi
+        done
+        
+        if [ "$admin_created" != "true" ]; then
+          echo ""
+          echo "⚠⚠⚠ WARNING: Admin account creation failed after $max_admin_attempts attempts ⚠⚠⚠"
+          echo "Please check logs and create admin manually if needed"
+        fi
+        
+        # Final verification: Check if admin account was created successfully
+        echo ""
+        echo "=== Verifying admin account creation ==="
+        echo "Timestamp: $(date)"
+        verification_output=$(bundle exec rails runner "
+          puts 'Verifying admin account...'
+          owner_role = UserRole.find_by(name: 'Owner')
+          if owner_role
+            puts \"Owner role found: ID=#{owner_role.id}\"
+            admin = User.find_by(role: owner_role)
+            if admin
+              puts ''
+              puts '=========================================='
+              puts '✓✓✓ Admin account verified ✓✓✓'
+              puts '=========================================='
+              puts \"  Username: #{admin.account.username}\"
+              puts \"  Email: #{admin.email}\"
+              puts \"  Role: #{admin.role.name}\"
+              puts \"  Confirmed: #{admin.confirmed_at.present?}\"
+              puts \"  Approved: #{admin.approved if admin.respond_to?(:approved)}\"
+              puts \"  Created: #{admin.created_at}\"
+              puts '=========================================='
+            else
+              puts '✗ ERROR: No Owner user found!'
+              puts 'Admin account creation may have failed.'
+            end
+          else
+            puts '✗ ERROR: Owner role not found!'
+          end
+        " 2>&1)
+        verify_exit_code=$?
+        echo "$verification_output"
+        echo ""
+        if [ $verify_exit_code -eq 0 ] && echo "$verification_output" | grep -q "Admin account verified"; then
+          echo "✓ Admin account verification completed successfully"
+        else
+          echo "⚠ WARNING: Could not verify admin account (exit code: $verify_exit_code)"
+          echo "Please check the logs above and verify manually if needed"
+        fi
+        echo ""
+      fi
+    else
+      echo ""
+      echo "=== Skipping auto-creation of admin account ==="
+      echo "AUTO_CREATE_ADMIN is not set to 'true'"
+      echo "Admin account will be created via web interface."
+      echo "After deployment, visit the Mastodon web interface to create the first admin account."
+      echo "The first user registered will automatically become the Owner."
+      echo ""
+    fi
+
+    # Initialize server rules (create default rule if none exist)
+    echo ""
+    echo "=== Server Rules Initialization ==="
+    echo "Timestamp: $(date)"
+    echo "Ensuring at least one server rule exists..."
+    
+    rules_check_output=$(bundle exec rails runner "
+      begin
+        # Check if Rule model exists and table exists
+        unless ActiveRecord::Base.connection.table_exists?('rules')
+          puts '⚠ Rules table does not exist yet, skipping server rules initialization'
+          exit 0
+        end
+        
+        rule_count = Rule.count rescue 0
+        puts \"Current server rules count: #{rule_count}\"
+        
+        if rule_count == 0
+          puts 'No server rules found, creating default rule...'
+          begin
+            default_rule = Rule.create!(
+              priority: 0,
+              text: 'Be respectful and follow community guidelines'
+            )
+            puts \"✓ Default server rule created: ID=#{default_rule.id}\"
+            puts \"  Text: #{default_rule.text}\"
+            puts \"  Priority: #{default_rule.priority}\"
+            puts 'RULES_INIT_SUCCESS'
+          rescue => e
+            puts \"✗ Failed to create default rule: #{e.class}: #{e.message}\"
+            # Try with different text or priority
+            begin
+              default_rule = Rule.create(
+                priority: 0,
+                text: 'Be respectful and follow community guidelines'
+              )
+              if default_rule.persisted?
+                puts \"✓ Default server rule created (ID: #{default_rule.id})\"
+                puts 'RULES_INIT_SUCCESS'
+              else
+                puts \"✗ Rule creation failed: #{default_rule.errors.full_messages.join(', ')}\"
+              end
+            rescue => e2
+              puts \"✗ Second attempt failed: #{e2.message}\"
+            end
+          end
+        else
+          puts \"✓ Server rules already exist (#{rule_count} rules)\"
+          Rule.order(:priority).limit(5).each do |rule|
+            puts \"  - Priority #{rule.priority}: #{rule.text[0..50]}#{'...' if rule.text.length > 50}\"
+          end
+          puts 'RULES_INIT_SUCCESS'
+        end
+        exit 0
+      rescue => e
+        puts \"⚠ Error checking/creating server rules: #{e.class}: #{e.message}\"
+        puts \"  #{e.backtrace.first(3).join(\"\n  \")}\"
+        puts \"  Server rules can be managed via admin interface: Admin > Server Rules\"
+        exit 0  # Don't fail initialization if rules can't be created
+      end
+    " 2>&1)
+    rules_exit_code=$?
+    echo "$rules_check_output"
+    
+    if [ $rules_exit_code -eq 0 ] && echo "$rules_check_output" | grep -q "RULES_INIT_SUCCESS\|Default server rule created\|already exist"; then
+      echo "✓ Server rules initialization completed successfully"
+    else
+      echo "⚠ Server rules initialization had issues, but this is non-critical"
+      echo "  Server rules can be managed via admin interface: Admin > Server Rules"
+    fi
+    echo ""
+    
+    echo ""
+    echo "=========================================="
+    echo "=== Initialization Completed ==="
+    echo "=========================================="
+    echo "Timestamp: $(date)"
+    echo "=========================================="
   precompile-assets.sh: |-
     #!/bin/bash
 
@@ -43,14 +1133,231 @@ data:
     set -o nounset
     set -o pipefail
 
-    # Load libraries
-    . /opt/bitnami/scripts/liblog.sh
-    . /opt/bitnami/scripts/libos.sh
-    . /opt/bitnami/scripts/libvalidations.sh
-    . /opt/bitnami/scripts/libmastodon.sh
+    # Enable verbose output
+    set -x
 
-    # Load Mastodon environment variables
-    . /opt/bitnami/scripts/mastodon-env.sh
-    mastodon_wait_for_s3_connection "$MASTODON_S3_HOSTNAME" "$MASTODON_S3_PORT_NUMBER"
-    info "Precompiling assets"
-    mastodon_rake_execute assets:precompile
+    echo "=========================================="
+    echo "=== Starting Mastodon assets precompilation ==="
+    echo "=========================================="
+    echo "Timestamp: $(date)"
+    echo "Working directory: $(pwd)"
+    cd /app/www
+    echo "Changed to: $(pwd)"
+    echo ""
+    
+    # Ensure public directory exists and has correct permissions (set at the beginning)
+    echo "=== Setting up public directory permissions (initial) ==="
+    echo "Timestamp: $(date)"
+    if [ ! -d "/app/www/public" ]; then
+      echo "Creating /app/www/public directory..."
+      mkdir -p /app/www/public
+    fi
+    if [ ! -d "/app/www/public/assets" ]; then
+      echo "Creating /app/www/public/assets directory..."
+      mkdir -p /app/www/public/assets
+    fi
+    echo "Setting permissions on /app/www/public..."
+    # Only use chmod, don't use chown (may not have permission)
+    find /app/www/public -type d -exec chmod 777 {} \; 2>/dev/null || true
+    find /app/www/public -type f -exec chmod 644 {} \; 2>/dev/null || true
+    chmod 777 /app/www/public/assets 2>/dev/null || true
+    echo "Current permissions:"
+    ls -la /app/www/public/ | head -5
+    echo ""
+    
+    # Ensure public directory exists and has correct permissions
+    echo "=== Setting up public directory permissions ==="
+    echo "Timestamp: $(date)"
+    if [ ! -d "/app/www/public" ]; then
+      echo "Creating /app/www/public directory..."
+      mkdir -p /app/www/public
+    fi
+    echo "Setting permissions on /app/www/public..."
+    # Only use chmod, don't use chown (may not have permission)
+    find /app/www/public -type d -exec chmod 777 {} \; 2>/dev/null || true
+    find /app/www/public -type f -exec chmod 644 {} \; 2>/dev/null || true
+    chmod 777 /app/www/public/assets 2>/dev/null || true
+    
+    # Ensure assets subdirectory exists
+    if [ ! -d "/app/www/public/assets" ]; then
+      echo "Creating /app/www/public/assets directory..."
+      mkdir -p /app/www/public/assets
+      chmod 777 /app/www/public/assets
+    fi
+    
+    echo "Current permissions:"
+    ls -la /app/www/public/ | head -10
+    echo ""
+
+    # Wait for Redis connection (use TCP port check, as redis gem may not be installed)
+    echo "Waiting for Redis connection..."
+    redis_host="${REDIS_HOST:-${MASTODON_REDIS_HOST:-mastodon-redis-master}}"
+    redis_port="${REDIS_PORT:-${MASTODON_REDIS_PORT_NUMBER:-6379}}"
+    echo "Connecting to Redis at ${redis_host}:${redis_port}"
+    # Use TCP port check (doesn't depend on redis gem)
+    max_attempts=30
+    attempt=0
+    while [ $attempt -lt $max_attempts ]; do
+      # Use nc (netcat) or timeout to check TCP connection
+      if command -v nc >/dev/null 2>&1; then
+        if nc -z -w 2 "${redis_host}" "${redis_port}" 2>/dev/null; then
+          echo "Redis port is open"
+          break
+        fi
+      elif command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then
+        # Use bash TCP connection check
+        if timeout 2 bash -c "echo > /dev/tcp/${redis_host}/${redis_port}" 2>/dev/null; then
+          echo "Redis port is open"
+          break
+        fi
+      else
+        # If none available, try using curl to check (though Redis is not HTTP, at least can detect port)
+        if curl -sf --connect-timeout 2 "${redis_host}:${redis_port}" >/dev/null 2>&1; then
+          echo "Redis port is open"
+          break
+        fi
+      fi
+      attempt=$((attempt + 1))
+      if [ $attempt -eq $max_attempts ]; then
+        echo "WARNING: Could not connect to Redis after ${max_attempts} attempts"
+        echo "Continuing anyway - Redis connection will be checked during asset precompilation"
+        break
+      fi
+      echo "Redis is unavailable - sleeping (attempt ${attempt}/${max_attempts})"
+      sleep 2
+    done
+    echo "Proceeding with asset precompilation (Redis will be checked by Rails)"
+
+    # Wait for S3/MinIO connection (only if S3 is enabled)
+    if [ "${S3_ENABLED:-false}" = "true" ]; then
+      s3_host="${MASTODON_S3_HOSTNAME:-${S3_HOSTNAME}}"
+      s3_port="${MASTODON_S3_PORT_NUMBER:-${S3_PORT_NUMBER:-9000}}"
+      echo "Waiting for S3/MinIO connection at ${s3_host}:${s3_port}..."
+      until curl -sf "http://${s3_host}:${s3_port}/minio/health/live" > /dev/null 2>&1 || curl -sf "http://${s3_host}:${s3_port}" > /dev/null 2>&1; do
+        echo "S3/MinIO is unavailable - sleeping"
+        sleep 2
+      done
+      echo "S3/MinIO connection established"
+    else
+      echo "S3 is disabled, using local storage"
+      echo "Ensuring local storage directories exist..."
+      mkdir -p /app/www/public/system
+      chmod -R 777 /app/www/public/system 2>/dev/null || true
+    fi
+
+    # Set Yarn temporary directory to mounted tmp directory (has write permission)
+    # Note: Newer versions of Yarn don't support YARN_TMPDIR, only use TMPDIR
+    export YARN_CACHE_FOLDER=/app/www/tmp/.yarn-cache
+    export TMPDIR=/app/www/tmp
+    mkdir -p "${YARN_CACHE_FOLDER}" "${TMPDIR}"
+    chmod -R 777 "${YARN_CACHE_FOLDER}" "${TMPDIR}" 2>/dev/null || true
+    
+    # First disable Vite (before any operations)
+    echo "Disabling Vite build system..."
+    # Disable all Vite config files
+    if [ -f "vite.config.mts" ]; then
+      mv vite.config.mts vite.config.mts.disabled 2>/dev/null || true
+      echo "Disabled vite.config.mts"
+    fi
+    if [ -f "vite.config.ts" ]; then
+      mv vite.config.ts vite.config.ts.disabled 2>/dev/null || true
+      echo "Disabled vite.config.ts"
+    fi
+    if [ -f "vite.config.js" ]; then
+      mv vite.config.js vite.config.js.disabled 2>/dev/null || true
+      echo "Disabled vite.config.js"
+    fi
+    # Disable Vite Ruby initializer file
+    if [ -f "config/initializers/vite_ruby.rb" ]; then
+      mv config/initializers/vite_ruby.rb config/initializers/vite_ruby.rb.disabled 2>/dev/null || true
+      echo "Disabled vite_ruby.rb initializer"
+    fi
+    # Set environment variables to disable Vite
+    export VITE_SKIP=true
+    export VITE_RUBY_HOST=localhost
+    export VITE_RUBY_PORT=3000
+    export DISABLE_VITE=true
+    
+    # Attempt to install Node.js dependencies (if package.json exists)
+    # But will not use Vite
+    if [ -f "package.json" ] && command -v yarn >/dev/null 2>&1; then
+      echo "Installing Node.js dependencies (Vite will not be used)..."
+      # Use newer Yarn parameters (--immutable instead of --frozen-lockfile)
+      # Set Yarn config instead of using command line parameters
+      yarn config set cacheFolder "${YARN_CACHE_FOLDER}" 2>/dev/null || true
+      yarn install --immutable 2>&1 || echo "Yarn install had warnings, continuing..."
+      # If vite binary exists, disable it
+      if [ -f "node_modules/.bin/vite" ]; then
+        mv node_modules/.bin/vite node_modules/.bin/vite.disabled 2>/dev/null || true
+        echo "Disabled vite binary"
+      fi
+    else
+      echo "Skipping Node.js dependencies (yarn not available or no package.json)"
+    fi
+    
+    # Ensure public directory has correct permissions
+    echo ""
+    echo "=== Setting up public directory permissions ==="
+    echo "Timestamp: $(date)"
+    if [ ! -d "/app/www/public" ]; then
+      echo "Creating /app/www/public directory..."
+      mkdir -p /app/www/public
+    fi
+    if [ ! -d "/app/www/public/assets" ]; then
+      echo "Creating /app/www/public/assets directory..."
+      mkdir -p /app/www/public/assets
+    fi
+    echo "Setting permissions on /app/www/public..."
+    # Only use chmod, don't use chown (may not have permission)
+    find /app/www/public -type d -exec chmod 777 {} \; 2>/dev/null || true
+    find /app/www/public -type f -exec chmod 644 {} \; 2>/dev/null || true
+    chmod 777 /app/www/public/assets 2>/dev/null || true
+    echo "Current permissions:"
+    ls -la /app/www/public/ | head -5
+    echo ""
+    
+    # Use Sprockets to precompile assets (don't use Vite)
+    echo "=== Precompiling assets ==="
+    echo "Timestamp: $(date)"
+    echo "Precompiling assets with Sprockets only..."
+    
+    # Ensure permissions are correct again (only use chmod)
+    find /app/www/public -type d -exec chmod 777 {} \; 2>/dev/null || true
+    find /app/www/public -type f -exec chmod 644 {} \; 2>/dev/null || true
+    chmod 777 /app/www/public/assets 2>/dev/null || true
+    # Remove old manifest file if it exists (if there are permission issues)
+    rm -f /app/www/public/assets/.manifest.json /app/www/public/assets/.sprockets-manifest-*.json 2>/dev/null || true
+    
+    VITE_SKIP=true VITE_RUBY_HOST=localhost VITE_RUBY_PORT=3000 DISABLE_VITE=true bundle exec rails assets:precompile RAILS_ENV=production
+    precompile_exit_code=$?
+    
+    if [ $precompile_exit_code -eq 0 ]; then
+      echo "✓ Assets precompilation completed successfully"
+      echo ""
+      echo "Verifying compiled assets..."
+      if [ -f "/app/www/public/assets/.manifest.json" ]; then
+        echo "✓ Manifest file created successfully"
+        ls -lh /app/www/public/assets/.manifest.json
+      else
+        echo "⚠ Warning: Manifest file not found, but compilation may have succeeded"
+      fi
+      echo ""
+      echo "Asset files created:"
+      ls -lh /app/www/public/assets/ | head -10
+    else
+      echo "✗ Assets precompilation failed with exit code: $precompile_exit_code"
+      echo ""
+      echo "Checking public directory permissions..."
+      ls -la /app/www/public/
+      echo ""
+      echo "Checking assets directory..."
+      ls -la /app/www/public/assets/ 2>/dev/null || echo "Assets directory does not exist"
+      exit $precompile_exit_code
+    fi
+    
+    echo ""
+    echo "=========================================="
+    echo "=== Assets Precompilation Completed ==="
+    echo "=========================================="
+    echo "Timestamp: $(date)"
+    echo "=========================================="

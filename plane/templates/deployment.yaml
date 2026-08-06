@@ -1,0 +1,394 @@
+﻿{{- $planeDomainENV := split  ","  .Values.domain.plane -}}
+{{- $planeDomain := index $planeDomainENV "_0" -}}
+
+# -------------------------
+# PLANE PROXY
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-proxy
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "plane-proxy").replicaCount }}
+  selector:
+    matchLabels:
+      app: plane-proxy
+  template:
+    metadata:
+      labels:
+        app: plane-proxy
+    spec:
+      initContainers:
+        - name: check-ready
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              web:3000,api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: proxy
+          image: "docker.io/beclab/harveyff-plane-proxy-commercial:v1.12.1"
+          ports:
+            - containerPort: 80
+          env:
+            - name: SITE_ADDRESS
+              value: "http://{{$planeDomain}}"
+            - name: TRUSTED_PROXIES
+              value: "0.0.0.0/0"
+            - name: FILE_SIZE_LIMIT
+              value: "5242880"
+            - name: BUCKET_NAME
+              value: "uploads"
+            - name: CERT_ACME_CA
+              value: "https://acme-v02.api.letsencrypt.org/directory"
+            - name: CERT_EMAIL
+              value: "example@olares.com"
+            - name: CERT_ACME_DNS
+              value: ""
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 80
+      name: http
+  selector:
+    app: plane-proxy
+
+---
+
+# -------------------------
+# PLANE WEB
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ .Values.workloads.plane.replicaCount }}
+  selector:
+    matchLabels:
+      app: plane
+  template:
+    metadata:
+      labels:
+        app: plane
+    spec:
+      initContainers:
+        - name: check-ready
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: web
+          image: "docker.io/beclab/harveyff-plane-web:v1.12.1"
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_WEB_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_PATH
+              value: "/god-mode"
+            - name: NEXT_PUBLIC_SPACE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_PATH
+              value: "/spaces"
+            - name: NEXT_PUBLIC_LIVE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_PATH
+              value: "/live"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane
+
+---
+
+# -------------------------
+# PLANE ADMIN
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-admin
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "plane-admin").replicaCount }}
+  selector:
+    matchLabels:
+      app: plane-admin
+  template:
+    metadata:
+      labels:
+        app: plane-admin
+    spec:
+      containers:
+        - name: admin
+          image: "docker.io/beclab/harveyff-plane-admin:v1.12.1"
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_ADMIN_BASE_PATH
+              value: "/god-mode"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-admin
+
+---
+
+# -------------------------
+# PLANE SPACE
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-space
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "plane-space").replicaCount }}
+  selector:
+    matchLabels:
+      app: plane-space
+  template:
+    metadata:
+      labels:
+        app: plane-space
+    spec:
+      initContainers:
+        - name: check-ready
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              api:8000
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: space
+          image: "docker.io/beclab/harveyff-plane-space:v1.12.1"
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_SPACE_BASE_PATH
+              value: "/spaces"
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: space
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-space
+
+---
+
+# -------------------------
+# PLANE LIVE
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-live
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "plane-live").replicaCount }}
+  selector:
+    matchLabels:
+      app: plane-live
+  template:
+    metadata:
+      labels:
+        app: plane-live
+    spec:
+      containers:
+        - name: live
+          image: "docker.io/beclab/harveyff-plane-live:v1.12.1"
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_URL
+              value: "https://{{$planeDomain}}"
+            - name: NEXT_PUBLIC_LIVE_BASE_PATH
+              value: "/live"
+          resources:
+            requests:
+              cpu: "10m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: live
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http
+  selector:
+    app: plane-live
+
+---
+
+# -------------------------
+# PLANE API
+# -------------------------
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plane-api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "plane-api").replicaCount }}
+  selector:
+    matchLabels:
+      app: plane-api
+  template:
+    metadata:
+      labels:
+        app: plane-api
+    spec:
+      initContainers:
+        - name: data-migrator
+          image: "docker.io/beclab/harveyff-plane-api:v1.12.1"
+          command:
+            - sh
+            - -c
+            - ./bin/docker-entrypoint-migrator.sh
+          env:
+            - name: WEB_URL
+              value: "https://{{$planeDomain}}"
+          envFrom:
+            - configMapRef:
+                name: api-config
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: api
+          image: "docker.io/beclab/harveyff-plane-api:v1.12.1"
+          command:
+            - sh
+            - -c
+            - ./bin/docker-entrypoint-api.sh
+          env:
+            - name: WEB_URL
+              value: "https://{{$planeDomain}}"
+          envFrom:
+            - configMapRef:
+                name: api-config
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 200Mi
+            limits:
+              cpu: "0.5"
+              memory: 500Mi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+  selector:
+    app: plane-api

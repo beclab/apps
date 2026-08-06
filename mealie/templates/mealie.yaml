@@ -1,0 +1,150 @@
+﻿{{- $mealieDomainENV := split  ","  .Values.domain.mealie -}}
+{{- $mealieDomain := index $mealieDomainENV "_0" -}}
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mealie
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mealie
+spec:
+  replicas: {{ .Values.workloads.mealie.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: mealie
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: mealie
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: mealie-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: mealie-data
+              mountPath: /new-data
+      containers:
+        - name: mealie
+          image: docker.io/beclab/mealie-recipes-mealie:v3.9.2
+          env:
+            - name: BASE_URL
+              value: 'https://{{ $mealieDomain }}'
+            - name: ALLOW_SIGNUP
+              value: "false"
+            - name: DEFAULT_GROUP
+              value: "Home"
+            - name: DEFAULT_HOUSEHOLD
+              value: "Family"
+            - name: LOG_LEVEL
+              value: "DEBUG"
+            - name: DB_ENGINE
+              value: "postgres"
+            - name: POSTGRES_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_SERVER
+              value: "{{ .Values.postgres.host }}"
+            - name: POSTGRES_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.databases.mealiedb }}"
+            - name: SMTP_HOST
+              value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            - name: SMTP_FROM_NAME
+              value: "{{ .Values.olaresEnv.SMTP_FROM_NAME }}"
+            - name: SMTP_AUTH_STRATEGY
+              value: "{{ .Values.olaresEnv.SMTP_AUTH_STRATEGY }}"
+            - name: SMTP_FROM_EMAIL
+              value: "{{ .Values.olaresEnv.SMTP_FROM_EMAIL }}"
+            - name: SMTP_USER
+              value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: SMTP_PASSWORD
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - containerPort: 9000
+          volumeMounts:
+            - name: mealie-data
+              mountPath: /app/data/
+
+      restartPolicy: Always
+      volumes:
+        - name: mealie-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: mealie-data-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mealie
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mealie
+spec:
+  ports:
+    - name: "9091"
+      protocol: TCP
+      port: 9091
+      targetPort: 9000
+  selector:
+    io.kompose.service: mealie
+status:
+  loadBalancer: {}

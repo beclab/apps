@@ -1,0 +1,196 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  litellm: 1
+  litellmingress: 1
+metadata:
+  name: litellm
+  icon: https://app.cdn.olares.com/appstore/litellm/icon.png
+  description: Call 100+ LLMs in OpenAI format
+  appid: litellm
+  title: LiteLLM
+  version: "1.0.15"
+  categories:
+    - Utilities_v112
+
+spec:
+  versionName: "1.83.3"
+  featuredImage: https://app.cdn.olares.com/appstore/litellm/1.webp
+  promoteImage:
+    - https://app.cdn.olares.com/appstore/litellm/1.webp
+    - https://app.cdn.olares.com/appstore/litellm/2.webp
+    - https://app.cdn.olares.com/appstore/litellm/3.webp
+  fullDescription: |
+    LiteLLM is a Python SDK and Proxy Server (AI Gateway) to call 100+ LLM APIs in OpenAI (or native) format, with cost tracking, guardrails, loadbalancing and logging.
+
+    **Features**
+    - Unified API: Call 100+ LLM APIs (OpenAI, Anthropic, Azure, Bedrock, VertexAI, etc.) in OpenAI format
+    - Cost Tracking: Track costs across all providers
+    - Load Balancing: Distribute requests across multiple models/endpoints
+    - Guardrails: Content filtering and safety checks
+    - Logging & Observability: Comprehensive logging and monitoring
+    - Rate Limiting: Built-in rate limiting and throttling
+    - Proxy Server: Deploy as an AI Gateway/Proxy server
+    - Multi-tenant: Support for multiple users and teams
+
+  upgradeDescription: |
+    Switch the reverse-proxy image from Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) to the official OpenResty image `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Align nginx config mounts and log paths with the official image layout (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), and drop Bitnami-specific `OPENRESTY_CONF_FILE` wiring.
+
+    v1.0.14: Move `DATABASE_URL`, `UI_PASSWORD`, and `SMTP_PASSWORD` into Secret (`secretKeyRef`).
+
+    Upgrade to [v1.83.3-stable](https://github.com/BerriAI/litellm/releases/tag/v1.83.3-stable) (from v1.81.4).
+
+    Security:
+    - Fix privilege escalation on /key/block, /key/unblock, /key/update max_budget
+    - Global secret redaction via root logger and key-name-based pattern matching
+    - Supply chain hardening: pin all Docker/npm/pip dependencies, cosign image signing
+
+    Providers:
+    - Anthropic: preserve thinking.summary when routing to OpenAI Responses API; add opt-out flag for default reasoning summary
+    - Gemini: fix image token undercounting in usage metadata; pass model to context caching URL builder for custom api_base
+    - Azure: auto-route gpt-5.4+ tools+reasoning to Responses API
+    - Bedrock: support cache_control_injection_points for tool_config; respect api_base in count_tokens
+    - OpenAI: round-trip Responses API reasoning_items in chat completions; GPT-5.4 mini/nano day-0 support
+
+    *Proxy & Core:*
+    - Project-level guardrails support
+    - Redis cluster caching fix; Redis-backed cross-pod budget enforcement
+    - Fix streaming guardrail race condition and post-call guardrail response capture
+    - Per-model-group deployment affinity; per-model rate limits for teams
+    - Auto-recover shared aiohttp session when closed
+
+    UI:
+    - Migrate components from Tremor to Ant Design
+    - Team management modernization; team guardrails UI
+    - Logs filter fix (empty filter no longer shows stale data); CSV export fix on Global Usage page
+    - Paginated team search on usage page; key alias substring search
+
+  developer: BerriAI
+  website: https://www.litellm.ai
+  sourceCode: https://github.com/BerriAI/litellm
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  doc: https://docs.litellm.ai
+  license:
+    - text: MIT
+      url: https://github.com/BerriAI/litellm/blob/main/LICENSE
+  limitedCpu: 4.5
+  requiredCpu: 200m
+  requiredDisk: 1Gi
+  limitedDisk: 500Gi
+  limitedMemory: 4.5Gi
+  requiredMemory: 576Mi
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+options:
+  apiTimeout: 0
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+entrances:
+  - name: litellmui
+    host: litellmingress
+    port: 8080
+    title: LiteLLM
+    icon: https://app.cdn.olares.com/appstore/litellm/icon.png
+    authLevel: private
+    openMethod: window
+  - name: litellmapi
+    host: litellm-svc
+    icon: https://app.cdn.olares.com/appstore/litellm/icon.png
+    openMethod: window
+    port: 80
+    title: LiteLLM API
+    authLevel: internal
+    invisible: true
+middleware:
+  postgres:
+    username: litellm
+    password: litellm
+    databases:
+      - name: litellm
+        distributed: false
+envs:
+  - envName: LITELLM_MASTER_KEY
+    required: false
+    type: password
+    editable: true
+    applyOnChange: true
+    regex: '^sk-[A-Za-z0-9]+$'
+    description: "Master API key (must start with sk-, followed by letters and numbers)"
+    default: "sk-1234"
+  - envName: UI_USERNAME
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{1,}$'
+    description: "Username for admin UI"
+  - envName: UI_PASSWORD
+    required: true
+    type: password
+    editable: true
+    applyOnChange: true
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{6,}$'
+    description: "Password for admin UI (must be at least 6 characters)"
+  - envName: LITELLM_DROP_PARAMS
+    required: false
+    applyOnChange: true
+    editable: true
+    type: bool
+    default: "true"
+    description: "Drop the unsupported parameter instead of raising an exception"
+  - envName: USE_SYSTEM_SMTP_SETTINGS
+    required: false
+    applyOnChange: true
+    editable: true
+    type: bool
+    default: "true"
+    description: "Use system SMTP settings (when enabled, SMTP envs are managed by system envs"
+  - envName: SMTP_ENABLED
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_ENABLED
+  - envName: SMTP_HOST
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_SERVER
+  - envName: SMTP_PORT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PORT
+  - envName: SMTP_SENDER_EMAIL
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_FROM_ADDRESS
+  - envName: SMTP_TLS
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
+  - envName: SMTP_USERNAME
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USERNAME
+  - envName: SMTP_PASSWORD
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PASSWORD
+

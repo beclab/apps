@@ -1,0 +1,360 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: claudecode
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: {{ .Values.workloads.claudecode.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: claudecode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: claudecode
+        bytetrade.io/terminal: claudecode
+    spec:
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        # Fix ownership of the PVC so the non-root runtime user can
+        # write to it. Root is required here because hostPath volumes
+        # land on disk with root ownership on first create.
+        - name: init-chmod-data
+          image: "beclab/ubuntu:24.04"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /opt/data/.local/bin /opt/data/.claude/skills /opt/data/.install-state
+              chown -R 1000:1000 /opt/data
+              chmod -R 0755 /opt/data
+              echo "[init-chmod-data] /opt/data owned by 1000:1000"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # Flatten Olares skills from /skills-staging into Claude Code's
+        # user skills dir (~/.claude/skills = /opt/data/.claude/skills).
+        - name: init-skills
+          image: "beclab/harveyff-claudecode-base:0.5.6"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -u
+              if [ ! -d /skills-staging ]; then
+                echo "[init-skills] /skills-staging not in image; skipping"
+                exit 0
+              fi
+              mkdir -p /opt/data/.claude/skills
+              for d in /skills-staging/*/; do
+                name="$(basename "$d")"
+                rm -rf "/opt/data/.claude/skills/$name"
+                cp -a "$d" "/opt/data/.claude/skills/$name"
+                chown -R 1000:1000 "/opt/data/.claude/skills/$name"
+              done
+              echo "[init-skills] Olares skills installed under /opt/data/.claude/skills:"
+              ls -1 /skills-staging
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # First-run only: install the claude native binary into the
+        # shared /opt/data PVC. Runs as UID 1000 since the installer
+        # only writes under $HOME. A sentinel file makes subsequent
+        # Pod starts skip the download.
+        - name: init-install-claude
+          image: "beclab/harveyff-claudecode-base:0.5.6"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HOME
+              value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
+            - name: DISABLE_AUTOUPDATER
+              value: "1"
+            - name: CLAUDE_VERSION
+              value: "{{ .Chart.AppVersion }}"
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              SENTINEL="$HOME/.install-state/install-complete-${CLAUDE_VERSION}"
+              mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
+
+              if [ -x "$HOME/.local/bin/claude" ] && [ -f "$SENTINEL" ]; then
+                echo "[init-install-claude] cached claude ${CLAUDE_VERSION} found (installed $(cat "$SENTINEL"))"
+                "$HOME/.local/bin/claude" --version
+                exit 0
+              fi
+
+              INSTALLER="$(mktemp --suffix=.sh)"
+              trap 'rm -f "$INSTALLER"' EXIT
+
+              echo "[init-install-claude] fetching installer script..."
+              curl -fSL --retry 5 --retry-delay 3 \
+                https://claude.ai/install.sh -o "$INSTALLER"
+              echo "[init-install-claude] installer downloaded ($(wc -c < "$INSTALLER") bytes)"
+
+              # Pin the installed version to the chart's appVersion. The installer
+              # accepts: install.sh [stable|latest|VERSION].
+              echo "[init-install-claude] running installer for version ${CLAUDE_VERSION}..."
+              bash "$INSTALLER" "${CLAUDE_VERSION}"
+
+              if [ ! -x "$HOME/.local/bin/claude" ]; then
+                echo "[init-install-claude] installer completed but binary not found at $HOME/.local/bin/claude" >&2
+                ls -la "$HOME/.local/bin" "$HOME/.local/share" 2>/dev/null >&2 || true
+                exit 1
+              fi
+
+              date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
+              echo "[init-install-claude] installed claude ${CLAUDE_VERSION}"
+              "$HOME/.local/bin/claude" --version
+          resources:
+            limits:
+              cpu: "2"
+              memory: 6Gi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # docker CLI itself
+              cp /usr/local/bin/docker /docker-cli/docker
+              # CLI plugins (docker compose / buildx). The dind image ships
+              # these under one of the standard cli-plugins dirs; copy whatever
+              # exists into the shared dir so the main container can find them.
+              mkdir -p /docker-cli/cli-plugins
+              for d in /usr/local/libexec/docker/cli-plugins \
+                       /usr/local/lib/docker/cli-plugins \
+                       /usr/libexec/docker/cli-plugins \
+                       /usr/lib/docker/cli-plugins; do
+                [ -d "$d" ] || continue
+                cp "$d"/docker-compose /docker-cli/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-buildx  /docker-cli/cli-plugins/ 2>/dev/null || true
+              done
+              echo "[init-docker-cli] copied:" && ls -la /docker-cli /docker-cli/cli-plugins
+          resources: {}
+          volumeMounts:
+            - mountPath: /docker-cli
+              name: docker-cli-bin
+        {{- end }}
+
+      containers:
+        # Workspace container. kubectl exec from the beclab terminal
+        # apiserver lands here as UID 1000. HOME/PATH are set on env so
+        # login / non-login / interactive / non-interactive shells all
+        # see the claude binary on PATH.
+        - name: claudecode
+          image: "beclab/harveyff-claudecode-base:0.5.6"
+          imagePullPolicy: IfNotPresent
+          workingDir: /opt/data
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: TERM
+              value: xterm-256color
+            - name: HOME
+              value: /opt/data
+            - name: JAVA_HOME
+              value: /usr/lib/jvm/java-21-openjdk-current
+            - name: PATH
+              value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: DISABLE_AUTOUPDATER
+              value: "1"
+            {{- /*
+              All Anthropic / Claude Code routing env vars are CONDITIONALLY
+              injected. Claude Code treats `CLAUDE_CODE_USE_*` as a presence
+              check (any non-empty string, including "false", routes to that
+              backend), so we MUST omit the env entry entirely when the user
+              wants the default (Anthropic / Anthropic-compatible API).
+
+              ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL
+              are skipped when blank so that downstream code sees them as
+              truly unset rather than as "" — important for OAuth login flow
+              and for routing through Anthropic-compatible endpoints (e.g.
+              an Olares-hosted Ollama proxy that exposes /v1/messages).
+            */ -}}
+            {{- with .Values.olaresEnv.ANTHROPIC_AUTH_TOKEN }}
+            - name: ANTHROPIC_AUTH_TOKEN
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_API_KEY }}
+            - name: ANTHROPIC_API_KEY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_BASE_URL }}
+            - name: ANTHROPIC_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.ANTHROPIC_MODEL }}
+            - name: ANTHROPIC_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_BEDROCK) "true" }}
+            - name: CLAUDE_CODE_USE_BEDROCK
+              value: "1"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_VERTEX) "true" }}
+            - name: CLAUDE_CODE_USE_VERTEX
+              value: "1"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.CLAUDE_CODE_USE_FOUNDRY) "true" }}
+            - name: CLAUDE_CODE_USE_FOUNDRY
+              value: "1"
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
+          command:
+            - sleep
+            - infinity
+          resources:
+            limits:
+              cpu: "4"
+              memory: 24Gi
+            requests:
+              cpu: 100m
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+            - mountPath: /usr/local/bin/docker
+              name: docker-cli-bin
+              subPath: docker
+              readOnly: true
+            - mountPath: /usr/local/lib/docker/cli-plugins
+              name: docker-cli-bin
+              subPath: cli-plugins
+              readOnly: true
+            {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-dind
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "8"
+              memory: 16Gi
+            requests:
+              cpu: 200m
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /var/lib/docker
+              name: dind-storage
+            # Share the workspace at the SAME path so bind-mounts resolve
+            # correctly inside dockerd.
+            - mountPath: /opt/data
+              name: app-data-home
+        {{- end }}
+
+      restartPolicy: Always
+      volumes:
+        - name: app-data-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/home"
+            type: DirectoryOrCreate
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ENABLE_DIND) "true" }}
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
+            type: DirectoryOrCreate
+        {{- end }}

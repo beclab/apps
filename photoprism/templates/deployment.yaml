@@ -1,4 +1,4 @@
----
+﻿---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,10 +7,12 @@ metadata:
   labels:
     app: photoprism
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.photoprism.replicaCount }}
   selector:
     matchLabels:
       app: photoprism
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -18,7 +20,7 @@ spec:
     spec:
       initContainers:
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
@@ -37,7 +39,7 @@ spec:
           runAsUser: 0
       containers:     
       - name: photoprism
-        image: docker.io/aboveos/kldtks-edge:photoprism
+        image: "docker.io/beclab/photoprism-photoprism:250707"
         resources:
           requests:
             cpu: 100m
@@ -59,9 +61,14 @@ spec:
         - name: PHOTOPRISM_HTTP_PORT
           value: "2342"
         - name: PHOTOPRISM_ADMIN_PASSWORD
-          value: "123456"
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: PHOTOPRISM_ADMIN_PASSWORD
+        - name: PHOTOPRISM_ADMIN_USERNAME
+          value: "{{ .Values.olaresEnv.PHOTOPRISM_ADMIN_USERNAME }}"          
         - name: PHOTOPRISM_AUTH_MODE
-          value: public
+          value: password
         - name: PHOTOPRISM_SITE_URL
           value: https://{{ index .Values.domain (printf "%s-svc" .Release.Name) }}          
         volumeMounts:
@@ -77,23 +84,23 @@ spec:
       - name: originals
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.userData }}/PhotoPrism
+          path: "{{ .Values.userspace.userData }}/PhotoPrism"
       - name: app-cache-root
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/photoprism
+          path: "{{ .Values.userspace.appData }}/photoprism"
       - name: storage
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.appData }}/photoprism/storage
+          path: "{{ .Values.userspace.appData }}/photoprism/storage"
       - name: pictures
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.userData }}/Pictures
+          path: "{{ .Values.userspace.userData }}/Pictures"
       - name: import
         hostPath:
           type: DirectoryOrCreate
-          path: {{ .Values.userspace.userData }}
+          path: "{{ .Values.userspace.userData }}"
 ---
 apiVersion: v1
 kind: Service

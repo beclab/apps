@@ -1,4 +1,4 @@
-{{- $penpotDomainENV := split  ","  .Values.domain.penpot -}}
+﻿{{- $penpotDomainENV := split  ","  .Values.domain.penpot -}}
 {{- $penpotDomain := index $penpotDomainENV "_0" -}}
 
 ---
@@ -10,10 +10,12 @@ metadata:
   labels:
     app: penpot-exporter
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.penpot.replicaCount }}
   selector:
     matchLabels:
       app: penpot-exporter
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -29,7 +31,7 @@ spec:
             readOnlyRootFilesystem: false
             runAsNonRoot: true
             runAsUser: 1001
-          image: docker.io/aboveos/penpotapp-exporter:latest
+          image: "penpotapp/exporter:2.14.4"
           resources:
             requests:
               cpu: 10m
@@ -45,10 +47,14 @@ spec:
             - name: PENPOT_PUBLIC_URI
               value: "https://{{$penpotDomain}}"
             - name: PENPOT_REDIS_URI
-#              value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
               value: "redis://penpot-redis:6379/0"
+            - name: PENPOT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: penpot-secret
+                  key: penpot-secret
       volumes:
         - name: data-assets
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/penpot/data/assets
+            path: '{{ .Values.userspace.appData }}/data/assets'

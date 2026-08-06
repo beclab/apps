@@ -1,4 +1,4 @@
-{{- $ipfsDomainENV := split  ","  .Values.domain.rpc -}}
+﻿{{- $ipfsDomainENV := split  ","  .Values.domain.rpc -}}
 {{- $webDomain := index $ipfsDomainENV "_0" -}}
 
 {{- $parts := split "." $webDomain }}
@@ -151,11 +151,12 @@ metadata:
   name: ipfs
   namespace: '{{ .Release.Namespace }}'
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.ipfs.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: ipfs
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -167,15 +168,39 @@ spec:
         - name: data
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appData }}/data
+              {{- else }}
             path: {{ .Values.userspace.appData }}/ipfs/data
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appData }}/ipfs/data
+            {{- end }}
         - name: export
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appData }}/export
+              {{- else }}
             path: {{ .Values.userspace.appData }}/ipfs/export
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appData }}/ipfs/export
+            {{- end }}
         - name: app-data-root
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: {{ .Values.userspace.appData }}
+              {{- else }}
             path: {{ .Values.userspace.appData }}/ipfs
+              {{- end }}
+            {{- else }}
+            path: {{ .Values.userspace.appData }}/ipfs
+            {{- end }}
         - name: nginx-config
           configMap:
             name: nginx-config
@@ -208,7 +233,7 @@ spec:
         
       initContainers:
       - name: init-ipfs
-        image: docker.io/aboveos/ipfs-kubo:latest
+        image: "docker.io/beclab/ipfs-kubo:v0.39.0"
         imagePullPolicy: IfNotPresent
         resources:
           requests:
@@ -244,7 +269,7 @@ spec:
               cp /data/cmd/init-cmd.sh /tmp/init-cmd.sh; chmod +x
               /tmp/init-cmd.sh; sh /tmp/init-cmd.sh
       - name: init-config
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         imagePullPolicy: IfNotPresent
         volumeMounts:
           - name: data
@@ -260,7 +285,7 @@ spec:
               cp /data/cmd/init-config-cmd.sh /tmp/init-config-cmd.sh;
               chmod +x /tmp/init-config-cmd.sh; sh /tmp/init-config-cmd.sh
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
@@ -277,7 +302,7 @@ spec:
           runAsUser: 0
       containers:
       - name: ipfs
-        image: docker.io/aboveos/ipfs-kubo:latest
+        image: "docker.io/beclab/ipfs-kubo:v0.39.0"
         imagePullPolicy: IfNotPresent
         resources:
           requests:
@@ -307,7 +332,7 @@ spec:
           - name: init-config
             mountPath: /container-init.d
       - name: nginx
-        image: docker.io/aboveos/nginx:latest
+        image: "docker.io/beclab/aboveos-nginx:1.27.0"
         volumeMounts:
         - name: nginx-config 
           mountPath: /etc/nginx/nginx.conf

@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: focalboard
+  name: focalboard
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: focalboard
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: focalboard
+    spec:
+      initContainers:
+        - name: focalboard-init
+          image: aboveos/mattermost-focalboard:7.8.9
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              echo "[Init] Syncing focalboard files..."
+
+              mkdir -p /mnt/data
+
+              sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list
+              apt clean && apt update && apt install -y rsync jq
+
+              rsync -av --update /opt/focalboard/ /mnt/data/
+
+              echo "[Init] Modifying config.json..."
+              jq '. + {
+                "dbtype": "postgres",
+                "dbconfig": "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}/{{ .Values.postgres.databases.focalboard }}?sslmode=disable&connect_timeout=10",
+                "enablepublicsharedboards": true
+              }' /mnt/data/config.json > /mnt/data/config.new.json
+
+              mv /mnt/data/config.new.json /mnt/data/config.json
+
+              echo "[Init] Changing ownership..."
+              chown -R root:root /mnt/data
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data-root
+              mountPath: /mnt/data
+
+      containers:
+        - name: focalboard
+          image: aboveos/mattermost-focalboard:7.8.9
+          env:
+            - name: PGID
+              value: "0"
+            - name: PUID
+              value: "0"
+            - name: TZ
+              value: Etc/UTC
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+            requests:
+              cpu: "500m"
+              memory: 1Gi
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data-root
+              mountPath: /opt/focalboard
+            - name: data
+              mountPath: /opt/focalboard/data
+      restartPolicy: Always
+      volumes:
+        - name: data-root
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: {{ .Release.Name }}
+  name: {{ .Release.Name }}-svc
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    io.kompose.service: {{ .Release.Name }}

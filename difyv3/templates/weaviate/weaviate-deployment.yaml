@@ -1,0 +1,129 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert -f docker-compose-resolved.yml --profile weaviate
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: weaviate
+  name: weaviate
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.weaviate.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: weaviate
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert -f docker-compose-resolved.yml --profile weaviate
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: weaviate
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+              if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: weaviate-claim0-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: weaviate-claim0
+              mountPath: /new-data
+      containers:
+        - env:
+            - name: AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED
+              value: "true"
+            - name: AUTHENTICATION_APIKEY_ALLOWED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: dify-api-secrets
+                  key: WEAVIATE_API_KEY
+            - name: AUTHENTICATION_APIKEY_ENABLED
+              value: "true"
+            - name: AUTHENTICATION_APIKEY_USERS
+              value: hello@dify.ai
+            - name: AUTHORIZATION_ADMINLIST_ENABLED
+              value: "true"
+            - name: AUTHORIZATION_ADMINLIST_USERS
+              value: hello@dify.ai
+            - name: CLUSTER_HOSTNAME
+              value: node1
+            - name: DEFAULT_VECTORIZER_MODULE
+              value: none
+            - name: PERSISTENCE_DATA_PATH
+              value: /var/lib/weaviate
+            - name: QUERY_DEFAULTS_LIMIT
+              value: "25"
+          image: "docker.io/beclab/semitechnologies-weaviate:1.35.7"
+          name: weaviate
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+            - containerPort: 50051
+              protocol: TCP
+              name: grpc
+          livenessProbe:
+            httpGet:
+              path: /v1/.well-known/ready
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          readinessProbe:
+            httpGet:
+              path: /v1/.well-known/ready
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - mountPath: /var/lib/weaviate
+              name: weaviate-claim0
+      restartPolicy: Always
+      volumes:
+        - name: weaviate-claim0-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/volumes/weaviate/claim0
+        - name: weaviate-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/weaviate/claim0

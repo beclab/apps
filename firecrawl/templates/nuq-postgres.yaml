@@ -1,0 +1,111 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nuq-postgres
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: nuq-postgres
+spec:
+  replicas: {{ (index .Values.workloads "nuq-postgres").replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nuq-postgres
+  template:
+    metadata:
+      labels:
+        app: nuq-postgres
+    spec:
+      initContainers:
+        - name: init-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /var/lib/postgresql/data..."
+              mkdir -p /var/lib/postgresql/data
+              chown -R 999:999 /var/lib/postgresql/data
+              chmod 700 /var/lib/postgresql/data
+          volumeMounts:
+            - name: nuq-data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: nuq-postgres
+          image: "docker.io/beclab/harveyff-firecrawl-nuq-postgres:2.11.158"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: "postgres"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          ports:
+            - containerPort: 5432
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - postgres
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - postgres
+                - -d
+                - postgres
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2
+              memory: 2Gi
+          volumeMounts:
+            - name: nuq-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: nuq-data
+          hostPath:
+            path: {{ .Values.userspace.appData }}/nuq-postgres
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nuq-postgres
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: nuq-postgres
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+  selector:
+    app: nuq-postgres

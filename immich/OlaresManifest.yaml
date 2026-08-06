@@ -1,68 +1,98 @@
-olaresManifest.version: '0.9.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  immich-machine-learning: 1
+  immich-redis: 1
+  immich: 1
 metadata:
   name: immich
-  icon: https://file.bttcdn.com/appstore/immich/icon.png
+  icon: https://app.cdn.olares.com/appstore/immich/icon.png
   description: High performance self-hosted photo and video management solution.
   appid: immich
   title: Immich
-  version: '1.0.5'
+  version: '1.0.30'
   categories:
-  - Entertainment
+  - Lifestyle
+
 entrances:
 - name: immich
-  host: immichclient
-  port: 8080
-  icon: https://file.bttcdn.com/appstore/immich/icon.png
+  host: immich-svc
+  port: 80
+  icon: https://app.cdn.olares.com/appstore/immich/icon.png
   title: Immich
-  authLevel: private
+  authLevel: internal
   openMethod: window
 spec:
-  versionName: '1.132.1'
-  featuredImage: https://file.bttcdn.com/appstore/immich/01.png
+  versionName: '2.7.5'
+  featuredImage: https://app.cdn.olares.com/appstore/immich/01.png
   promoteImage:
-  - https://file.bttcdn.com/appstore/immich/01.png
-  - https://file.bttcdn.com/appstore/immich/02.png
-  - https://file.bttcdn.com/appstore/immich/03.png
-  - https://file.bttcdn.com/appstore/immich/04.png
+  - https://app.cdn.olares.com/appstore/immich/01.png
+  - https://app.cdn.olares.com/appstore/immich/02.png
+  - https://app.cdn.olares.com/appstore/immich/03.png
+  - https://app.cdn.olares.com/appstore/immich/04.png
 
   fullDescription: |
-    ## OVERVIEW ##  
+    **OVERVIEW**
     Immich is a self-hosted photo and video management solution that allows you to back up your precious memories directly from your mobile phone.
 
     Here are some key features:
-    - Web Portal and Mobile App:
+    **Web Portal and Mobile App**
     Immich provides a user-friendly web interface and a mobile app for both iOS and Android. You can easily browse, organize, and manage your media files.
 
-    - Automatic Backup
+    **Automatic Backup**
     Immich ensures that your photos and videos are automatically backed up, just like Google Photos. Say goodbye to manual uploads!
 
-    - Bulk Upload
+    **Bulk Upload**
     Need to transfer a large batch of files? Immich supports bulk uploads, making it efficient to migrate your existing media.
 
-    - Partner Sharing
+    **Partner Sharing**
     Share specific albums or memories with friends and family. Immich lets you collaborate and reminisce together.
 
-    - Facial Recognition
+    **Facial Recognition**
     Immich can recognize faces in your photos, making it easier to find specific people or moments.
 
-    - Reverse Geocoding
+    **Reverse Geocoding**
     Wondering where a particular photo was taken? Immich adds location information to your media.
 
   upgradeDescription: |
-    Upgrade app version to v1.132.1
-    
-    Hotfixes
-    Reverting the opt-in delete synchronization in this release. There is an issue with getting the Google PlayStore to approve the app with the new permission needed for this feature. We are exploring alternative routes to preserve this feature and will push out another update as soon as possible
-    Fixes an issue where the server does not start on ARM devices
+    v1.0.30: Move leftover `DB_PASSWORD` into Secret (`secretKeyRef`).
 
-    What's Changed
-    
-    Bug fixes
-    - fix(server): bump sharp by @mertalev in #17818
-    - chore: reverting opt-in deletion feature by @alextran1502 in #17819
+    v1.0.29: Move `OAUTH_CLIENT_SECRET` into Kubernetes Secret (`secretKeyRef`).
 
-    Full release note at: https://github.com/immich-app/immich/releases/tag/v1.132.1
+    Upgrade app version from v2.6.2 to v2.7.5
+
+    Welcome to Immich v2.7.5. This upgrade covers the v2.7.x release series, including enhancements to the asset viewer, security improvements, deduplication improvements, and numerous bug fixes.
+
+    Highlights (v2.7.0):
+
+    Remove from Album (Asset Viewer):
+    A new "Remove from album" action is available in the asset viewer for both album and asset owners.
+
+    Editor Shortcuts:
+    Press 'e' to open the editor, '[' or ']' to rotate +/- 90 degrees, and 'ENTER' to save and close.
+
+    Create Face On-the-Fly:
+    You can now create a new face/person directly from the face tagging editor interface.
+
+    Deduplication Improvements:
+    The server now automatically suggests which asset to keep based on image size and EXIF data, and synchronizes metadata including albums, favorites, rating, description, visibility, location, and tags.
+
+    Helmet Configuration (CSP):
+    You can now opt in to a Content Security Policy by setting IMMICH_HELMET_FILE=true. Custom policies are also supported via a configuration file path.
+
+    Version Check Infrastructure:
+    Version checks now use version.immich.cloud instead of github.com for improved privacy.
+
+    Notable Bug Fixes
+    - Live photo and video download in Safari now works correctly.
+    - Escape HTML in Panorama Photo Viewer (XSS fix).
+    - Rate limit and deduplication added to version check.
+    - Image rendering fixes on mobile app.
+    - People search fixed for 3 or less characters.
+
+    Full release notes: https://github.com/immich-app/immich/releases/tag/v2.7.5
 
   developer: immich-app
   website: https://immich.app
@@ -79,6 +109,7 @@ spec:
   requiredDisk: 5Gi
   supportArch:
   - amd64
+  - arm64
   requiredCpu: 600m
   limitedMemory: 6500Mi
   limitedCpu: 5500m
@@ -87,6 +118,7 @@ permission:
   appCache: true
   userData:
   - Home
+  externalData: true
 middleware:
   postgres:
     username: immich
@@ -95,25 +127,28 @@ middleware:
     - name: immich
       distributed: false
       extensions:
-      - vectors
+      - vchord
+      - vector
       - earthdistance
       scripts:
       - BEGIN;
-      - ALTER DATABASE $databasename SET search_path TO "$user", public, vectors;
-      - ALTER SCHEMA vectors OWNER TO $dbusername;
+      - ALTER EXTENSION vector OWNER TO $dbusername;
       - COMMIT;
   redis:
     namespace: db0
 options:
-  analytics:
-    enabled: false
-  resetCookie:
-    enabled: false
+  apiTimeout: 0
   dependencies:
   - name: olares
-    version: '>=1.10.1-0'
+    version: '>=1.12.6-0'
     type: system
   oidc:
     enabled: true
     redirectUri: /auth/login
     entranceName: immich
+envs:
+- envName: HF_ENDPOINT
+  required: true
+  applyOnChange: true
+  valueFrom:
+    envName: OLARES_USER_HUGGINGFACE_SERVICE

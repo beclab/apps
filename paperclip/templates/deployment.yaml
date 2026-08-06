@@ -1,0 +1,346 @@
+{{- $paperclipDomainENV := split  ","  .Values.domain.paperclip -}}
+{{- $paperclipDomain := index $paperclipDomainENV "_0" -}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: paperclip
+  name: paperclip
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.paperclip.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: paperclip
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: paperclip
+        bytetrade.io/terminal: paperclip
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            set -e
+            mkdir -p /paperclip/.local/bin /paperclip/.npm-global/bin \
+              /paperclip/.config /paperclip/.local/share /paperclip/.cache \
+              /paperclip/instances/default/logs \
+              /paperclip/instances/default/data/storage \
+              /paperclip/instances/default/secrets
+            printf '%s\n' '#!/bin/sh' 'cd /app && exec pnpm paperclipai "$@"' > /paperclip/.local/bin/paperclipai
+            chmod 755 /paperclip/.local/bin/paperclipai
+            PATH_MARKER="# paperclip: brew-path"
+            for rc in /paperclip/.bashrc /paperclip/.profile; do
+              if ! grep -qF "$PATH_MARKER" "$rc" 2>/dev/null; then
+                {
+                  echo ""
+                  echo "$PATH_MARKER"
+                  echo 'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"'
+                  echo 'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"'
+                  echo 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/paperclip/.npm-global}"'
+                  echo 'export PATH="/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+                } >> "$rc"
+              fi
+            done
+            fix_dir() {
+              for d in "$@"; do
+                [ -e "$d" ] || continue
+                chown -R 1000:1000 "$d" 2>/dev/null || true
+                chmod -R u+rwX,g+rwX "$d" 2>/dev/null || true
+              done
+            }
+            fix_dir /paperclip /tmp
+            echo "[init-permissions] /paperclip and /tmp ready (owner=1000:1000)"
+        volumeMounts:
+          - name: data
+            mountPath: /paperclip
+          - name: tmp-volume
+            mountPath: /tmp
+        securityContext:
+          runAsUser: 0
+      - name: init-install-dev
+        image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -euo pipefail
+            if [ ! -d /brew-staging/.linuxbrew ]; then
+              echo "[init-install-dev] FATAL: /brew-staging/.linuxbrew missing"
+              exit 1
+            fi
+            mkdir -p /home/linuxbrew/.linuxbrew
+            if cmp -s /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build 2>/dev/null; then
+              echo "[init-install-dev] brew base up to date, skip copy"
+            else
+              echo "[init-install-dev] materializing brew base to appData..."
+              cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
+            fi
+            chown -R 1000:1000 /home/linuxbrew || true
+            echo "[init-install-dev] done"
+        volumeMounts:
+          - name: brew-volume
+            mountPath: /home/linuxbrew
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        imagePullPolicy: IfNotPresent
+      containers:
+        - name: paperclip
+          image: beclab/paperclipai-paperclip:sha-a0f7d3d
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - --import
+            - ./server/node_modules/tsx/dist/loader.mjs
+            - server/dist/index.js
+          ports:
+            - containerPort: 3100
+          env:
+            - name: PORT
+              value: "3100"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: SERVE_UI
+              value: "true"
+            - name: PAPERCLIP_HOME
+              value: "/paperclip"
+            - name: HOME
+              value: "/paperclip"
+            - name: XDG_CONFIG_HOME
+              value: "/paperclip/.config"
+            - name: XDG_DATA_HOME
+              value: "/paperclip/.local/share"
+            - name: XDG_CACHE_HOME
+              value: "/paperclip/.cache"
+            - name: HOMEBREW_PREFIX
+              value: "/home/linuxbrew/.linuxbrew"
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: NPM_CONFIG_PREFIX
+              value: "/paperclip/.npm-global"
+            - name: PATH
+              value: "/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: PAPERCLIP_DEPLOYMENT_MODE
+              value: "authenticated"
+            - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
+              value: "private"
+            - name: PAPERCLIP_AUTH_BASE_URL_MODE
+              value: "explicit"
+            - name: PAPERCLIP_AUTH_PUBLIC_BASE_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_PUBLIC_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: BETTER_AUTH_SECRET
+            - name: BETTER_AUTH_BASE_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_ALLOWED_HOSTNAMES
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_API_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_INTERNAL_URL
+              value: "http://127.0.0.1:3100"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DATABASE_URL
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: OPENAI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: GEMINI_API_KEY
+            - name: CURSOR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: CURSOR_API_KEY
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 3000m
+              memory: 6Gi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - mountPath: /paperclip
+              name: data
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /tmp
+              name: tmp-volume
+          readinessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: 3100
+            initialDelaySeconds: 40
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+        - name: paperclip-cli
+          image: beclab/paperclipai-paperclip:sha-a0f7d3d
+          imagePullPolicy: IfNotPresent
+          command:
+            - sleep
+            - infinity
+          startupProbe:
+            exec:
+              command:
+                - /home/linuxbrew/.linuxbrew/bin/python3
+                - -c
+                - "import sys; sys.exit(0)"
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 60
+          env:
+            - name: TERM
+              value: xterm-256color
+            - name: PAPERCLIP_HOME
+              value: "/paperclip"
+            - name: HOME
+              value: "/paperclip"
+            - name: XDG_CONFIG_HOME
+              value: "/paperclip/.config"
+            - name: XDG_DATA_HOME
+              value: "/paperclip/.local/share"
+            - name: XDG_CACHE_HOME
+              value: "/paperclip/.cache"
+            - name: HOMEBREW_PREFIX
+              value: "/home/linuxbrew/.linuxbrew"
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: NPM_CONFIG_PREFIX
+              value: "/paperclip/.npm-global"
+            - name: PATH
+              value: "/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: PAPERCLIP_DEPLOYMENT_MODE
+              value: "authenticated"
+            - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
+              value: "private"
+            - name: PAPERCLIP_AUTH_BASE_URL_MODE
+              value: "explicit"
+            - name: PAPERCLIP_AUTH_PUBLIC_BASE_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_PUBLIC_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: BETTER_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: BETTER_AUTH_SECRET
+            - name: BETTER_AUTH_BASE_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_ALLOWED_HOSTNAMES
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_API_URL
+              value: "https://{{ $paperclipDomain }}"
+            - name: PAPERCLIP_INTERNAL_URL
+              value: "http://127.0.0.1:3100"
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: OPENAI_API_KEY
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: GEMINI_API_KEY
+            - name: CURSOR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: CURSOR_API_KEY
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          volumeMounts:
+            - mountPath: /paperclip
+              name: data
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /tmp
+              name: tmp-volume
+      volumes:
+        - name: tmp-volume
+          emptyDir: {}
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/paperclip'
+        - name: brew-volume
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/brew'
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paperclip
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: paperclip
+spec:
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+  selector:
+    io.kompose.service: paperclip

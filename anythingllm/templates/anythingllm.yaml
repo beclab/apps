@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,20 +6,40 @@ metadata:
   labels:
     app: anythingllm
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.anythingllm.replicaCount }}
   selector:
     matchLabels:
       app: anythingllm
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app: anythingllm
     spec:
-      containers:
-        - name: anythingllm
-          image: docker.io/mintplexlabs/anythingllm:1.7.5
+      initContainers:
+        - name: init-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: Always
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "[Init] Fixing permissions on /app/server/storage..."
+              mkdir -p /app/server/storage/comkey
+              chown -R 1000:1000 /app/server/storage
+              chmod -R 770 /app/server/storage
+          resources: {}
+          volumeMounts:
+            - name: anythingllm-storage
+              mountPath: /app/server/storage
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
           securityContext:
             runAsUser: 0
+      containers:
+        - name: anythingllm
+          image: "docker.io/beclab/mintplex-labs-anything-llm:1.14.1"
           env:
             - name: PGID
               value: "1000"
@@ -44,7 +63,7 @@ spec:
               memory: 512Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              memory: 2Gi
           livenessProbe:
             httpGet:
               path: /
@@ -72,7 +91,15 @@ spec:
       volumes:
         - name: anythingllm-storage
           hostPath:
-            path: "{{ .Values.userspace.appData }}/anythingllm2"
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/{{ .Release.Name }}"
+            {{- end }}
             type: DirectoryOrCreate
 ---
 apiVersion: v1

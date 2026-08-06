@@ -1,57 +1,12 @@
-apiVersion: v1
-data:
-  nginx.conf: |
-    stream {
-      server {
-          listen  8001;  
-          proxy_pass 127.0.0.1:8080;
-      }
-    }
-
-    events {
-      # Your event-related configurations go here
-    }
-
-    http {
-      # Your HTTP server configurations go here
-    }
-
-kind: ConfigMap
-metadata:
-  name: nginx-config
-  namespace: {{ .Release.Namespace }}
----
-apiVersion: v1
-data:
-  init.sh: |
-    #!/bin/bash
-
-    appDataDir="/appData"
-    configDir="/config/qBittorrent"
-
-    if [ "$(ls -A $appDataDir)" ]; then
-      echo "$appDataDir not empty"
-    else
-      echo "$appDataDir is empty"
-      cp -r $configDir/. $appDataDir
-      echo "copy succeed"
-    fi
-
-
-kind: ConfigMap
-metadata:
-  name: init-config
-  namespace: {{ .Release.Namespace }}
----
-kind: Deployment
 apiVersion: apps/v1
+kind: Deployment
 metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
     app: {{ .Release.Name }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.qbittorrent.replicaCount }}
   selector:
     matchLabels:
       app: {{ .Release.Name }}
@@ -61,88 +16,87 @@ spec:
         app: {{ .Release.Name }}
     spec:
       volumes:
-        - name: home
+        - name: external-downloads
           hostPath:
-            type: Directory
+            type: DirectoryOrCreate
+            path: "{{ .Values.sharedlib }}"
+        - name: home-downloads
+          hostPath:
+            type: DirectoryOrCreate
             path: {{ .Values.userspace.userData }}
         - name: appdata
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appData }}/qbittorrent
-        - name: nginx-config
+            path: {{ .Values.userspace.appData }}
+        - name: qbittorrent-init
           configMap:
-            name: nginx-config
+            name: qbittorrent-init
             defaultMode: 438
             items:
-            - key: nginx.conf
-              path: nginx.conf
-        - name: init-config
+              - key: init.sh
+                path: init.sh
+              - key: init-migrate-webui-auth.sh
+                path: init-migrate-webui-auth.sh
+        - name: qbittorrent-defaults
           configMap:
-            name: init-config
+            name: qbittorrent-defaults
             defaultMode: 438
             items:
-            - key: init.sh
-              path: init.sh
+              - key: qBittorrent.conf
+                path: qBittorrent.conf
       initContainers:
-        - name: init-chmod-data
-          image: 'docker.io/aboveos/busybox:latest'
+        - name: init-qbittorrent
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
             - |
-              chown -R 1000:1000 /home; chown -R 1000:1000 /appdata
+              sh /chart-init/init.sh
           resources: {}
           imagePullPolicy: IfNotPresent
           volumeMounts:
-            - name: home
-              mountPath: /home
+            - name: home-downloads
+              mountPath: /olares/userdata/home
+            - name: home-downloads
+              mountPath: /downloads/home
             - name: appdata
-              mountPath: /appdata
+              mountPath: /appData
+            - name: qbittorrent-init
+              mountPath: /chart-init
+              readOnly: true
+            - name: qbittorrent-defaults
+              mountPath: /chart-defaults
+              readOnly: true
           securityContext:
             runAsUser: 0
-        - name: init-qbittorrent-config
-          image: 'aboveos/qbittorrent:latest'
+        # TODO: drop after all users upgraded from chart <= 1.0.20 (nginx loopback proxy).
+        - name: init-migrate-webui-auth
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - '-c'
             - |
-              chmod +x /init.sh & bash /init.sh
+              sh /chart-init/init-migrate-webui-auth.sh
           resources: {}
           imagePullPolicy: IfNotPresent
           volumeMounts:
             - name: appdata
               mountPath: /appData
-            - name: init-config 
-              mountPath: /init.sh
-              subPath: init.sh
+            - name: qbittorrent-init
+              mountPath: /chart-init
+              readOnly: true
           securityContext:
-            runAsUser: 0            
+            runAsUser: 0
       containers:
-        - name: nginx
-          image: docker.io/aboveos/nginx:latest
-          volumeMounts:
-          - name: nginx-config 
-            mountPath: /etc/nginx/nginx.conf
-            subPath: nginx.conf
-          ports:
-          - containerPort: 8001
-          imagePullPolicy: IfNotPresent
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 100m
-              memory: 128Mi
         - name: qbittorrent
-          image: 'aboveos/qbittorrent:latest'
+          image: "linuxserver/qbittorrent:5.2.2"
           resources:
             requests:
-              cpu: 40m
-              memory: 64Mi
+              cpu: 100m
+              memory: 100Mi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "1"
+              memory: 2Gi
           ports:
             - name: http
               containerPort: 8080
@@ -156,9 +110,21 @@ spec:
               value: "002" 
             - name: TZ
               value: UTC
+            - name: WEBUI_PORT
+              value: "8080"
+            - name: TORRENTING_PORT
+              value: "6881"
           volumeMounts:
-            - name: home
+            - name: home-downloads
+              mountPath: /olares/userdata/home
+            - name: home-downloads
+              mountPath: /downloads/home
+            - name: home-downloads
               mountPath: /home
+            - name: external-downloads
+              mountPath: /olares/userdata/external
+            - name: external-downloads
+              mountPath: /downloads/external
             - name: appdata
               mountPath: /config/qBittorrent
           livenessProbe:
@@ -197,43 +163,3 @@ spec:
     type: Recreate
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 600
-
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: {{ .Release.Name }}-svc
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_api
-  deployment: qbittorrent
-  description: qbittorrent legacy api
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8001
-  group: api.qbittorrent
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v1
-status:
-  state: active
-
-
----
-apiVersion: sys.bytetrade.io/v1alpha1
-kind: ProviderRegistry
-metadata:
-  name: legacy-{{ .Release.Name }}
-  namespace: user-system-{{ .Values.bfl.username }}
-spec:
-  dataType: legacy_qbittorrent
-  deployment: qbittorrent
-  description: qbittorrent legacy api v2
-  endpoint: {{ .Release.Name }}-svc.{{ .Release.Namespace }}:8001
-  group: apiv2.qbittorrent
-  kind: provider
-  namespace: {{ .Release.Namespace }}
-  version: v2
-  opApis:
-  - name: All
-    uri: /  
-status:
-  state: active

@@ -1,0 +1,151 @@
+
+{{- $difyDomainENV := split "," .Values.domain.difyv3 -}}
+{{- $difyDomain := index $difyDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $difyDomain "$1" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: kompose convert
+    kompose.version: 1.35.0 (HEAD)
+  labels:
+    io.kompose.service: plugin-daemon
+  name: plugindaemon
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.plugindaemon.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: plugin-daemon
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: kompose convert
+        kompose.version: 1.35.0 (HEAD)
+      labels:
+        io.kompose.service: plugin-daemon
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+              if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: plugin-daemon-claim0-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: plugin-daemon-claim0
+              mountPath: /new-data
+      containers:
+        - name: plugin-daemon
+          envFrom:
+            - configMapRef:
+                name: dify-api-env
+            - secretRef:
+                name: dify-api-secrets
+          env:
+            # api/worker use DB_EXTRAS; plugin-daemon's pg driver rejects it as a server arg
+            - name: DB_EXTRAS
+              value: ""
+            - name: DIFY_INNER_API_URL
+              value: http://api:5001
+            - name: PLUGIN_DIFY_INNER_API_URL
+              value: http://api:5001
+            - name: MAX_PLUGIN_PACKAGE_SIZE
+              value: "52428800"
+            - name: PLUGIN_DEBUGGING_HOST
+              value: 0.0.0.0
+            - name: PLUGIN_DEBUGGING_PORT
+              value: "5003"
+            - name: PLUGIN_REMOTE_INSTALLING_HOST
+              value: 0.0.0.0
+            - name: PLUGIN_REMOTE_INSTALLING_PORT
+              value: "5003"
+            - name: PLUGIN_STORAGE_TYPE
+              value: local
+            - name: PPROF_ENABLED
+              value: "false"
+            - name: PYTHON_ENV_INIT_TIMEOUT
+              value: "120"
+            - name: S3_USE_AWS
+              value: "false"
+            - name: S3_USE_PATH_STYLE
+              value: "false"
+            - name: SERVER_PORT
+              value: "5002"
+            - name: HTTP_PROXY
+              value: "http://ssrfproxy:3128"
+            - name: HTTPS_PROXY
+              value: "http://ssrfproxy:3128"
+          image: "docker.io/beclab/langgenius-dify-plugin-daemon:0.5.3-local"
+          ports:
+            - containerPort: 5002
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: 5002
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 40
+            successThreshold: 1
+          livenessProbe:
+            tcpSocket:
+              port: 5002
+            initialDelaySeconds: 120
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
+            successThreshold: 1
+          readinessProbe:
+            tcpSocket:
+              port: 5002
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 5
+            successThreshold: 1
+          resources:
+            requests:
+              cpu: 300m
+              memory: 512Mi
+            limits:
+              cpu: 600m
+              memory: 1Gi
+          volumeMounts:
+            - mountPath: /app/storage
+              name: plugin-daemon-claim0
+      restartPolicy: Always
+      volumes:
+        - name: plugin-daemon-claim0-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/volumes/plugin-daemon/claim0
+        - name: plugin-daemon-claim0
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/volumes/plugin-daemon/claim0

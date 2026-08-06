@@ -1,0 +1,120 @@
+{{- $ha_postgresql_secret := (lookup "v1" "Secret" .Release.Namespace "otmoic-relay-db-postgresql-postgresql-ha-postgresql") -}}
+{{- $postgresql_secret_password := "" -}}
+{{ if $ha_postgresql_secret -}}
+{{- $postgresql_secret_password = (index $ha_postgresql_secret "data" "password") -}}
+{{ else -}}
+{{- $postgresql_secret_password = randAlphaNum 16 | b64enc}}
+{{- end -}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: otmoic-relay-db-postgresql-postgresql-ha-postgresql
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  password: {{ $postgresql_secret_password }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-relay-db-postgresql-postgresql-ha-pgpool
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+  selector:
+    app: otmoic-relay-db-postgresql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-relay-db-postgresql-headless
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+  selector:
+    app: otmoic-relay-db-postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: otmoic-relay-db-postgresql
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoic-relay-db-postgresql
+  serviceName: otmoic-relay-db-postgresql-headless
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: otmoic-relay-db-postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: postgres:15
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: otmoic-relay-db-postgresql-postgresql-ha-postgresql
+                  key: password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          livenessProbe:
+            failureThreshold: 6
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            exec:
+              command:
+                - bash
+                - -ec
+                - PGPASSWORD=$POSTGRES_PASSWORD psql -w -U postgres -d postgres -h 127.0.0.1 -p 5432 -c "SELECT 1"
+          readinessProbe:
+            failureThreshold: 6
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            exec:
+              command:
+                - bash
+                - -ec
+                - PGPASSWORD=$POSTGRES_PASSWORD psql -w -U postgres -d postgres -h 127.0.0.1 -p 5432 -c "SELECT 1"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 8Gi

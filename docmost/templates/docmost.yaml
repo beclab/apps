@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: docmost
@@ -6,7 +6,7 @@ metadata:
   labels:
     io.kompose.service: docmost
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.docmost.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: docmost
@@ -17,9 +17,47 @@ spec:
       labels:
         io.kompose.service: docmost
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: docmost-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: docmost-data
+              mountPath: /new-data
       containers:
         - name: docmost
-          image: docker.io/docmost/docmost:0.8.4
+          image: "docker.io/beclab/docmost-docmost:0.21.0"
           env:
             - name: PGID
               value: "1000"
@@ -37,40 +75,29 @@ spec:
                   name: docmost
                   key: app-password
             - name: DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.docmost}}?schema=public"
+              valueFrom:
+                secretKeyRef:
+                  name: docmost
+                  key: DATABASE_URL
+            {{- if and .Values.olaresEnv .Values.olaresEnv.SMTP_PASSWORD }}
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: docmost
+                  key: SMTP_PASSWORD
+            {{- end }}
             - name: REDIS_URL
               value: "redis://docmost-redis:6379/0"
-            - name: JWT_TOKEN_EXPIRES_IN
-              value: "30d"
-            - name: PORT
-              value: "3000"
-            - name: STORAGE_DRIVER
-              value: "local"
-            - name: FILE_UPLOAD_SIZE_LIMIT
-              value: "50mb"
-            - name: MAIL_DRIVER
-              value: "smtp"
-            - name: SMTP_HOST
-              value: ""
-            - name: SMTP_PORT
-              value: "587"
-            - name: SMTP_USERNAME
-              value: ""
-            - name: SMTP_PASSWORD
-              value: ""
-            - name: SMTP_SECURE
-              value: "true"
-            - name: MAIL_FROM_ADDRESS
-              value: ""
-            - name: MAIL_FROM_NAME
-              value: "Docmost"
+          envFrom:
+            - configMapRef:
+                name: docmost-config
           resources:
             requests:
               cpu: 500m
               memory: 512Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 2000m
+              memory: 2Gi
           ports:
             - name: http
               containerPort: 3000
@@ -84,11 +111,11 @@ spec:
         - name: docmost-data
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appCache }}/docmost'
-        - name: redis-data
+            path: '{{ .Values.userspace.appData }}'
+        - name: docmost-data-legacy
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appdata }}/docmost/redisdata'
+            path: '{{ .Values.userspace.appCache }}'
 ---
 apiVersion: v1
 kind: Service

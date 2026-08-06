@@ -1,113 +1,69 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ragflow-config
-  namespace: {{ .Release.Namespace }}
-data:
-  nginx.conf: |
-    user  root;
-    worker_processes  auto;
-
-    error_log  /var/log/nginx/error.log notice;
-    pid        /var/run/nginx.pid;
-
-
-    events {
-        worker_connections  1024;
-    }
-
-
-    http {
-        include       /etc/nginx/mime.types;
-        default_type  application/octet-stream;
-
-        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
-                          '$status $body_bytes_sent "$http_referer" '
-                          '"$http_user_agent" "$http_x_forwarded_for"';
-
-        access_log  /var/log/nginx/access.log  main;
-
-        sendfile        on;
-        #tcp_nopush     on;
-
-        keepalive_timeout  65;
-
-        #gzip  on;
-        client_max_body_size 128M;
-
-        include /etc/nginx/conf.d/ragflow.conf;
-    }
-
-  proxy.conf: |
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_http_version 1.1;
-    proxy_set_header Connection "";
-    proxy_buffering off;
-    proxy_read_timeout 3600s;
-    proxy_send_timeout 3600s;
-
-  ragflow.conf: |
-    server {
-        listen 80;
-        server_name _;
-        root /ragflow/web/dist;
-
-        gzip on;
-        gzip_min_length 1k;
-        gzip_comp_level 9;
-        gzip_types text/plain application/javascript application/x-javascript text/css application/xml text/javascript application/x-httpd-php image/jpeg image/gif image/png;
-        gzip_vary on;
-        gzip_disable "MSIE [1-6]\.";
-
-        location ~ ^/(v1|api) {
-            proxy_pass http://127.0.0.1:9380;
-            include proxy.conf;
-        }
-
-
-        location / {
-            index index.html;
-            try_files $uri $uri/ /index.html;
-        }
-
-        # Cache-Control: max-age~@~AExpires
-        location ~ ^/static/(css|js|media)/ {
-            expires 10y;
-            access_log off;
-        }
-    }
-
-
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ragflow
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.ragflow.replicaCount }}
   selector:
     matchLabels:
       app: ragflow
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app: ragflow
     spec:
       initContainers:
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_ragflow_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_ragflow_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/ragflow -> appData/ragflow..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: ragflow-logs-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: ragflow-logs
+            mountPath: /new-data
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /appcache
+            chown -R 1000:1000 /ragflow/logs
         resources: {}
         volumeMounts:
-          - name:  appcache
-            mountPath: /appcache
+          - name: ragflow-logs
+            mountPath: /ragflow/logs
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
@@ -115,46 +71,104 @@ spec:
           runAsUser: 0
       containers:
       - name: ragflow
-        image: infiniflow/ragflow:v0.15.1
+        image: "docker.io/infiniflow/ragflow:v0.26.4"
+        args:
+          - --enable-adminserver
         ports:
         - containerPort: 9380
+        - containerPort: 9381
         - containerPort: 80
         env:
-        - name: TZ
-          value: "Asia/Shanghai"
         - name: HF_ENDPOINT
-          value: 'https://hf-mirror.com/'
+          value: '{{ .Values.olaresEnv.HF_ENDPOINT }}'
         - name: MACOS
           value: '0'
+        - name: API_PROXY_SCHEME
+          value: 'python'
+        - name: DOC_ENGINE
+          value: 'elasticsearch'
+        - name: MYSQL_PORT
+          value: "{{ .Values.mysql.port }}"
+        - name: MYSQL_HOST
+          value: "{{ .Values.mysql.host }}"
+        - name: MYSQL_USER
+          value: "{{ .Values.mysql.username }}"
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: MYSQL_PASSWORD
+        - name: MYSQL_DBNAME
+          value: "{{ .Values.mysql.databases.rag_flow }}"
+        - name: ES_HOST
+          value: 'es01'
+        - name: ELASTIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ELASTIC_PASSWORD
+        - name: REDIS_HOST
+          value: 'redis'
+        - name: REDIS_PORT
+          value: '6379'
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: REDIS_PASSWORD
+        - name: MINIO_HOST
+          value: 'minio'
+        - name: MINIO_PORT
+          value: '9000'
+        - name: MINIO_USER
+          value: 'rag_flow'
+        - name: MINIO_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: MINIO_PASSWORD
         resources:
           limits:
             cpu: "4"
-            memory: 4Gi
+            memory: 10Gi
           requests:
             cpu: "1"
             memory: 1Gi
+        startupProbe:
+          httpGet:
+            path: /api/v1/system/healthz
+            port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /api/v1/system/healthz
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /api/v1/system/ping
+            port: 80
+          initialDelaySeconds: 120
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 5
         volumeMounts:
-          - name: nginx-config
-            mountPath: /etc/nginx/conf.d/ragflow.conf
-            subPath: ragflow.conf
-          - name: nginx-config
-            mountPath: /etc/nginx/proxy.conf
-            subPath: proxy.conf
-          - name: nginx-config
-            mountPath: /etc/nginx/nginx.conf
-            subPath: nginx.conf
+          - name: ragflow-logs
+            mountPath: /ragflow/logs
       volumes:
-      - name: nginx-config
-        configMap:
-          name: ragflow-config
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/ragflow'
+          type: DirectoryOrCreate
+        name: ragflow-logs
       - hostPath:
           path: '{{ .Values.userspace.appCache }}/ragflow'
           type: DirectoryOrCreate
-        name: appcache
-      - hostPath:
-          path: '{{ .Values.userspace.appCache }}/ragflow/ragflow'
-          type: DirectoryOrCreate
-        name: ragflow-logs
+        name: ragflow-logs-legacy
 ---
 apiVersion: v1
 kind: Service

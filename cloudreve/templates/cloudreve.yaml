@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
@@ -6,7 +6,7 @@ metadata:
   name: cloudreve
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.cloudreve.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: cloudreve
@@ -19,7 +19,7 @@ spec:
         io.kompose.service: cloudreve
     spec:
       containers:
-        - image: docker.io/cloudreve/cloudreve:3.8.3
+        - image: cloudreve/cloudreve:4.5.1
           name: cloudreve
           ports:
             - containerPort: 5212
@@ -32,18 +32,19 @@ spec:
               value: Etc/UTC
             - name: DISPLAY
               value: ':0'
+            - name: CR_CONF_Redis.Server
+              value: "redis-svc:6379"
           resources:
             requests:
               cpu: 250m
               memory: 512Mi
             limits:
-              cpu: 250m
-              memory: 1Gi
+              cpu: 1000m
+              memory: 2Gi
           volumeMounts:
             - name: config
               mountPath: /cloudreve/conf.ini
               subPath: conf.ini
-
             - name: db
               mountPath: /cloudreve/cloudreve.db
               subPath: cloudreve.db
@@ -53,6 +54,8 @@ spec:
               mountPath: /cloudreve/avatar
             - name: temp-data
               mountPath: /data
+            - name: backend-data
+              mountPath: /cloudreve/data
           startupProbe:
             httpGet:
               path: /
@@ -62,12 +65,12 @@ spec:
             failureThreshold: 30
 
         - name: aria2
-          image: docker.io/p3terx/aria2-pro:202209060423
+          image: "docker.io/beclab/p3terx-aria2-pro:202209060423"
           env:
             - name: RPC_SECRET
               value: {{ randAlphaNum 16 | b64enc }}
             - name: RPC_PORT
-              value: '6800'
+              value: '6801'
           resources:
             requests:
               cpu: 250m
@@ -98,16 +101,43 @@ spec:
         - name: uploads
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/uploads'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/cloudreve/uploads'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/cloudreve/uploads'
+            {{- end }}
+        - name: backend-data
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/backend_data'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/cloudreve/backend_data'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/cloudreve/backend_data'
+            {{- end }}
         - name: avatar
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/avatar'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/cloudreve/avatar'
-
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/cloudreve/avatar'
+            {{- end }}
         - name: aria2-config
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appData }}/aria2/config'
+            path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/aria2/config'
 
       restartPolicy: Always
 
@@ -123,7 +153,7 @@ spec:
   ports:
     - name: http
       port: 6800
-      targetPort: 6800
+      targetPort: 6801
   selector:
     io.kompose.service: cloudreve
 

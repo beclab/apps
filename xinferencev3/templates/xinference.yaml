@@ -1,0 +1,185 @@
+{{- $hfEndpoint := (.Values.olaresEnv | default dict).HF_ENDPOINT | default "" -}}
+{{- $hfCache := printf "%s/huggingface" .Values.userspace.appCommon -}}
+{{- $appData := .Values.userspace.appData -}}
+{{- $appCache := .Values.userspace.appCache -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  # Primary workload: named after the release (== appid xinferencev3) for v3
+  # workload verification. The label/selector stays io.kompose.service: xinference
+  # so the Services below keep resolving.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.xinferencev3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: xinference
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: xinference
+    spec:
+      containers:
+      - name: xinference
+        image: "xprobe/xinference:v2.12.0"
+        # GPU memory quota is injected by the platform (gpu-inject webhook); do not
+        # set nvidia.com/gpumem in the chart. xinference-local binds :9997 and :8000.
+        # One-time copy from legacy appCache (/root) into appData, then start.
+        command:
+          - sh
+          - -c
+          - |
+            if [ -d /migrate-from-cache ] && [ -n "$(ls -A /migrate-from-cache 2>/dev/null)" ] && [ ! -f /root/.xinference-migrated-from-cache ]; then
+              cp -an /migrate-from-cache/. /root/ && touch /root/.xinference-migrated-from-cache
+            fi
+            if [ -d /root/.xinference/huggingface ] && [ -n "$(ls -A /root/.xinference/huggingface 2>/dev/null)" ] && [ ! -f {{ $hfCache }}/.migrated-from-xinference-home ]; then
+              cp -an /root/.xinference/huggingface/. {{ $hfCache }}/ && touch {{ $hfCache }}/.migrated-from-xinference-home
+            fi
+            # v2.12 image ships CUDA 13 runtime but bundles a CUDA-12-linked xllamacpp;
+            # reinstall cu132 wheel so llama.cpp can import (lost on every fresh pod otherwise).
+            mkdir -p /root/.xinference
+            echo "Reinstalling xllamacpp (cu132) for CUDA 13 runtime..."
+            pip install xllamacpp --force-reinstall \
+              --index-url https://xorbitsai.github.io/xllamacpp/whl/cu132 \
+              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
+            python3 -c "from xllamacpp import CommonParams, Server; print('xllamacpp ok')" \
+              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
+            exec xinference-local -H 0.0.0.0 --log-level debug
+        ports:
+          - containerPort: 9997
+            protocol: TCP
+          - containerPort: 8000
+            protocol: TCP
+        # The entrance routes straight to :9997, so gate pod readiness on the
+        # supervisor API actually listening (Olares only publishes the entrance
+        # once the pod is Ready). The startup grace covers first-boot init.
+        startupProbe:
+          tcpSocket:
+            port: 9997
+          failureThreshold: 60
+          periodSeconds: 5
+        readinessProbe:
+          tcpSocket:
+            port: 9997
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        env:
+          # Private durable state (logs, launch history, ModelScope cache) on appData.
+          # HF hub weights use the cross-app appCommon store.
+          - name: XINFERENCE_HOME
+            value: /root/.xinference
+          - name: XINFERENCE_MODEL_SRC
+            value: modelscope
+          - name: MODELSCOPE_CACHE
+            value: /root/.cache/modelscope
+          # HF hub cache: flat models--* under appCommon/huggingface (Olares convention;
+          # matches legacy $XINFERENCE_HOME/huggingface layout, not .../hub).
+          - name: HF_HOME
+            value: "{{ $hfCache }}"
+          - name: HF_HUB_CACHE
+            value: "{{ $hfCache }}"
+          - name: VLLM_PORT
+            value: "8000"
+          - name: HF_ENDPOINT
+            value: "{{ $hfEndpoint }}"
+          # CUDA 13 libs in image; helps torch/vllm/xllamacpp resolve libcudart.so.13.
+          - name: LD_LIBRARY_PATH
+            value: "/usr/local/cuda-13.0/targets/x86_64-linux/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
+          # Use system xllamacpp (reinstalled above); avoid isolated venv missing cu132 wheel.
+          - name: XINFERENCE_ENABLE_VIRTUAL_ENV
+            value: "0"
+        resources:
+          limits:
+            cpu: "5"
+            # Large-model launch/download can spike well past 20Gi (weights staging,
+            # vLLM worker init, HF/ModelScope cache I/O). 40Gi avoids OOM during
+            # first boot of big checkpoints on typical GPU nodes.
+            memory: 40Gi
+          requests:
+            cpu: "1"
+            memory: 6Gi
+        volumeMounts:
+        - mountPath: /root
+          name: data
+        - mountPath: /migrate-from-cache
+          name: legacy-cache
+          readOnly: true
+        - mountPath: "{{ $hfCache }}"
+          name: hf-cache
+        - name: shm
+          mountPath: /dev/shm
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ $appData }}'
+          type: DirectoryOrCreate
+        name: data
+      - hostPath:
+          path: '{{ $appCache }}'
+          type: DirectoryOrCreate
+        name: legacy-cache
+      - hostPath:
+          path: "{{ $hfCache }}"
+          type: DirectoryOrCreate
+        name: hf-cache
+      - name: shm
+        emptyDir:
+          medium: Memory
+          # vLLM / torch multiprocessing uses /dev/shm heavily; 2Gi was tight for
+          # multi-GB models.
+          sizeLimit: "8Gi"
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  name: xinference
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "8000"
+    port: 8000
+    targetPort: 8000
+  - name: "9997"
+    port: 9997
+    targetPort: 9997
+  selector:
+    io.kompose.service: xinference
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: xinference
+  name: sharedentrances-api
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "sharedentrances-api"
+    port: 80
+    targetPort: 9997
+  selector:
+    io.kompose.service: xinference
+status:
+  loadBalancer: {}

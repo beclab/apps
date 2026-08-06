@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"  
+  labels:
+    io.kompose.service: dman
+  name: dman
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: dman
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: dman
+    spec:
+      containers:
+        - image: coturn/coturn:4.7.0-alpine3.23
+          name: turnserver
+          args: 
+          - "-a"
+          - "-v"
+          - "-n"
+          - "-u"
+          - "user:password"
+          - "-p"
+          - "3478"
+          - "-r"
+          - "default-realm"
+          - "--no-dtls"
+          - "--no-tls"
+          - "-X"
+          - "$(NODE_IP)"
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP                
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 2
+              memory: 1Gi    
+        - image: docker.io/riddlemeteng/ainpc:v0.0.3
+          name: project
+          command:
+            - /home/ue4/app/dman.sh
+            - '-RenderOffscreen'
+            - '-ResX=1920'
+            - '-ResY=1080'
+            - '-PixelStreamingIP=127.0.0.1'
+            - '-PixelStreamingPort=8888'
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: HOME
+              value: /home/ue4
+            - name: LANG
+              value: C.UTF-8
+            - name: LC_ALL
+              value: C.UTF-8
+            - name: DISPLAY
+              value: ':55'
+          volumeMounts:
+            - name: saved-data
+              mountPath: /home/ue4/app/dman/Saved              
+          resources:
+            requests:
+              cpu: 1
+              memory: 4Gi
+            limits:
+              cpu: 8
+              memory: 8Gi              
+        - image: ghcr.io/zhongl/pixel-streaming-signalling-server:5.6
+          name: signalling
+          command:
+            - bash
+            - '-c'
+            - >
+              node /SignallingWebServer/SignallingWebServer/dist/index.js
+              --serve --console_messages verbose --log_config --https_redirect
+              --serve --https_redirect --console_messages verbose --log_config
+              --public_ip=$(NODE_IP)
+              --peer_options='{"iceServers":[{"urls":["turn:$(NODE_IP):3478?transport=tcp"],"username":"user","credential":"password"}]}'
+              --http_root=/SignallingWebServer/SignallingWebServer/platform_scripts/bash/../../www
+          ports:
+            - containerPort: 80
+              protocol: TCP
+            - containerPort: 8889
+              protocol: TCP
+            - containerPort: 8888
+              protocol: UDP
+          env:
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP   
+          resources:
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 2
+              memory: 1Gi                      
+      restartPolicy: Always
+      volumes:
+        - name: saved-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/dman-saved
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signalling
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: dman
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: dman
+  ports:
+    - name: "signalling"
+      port: 8000
+      targetPort: 80
+      protocol: TCP
+    - name: "tcp-3478"
+      port: 3478
+      protocol: TCP
+      targetPort: 3478
+    - name: "udp-3478"
+      port: 3478  
+      protocol: UDP
+      targetPort: 3478

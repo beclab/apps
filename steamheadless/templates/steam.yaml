@@ -1,27 +1,17 @@
-{{- $ipfsDomainENV := split  ","  .Values.domain.steamheadlessaudio -}}
-{{- $webDomain := index $ipfsDomainENV "_0" -}}
-
-{{- $parts := split "." $webDomain }}
-{{- $subdomain := index $parts "_0" }}
-{{- $subdomain2 := split  $subdomain  .Values.domain.steamheadlessaudio -}}
-
-{{- $domain := index $subdomain2 "_0" }}
-{{- $domain2 := index $subdomain2 "_1" }}
-
-{{- $newWebDomain := printf "%s.local%s" $subdomain $domain2 }}
----
+﻿---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
     kompose.cmd: kompose convert -f docker-steam-headless.yml
     kompose.version: 1.34.0 (HEAD)
+    applications.app.bytetrade.io/gpu-inject: "true"    
   labels:
     io.kompose.service: steam-headless
   name: steamheadless
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.steamheadless.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: steam-headless
@@ -35,6 +25,17 @@ spec:
       labels:
         io.kompose.service: steam-headless
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       containers:
         - env:
             - name: NAME
@@ -66,16 +67,19 @@ spec:
             - name: PORT_AUDIO_WEBSOCKET
               value: "8088"
             - name: DOMAIN_AUDIO_WEBSOCKET
-              value: {{ $newWebDomain }}
+              value: {{ .Values.domain.steamheadlessaudio }}
             - name: PORT_NOVNC_WEB
               value: '8083'
             - name: NEKO_NAT1TO1
             - name: ENABLE_SUNSHINE
               value: 'true'
             - name: SUNSHINE_USER
-              value: sam
+              value: {{ .Values.olaresEnv.SUNSHINE_USER }}
             - name: SUNSHINE_PASS
-              value: password
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: SUNSHINE_PASS
             - name: ENABLE_STEAM
               value: 'true'
             - name: ENABLE_EVDEV_INPUTS
@@ -84,7 +88,17 @@ spec:
               value: all
             - name: NVIDIA_VISIBLE_DEVICES
               value: all
-          image: bytetrade/steam-headless:v0.1.7
+        {{- if .Values.deviceName }}
+            - name: DEVICE_NAME
+              value: {{ .Values.deviceName }}
+        {{- end }}  
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: DBUS_SESSION_BUS_ADDRESS
+              value: unix:path=/run/dbus/session_bus_socket
+          image: docker.io/beclab/steam-headless:v0.1.16
           livenessProbe:
             httpGet:
               path: /
@@ -139,12 +153,23 @@ spec:
             protocol: UDP
           resources:
             requests:
-              cpu: 2
+              cpu: "4"
               memory: 4Gi
             limits:
-              cpu: 8
+              cpu: "18"
               memory: 64Gi
           name: steam-headless
+          lifecycle:
+            postStart:
+              exec:  
+                command: 
+                - sh
+                - -c
+                - |
+                  cat /dev/null > /usr/libexec/upowerd
+                  mkdir -p /run/dbus
+                  dbus-daemon --session --fork --nopidfile \
+                    --address=unix:path=/run/dbus/session_bus_socket || true
           securityContext:
             privileged: true
             runAsUser: 0
@@ -163,16 +188,20 @@ spec:
               mountPath: /dev/input/
             - name: dshm
               mountPath: /dev/shm
+        {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+            - name: snd
+              mountPath: /dev/snd
+        {{- end }}
       restartPolicy: Always
       volumes:
         - name: steam-headless-claim0
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/steam-headless/c0
+            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c0
         - name: steam-headless-claim1
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/steam-headless/c1
+            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c1
         - name: input-devices
           hostPath:
             path: /dev/input/
@@ -180,6 +209,12 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
+    {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
+        - name: snd
+          hostPath:
+            path: /dev/snd
+            type: ''
+    {{- end }}
       securityContext:
         runAsUser: 0
 

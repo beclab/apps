@@ -1,3 +1,4 @@
+﻿{{- if and .Values.admin .Values.bfl.username (eq .Values.admin .Values.bfl.username) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -7,6 +8,8 @@ metadata:
     io.kompose.service: ollama
   name: ollama
   namespace: "{{ .Release.Namespace }}"
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
 spec:
   replicas: 1
   selector:
@@ -24,7 +27,7 @@ spec:
     spec:
       initContainers:
         - name: init-chmod-data
-          image: "docker.io/aboveos/busybox:latest"
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
             - "-c"
@@ -41,7 +44,7 @@ spec:
             runAsUser: 0
       containers:
         - name: ollama
-          image: "ollama/ollama:0.6.5"
+          image: "docker.io/beclab/ollama-ollama:0.13.1"
           env:
             - name: PGID
               value: "1000"
@@ -51,10 +54,6 @@ spec:
               value: Etc/UTC
             - name: GGML_CUDA_DISABLE_GRAPHS
               value: "1"
-            - name: CUDA_INFO_FROM_OS
-              value: "{{ .Values.GPU.Cuda }}"
-            - name: GPU_TYPE_FROM_OS
-              value: "{{ .Values.GPU.Type }}"
             - name: OLLAMA_ORIGINS
               value: "*"
           ports:
@@ -79,16 +78,13 @@ spec:
           resources:
             limits:
               cpu: "4"
-              memory: 16Gi
+              memory: 38Gi
             requests:
               cpu: 50m
               memory: 4Gi
           volumeMounts:
             - mountPath: "/root/.ollama"
               name: data
-              mountPropagation: Bidirectional
-          securityContext:
-            privileged: true
       volumes:
         - name: data
           hostPath:
@@ -116,6 +112,9 @@ spec:
 status:
   loadBalancer: {}
 
+
+{{- if .Values.sysVersion }}
+  {{- if semverCompare "<1.12.1-0" (toString .Values.sysVersion) }}
 ---
 apiVersion: sys.bytetrade.io/v1alpha1
 kind: ProviderRegistry
@@ -136,3 +135,7 @@ spec:
       uri: /
 status:
   state: active
+  {{- end }}
+{{- end }}
+
+{{- end }}

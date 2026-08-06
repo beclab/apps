@@ -1,0 +1,259 @@
+# ============================================================
+# SSI service
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-ssi-config
+  namespace: {{ .Release.Namespace }}
+data:
+  dev.toml: |
+    title = "SSI Service Config"
+    
+    svn = "0.0.1"
+    desc = "Dev configuration to be used while running the service for testing as a single go process."
+    
+    # http service configuration
+    [server]
+    env = "dev" # either 'dev', 'test', or 'prod'
+    api_host = "0.0.0.0:6003"
+    
+    jager_enabled = false
+    
+    # 5 seconds, time is in nanoseconds
+    read_timeout = 5000000000
+    write_timeout = 5000000000
+    shutdown_timeout = 5000000000
+    
+    log_location = ""
+    # options: trace, debug, info, warn, error, fatal, panic
+    log_level = "trace"
+    
+    enable_schema_caching = true
+    enable_allow_all_cors = true
+    
+    # Storage Configuration
+    [services]
+    service_endpoint = "http://localhost:6003"
+    
+    # use pg as storage
+    storage = "database_sql"
+    
+    [services.storage_encryption]
+    # encryption
+    disable_encryption = true
+    
+    [[services.storage_option]]
+    id = "sql-connection-string-option"
+    option = "host={{ .Values.postgres.host }} port={{ .Values.postgres.port }} user={{ .Values.postgres.username }} password={{ .Values.postgres.password }} dbname={{ .Values.postgres.databases.merchant }} sslmode=disable"
+    
+    [[services.storage_option]]
+    id = "sql-driver-name-option"
+    option = "postgres"
+    
+    # per-service configuration
+    [services.keystore]
+    name = "keystore"
+    
+    [services.did]
+    name = "did"
+    methods = ["key", "web"]
+    local_resolution_methods = ["key"]
+    batch_create_max_items = 100
+    
+    [services.schema]
+    name = "schema"
+    
+    [services.credential]
+    name = "credential"
+    batch_create_max_items = 100
+    
+    [services.issuance]
+    name = "issuance"
+    
+    [services.manifest]
+    name = "manifest"
+    
+    [services.presentation]
+    name = "presentation"
+    
+    [services.webhook]
+    name = "webhook"
+    webhook_timeout = "10s"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-ssi
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-ssi
+spec:
+  replicas: {{ .Values.workloads.merchant.replicaCount }}
+  selector:
+    matchLabels:
+      app: merchant-ssi
+  template:
+    metadata:
+      labels:
+        app: merchant-ssi
+    spec:
+      containers:
+      - name: merchant-ssi
+        image: aboveos/ssi-service:v4.3.1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+        ports:
+        - containerPort: 6003
+          protocol: TCP
+        env:
+        - name: USE_DETERMINISTIC_ID
+          value: "true"
+        volumeMounts:
+        - name: ssi-config
+          mountPath: /app/config
+          readOnly: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      volumes:
+      - name: ssi-config
+        configMap:
+          name: {{ .Release.Name }}-ssi-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-ssi-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: merchant-ssi
+  ports:
+    - name: ssi-port
+      port: 6003
+      targetPort: 6003
+      protocol: TCP
+
+# ============================================================
+# Olares Service
+# ============================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-vc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-vc
+spec:
+  replicas: {{ .Values.workloads.merchant.replicaCount }}
+  selector:
+    matchLabels:
+      app: merchant-vc
+  template:
+    metadata:
+      labels:
+        app: merchant-vc
+    spec:
+      containers:
+      - name: vc
+        image: aboveos/vc:v4.3.1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+        ports:
+        - containerPort: 4001
+          protocol: TCP
+        env:
+        # ---- runtime ----
+        - name: NODE_ENV
+          value: "prod"
+        - name: PORT
+          value: "4001"
+        - name: LOG_LEVEL
+          value: "debug"
+        - name: APP_MODE
+          value: "paid-app"
+        # ---- redis ----
+        - name: REDIS_URL
+          value: "redis://:{{ .Values.redis.password }}@{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+        # ---- internal services ----
+        - name: SSI_SERVICE_URL
+          value: "http://{{ .Release.Name }}-ssi-svc:6003"
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-vc-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: merchant-vc
+  ports:
+    - name: vc-port
+      port: 4001
+      targetPort: 4001
+      protocol: TCP
+
+# ============================================================
+# PG Client
+# ============================================================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pg-client
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: merchant-pg-client
+spec:
+  replicas: {{ .Values.workloads.merchant.replicaCount }}
+  selector:
+    matchLabels:
+      app: merchant-pg-client
+  template:
+    metadata:
+      labels:
+        app: merchant-pg-client
+    spec:
+      containers:
+      - name: pg-client
+        image: postgres:15-alpine
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 50m
+            memory: 64Mi
+        env:
+        - name: PGHOST
+          value: "{{ .Values.postgres.host }}"
+        - name: PGPORT
+          value: "{{ .Values.postgres.port }}"
+        - name: PGUSER
+          value: "{{ .Values.postgres.username }}"
+        - name: PGPASSWORD
+          value: "{{ .Values.postgres.password }}"
+        - name: PGDATABASE
+          value: "{{ .Values.postgres.databases.merchant }}"
+        command: ["/bin/sh"]
+        args: ["-c", "while true; do sleep 3600; done"]
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent

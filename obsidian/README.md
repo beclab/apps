@@ -1,8 +1,3 @@
-#### Default credentials
-Username: admin 
-Password: password
-Please change username and password as soon as possible.
-
 #### Sync Setup Guide
 1. Install Obsidian LiveSync on Olares and Obsidian Client on you computer or cellphone.
 

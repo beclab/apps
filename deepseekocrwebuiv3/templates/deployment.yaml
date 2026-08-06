@@ -1,0 +1,163 @@
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+{{- $modelPath := "/app/models" -}}
+{{- /* Accelerator type (Olares-injected, same detection as the llm* base charts).
+       On GB10/Spark the GPU has no separate VRAM: gpu-inject carves GPU memory
+       from the pod's RAM (gpumem == accelerator.requiredMemory), so that memory
+       shows up in this container's cgroup. The discrete-GPU requests (5Gi/20Gi)
+       only cover the Python/OCR process and would OOM on Spark, so on nvidia-gb10
+       we raise requests/limits to also hold the GPU working set. */ -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $memRequest := "5Gi" -}}
+{{- $memLimit := "20Gi" -}}
+{{- if $unifiedMem -}}
+{{- /* GPU (up to gpumem == requiredMemory 16Gi) is carved from pod RAM. Keep
+       sums within the nvidia-gb10 accelerator envelope: requests <= 16Gi
+       requiredMemory, limits <= 28Gi limitedMemory (llm-init download 4Gi +
+       nginx 0.5Gi). */ -}}
+{{- $memRequest = "13Gi" -}}
+{{- $memLimit = "23Gi" -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv3
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "deepseekocrwebuiv3"
+spec:
+  replicas: {{ .Values.workloads.deepseekocrwebuiv3.replicaCount }}
+  selector:
+    matchLabels:
+      app: deepseekocrwebuiv3
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deepseekocrwebuiv3
+    spec:
+      containers:
+        - name: deepseekocrwebuiv3
+          image: "docker.io/beclab/harveyff-deepseekocr-webui:v2.0.3"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              CACHE=/cache/hf/hub
+              READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
+
+              # Gate on the llm-init downloader (download-only mode) reporting the
+              # repo present. /readyz flips to 200 only once every MODEL_SOURCE repo
+              # is fully on disk, replacing the old .DeepSeek-OCR-2.done sentinel.
+              echo "[ocr-wait] Waiting for llm-init downloader (/readyz)..."
+              until python - "$READYZ" <<'RDY_EOF' 2>/dev/null
+              import sys, urllib.request
+              try:
+                  with urllib.request.urlopen(sys.argv[1], timeout=5) as r:
+                      sys.exit(0 if r.status == 200 else 1)
+              except Exception:
+                  sys.exit(1)
+              RDY_EOF
+              do
+                echo "[ocr-wait] downloader not ready yet..."
+                sleep 10
+              done
+              echo "[ocr-wait] downloader ready; materialising {{ $modelPath }} from HF cache."
+
+              # llm-init writes the standard HF cache snapshot layout
+              # ($CACHE/models--deepseek-ai--DeepSeek-OCR-2/snapshots/<sha>/...), but
+              # the OCR service loads a flat LOCAL_MODEL_PATH. Rebuild that flat view
+              # as a symlink farm pointing at the resolved snapshot. The snapshot's
+              # internal blob symlinks are relative to $CACHE (mounted here at the
+              # same path), so they resolve transparently.
+              REPO_DIR="$CACHE/models--deepseek-ai--DeepSeek-OCR-2"
+              if [ -f "$REPO_DIR/refs/main" ]; then
+                SNAP="$REPO_DIR/snapshots/$(cat "$REPO_DIR/refs/main")"
+              else
+                SNAP="$(ls -d "$REPO_DIR"/snapshots/*/ 2>/dev/null | head -1)"
+              fi
+              mkdir -p {{ $modelPath }}
+              for f in "$SNAP"/* "$SNAP"/.[!.]*; do
+                [ -e "$f" ] || continue
+                ln -sfn "$f" "{{ $modelPath }}/$(basename "$f")"
+              done
+              echo "[ocr-wait] model ready, starting OCR service."
+              python web_service_unified.py
+          ports:
+            - containerPort: 8001
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
+            - name: LOCAL_MODEL_PATH
+              value: "{{ $modelPath }}"
+            - name: HF_HOME
+              value: "{{ $modelPath }}"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: GPU_IDLE_TIMEOUT
+              value: "60"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: SHM_SIZE
+              value: 8G
+          resources:
+            requests:
+              cpu: "500m"
+              memory: {{ $memRequest }}
+            limits:
+              cpu: "4"
+              memory: {{ $memLimit }}
+          volumeMounts:
+            - name: models
+              mountPath: {{ $modelPath }}
+            # Shared cross-app HF Hub cache (App Common), populated by the
+            # llm-init downloader. Read here to build the model symlink farm.
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: logs
+              mountPath: /app/log
+      volumes:
+        # {{ $modelPath }} is now an ephemeral symlink farm rebuilt on every start;
+        # the real model bytes persist in the shared HF cache below.
+        - name: models
+          emptyDir: {}
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseekocrwebuiv3-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deepseekocrwebuiv3
+  ports:
+    - name: api
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP

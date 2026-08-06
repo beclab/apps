@@ -1,0 +1,113 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wise
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: wise
+    applications.app.bytetrade.io/author: bytetrade.io
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wise
+  template:
+    metadata:
+      labels:
+        app: wise
+    spec:
+      containers:
+      - name: frontend
+        image: "beclab/wise:v1.9.4"
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 10m
+            memory: 20Mi
+          limits:
+            cpu: "500m"
+            memory: 200Mi        
+        ports:
+        - containerPort: 80
+        
+
+      
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: wise-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: wise
+  ports:
+    - name: "frontend"
+      protocol: TCP
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: workflow-archivelog-s3
+  namespace: user-system-{{ .Values.bfl.username }}
+spec:
+  type: ClusterIP
+  selector:
+    app: systemserver
+  ports:
+    - protocol: TCP
+      name: fakes3
+      port: 4568
+      targetPort: 4568
+
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Values.bfl.username }}:files-frontend-domain-wise
+  annotations:
+    provider-registry-ref: {{ .Values.bfl.username }}/dbf4c379
+    provider-service-ref: files-service.os-framework:80
+rules:
+- nonResourceURLs: 
+  - "/api/*"
+  - "/upload/*"
+  - "/videos/*"
+  verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: user:{{ .Values.bfl.username }}:files-frontend-domain-wise
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Values.bfl.username }}:files-frontend-domain-wise
+subjects:
+- kind: User
+  name: '{{ .Values.bfl.username }}'  
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: files-proxy
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ExternalName
+  externalName: system-server.user-system-{{ .Values.bfl.username }}.svc.cluster.local
+  ports:
+    - protocol: TCP
+      port: 28080
+      targetPort: 28080

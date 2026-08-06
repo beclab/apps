@@ -1,0 +1,155 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    upstream backend {
+        server {{ .Values.backend.service }}.{{ .Values.backend.namespace }}.svc.cluster.local:{{ .Values.backend.port }};
+    }
+
+    server {
+        listen 80;
+        server_name _;
+        
+        # 根目录（前端静态文件）
+        root /usr/share/nginx/html;
+        index index.html;
+        
+        # 日志配置
+        access_log /var/log/nginx/access.log;
+        error_log /var/log/nginx/error.log warn;
+        
+        # 客户端最大上传大小（PDF 文件可能较大）
+        client_max_body_size 50M;
+        
+        # Gzip 压缩
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_types text/plain text/css text/xml text/javascript application/json application/javascript application/xml+rss application/rss+xml image/svg+xml;
+        gzip_comp_level 6;
+        
+        # 设置 .mjs 文件的 MIME 类型
+        include /etc/nginx/mime.types;
+        types {
+            application/javascript mjs;
+        }
+        
+        # 前端静态文件
+        location / {
+            try_files $uri $uri/ /index.html;
+            
+            # 安全头
+            add_header X-Frame-Options "SAMEORIGIN" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header X-XSS-Protection "1; mode=block" always;
+            add_header Referrer-Policy "no-referrer-when-downgrade" always;
+            
+            # 缓存控制
+            add_header Cache-Control "public, max-age=3600";
+        }
+        
+        # PDF Worker 文件（优先级最高，不缓存，强制设置正确的 MIME 类型）
+        location = /pdf.worker.min.mjs {
+            types {
+                application/javascript mjs;
+            }
+            default_type application/javascript;
+            expires -1;
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        }
+        
+        # 其他 worker 文件（正则匹配）
+        location ~* \.worker\.(mjs|js)$ {
+            types {
+                application/javascript mjs js;
+            }
+            default_type application/javascript;
+            expires -1;
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        }
+        
+        # 静态资源缓存（.mjs 文件会匹配到这里，但 worker 文件已经在上面处理了）
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot|mjs)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+            access_log off;
+        }
+        
+        # 后端 API 代理
+        location /api {
+            # 移除 /api 前缀后转发到后端
+            rewrite ^/api/?(.*)$ /$1 break;
+            proxy_pass http://backend;
+            
+            # HTTP 版本
+            proxy_http_version 1.1;
+            
+            # 请求头
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header X-Forwarded-Port $server_port;
+            
+            # WebSocket 支持
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            
+            # 认证信息透传
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header Cookie $http_cookie;
+            proxy_pass_request_headers on;
+            
+            # CORS 头（olares 标准配置）
+            proxy_hide_header Access-Control-Allow-Origin;
+            proxy_hide_header Access-Control-Allow-Methods;
+            proxy_hide_header Access-Control-Allow-Headers;
+            add_header Access-Control-Allow-Origin * always;
+            add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+            add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+            
+            # 处理 OPTIONS 预检请求
+            if ($request_method = 'OPTIONS') {
+                add_header Access-Control-Allow-Origin * always;
+                add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD" always;
+                add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken" always;
+                add_header Content-Length 0;
+                add_header Content-Type text/plain;
+                return 204;
+            }
+            
+            # 超时设置（OCR 可能需要较长时间）
+            proxy_connect_timeout 600s;
+            proxy_send_timeout 600s;
+            proxy_read_timeout 600s;
+            
+            # 缓冲设置
+            proxy_buffering on;
+            proxy_buffer_size 4k;
+            proxy_buffers 8 4k;
+            proxy_busy_buffers_size 8k;
+            
+            # 禁用缓存（API 响应）
+            proxy_cache_bypass $http_upgrade;
+            add_header Cache-Control "no-cache, no-store, must-revalidate" always;
+        }
+        
+        # 健康检查端点
+        location /health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+        
+        # 禁止访问隐藏文件
+        location ~ /\. {
+            deny all;
+            access_log off;
+            log_not_found off;
+        }
+    }

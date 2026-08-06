@@ -1,0 +1,526 @@
+{{- $opencodeDomainENV := split  ","  .Values.domain.opencode -}}
+{{- $opencodeDomain := index $opencodeDomainENV "_0" -}}
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $enableOMO := ne (index $env "OPENCODE_OMO" | default "false") "false" }}
+{{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
+{{- $serverPassword := index $env "OPENCODE_SERVER_PASSWORD" | default "" }}
+{{- $serverUsername := index $env "OPENCODE_SERVER_USERNAME" | default "opencode" }}
+{{- $image := "beclab/opencode:1.18.9.1" }}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencode
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: opencode
+spec:
+  replicas: {{ .Values.workloads.opencode.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: opencode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: opencode
+        bytetrade.io/terminal: opencode
+    spec:
+      initContainers:
+        # All init logic is baked into the image at /opt/olares-bake/lib; the
+        # chart only execs it and passes the few dynamic values via env. Both
+        # init steps below are STRICTLY OFFLINE (no network on new install /
+        # restart / upgrade): everything is baked into the image, user packages
+        # persist in the OverlayFS upper and are never reinstalled.
+        #
+        # init-home: lay down the $HOME-side config + seeds (opencode.json,
+        # skills, OMO cache, /etc bits, venv). Runs init-setup then init-packages
+        # (merged into one container -- neither needs the overlay mounts).
+        - name: init-home
+          image: "{{ $image }}"
+          command:
+            - "sh"
+            - "-c"
+            - "/opt/olares-bake/lib/init-setup.sh && exec /opt/olares-bake/lib/init-packages.sh"
+          env:
+            - name: OLARES_OC_DOMAIN
+              value: "{{ $opencodeDomain }}"
+            - name: OLARES_ENABLE_OMO
+              value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
+            - name: OLARES_OMO_VERSION
+              value: "{{ index $env "OPENCODE_OMO_VERSION" | default "4.8.1" }}"
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+
+        - name: init-overlay
+          # Privileged: mounts an OverlayFS so the baked image rootfs (/usr /bin
+          # /sbin /lib /lib64) is the read-only lower layer (ZERO copy) and only
+          # user-installed package deltas live in a small persistent upper layer.
+          # The upper is NEVER reset, so user packages persist across upgrades
+          # with zero reinstall / zero network. Allowed by the cluster OPA policy
+          # because this is a trusted (beclab/) image.
+          image: "{{ $image }}"
+          command: ["sh", "-c", "exec /opt/olares-bake/lib/init-overlay.sh"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: pkg-overlay
+              mountPath: /pkg-overlay
+              mountPropagation: Bidirectional
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            privileged: true
+
+        {{- if $enableDind }}
+        # DIND: stage the docker CLI + compose/buildx plugins out of the dind image
+        # DIRECTLY into the persistent $HOME (~/.local/bin + ~/.docker/cli-plugins).
+        # Why not /opt/docker-cli: the web terminal runs a login shell that sources
+        # ~/.profile (regenerated every start by init-packages.sh), which HARD-SETS
+        # PATH and drops any container-env addition like /opt/docker-cli. That
+        # hard-coded PATH already contains ~/.local/bin, so placing docker there is
+        # the one location a login shell will reliably find it. The opencode image
+        # ships no docker client; only the privileged dockerd sidecar (below)
+        # provides the engine. Runs after init-home (which chowns $HOME), and
+        # re-chowns the staged files to uid 1000 so the main container can exec them.
+        - name: init-docker-cli
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /home/opencode/.local/bin /home/opencode/.docker/cli-plugins
+              cp /usr/local/bin/docker /home/opencode/.local/bin/docker
+              for d in /usr/local/libexec/docker/cli-plugins \
+                       /usr/local/lib/docker/cli-plugins \
+                       /usr/libexec/docker/cli-plugins \
+                       /usr/lib/docker/cli-plugins; do
+                [ -d "$d" ] || continue
+                cp "$d"/docker-compose /home/opencode/.docker/cli-plugins/ 2>/dev/null || true
+                cp "$d"/docker-buildx  /home/opencode/.docker/cli-plugins/ 2>/dev/null || true
+              done
+              chmod -R a+rx /home/opencode/.local/bin /home/opencode/.docker/cli-plugins
+              chown -R 1000:1000 /home/opencode/.local /home/opencode/.docker
+              echo "[init-docker-cli] staged docker CLI into ~/.local/bin:" && ls -la /home/opencode/.local/bin
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+        {{- end }}
+      serviceAccountName: proxylistener
+      containers:
+        - name: opencode
+          image: "{{ $image }}"
+          command: ["sh", "-c", "exec /opt/olares-bake/lib/start-opencode.sh"]
+          workingDir: /home/opencode/workspace
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: HOME
+              value: /home/opencode
+            - name: TERM
+              value: xterm-256color
+            - name: PATH
+              # DIND docker client is staged into ~/.local/bin (already in PATH),
+              # so this list stays identical to the non-DIND layout.
+              value: /home/opencode/.venv/bin:/home/opencode/.npm-global/bin:/home/opencode/go/bin:/home/opencode/.cargo/bin:/home/opencode/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: VIRTUAL_ENV
+              value: /home/opencode/.venv
+            - name: NPM_CONFIG_PREFIX
+              value: /home/opencode/.npm-global
+            - name: GOPATH
+              value: /home/opencode/go
+            - name: CARGO_HOME
+              value: /home/opencode/.cargo
+            - name: ENV
+              value: /home/opencode/.profile
+            - name: LD_LIBRARY_PATH
+              value: /usr/glibc-compat/lib
+            {{- if $enableDind }}
+            # docker CLI talks to the dockerd sidecar over the shared pod network.
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
+            {{- if $serverPassword }}
+            # Optional HTTP basic auth for opencode web/serve (off when unset).
+            - name: OPENCODE_SERVER_PASSWORD
+              value: {{ $serverPassword | quote }}
+            - name: OPENCODE_SERVER_USERNAME
+              value: {{ $serverUsername | quote }}
+            {{- end }}
+          resources:
+            limits:
+              cpu: "4"
+              memory: 4Gi
+            requests:
+              cpu: 200m
+              memory: 1Gi
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+            - name: pkg-bin
+              mountPath: /bin
+              mountPropagation: HostToContainer
+            - name: pkg-sbin
+              mountPath: /sbin
+              mountPropagation: HostToContainer
+            - name: pkg-usr
+              mountPath: /usr
+              mountPropagation: HostToContainer
+            - name: pkg-etc-passwd
+              mountPath: /etc/passwd
+            - name: pkg-etc-group
+              mountPath: /etc/group
+            - name: pkg-lib
+              mountPath: /lib
+              mountPropagation: HostToContainer
+            - name: pkg-lib64
+              mountPath: /lib64
+              mountPropagation: HostToContainer
+            # DIND client needs no extra mounts here: init-docker-cli stages the
+            # docker binary + plugins into the persistent $HOME (~/.local/bin +
+            # ~/.docker/cli-plugins), already visible via the opencode-home mount.
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+        - name: port-watcher
+          image: beclab/proxy-listener:0.0.1
+          imagePullPolicy: IfNotPresent
+          env:
+          - name: PORT_WATCHER_ADDR
+            value: "127.0.0.1:19790"
+          - name: PORT_WATCHER_DENYLIST
+            value: "19790"
+          - name: PORT_WATCHER_DEBOUNCE
+            value: "1s"
+          - name: ENTRANCE_HOST
+            value: "{{ $opencodeDomain }}"
+          - name: POD_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+          - name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+        - name: nginx
+          image: "docker.io/openresty/openresty:1.29.2.5-bookworm-fat"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            periodSeconds: 30
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+        - name: pkg-manager
+          image: "{{ $image }}"
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c", "exec /opt/olares-bake/lib/pkg-manager.sh"]
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /home/opencode
+            - name: pkg-bin
+              mountPath: /bin
+              mountPropagation: HostToContainer
+            - name: pkg-sbin
+              mountPath: /sbin
+              mountPropagation: HostToContainer
+            - name: pkg-usr
+              mountPath: /usr
+              mountPropagation: HostToContainer
+            - name: pkg-lib
+              mountPath: /lib
+              mountPropagation: HostToContainer
+            - name: pkg-lib64
+              mountPath: /lib64
+              mountPropagation: HostToContainer
+            - name: pkg-etc-apk
+              mountPath: /etc/apk
+            - name: pkg-etc-ssl
+              mountPath: /etc/ssl
+            - name: pkg-etc-passwd
+              mountPath: /etc/passwd
+            - name: pkg-etc-group
+              mountPath: /etc/group
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            exec:
+              command: ["test", "-d", "/home/opencode/.pkg-queue"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+        {{- if $enableDind }}
+        # Privileged Docker-in-Docker engine. Runs dockerd on tcp://localhost:2375
+        # (in-pod only); the opencode container's DOCKER_HOST points here. Image
+        # layers persist on the appData hostPath so `docker` state survives restarts.
+        - name: docker-dind
+          image: "docker.io/beclab/docker:29.3.0-dind"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["docker", "info"]
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            # Share the workspace at the SAME path so `docker run -v $(pwd):...`
+            # bind-mounts issued from the terminal resolve inside dockerd.
+            - name: opencode-workspace
+              mountPath: /home/opencode/workspace
+        {{- end }}
+      terminationGracePeriodSeconds: 10
+      restartPolicy: Always
+      volumes:
+        - name: opencode-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}"
+            type: DirectoryOrCreate
+        - name: opencode-workspace
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Code"
+            type: DirectoryOrCreate
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        # Parent of the overlay tree (upper/work/merged + marker). init-overlay
+        # mounts this Bidirectional so the overlay mounts it creates propagate to
+        # the node and are visible to the other containers' merged binds below.
+        - name: pkg-overlay
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay"
+            type: DirectoryOrCreate
+        # Merged overlay views (image lower + user upper), populated by init-overlay.
+        - name: pkg-bin
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/bin"
+            type: DirectoryOrCreate
+        - name: pkg-sbin
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/sbin"
+            type: DirectoryOrCreate
+        - name: pkg-usr
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/usr"
+            type: DirectoryOrCreate
+        - name: pkg-lib
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/lib"
+            type: DirectoryOrCreate
+        - name: pkg-lib64
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/lib64"
+            type: DirectoryOrCreate
+        # Tiny /etc bits kept as plain persistent files/dirs (seeded by init-packages
+        # from the image); not part of the overlay.
+        - name: pkg-etc-passwd
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/passwd"
+            type: FileOrCreate
+        - name: pkg-etc-group
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/group"
+            type: FileOrCreate
+        - name: pkg-etc-apk
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/apk"
+            type: DirectoryOrCreate
+        - name: pkg-etc-ssl
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/ssl"
+            type: DirectoryOrCreate
+        {{- if $enableDind }}
+        # DIND: dockerd's image/layer store persisted on the appData hostPath.
+        # (The docker client is staged into $HOME by init-docker-cli, no volume.)
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
+            type: DirectoryOrCreate
+        {{- end }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencode
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: opencode
+spec:
+  ports:
+    - name: web
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: opencode
+status:
+  loadBalancer: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxylistener
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: proxylistener
+rules:
+  - apiGroups:
+      - app.bytetrade.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: proxylistener
+subjects:
+  - kind: ServiceAccount
+    name: proxylistener
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: proxylistener
+  apiGroup: rbac.authorization.k8s.io

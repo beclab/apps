@@ -1,0 +1,163 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frigate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: frigate
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.frigate.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: frigate
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: frigate
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data/media
+              DEST=/new-data/media
+              MARKER="${DEST}/.migration_from_appcache_done_media"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done_media$' || true)" ]; then
+                echo "[migrate] appData/media already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache/media -> appData/media..."
+                mkdir -p "$DEST"
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy media data, fresh install."
+                mkdir -p "$DEST"
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: frigate-media-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: frigate-config
+              mountPath: /new-data
+      containers:
+        - name: frigate
+          image: "docker.io/beclab/blakeblackshear-frigate:0.17.0"
+          env:
+            - name: TZ
+              value: {{ .Values.timezone | default "Etc/UTC" | quote }}
+            - name: FRIGATE_RTSP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: FRIGATE_RTSP_PASSWORD
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | default "1000m" }}
+              memory: {{ .Values.resources.requests.memory | default "1Gi" }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | default "4000m" }}
+              memory: {{ .Values.resources.limits.memory | default "5Gi" }}
+          ports:
+            - name: http
+              containerPort: 5000
+              protocol: TCP
+            - name: rtsp
+              containerPort: 8554
+              protocol: TCP
+            - name: rtsp-udp
+              containerPort: 8555
+              protocol: UDP
+          volumeMounts:
+            - mountPath: /config
+              name: frigate-config
+              subPath: config
+            - mountPath: /media/frigate
+              name: frigate-media
+              subPath: media
+            - mountPath: /tmp/cache
+              name: frigate-cache
+            - mountPath: /dev/shm
+              name: shm
+            {{- if .Values.usb.enabled }}
+            - mountPath: /dev/bus/usb
+              name: usb-devices
+            {{- end }}
+          securityContext:
+            privileged: {{ .Values.securityContext.privileged | default false }}
+            capabilities:
+              add:
+                - SYS_ADMIN
+                {{- if .Values.usb.enabled }}
+                - SYS_RAWIO
+                {{- end }}
+      restartPolicy: Always
+      volumes:
+        - name: frigate-config
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: frigate-media
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: frigate-media-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}'
+        - name: frigate-cache
+          emptyDir:
+            sizeLimit: {{ .Values.cacheSize | default "4Gi" }}
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shmSize | default "2Gi" }}
+        {{- if .Values.usb.enabled }}
+        - name: usb-devices
+          hostPath:
+            path: /dev/bus/usb
+            type: Directory
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frigate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: frigate
+spec:
+  ports:
+    - name: "5000"
+      port: 5000
+      targetPort: 5000
+    - name: "8554"
+      port: 8554
+      targetPort: 8554
+    - name: "8555"
+      port: 8555
+      targetPort: 8555
+      protocol: UDP
+  selector:
+    io.kompose.service: frigate
+status:
+  loadBalancer: {}

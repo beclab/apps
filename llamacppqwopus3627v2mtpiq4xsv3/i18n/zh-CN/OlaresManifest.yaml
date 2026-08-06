@@ -1,0 +1,38 @@
+metadata:
+  description: "使用 llama.cpp 运行 Qwopus3.6-27B-v2 MTP IQ4_XS 模型。"
+  title: Qwopus3.6-27B MTP (llama.cpp)
+
+spec:
+  fullDescription: |
+    **模型简介**
+    Qwopus3.6-27B-v2 是 Jackrong 在 Hugging Face 发布的 Qwen3.6-27B 社区微调变体，内置 Multi-Token Prediction (MTP) 草稿头。支持思考与工具调用，并针对结构化逻辑输出进行了优化。本应用通过 llama.cpp 运行 `Jackrong/Qwopus3.6-27B-v2-MTP-GGUF` 的 `IQ4_XS` GGUF 量化版本（纯文本预设，不含视觉/mmproj）。
+
+    适合对 token 生成速度要求较高，或需要严格格式输出与 DevOps 类任务的场景。该社区版本针对结构化逻辑输出进行了优化，生成更加紧凑规范。
+
+    **预设配置**
+    - 模型：`Jackrong/Qwopus3.6-27B-v2-MTP-GGUF:IQ4_XS`
+    - 能力：思考、工具
+    - 引擎参数：`-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2`（98K 上下文、MTP draft-2、全量 GPU 卸载、q8_0 KV 缓存）
+    - 所需显存：`23Gi`
+
+    **加速器模式**
+    | 模式           | 设备             | 说明                                        |
+    |----------------|------------------|---------------------------------------------|
+    | `nvidia`       | GPU (CUDA)       | 使用 `23Gi` 显存，`-ngl all` 完全利用 GPU   |
+    | `nvidia-gb10`  | GPU (Spark)      | 类似上方，但显存由 pod 管理                  |
+    | `cpu`          | CPU              | 自动加入 `-ngl 0`，禁用 GPU 与 MTP 加速      |
+
+    **工作流程说明**
+    首先，Model Console 下载并准备模型，然后 `llama.cpp` 在模型就绪后启动服务。MTP（`--spec-type draft-mtp`）利用模型内置草稿头每步预测多个 token，提升解码吞吐。
+
+    **技术栈说明**
+    - **llama.cpp**：运行模型并通过 8081 端口提供 API 服务
+    - **Model Console**：下载模型，展示进度，并通过 8090 端口提供 OpenAI API，代理到 `llamacpp`
+
+    **模型存储**
+    所有模型文件存储在共享目录 `appCommon/huggingface`（挂载为 `/cache/hf/hub`），同类应用均使用此目录。
+
+    **资源建议**
+    - CPU、内存和 GPU 数量随图表自动配置，磁盘配额为固定
+    - `IQ4_XS` 权重约 15.4 GiB；本预设面向至少 23Gi 显存以支撑 98K 上下文 + MTP
+    - MTP 会略增显存占用；若 98K 上下文 OOM，可降低 `-c`（如 `-c 65536`）

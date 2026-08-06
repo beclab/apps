@@ -1,16 +1,15 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   annotations:
     kompose.cmd: kompose convert
-    kompose.version: 1.26.1 (HEAD)
-  creationTimestamp: null
+    kompose.version: 2.2.16 (HEAD)
   labels:
     io.kompose.service: miniflux
   name: miniflux
-  namespace: {{ .Release.Namespace }}
+  namespace: "{{ .Release.Namespace }}"
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.miniflux.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: miniflux
@@ -19,26 +18,31 @@ spec:
     metadata:
       annotations:
         kompose.cmd: kompose convert
-        kompose.version: 1.26.1 (HEAD)
-      creationTimestamp: null
+        kompose.version: 2.2.16 (HEAD)
       labels:
         io.kompose.service: miniflux
     spec:
       containers:
         - env:
             - name: ADMIN_PASSWORD
-              value: test123
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: ADMIN_PASSWORD
             - name: ADMIN_USERNAME
-              value: admin
+              value: "{{ .Values.olaresEnv.ADMIN_USERNAME }}"
             - name: CREATE_ADMIN
               value: "1"
             - name: DATABASE_URL
-              value: postgres://miniflux:secret@db/miniflux?sslmode=disable
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DATABASE_URL
             - name: DEBUG
               value: "1"
             - name: RUN_MIGRATIONS
               value: "1"
-          image: docker.io/aboveos/kldtks-edge:miniflux
+          image: "docker.io/beclab/miniflux-miniflux:2.2.16-distroless"
           name: miniflux
           resources:
             requests:
@@ -50,4 +54,3 @@ spec:
           ports:
             - containerPort: 8080
       restartPolicy: Always
-status: {}

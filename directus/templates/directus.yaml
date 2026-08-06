@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   creationTimestamp: null
@@ -7,7 +7,7 @@ metadata:
   name: directus
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.directus.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: directus
@@ -20,6 +20,15 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: directus
     spec:
+      initContainers:
+        - name: wait-postgres
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args: ["-it", "{{ .Values.postgres.host }}:5432"]
+          imagePullPolicy: IfNotPresent
+        - name: wait-redis
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args: ["-it", "directus-redis:6379"]
+          imagePullPolicy: IfNotPresent
       containers:
         - env:
             - name: PGID
@@ -37,11 +46,17 @@ spec:
             - name: PUBLIC_URL
               value: 'https://directus.example.com'
             - name: SECRET
-              value: 'replace-with-secure-random-value'
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: SECRET
             - name: ADMIN_EMAIL
-              value: 'directus@olares.com'
+              value: '{{ .Values.olaresEnv.ADMIN_EMAIL }}'
             - name: ADMIN_PASSWORD
-              value: 'olares'
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: ADMIN_PASSWORD
             - name: WEBSOCKETS_ENABLED
               value: 'true'
             - name: DB_CLIENT
@@ -53,7 +68,10 @@ spec:
             - name: DB_USER
               value: '{{ .Values.postgres.username }}'
             - name: DB_PASSWORD
-              value: '{{ .Values.postgres.password }}'
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DB_PASSWORD
             - name: DB_DATABASE
               value: '{{ .Values.postgres.databases.directus }}'
             - name: CACHE_ENABLED
@@ -65,7 +83,7 @@ spec:
             - name: REDIS
               value: 'redis://directus-redis:6379/0'
 
-          image: docker.io/directus/directus:11.4.1
+          image: "docker.io/beclab/directus-directus:11.14.0"
           name: directus
           resources:
             requests:
@@ -92,19 +110,51 @@ spec:
         - name: uploads
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/uploads'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/directus/uploads'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/directus/uploads'
+            {{- end }}
         - name: extensions
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/extensions'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/directus/extensions'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/directus/extensions'
+            {{- end }}
         - name: database
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/database'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/directus/database'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/directus/database'
+            {{- end }}
         - name: templates
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/templates'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/directus/templates'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/directus/templates'
+            {{- end }}
 status: {}
 ---
 apiVersion: v1
@@ -117,7 +167,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   ports:
-    - name: "8055"
+    - name: "api"
       port: 8055
       targetPort: 8055
   selector:

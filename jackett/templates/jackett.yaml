@@ -1,0 +1,116 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jackett
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jackett
+spec:
+  replicas: {{ .Values.workloads.jackett.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: jackett
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: jackett
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: jackett-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: jackett-data
+              mountPath: /new-data
+      containers:
+        - name: jackett
+          image: docker.io/linuxserver/jackett:0.24.2166
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: AUTO_UPDATE
+              value: "false"
+            - name: RUN_OPTS
+              value: ""
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          ports:
+            - containerPort: 9117
+          volumeMounts:
+            - mountPath: /config
+              name: jackett-data
+              subPath: config
+            - mountPath: /downloads
+              name: jackett-data
+              subPath: blackhole
+      restartPolicy: Always
+      volumes:
+        - name: jackett-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: jackett-data-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jackett
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: jackett
+spec:
+  ports:
+    - name: "9117"
+      protocol: TCP
+      port: 9117
+      targetPort: 9117
+  selector:
+    io.kompose.service: jackett
+status:
+  loadBalancer: {}

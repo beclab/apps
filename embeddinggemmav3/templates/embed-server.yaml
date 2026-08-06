@@ -1,0 +1,187 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := "200m" -}}
+{{- $memRequest := "2Gi" -}}
+{{- $cpuLimit := "4" -}}
+{{- $memLimit := "3Gi" -}}
+{{- $gpuMem := "2048Mi" -}}
+{{- $gpuMemMi := include "embeddinggemmav3.gpuMiB" $gpuMem -}}
+{{- $gpuType := include "embeddinggemmav3.gpuType" . -}}
+{{- $useOpenVino := eq (include "embeddinggemmav3.useOpenVino" .) "true" -}}
+{{- $isNvidia := or (eq $gpuType "nvidia") (eq $gpuType "nvidia-gb10") -}}
+{{- $isGb10 := eq $gpuType "nvidia-gb10" -}}
+{{- $isIntelMode := eq $gpuType "intel" -}}
+{{- $gpuObj := .Values.GPU | default dict -}}
+{{- $cudaMajor := $gpuObj.Cuda | default 12 -}}
+{{- $embedTag := include "embeddinggemmav3.embedTag" . -}}
+{{- $modelId := include "embeddinggemmav3.modelId" . -}}
+{{- $embedImage := printf "docker.io/beclab/embed-server:%s-onnx-cpu" $embedTag -}}
+{{- if $useOpenVino -}}
+{{- $embedImage = printf "docker.io/beclab/embed-server:%s-ov-intel" $embedTag -}}
+{{- else if $isNvidia -}}
+{{- if $isGb10 -}}
+{{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda13-gb10-arm64" $embedTag -}}
+{{- $memRequest = "3Gi" -}}
+{{- $memLimit = "6Gi" -}}
+{{- else if ge (float64 $cudaMajor) 13.0 -}}
+{{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda13" $embedTag -}}
+{{- else -}}
+{{- $embedImage = printf "docker.io/beclab/embed-server:%s-onnx-cuda12" $embedTag -}}
+{{- end -}}
+{{- end -}}
+{{- $embedDevice := "cpu" -}}
+{{- if $useOpenVino -}}
+{{- $embedDevice = "igpu" -}}
+{{- else if $isNvidia -}}
+{{- $embedDevice = "cuda" -}}
+{{- end -}}
+{{- $needDri := $isIntelMode -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: embed-server
+  {{- if $isNvidia }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "embed-server"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.embeddinggemmav3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: embed-server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: embed-server
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: embed-server-wrappers
+            defaultMode: 0555
+{{- if $needDri }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+{{- end }}
+      containers:
+        - name: embed-server
+          image: "{{ $embedImage }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/embed.sh"]
+          env:
+            - name: MODEL_ID
+              value: "{{ $modelId }}"
+            - name: EMBED_DEVICE
+              value: "{{ $embedDevice }}"
+            - name: EMBED_HOST
+              value: "0.0.0.0"
+            - name: EMBED_PORT
+              value: "8080"
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: WAIT_TIMEOUT
+              value: "3600"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: EMBED_SHARED_ENTRANCE_HOST
+              value: "sharedentrances-api"
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+{{- if $needDri }}
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+{{- end }}
+{{- if $needDri }}
+          securityContext:
+            privileged: true
+{{- end }}
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and $isNvidia (not $isGb10) }}
+              nvidia.com/gpumem: "{{ $gpuMemMi }}"
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embedserver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: embed-server
+spec:
+  selector:
+    io.kompose.service: embed-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# Compose service-name alias: llm-init ENGINE_KIND=embed derives http://embed:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: embed-server
+spec:
+  selector:
+    io.kompose.service: embed-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

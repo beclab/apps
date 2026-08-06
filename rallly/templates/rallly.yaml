@@ -1,0 +1,94 @@
+﻿{{- $ralllyDomainENV := split "," .Values.domain.rallly -}}
+{{- $ralllyDomain := index $ralllyDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: rallly
+spec:
+  replicas: {{ .Values.workloads.rallly.replicaCount }}
+  selector:
+    matchLabels:
+      app: rallly
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: rallly
+    spec:
+      containers:
+        - name: rallly
+          image: "docker.io/lukevella/rallly:4.11.1"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DATABASE_URL
+            - name: SUPPORT_EMAIL
+              {{- if .Values.olaresEnv.SUPPORT_EMAIL }}
+              value: "{{ .Values.olaresEnv.SUPPORT_EMAIL }}"
+              {{- else }}
+              value: "noreply@{{ $ralllyDomain }}"
+              {{- end }}
+            {{- if .Values.olaresEnv.SMTP_HOST }}
+            - name: SMTP_HOST
+              value: "{{ .Values.olaresEnv.SMTP_HOST }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PORT }}
+            - name: SMTP_PORT
+              value: "{{ .Values.olaresEnv.SMTP_PORT }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_USER }}
+            - name: SMTP_USER
+              value: "{{ .Values.olaresEnv.SMTP_USER }}"
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_PWD }}
+            - name: SMTP_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: SMTP_PWD
+            {{- end }}
+            {{- if .Values.olaresEnv.SMTP_SECURE }}
+            - name: SMTP_SECURE
+              value: "{{ .Values.olaresEnv.SMTP_SECURE }}"
+            {{- else if .Values.olaresEnv.SMTP_HOST }}
+            - name: SMTP_SECURE
+              value: "{{ ternary "true" "false" (eq (.Values.olaresEnv.SMTP_PORT | toString) "465") }}"
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: rallly-config
+          resources:
+            requests:
+              cpu: 300m
+              memory: 200Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rallly-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rallly
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    app: rallly

@@ -11,21 +11,45 @@ metadata:
   name: affine
   namespace: '{{ .Release.Namespace }}'
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.affine.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: affine
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
+      annotations:
+        affine.version: "0.25.7"
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: affine
     spec:
       initContainers:
+      - name: wait-for-postgres
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            {{ .Values.postgres.host }}:{{ .Values.postgres.port }}
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: wait-for-redis
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            redis-svc:6379
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
         command:
           - sh
           - '-c'
@@ -37,7 +61,6 @@ spec:
             mountPath: /app-cache-root
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: Always
         securityContext:
           runAsUser: 0
       containers:
@@ -48,26 +71,24 @@ spec:
           value: "1000"
         - name: TZ
           value: Etc/UTC
-        - name: NODE_OPTIONS
-          value: "--import=./scripts/register.js"
         - name: AFFINE_CONFIG_PATH
           value: "/root/.affine/config"
         - name: REDIS_SERVER_HOST
-          value: "localhost"
+          value: "redis-svc"
         - name: DATABASE_URL
-          value: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
+          value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.affine }}"
         - name: NODE_ENV
           value: production
-        - name: AFFINE_ADMIN_EMAIL
-          value: "affine@acme.sh"
-        - name: AFFINE_ADMIN_PASSWORD
-          value: "affine"
         - name: AFFINE_SERVER_HOST
           value: '{{$affineDomain}}'
         - name: AFFINE_SERVER_HTTPS
           value: 'false'
-        image: aboveos/toeverything-affine-graphql:stable
-        command: ['sh', '-c', 'node ./scripts/self-host-predeploy && node ./dist/index.js']
+        - name: AFFINE_INDEXER_ENABLED
+          value: 'true'
+        - name: PORT
+          value: '3010'
+        image: "beclab/toeverything-affine:0.25.7"
+        imagePullPolicy: IfNotPresent
         name: affine
         ports:
         - name: proxy-affine
@@ -86,41 +107,58 @@ spec:
           name: blob
         - mountPath: /userdata
           name: userdata
-      - name: affine-redis
-        image: aboveos/redis
-        env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
-        - name: TZ
-          value: Etc/UTC
-        resources:
-          limits:
-            cpu: "1"
-            memory: 2Gi
-          requests:
-            cpu: 100m
-            memory: 1Gi
-        volumeMounts:
-        - mountPath: /data
-          name: redis
+        readinessProbe:
+          tcpSocket:
+            port: 3010
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 3010
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
       restartPolicy: Always
       volumes:
       - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/config'
+            {{- else }}
           path: '{{ .Values.userspace.appData }}/affine/config'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/affine/config'
+          {{- end }}
           type: DirectoryOrCreate
         name: config
       - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/blob'
+            {{- else }}
           path: '{{ .Values.userspace.appData }}/affine/blob'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/affine/blob'
+          {{- end }}
           type: DirectoryOrCreate
         name: blob
       - hostPath:
-          path: '{{ .Values.userspace.appData }}/affine/redis'
-          type: DirectoryOrCreate
-        name: redis
-      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}'
+            {{- else }}
           path: '{{ .Values.userspace.appData }}/affine'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/affine'
+          {{- end }}
           type: DirectoryOrCreate
         name: app-cache-root
       - hostPath:

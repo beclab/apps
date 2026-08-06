@@ -1,0 +1,101 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseekocrwebuiv2-download
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv2-download
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepseekocrwebuiv2-download
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deepseekocrwebuiv2-download
+    spec:
+      containers:
+        - name: download-model
+          image: "docker.io/beclab/harveyff-hf-downloader-only:v0.0.6"
+          env:
+            - name: HF_ENDPOINT
+              value: "{{ if .Values.olaresEnv }}{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE | default "" }}{{ end }}"
+            - name: HF_TOKEN
+              value: "{{ if .Values.olaresEnv }}{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_TOKEN | default "" }}{{ end }}"
+            - name: MODEL_NAME
+              value: "DeepSeek-OCR-2"
+          args:
+            - "--repo"
+            - "deepseek-ai/DeepSeek-OCR-2"
+            - "--ref"
+            - "main"
+            - "--outdir"
+            - "/data"
+            - "--static"
+            - "/app/static"
+            - "--port"
+            - "8090"
+            - "--probe-url"
+            - "/health"
+            - "--done-name"
+            - ".DeepSeek-OCR-2.done"
+          startupProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+            initialDelaySeconds: 5
+            timeoutSeconds: 10
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          ports:
+            - containerPort: 8090
+              name: http
+          volumeMounts:
+            - name: models
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "500Mi"
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv2-download
+spec:
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  selector:
+    app: deepseekocrwebuiv2-download

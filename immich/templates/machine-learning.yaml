@@ -7,7 +7,7 @@ metadata:
   name: immich-machine-learning
   namespace: '{{ .Release.Namespace }}'
 spec:
-  replicas: 1
+  replicas: {{ (index .Values.workloads "immich-machine-learning").replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: immich-machine-learning
@@ -29,26 +29,58 @@ spec:
         - name: TZ
           value: Etc/UTC
         - name: REDIS_HOSTNAME
-          value: {{ .Values.redis.host }}
+          value: redis-svc
         - name: REDIS_PASSWORD
-          value: {{ .Values.redis.password }}
+          value: ""
         - name: DB_HOSTNAME
           value: {{ .Values.postgres.host }}
         - name: DB_USERNAME
           value: {{ .Values.postgres.username }}
         - name: DB_PASSWORD
-          value: {{ .Values.postgres.password }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: DB_PASSWORD
         - name: DB_DATABASE_NAME
           value: {{ .Values.postgres.databases.immich }}
         - name: IMMICH_PORT
           value: "3003"
-        image: docker.io/aboveos/immich-app-immich-machine-learning:v1.132.1
+        - name: HF_ENDPOINT
+          value: {{ .Values.olaresEnv.HF_ENDPOINT }}
+        - name: TRANSFORMERS_CACHE
+          value: "/cache"
+        - name: HF_XET_CACHE
+          value: "/cache/huggingface-xet"
+        - name: MPLCONFIGDIR
+          value: "/cache/matplotlib-config"
+        image: "beclab/immich-app-immich-machine-learning:v2.7.5"
         imagePullPolicy: IfNotPresent
         name: immich-machine-learning
         ports:
         - containerPort: 3003
           name: http
           protocol: TCP
+        startupProbe:
+          tcpSocket:
+            port: 3003
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        readinessProbe:
+          tcpSocket:
+            port: 3003
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 3003
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         resources:
           limits:
             cpu: 2000m
@@ -62,7 +94,15 @@ spec:
       restartPolicy: Always
       volumes:
       - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/machine-learning'
+            {{- else }}
           path: '{{ .Values.userspace.appData }}/immich/machine-learning'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/immich/machine-learning'
+          {{- end }}
           type: DirectoryOrCreate
         name: cache
 status: {}

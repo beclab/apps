@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: extract-worker
+  namespace: "{{ .Release.Namespace }}"
+  name: extract-worker
+spec:
+  replicas: {{ (index .Values.workloads "extract-worker").replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: extract-worker
+  template:
+    metadata:
+      labels:
+        io.kompose.service: extract-worker
+    spec:
+      initContainers:
+        - name: check-depends
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - "-it"
+            - >-
+              firecrawl-redis-svc:6379,nuq-postgres:5432,rabbitmq:5672
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
+      containers:
+        - name: extract-worker
+          command:
+            - node
+            - dist/src/services/extract-worker.js
+          image: "docker.io/beclab/firecrawl-firecrawl:2.11.158"
+          ports:
+            - containerPort: 3004
+          envFrom:
+            - configMapRef:
+                name: firecrawl-config
+            - secretRef:
+                name: {{ .Release.Name }}-secrets
+          env:
+            - name: FLY_PROCESS_GROUP
+              value: "extract-worker"
+            - name: EXTRACT_WORKER_PORT
+              value: "3004"
+            - name: NUQ_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "pgrep -f extract-worker.js >/dev/null"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+              cpu: 2
+      restartPolicy: Always

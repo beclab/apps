@@ -1,0 +1,127 @@
+{{- $gpuInfo := include "GPU.getGPUInfo" . | fromJson -}}
+{{- $isSparkDGX := $gpuInfo.isSparkDGX -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: vllm
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "vllm"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: vllm
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: vllm
+    spec:
+      containers:
+        - name: vllm
+          image: "docker.io/vllm/vllm-openai:v0.22.0-cu129"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="/models/gemma-3-12b/.gemma-3-12b-it-quantized-W4A16.done"
+              echo "[vllm-wait] Waiting for $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[vllm-wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[vllm-wait] Detected $DONE_FILE, starting vLLM server."
+              
+              echo "[vllm-start] Starting vLLM server..."
+              _MEM_UTILS="/usr/local/lib/python3.12/dist-packages/vllm/utils/mem_utils.py"
+              if [ -f "$_MEM_UTILS" ]; then
+                sed -i 's/shared_sysmem_device_mem_sms = .*$/shared_sysmem_device_mem_sms = ()/' "$_MEM_UTILS"
+                echo "[vllm-start] Patched vLLM mem_utils.py (shared_sysmem_device_mem_sms)"
+              else
+                echo "[vllm-start] WARN: $_MEM_UTILS missing, mem_utils patch skipped"
+              fi
+              python3 -m vllm.entrypoints.openai.api_server \
+                --model "/models/gemma-3-12b" \
+{{- $gpuMemUtil := "0.9" -}}
+{{- $maxModelLen := "auto" -}}
+{{- if eq $isSparkDGX "true" -}}
+{{- $gpuMemUtil = "0.88" -}}
+{{- $maxModelLen = "8192" -}}
+{{- end -}}
+{{- with .Values.olaresEnv }}
+                --gpu-memory-utilization {{ .GPU_MEMORY_UTILIZATION | default $gpuMemUtil }} \
+                --max-model-len {{ .MAX_MODEL_LEN | default $maxModelLen }} \
+{{- else }}
+                --gpu-memory-utilization {{ $gpuMemUtil }} \
+                --max-model-len {{ $maxModelLen }} \
+{{- end }}
+{{- if eq $isSparkDGX "true" }}
+                -O0 \
+                --enforce-eager \
+                --max-num-seqs 8 \
+                --no-enable-prefix-caching \
+{{- else }}
+                -O3 \
+{{- end }}
+                --tensor-parallel-size 1
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: VLLM_PORT
+              value: "8000"
+            {{- if eq $isSparkDGX "true" }}
+            - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+              value: "1"
+            {{- end }}
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "14"
+              memory: 24Gi
+            requests:
+              cpu: "1"
+              memory: 14Gi
+          volumeMounts:
+            - mountPath: /models/gemma-3-12b
+              name: data
+            - name: vllm-cache
+              mountPath: /root/.cache
+      volumes:
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/gemma312bit"
+            type: DirectoryOrCreate
+        - name: vllm-cache
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Cache/vllm-gemma312bit"
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-svc
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: vllm
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  selector:
+    io.kompose.service: vllm

@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: homebox
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: homebox
+spec:
+  replicas: {{ .Values.workloads.homebox.replicaCount }}
+  selector:
+    matchLabels:
+      app: homebox
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: homebox
+    spec:
+      containers:
+        - image: aboveos/aby913-homebox:1.0.0
+          name: homebox
+          ports:
+            - containerPort: 7745
+          resources:
+            requests:
+              cpu: 50m
+              memory: 20Mi
+            limits:
+              cpu: 100m
+              memory: 100Mi
+          volumeMounts:
+            - mountPath: /data
+              name: data
+            - mountPath: /.cache
+              name: cache
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: HBOX_MODE
+              value: "production"
+            - name: HBOX_STORAGE_CONN_STRING
+              value: "file:///?no_tmp_dir=true"
+            - name: HBOX_STORAGE_PREFIX_PATH
+              value: "data"
+            - name: HBOX_DATABASE_DRIVER
+              value: "postgres"
+            - name: HBOX_DATABASE_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: HBOX_DATABASE_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: HBOX_DATABASE_USERNAME
+              value: "{{ .Values.postgres.username }}"
+            - name: HBOX_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HBOX_DATABASE_PASSWORD
+            - name: HBOX_DATABASE_DATABASE
+              value: "{{ .Values.postgres.databases.homebox }}"
+            - name: HBOX_DATABASE_SSL_MODE
+              value: disable
+            - name: HBOX_WEB_MAX_FILE_UPLOAD
+              value: "10"
+            - name: HBOX_OPTIONS_ALLOW_ANALYTICS
+              value: "false"
+      volumes:
+        - name: cache
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appCache }}"
+              {{- else }}
+            path: "{{ .Values.userspace.appCache }}/homebox"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appCache }}/homebox"
+            {{- end }}
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}"
+              {{- else }}
+            path: "{{ .Values.userspace.appData }}/homebox"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/homebox"
+            {{- end }}
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: homebox
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  type: ClusterIP
+  selector:
+    app: homebox
+  ports:
+    - name: "homebox"
+      port: 3100
+      targetPort: 7745

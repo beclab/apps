@@ -1,4 +1,3 @@
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,21 +6,32 @@ metadata:
   labels:
     app: teable
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.teable.replicaCount }}
   selector:
     matchLabels:
       app: teable
+  strategy:
+    type: Recreate  
   template:
     metadata:
       labels:
         app: teable
     spec:
-      securityContext:
-        runAsUser: 0
+      initContainers:
+        - name: check-ready
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args:
+            - '-it'
+            - >-
+              teable-redis:6379
+          resources: {}
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          imagePullPolicy: IfNotPresent
       containers:
         - name: teable
-          image: docker.io/teableio/teable:latest
-          imagePullPolicy: Always
+          image: "docker.io/beclab/teableio-teable:3077582aef94c87199dade566f2459ef264f26bb"
+          imagePullPolicy: IfNotPresent
           env:
             - name: PGID
               value: "1000"
@@ -37,7 +47,10 @@ spec:
                   name: teable
                   key: app-password
             - name: PRISMA_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.teable }}?schema=public"
+              valueFrom:
+                secretKeyRef:
+                  name: teable
+                  key: PRISMA_DATABASE_URL
             - name: BACKEND_CACHE_REDIS_URI
               value: "redis://teable-redis:6379/0"
           envFrom:
@@ -46,14 +59,30 @@ spec:
           resources:
             requests:
               cpu: 300m
-              memory: 300Mi
+              memory: 500Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 2000m
+              memory: 3Gi
           ports:
             - name: http
               containerPort: 3000
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 120
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
           volumeMounts:
             - mountPath: /app/.assets
               name: teable-data
@@ -62,8 +91,15 @@ spec:
         - name: teable-data
           hostPath:
             type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}'
+              {{- else }}
             path: '{{ .Values.userspace.appData }}/teable'
-
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/teable'
+            {{- end }}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -80,7 +116,7 @@ spec:
     spec:
       containers:
         - name: teable-db-migrate
-          image: docker.io/teableio/teable-db-migrate:latest
+          image: "docker.io/beclab/teableio-teable-db-migrate:3077582aef94c87199dade566f2459ef264f26bb"
           env:
             - name: PGID
               value: "1000"
@@ -96,14 +132,17 @@ spec:
                   name: teable
                   key: app-password
             - name: PRISMA_DATABASE_URL
-              value: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.teable }}?schema=public"
+              valueFrom:
+                secretKeyRef:
+                  name: teable
+                  key: PRISMA_DATABASE_URL
           resources:
             requests:
               cpu: 300m
               memory: 200Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 500m
+              memory: 500Mi
       restartPolicy: Never
 
 ---
@@ -122,5 +161,3 @@ spec:
       protocol: TCP
   selector:
     app: teable
-status:
-  loadBalancer: {}

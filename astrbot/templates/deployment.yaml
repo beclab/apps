@@ -1,0 +1,90 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: astrbot
+  name: astrbot
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ .Values.workloads.astrbot.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: astrbot
+  strategy:
+    type: Recreate    
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: astrbot
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Asia/Shanghai
+        - name: ASTRBOT_DASHBOARD_INITIAL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ASTRBOT_DASHBOARD_INITIAL_PASSWORD
+        - name: ASTRBOT_RESET_DASHBOARD_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ASTRBOT_RESET_DASHBOARD_PASSWORD
+        image: "docker.io/soulter/astrbot:v4.26.6"
+        name: astrbot
+        command: ["/bin/sh", "-c"]
+        args:
+          - python /bootstrap/bootstrap.py && exec python main.py
+        ports:
+        - containerPort: 6185
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /AstrBot/data
+          name: app-data-data
+        - mountPath: /etc/localtime:ro
+          name: app-data-etc-localtime
+        - mountPath: /bootstrap
+          name: astrbot-bootstrap
+          readOnly: true
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+        name: app-data-data
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/etc/localtime'
+          type: DirectoryOrCreate
+        name: app-data-etc-localtime
+      - configMap:
+          name: astrbot-bootstrap
+        name: astrbot-bootstrap
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: astrbot
+  name: astrbot
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "6185"
+    port: 6185
+    targetPort: 6185
+  selector:
+    io.kompose.service: astrbot

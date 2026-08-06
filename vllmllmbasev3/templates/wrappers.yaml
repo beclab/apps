@@ -1,0 +1,169 @@
+# Engine wrapper mounted into the vLLM container at /llm-init/wrappers. Helpers
+# inlined from llm-init v1.1.0 common.sh + vllm.sh (single engine). llm-init
+# downloads the model and writes model_download_finish under /run/llm-init;
+# the wrapper waits on it, then loads --model from MODEL_NAME (owner/repo).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: vllm
+data:
+  spark_tune_gpu_util.py: |
+    #!/usr/bin/env python3
+    import os
+    import re
+    import sys
+
+    args = os.environ.get("ENGINE_ARGS", "").strip()
+    pod_mib = int(os.environ.get("VLLM_POD_MEMORY_MIB", "0") or "0")
+    if pod_mib <= 0:
+        print(args)
+        raise SystemExit
+
+    import torch
+
+    if not torch.cuda.is_available():
+        print(args)
+        raise SystemExit
+
+    _free, total = torch.cuda.mem_get_info()
+    headroom = float(os.environ.get("VLLM_SPARK_UTIL_HEADROOM", "0.90"))
+    target = (pod_mib * 1024 * 1024 / total) * headroom
+    target = max(0.05, min(target, 0.95))
+
+    old_m = re.search(r"--gpu-memory-utilization\s+([0-9.]+)", args)
+    old = old_m.group(1) if old_m else None
+    args = re.sub(r"\s*--gpu-memory-utilization\s+[0-9.]+", "", args).strip()
+    args = f"{args} --gpu-memory-utilization {target:.4f}".strip()
+
+    print(
+        f"Spark pod memory {pod_mib}Mi vs CUDA pool {total / (1024 ** 3):.2f}GiB: "
+        f"--gpu-memory-utilization {old or '<unset>'} -> {target:.4f}",
+        file=sys.stderr,
+    )
+    print(args)
+  vllm.sh: |
+    #!/bin/sh
+    # Waits for llm-init's sentinel, then starts vLLM's OpenAI server with
+    # --model "$MODEL_NAME" (HF owner/repo). ENGINE_ARGS is word-split and
+    # appended after the baseline flags, e.g. "--max-model-len 8192 --gpu-memory-utilization 0.9".
+    # Do NOT pass --disable-log-stats (llm-init's /api/diag/gpu needs /metrics).
+    set -eu
+
+    ENGINE=vllm
+    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
+    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
+    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+
+    # DGX Spark (GB10 unified memory): disable vLLM's UMA free-memory override so
+    # cudaMemGetInfo is used (legacy charts cleared shared_sysmem_device_mem_sms;
+    # v0.20+ uses is_integrated_gpu instead).
+    patch_spark_mem_utils() {
+        [ "${VLLM_PATCH_SPARK_MEM_UTILS:-}" = "true" ] || return 0
+        _MEM_UTILS="/usr/local/lib/python3.12/dist-packages/vllm/utils/mem_utils.py"
+        if [ ! -f "$_MEM_UTILS" ]; then
+            log "WARN: $_MEM_UTILS missing, Spark mem_utils patch skipped"
+            return 0
+        fi
+        if grep -q 'spark-patched' "$_MEM_UTILS" || grep -q 'shared_sysmem_device_mem_sms = ()' "$_MEM_UTILS"; then
+            log "mem_utils.py already Spark-patched"
+            return 0
+        fi
+        if grep -q 'shared_sysmem_device_mem_sms = ' "$_MEM_UTILS"; then
+            sed -i 's/shared_sysmem_device_mem_sms = .*$/shared_sysmem_device_mem_sms = ()/' "$_MEM_UTILS"
+            if grep -q 'shared_sysmem_device_mem_sms = ()' "$_MEM_UTILS"; then
+                log "patched mem_utils.py (shared_sysmem_device_mem_sms cleared)"
+            else
+                log "WARN: Spark mem_utils patch failed (shared_sysmem_device_mem_sms unchanged)"
+            fi
+        elif grep -q 'is_integrated_gpu(device.index)' "$_MEM_UTILS"; then
+            sed -i 's/if current_platform.is_integrated_gpu(device.index):/if False:  # spark-patched/' "$_MEM_UTILS"
+            if grep -q 'spark-patched' "$_MEM_UTILS"; then
+                log "patched mem_utils.py (is_integrated_gpu branch disabled)"
+            else
+                log "WARN: Spark mem_utils patch failed (is_integrated_gpu pattern unchanged)"
+            fi
+        else
+            log "WARN: no known Spark mem_utils pattern, patch skipped"
+        fi
+    }
+
+    spark_tune_gpu_memory_utilization() {
+        [ "${VLLM_PATCH_SPARK_MEM_UTILS:-}" = "true" ] || return 0
+        [ "${VLLM_SPARK_AUTO_GPU_UTIL:-false}" = "true" ] || return 0
+        [ -n "${VLLM_POD_MEMORY_MIB:-}" ] || return 0
+        _tune_script="/llm-init/wrappers/spark_tune_gpu_util.py"
+        if [ ! -f "$_tune_script" ]; then
+            log "WARN: $_tune_script missing, Spark gpu util tune skipped"
+            return 0
+        fi
+        _tune_log=$(mktemp)
+        _new_args=$(ENGINE_ARGS="${ENGINE_ARGS:-}" python3 "$_tune_script" 2>"$_tune_log") || true
+        if [ -s "$_tune_log" ]; then
+            while IFS= read -r _line; do
+                log "$_line"
+            done <"$_tune_log"
+        fi
+        rm -f "$_tune_log"
+        if [ -n "${_new_args:-}" ]; then
+            ENGINE_ARGS="$_new_args"
+        fi
+    }
+
+    looks_like_hf_repo_id() {
+        s=$1
+        case "$s" in
+            ""|/*|./*|*://*) return 1 ;;
+        esac
+        case "$s" in
+            */*)
+                rest=${s#*/}
+                case "$rest" in
+                    */*|*:*) return 1 ;;
+                esac
+                return 0
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # Block until the sentinel appears (or WAIT_TIMEOUT elapses).
+    elapsed=0
+    while [ ! -f "$SENTINEL" ]; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
+            exit 1
+        fi
+        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL found after ${elapsed}s"
+
+    if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
+        log "MODEL_NAME must be owner/repo for --model (got ${MODEL_NAME:-<empty>})"
+        exit 1
+    fi
+
+    patch_spark_mem_utils
+
+    # Olares env field is ENGINE_ARGS; value must be flags only (not "ENGINE_ARGS=...").
+    case "${ENGINE_ARGS:-}" in
+        ENGINE_ARGS=*) ENGINE_ARGS=${ENGINE_ARGS#ENGINE_ARGS=} ;;
+    esac
+
+    spark_tune_gpu_memory_utilization
+
+    log "starting vLLM with model=$MODEL_NAME args=${ENGINE_ARGS:-<empty>}"
+
+    # shellcheck disable=SC2086  # intentional word-splitting of ENGINE_ARGS
+    exec python3 -m vllm.entrypoints.openai.api_server \
+        --model "$MODEL_NAME" \
+        --served-model-name "$MODEL_NAME" \
+        --host 0.0.0.0 \
+        --port "${VLLM_PORT:-8000}" \
+        ${ENGINE_ARGS:-} \
+        "$@"

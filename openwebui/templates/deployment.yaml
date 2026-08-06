@@ -1,128 +1,240 @@
+{{- $appDomainENV := split "," .Values.domain.openwebui -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $persistSecretKey := true -}}
+{{- if hasKey $oe "ENABLE_WEBUI_SECRET_KEY_PERSIST" -}}
+{{- $pv := lower (toString (index $oe "ENABLE_WEBUI_SECRET_KEY_PERSIST")) -}}
+{{- if or (eq $pv "false") (eq $pv "0") (eq $pv "no") -}}
+{{- $persistSecretKey = false -}}
+{{- end -}}
+{{- end -}}
+{{- $envBackup := false -}}
+{{- if hasKey $oe "ENABLE_WEBUI_DB_BACKUP" -}}
+{{- $v := index $oe "ENABLE_WEBUI_DB_BACKUP" -}}
+{{- $vs := lower (toString $v) -}}
+{{- if or (eq $vs "true") (eq $vs "1") (eq $vs "yes") -}}
+{{- $envBackup = true -}}
+{{- end -}}
+{{- end -}}
+{{- $bw := .Values.backupWebuiDb | default dict -}}
+{{- $helmBackup := $bw.enabled | default false -}}
+{{- $backupWebuiDbEnabled := or $envBackup $helmBackup -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  creationTimestamp: null
+  name: openwebui
+  namespace: "{{ .Release.Namespace }}"
   labels:
     io.kompose.service: openwebui
-  name: openwebui
-  namespace: '{{ .Release.Namespace }}'
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.openwebui.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       io.kompose.service: openwebui
-  strategy: {}
   template:
     metadata:
-      creationTimestamp: null
       labels:
-        io.kompose.network/chrome-default: "true"
         io.kompose.service: openwebui
+        io.kompose.network/chrome-default: "true"
     spec:
-      initContainers:
-      - name: init-data
-        image: docker.io/aboveos/kldtks-openwebui-fix-chunked:v0.4.8-f1-m1
-        command: 
-            - sh
-            - '-c'
-            - |-
-              if [ ! -d "/app/backend/data2" ] || [ -z "$(ls -A /app/backend/data2)" ]; then
-                  if [ -n "$(ls -A /app/backend/data)" ]; then
-                      echo "start copy"; cp -a /app/backend/data/. /app/backend/data2/
-                  fi
-              fi
-        volumeMounts:
-        - mountPath: /app/backend/data2
-          name: appcache
-        securityContext:
-          runAsUser: 0
-      - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
-        command:
-          - sh
-          - '-c'
-          - |
-            chown -R 1000:1000 /appcache
-        resources: {}
-        volumeMounts:
-          - name:  appcache
-            mountPath: /appcache
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
-      containers:
-      - env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
-        - name: TZ
-          value: Etc/UTC
-        - name: HF_HUB_OFFLINE
-          value: '1'
-        image: docker.io/aboveos/kldtks-openwebui-fix-chunked:v0.4.8-f1-m1
-        name: openwebui
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 8080
-            scheme: HTTP
-          initialDelaySeconds: 30
-          timeoutSeconds: 60
-          periodSeconds: 60
-          successThreshold: 1
-          failureThreshold: 10
-        startupProbe:
-          tcpSocket:
-            port: 8080
-          timeoutSeconds: 5
-          periodSeconds: 10
-          successThreshold: 1
-          failureThreshold: 30
-        ports:
-        - containerPort: 8080
-        env:
-        - name: OLLAMA_BASE_URL
-          value: "http://ollama.ollama-{{ .Values.admin }}:11434"
-        - name: OPENAI_API_BASE_URLS
-          value: "http://xinference.xinference-{{ .Values.admin }}:9997/v1;"
-        - name: OPENAI_API_KEYS
-          value: " ;"
-        resources:
-          limits:
-            cpu: "1"
-            memory: 1000Mi
-          requests:
-            cpu: 50m
-            memory: 512Mi
-        volumeMounts:
-        - mountPath: /app/backend/data
-          name: appcache
       restartPolicy: Always
-      volumes:
-      - hostPath:
-          path: '{{ .Values.userspace.appCache }}/openwebui'
-          type: DirectoryOrCreate
-        name: appcache
-status: {}
+      initContainers:
+        - name: migrate-data
+          image: 'docker.io/beclab/busybox:1.37'
+          command: ['sh', '-c']
+          args:
+            - |
+              VERSION="{{ .Chart.Version }}"
+              MARKER="/new-data/.migration_done_${VERSION}"
 
+              if [ -f "$MARKER" ]; then
+                echo "Migration already completed for v${VERSION}, skipping."
+                exit 0
+              fi
+
+              if [ -f /new-data/webui.db ]; then
+                echo "Data already exists in appData, no migration needed."
+                echo "Skipped - data already present at $(date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -d /old-data ] && [ -f /old-data/webui.db ]; then
+                echo "Found old data in appCache, migrating to appData..."
+                cp -a /old-data/. /new-data/
+                if [ $? -eq 0 ]; then
+                  echo "Migrated from appCache at $(date)" > "$MARKER"
+                  echo "Migration completed successfully."
+                else
+                  echo "ERROR: Copy failed, will retry on next restart."
+                  exit 1
+                fi
+              else
+                echo "No old data found, fresh install."
+                echo "Fresh install at $(date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: old-appdata
+              mountPath: /old-data
+              readOnly: true
+            - name: appdata
+              mountPath: /new-data
+{{- if $backupWebuiDbEnabled }}
+        - name: backup-webui-db
+          image: 'docker.io/beclab/busybox:1.37'
+          command: ['sh', '-c']
+          args:
+            - |
+              CHART_VER="{{ .Chart.Version }}"
+              BACKUP_DIR=/data/backups
+              DEST="$BACKUP_DIR/webui_chart_${CHART_VER}.db"
+              mkdir -p "$BACKUP_DIR"
+              if [ ! -f /data/webui.db ]; then
+                echo "No webui.db yet, skipping backup."
+                exit 0
+              fi
+              if [ -f "$DEST" ]; then
+                echo "Backup for chart version ${CHART_VER} already exists: $DEST"
+                exit 0
+              fi
+              cp -a /data/webui.db "$DEST" || exit 1
+              echo "Backed up webui.db for chart version ${CHART_VER} -> $DEST"
+          volumeMounts:
+            - name: appdata
+              mountPath: /data
+{{- end }}
+      containers:
+        # Sidecar: fill missing user Settings→Interface keys with false after signup.
+        # Looping (not init) so registration after pod start is still covered.
+        # Failures are logged only — never blocks Open WebUI.
+        - name: seed-task-auto-gen
+          image: 'docker.io/library/python:3.14.6-alpine3.23'
+          command: ['python', '/scripts/seed_task_auto_gen.py', '--loop']
+          env:
+            - name: WEBUI_DB_PATH
+              value: /data/webui.db
+            - name: SEED_INTERVAL_SEC
+              value: "10"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: appdata
+              mountPath: /data
+            - name: seed-scripts
+              mountPath: /scripts
+              readOnly: true
+        - name: openwebui
+          image: 'docker.io/openwebui/open-webui:0.11.0'
+          ports:
+            - containerPort: 8080
+
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 60
+            timeoutSeconds: 10
+            periodSeconds: 30
+            failureThreshold: 5
+
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 15
+            periodSeconds: 15
+            successThreshold: 1
+            failureThreshold: 60
+
+          env:
+            - name: TZ
+              value: Etc/UTC
+{{- if $persistSecretKey }}
+            - name: WEBUI_SECRET_KEY_FILE
+              value: "/app/backend/data/.webui_secret_key"
+{{- end }}
+{{- if and .Values.olaresEnv (eq (lower (toString .Values.olaresEnv.HF_HUB_OFFLINE)) "false") }}
+            - name: HF_HUB_OFFLINE
+              value: "0"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
+            {{- if .Values.olaresEnv.HF_TOKEN }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+            {{- end }}
+{{- else }}
+            - name: HF_HUB_OFFLINE
+              value: "1"
+{{- end }}
+            - name: ENABLE_WEBUI_DB_BACKUP
+              value: {{ index $oe "ENABLE_WEBUI_DB_BACKUP" | default "false" | toString | quote }}
+            - name: CORS_ALLOW_ORIGIN
+              value: "*"
+            - name: USER_AGENT
+              value: "OpenWebUI/0.11.0"
+            - name: WEBSOCKET_EVENT_CALLER_TIMEOUT
+              value: "600"
+            - name: RAG_EMBEDDING_ENGINE
+              value: "ollama"
+          resources:
+            limits:
+              cpu: "2"
+{{- if and .Values.olaresEnv (eq (lower (toString .Values.olaresEnv.HF_HUB_OFFLINE)) "false") }}
+              memory: 8Gi
+{{- else }}
+              memory: 3Gi
+{{- end }}
+            requests:
+              cpu: 50m
+              memory: 512Mi
+
+          volumeMounts:
+            - name: appdata
+              mountPath: /app/backend/data
+            - name: hf-cache
+              mountPath: /app/backend/data/cache
+
+      volumes:
+        - name: seed-scripts
+          configMap:
+            name: openwebui-seed-scripts
+            defaultMode: 0555
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: appdata
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+        - name: old-appdata
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/data"
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  creationTimestamp: null
+  name: openwebui
+  namespace: "{{ .Release.Namespace }}"
   labels:
     io.kompose.service: openwebui
-  name: openwebui
-  namespace: '{{ .Release.Namespace }}'
 spec:
-  ports:
-  - name: "8080"
-    port: 8080
-    targetPort: 8080
   selector:
     io.kompose.service: openwebui
-status:
-  loadBalancer: {}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

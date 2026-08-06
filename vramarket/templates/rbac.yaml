@@ -1,0 +1,109 @@
+# RBAC minimal : control plane (CRDs + pods locataires) et agent (nodes RO)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vramarket-control
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vramarket-agent
+  namespace: {{ .Release.Namespace }}
+---
+# CRDs vramarket : lecture/écriture dans le namespace de l'app
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vramarket-control
+  namespace: {{ .Release.Namespace }}
+rules:
+  # "delete" : annulation d'une offre/enchère OPEN par son propriétaire
+  # (DELETE /v1/offers/{id}, /v1/bids/{id}) — suppression réelle du CRD,
+  # les baux figés sont autonomes.
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramoffers", "vrambids", "vramleases", "vramnodes", "vramaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramleases/status", "vramnodes/status", "vramaccounts/status",
+                "vramoffers/status", "vrambids/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vramarket-control
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  {apiGroup: rbac.authorization.k8s.io, kind: Role, name: vramarket-control}
+subjects:
+  - {kind: ServiceAccount, name: vramarket-control, namespace: {{ .Release.Namespace }}}
+---
+# Agent : lecture SEULE cluster-wide (inventaire GPU m01 : labels + allocatable)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vramarket-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vramarket-agent
+roleRef:
+  {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: vramarket-agent}
+subjects:
+  - {kind: ServiceAccount, name: vramarket-agent, namespace: {{ .Release.Namespace }}}
+---
+# Agent : gestion des workloads locataires DANS le namespace de l'app (m06).
+# Les pods locataires y sont co-localisés avec des labels vramarket/lease=*
+# (conforme OPA : pas d'écriture cluster-scope, pas de création de namespaces).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vramarket-agent
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["limitranges"]
+    verbs: ["get", "list", "create", "delete"]
+  # m06 : reconcile des baux FUNDED + transition RUNNING (subresource status)
+  # (pas de grant PVC ni networkpolicies : refusés par la validation Olares —
+  # l'isolation est la NetPol statique du chart, la purge PVC est best-effort)
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramleases"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramleases/status"]
+    verbs: ["get", "patch", "update"]
+  # Heartbeats m02 : l'agent horodate SON VRAMNode (unité de facturation m05,
+  # détection SUSPECT/DOWN côté control) — canal K8s-natif, bypass du sidecar
+  # envoy qui exige une session utilisateur sur tout HTTP entrant.
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramnodes"]
+    verbs: ["get", "create", "patch", "update"]
+  - apiGroups: ["vramarket.olares"]
+    resources: ["vramnodes/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vramarket-agent
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  {apiGroup: rbac.authorization.k8s.io, kind: Role, name: vramarket-agent}
+subjects:
+  - {kind: ServiceAccount, name: vramarket-agent, namespace: {{ .Release.Namespace }}}

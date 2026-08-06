@@ -1,0 +1,31 @@
+# Isolation réseau des pods locataires — politique STATIQUE livrée avec le
+# chart (les apps Olares ne peuvent pas créer de NetworkPolicy à chaud : OPA).
+# Couvre tout pod étiqueté vramarket/tenant=true (posé par m06) :
+#   - ingress : uniquement la sonde de l'agent (même namespace, port 9100)
+#   - egress  : Internet via NAT, sauf RFC1918/link-local (LAN provider,
+#               autres namespaces, API K8s)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vramarket-tenant-isolation
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      vramarket/tenant: "true"
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: vramarket-agent}
+      ports:
+        - {port: 9100, protocol: TCP}
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16

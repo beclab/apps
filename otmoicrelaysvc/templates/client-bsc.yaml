@@ -1,0 +1,476 @@
+# Source: otmoic-chain-client-evm/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: otmoic-chain-client-evm-bsc-server-9006
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: otmoic-chain-client-evm-bsc-9006
+  type: ClusterIP
+  ports:
+    - protocol: TCP
+      name: otmoic-chain-client-evm-bsc-api-9006
+      port: 9100
+      targetPort: 80
+---
+# Source: otmoic-chain-client-evm/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otmoic-chain-client-evm-bsc-9006
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: otmoic-chain-client-evm-bsc-9006
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    deployment.kubernetes.io/revision: '11'
+    meta.helm.sh/release-name: otmoicrelaysvc
+    meta.helm.sh/release-namespace: otmoicrelaysvc-magicdog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otmoic-chain-client-evm-bsc-9006
+  template:
+    metadata:
+      labels:
+        app: otmoic-chain-client-evm-bsc-9006
+      annotations:
+        kubesphere.io/restartedAt: '2025-01-16T09:40:20.359Z'
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: otmoic-chain-client-evm-bsc-server-9006-nginx-conf
+            defaultMode: 420
+      containers:
+      - name: message-producer
+        image: otmoic/chainclient:v2.5.26
+        command:
+          - node
+        args:
+          - dist/message-producer
+        ports:
+          - containerPort: 3001
+            protocol: TCP
+        env:
+          - name: REDIS_HOST
+            value: "otmoic-relay-db-redis-master"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: REDIS_DB_NUMBER
+            value: "0"
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-redis
+                key: redis-password
+          - name: STATUS_KEY
+            value: "chain-client-status-report-bsc"
+          - name: CHAIN_ID
+            value: "56"
+          - name: MESSAGE_PRODUCER_PORT
+            value: "3001"
+          - name: MONGODB_HOST
+            value: otmoic-relay-mongo-service
+          - name: MONGODB_ACCOUNT
+            value: admin
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: password
+          - name: MONGODB_PORT
+            value: "27017"
+          - name: MONGODB_DBNAME_LP_STORE
+            value: admin
+          - name: MONGODB_AUTH_SOURCE
+            value: admin
+        resources:
+          limits:
+            cpu: 500m
+            memory: 800Mi
+          requests:
+            cpu: 1m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+
+      - name: monitor
+        image: otmoic/chainclient:v2.5.26
+        command:
+          - node
+        args:
+          - dist/monitor
+        ports:
+          - containerPort: 3002
+            protocol: TCP
+        env:
+          - name: REDIS_HOST
+            value: "otmoic-relay-db-redis-master"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: REDIS_DB_NUMBER
+            value: "0"
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-redis
+                key: redis-password
+          - name: STATUS_KEY
+            value: "chain-client-status-report-bsc"
+          - name: MONGODB_HOST
+            value: otmoic-relay-mongo-service
+          - name: MONGODB_ACCOUNT
+            value: admin
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: password
+          - name: MONGODB_PORT
+            value: "27017"
+          - name: MONGODB_DBNAME_LP_STORE
+            value: admin
+          - name: MONGODB_AUTH_SOURCE
+            value: admin
+          - name: MONITOR_NAME
+            value: relay-otmoic-chain-client-evm-bsc-9006-monitor
+          - name: LOGGER_LEVEL
+            value: debug
+          - name: SYSTEM_CHAIN_ID
+            value: "9006"
+          - name: CHAIN_ID
+            value: "56"
+          - name: OBRIDGE_CONTRACT
+            value: "0x6F12FED6Cd5BeBFA3351c447f7873B76178B1b84"
+          - name: OBRIDGE_CONTRACT_START_BLOCK
+            value: "42984925"
+          - name: OBRIDGE_SWAP_CONTRACT
+            value: "0x0D8fBda3509E72f39b272Df8f25d1490ef7bcD61"
+          - name: OBRIDGE_SWAP_CONTRACT_START_BLOCK
+            value: "46993178"
+          - name: FEE_RECEPIENT
+            value: "0xF59c8D79d950cB83d56ec645AF561146E3B6a475"
+          - name: RPCS
+            value: "https://rpc.ankr.com/bsc/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+          - name: RPC_TIMEOUT
+            value: "30000"
+          - name: BLOCK_MARGIN
+            value: "3"
+          - name: BLOCK_MODE_SWITCH_THRESHOLD
+            value: "50"
+          - name: BLOCK_INTERVAL
+            value: "3000"
+          - name: BATCH_SIZE
+            value: "5000"
+          - name: N8N_WEBHOOK_URL
+            value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+          - name: ADMIN_SERVICE_URL
+            value: "http://lpnode-admin-server:18006"
+          - name: ADMIN_SERVICE_POLLING_INTERVAL
+            value: "15000"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 800Mi
+          requests:
+            cpu: 1m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+
+      - name: public-service
+        image: otmoic/chainclient:v2.5.26
+        command:
+          - node
+        args:
+          - dist/public-service
+        ports:
+          - containerPort: 3003
+            protocol: TCP
+        env:
+          - name: REDIS_HOST
+            value: "otmoic-relay-db-redis-master"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: REDIS_DB_NUMBER
+            value: "0"
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-redis
+                key: redis-password
+          - name: STATUS_KEY
+            value: "chain-client-status-report-bsc"
+          - name: MONGODB_HOST
+            value: otmoic-relay-mongo-service
+          - name: MONGODB_ACCOUNT
+            value: admin
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: password
+          - name: MONGODB_PORT
+            value: "27017"
+          - name: MONGODB_DBNAME_LP_STORE
+            value: admin
+          - name: MONGODB_AUTH_SOURCE
+            value: admin
+          - name: MONITOR_NAME
+            value: otmoic-chain-client-evm-bsc-9006-monitor
+          - name: PUBLIC_SERVICE_PORT
+            value: "3003"
+          - name: CHAIN_ID
+            value: "56"
+          - name: LOGGER_LEVEL
+            value: debug
+          - name: SYSTEM_CHAIN_ID
+            value: "9006"
+          - name: N8N_WEBHOOK_URL
+            value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+          - name: ADMIN_SERVICE_URL
+            value: "http://lpnode-admin-server:18006"
+          - name: ADMIN_SERVICE_POLLING_INTERVAL
+            value: "15000"
+          - name: RPCS
+            value: "https://rpc.ankr.com/bsc/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+          - name: RPC_TIMEOUT
+            value: "30000"
+          - name: RELAY_WALLET
+            value: "true"
+          - name: RELAY_WALLET_ADDRESS
+            value: "0x2E2a9E93cd30620f46A23976328C49cE32f8adEf"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 800Mi
+          requests:
+            cpu: 1m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+
+      - name: sender
+        image: otmoic/chainclient:v2.5.26
+        command:
+          - node
+        args:
+          - dist/sender
+        ports:
+          - containerPort: 3004
+            protocol: TCP
+        env:
+          - name: REDIS_HOST
+            value: "otmoic-relay-db-redis-master"
+          - name: REDIS_PORT
+            value: "6379"
+          - name: REDIS_DB_NUMBER
+            value: "0"
+          - name: REDIS_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-db-redis
+                key: redis-password 
+          - name: STATUS_KEY
+            value: "chain-client-status-report-bsc"
+          - name: ADMIN_SERVICE_URL
+            value: "http://lpnode-admin-server:18006"
+          - name: ADMIN_SERVICE_POLLING_INTERVAL
+            value: "15000"
+          - name: CHAIN_ID
+            value: "56"
+          - name: MONITOR_NAME
+            value: otmoic-chain-client-evm-bsc-9006-monitor
+          - name: SENDER_RPC_URL
+            value: "https://rpc.ankr.com/bsc/c9b2bf73e1d5d2bf8ac5db5df485508769c0f086bad9fed9ff0d347dbd24b4f7"
+          - name: MONGODB_HOST
+            value: otmoic-relay-mongo-service
+          - name: MONGODB_ACCOUNT
+            value: admin
+          - name: MONGODB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: otmoic-relay-mongo
+                key: password
+          - name: MONGODB_PORT
+            value: "27017"
+          - name: MONGODB_DBNAME_LP_STORE
+            value: admin
+          - name: MONGODB_AUTH_SOURCE
+            value: admin
+          - name: SENDER_SERVICE_PORT
+            value: "3004"
+          - name: SYSTEM_CHAIN_ID
+            value: "9006"
+          - name: RELAY_WALLET
+            value: "true"
+          - name: RELAY_WALLET_ADDRESS
+            value: "0x2E2a9E93cd30620f46A23976328C49cE32f8adEf"
+          - name: RELAY_SIGNING_SERVICE_URL
+            value: "http://10.203.16.3:19004"
+          - name: TX_TIMEOUT
+            value: "30000"
+          - name: N8N_WEBHOOK_URL
+            value: "http://n8n.edge-dev.xyz/webhook/f8b3f611-89b9-4128-8e93-b50ff8903531"
+          - name: LOGGER_LEVEL
+            value: debug
+          - name: FEE_RECEPIENT
+            value: "0xF59c8D79d950cB83d56ec645AF561146E3B6a475"
+          - name: OBRIDGE_CONTRACT
+            value: "0x6F12FED6Cd5BeBFA3351c447f7873B76178B1b84"
+          - name: OBRIDGE_SWAP_CONTRACT
+            value: "0x0D8fBda3509E72f39b272Df8f25d1490ef7bcD61"
+        resources:
+          limits:
+            cpu: 500m
+            memory: 800Mi
+          requests:
+            cpu: 1m
+            memory: 64Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      - name: nginx-proxy
+        image: nginx:1.25.3
+        ports:
+          - containerPort: 80
+            protocol: TCP
+        env:
+          - name: NGINX_WORKER_PROCESSES
+            value: "1"
+        resources:
+          limits:
+            cpu: 200m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 56Mi
+        volumeMounts:
+          - name: nginx-config
+            mountPath: /etc/nginx/nginx.conf
+            subPath: nginx.conf
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext: {}
+      schedulerName: default-scheduler
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+---
+# Inline ConfigMap definition
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otmoic-chain-client-evm-bsc-server-9006-nginx-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    user  nginx;
+    worker_processes  1;
+
+    error_log  /var/log/nginx/error.log notice;
+    pid        /var/run/nginx.pid;
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       /etc/nginx/mime.types;
+        default_type  application/octet-stream;
+
+        log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                         '$status $body_bytes_sent "$http_referer" '
+                         '"$http_user_agent" "$http_x_forwarded_for"';
+
+        access_log  /var/log/nginx/access.log  main;
+
+        sendfile        on;
+        keepalive_timeout  65;
+
+        server {
+            listen 80;
+
+            # Message Producer endpoints
+            location ~ ^/producer/getNextEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/producer/getLatestEvent {
+                proxy_pass http://localhost:3001;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Public Service endpoints
+            location ~ ^/solana-client-[0-9]+/lpnode/get_wallets {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ ^/solana-client-[0-9]+/lpnode/get_wallet_balances {
+                proxy_pass http://localhost:3003;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender endpoints
+            location = /submitTokenTransfer {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            location ~ "/queryJobStatus/[a-f0-9]+" {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+
+            # Sender lpnode endpoints
+            location ~ ^/solana-client-[0-9]+/lpnode/(transfer_in|confirm|refund|sign_message) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Sender relay endpoints
+            location ~ ^/evm-client-[0-9]+/relay/(get_hashlock|get_system_fee|get_signer_from_eip712) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # single_swap
+            location ~ ^/evm-client-[0-9]+/relay/single_swap/get_signer_from_eip712 {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Sender relay behalf endpoints
+            location ~ ^/evm-client-[0-9]+/relay/behalf/(confirm_out|confirm_in|refund_out|refund_in) {
+                proxy_pass http://localhost:3004;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+            }
+            # Default fallback route
+            location / {
+                return 404;
+            }
+        }
+    }

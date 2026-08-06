@@ -1,0 +1,101 @@
+# Engine wrapper script, mounted into the llama.cpp (engine) container at
+# /llm-init/wrappers. Inlined from llm-init deploy/wrappers/{common,llamacpp}.sh.
+#
+# Waits for model_download_finish, then starts llama-server with
+#   -hf "$MODEL_NAME"   (owner/repo or owner/repo:quant)
+# Sentinel model_path is not used for load; llm-init ensure must populate HF cache.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llamacpp
+data:
+  llamacpp.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=llamacpp
+    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
+    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
+    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
+    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+
+    looks_like_hf_repo_id() {
+        s=$1
+        case "$s" in
+            ""|/*|./*|*://*) return 1 ;;
+        esac
+        case "$s" in
+            */*)
+                rest=${s#*/}
+                case "$rest" in
+                    */*) return 1 ;;
+                esac
+                return 0
+                ;;
+            *) return 1 ;;
+        esac
+    }
+
+    elapsed=0
+    while [ ! -f "$SENTINEL" ]; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
+            exit 1
+        fi
+        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL found after ${elapsed}s"
+
+    if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
+        log "MODEL_NAME must be owner/repo or owner/repo:quant for -hf (got ${MODEL_NAME:-<empty>})"
+        exit 1
+    fi
+
+    LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
+    if [ -z "$LLAMA_SERVER_BIN" ]; then
+        if [ -x /app/llama-server ]; then
+            LLAMA_SERVER_BIN=/app/llama-server
+        else
+            LLAMA_SERVER_BIN="$(command -v llama-server 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
+        log "llama-server binary not found"
+        exit 127
+    fi
+
+    LLAMA_SERVER_DIR=$(dirname "$LLAMA_SERVER_BIN")
+    export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    if [ -d "${LLAMA_SERVER_DIR}/lib" ]; then
+        export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
+    fi
+
+    ARGV=""
+    if [ -n "${ENGINE_ARGS:-}" ]; then
+        # shellcheck disable=SC2086
+        set -- $ENGINE_ARGS
+        for tok in "$@"; do
+            case "$tok" in
+                -*)             ARGV="$ARGV $tok" ;;
+                LLAMA_ARG_*=*)  export "$tok" && log "engine_args export: $tok" ;;
+                *=*)            log "engine_args drop non-LLAMA_ARG env: $tok" ;;
+                *)              ARGV="$ARGV $tok" ;;
+            esac
+        done
+    fi
+
+    log "starting llama.cpp with -hf=$MODEL_NAME alias=${MODEL_NAME:-unset} argv=${ARGV:-<empty>} (bin=$LLAMA_SERVER_BIN)"
+    # shellcheck disable=SC2086
+    exec "$LLAMA_SERVER_BIN" \
+        -hf "$MODEL_NAME" \
+        --alias "${MODEL_NAME:-llm-init-model}" \
+        --host 0.0.0.0 \
+        --port "${LLAMACPP_PORT:-8081}" \
+        --metrics \
+        $ARGV \
+        "$@"

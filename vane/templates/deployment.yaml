@@ -1,0 +1,387 @@
+{{- $appDomainENV := split "," .Values.domain.vane -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: {{ .Release.Namespace }}
+data:
+  config.toml: |
+    [GENERAL]
+    SIMILARITY_MEASURE = "cosine" # "cosine" or "dot"
+    KEEP_ALIVE = "30m" # How long to keep Ollama models loaded into memory. Increased from 5m to reduce model reload overhead. (Instead of using -1 use "-1m")
+
+    # API keys are injected at pod start from Secret {{ .Release.Name }}-secrets (not stored in ConfigMap).
+    [MODELS.OPENAI]
+    API_KEY = ""
+
+    [MODELS.GROQ]
+    API_KEY = ""
+
+    [MODELS.ANTHROPIC]
+    API_KEY = ""
+
+    [MODELS.GEMINI]
+    API_KEY = ""
+
+    [MODELS.CUSTOM_OPENAI]
+    API_KEY = ""
+    API_URL = "{{ .Values.olaresEnv.CUSTOM_OPENAI_URL }}"
+    MODEL_NAME = "{{ .Values.olaresEnv.CUSTOM_OPENAI_MODEL_NAME }}"
+
+    [MODELS.OLLAMA]
+    API_URL = "{{ .Values.olaresEnv.OLLAMA_BASE_URL | default "" }}"
+    {{- if .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}
+    NAME = "{{ .Values.olaresEnv.OLLAMA_CONNECTION_NAME }}" # Connection name for Ollama
+    {{- else }}
+    NAME = "Ollama" # Default connection name for Ollama
+    {{- end }}
+    API_KEY = ""
+
+    [MODELS.DEEPSEEK]
+    API_KEY = ""
+
+    [API_ENDPOINTS]
+    SEARXNG = "{{ .Values.olaresEnv.SEARXNG_API_URL | default "" }}"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vane
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: vane
+spec:
+  replicas: {{ .Values.workloads.vane.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: vane
+  strategy:
+    type: Recreate  
+  template:
+    metadata:
+      labels:
+        io.kompose.service: vane
+    spec:
+      initContainers:
+      - name: migrate-appcache-to-appdata-data
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_data_done"
+            if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_data_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/data -> appData/data..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+        - name: appcache-legacy
+          mountPath: /old-data
+          readOnly: true
+        - name: appcache
+          mountPath: /new-data
+      - name: migrate-appcache-to-appdata-uploads
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_uploads_done"
+            if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_uploads_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/uploads -> appData/uploads..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+        - name: appuploads-legacy
+          mountPath: /old-data
+          readOnly: true
+        - name: appuploads
+          mountPath: /new-data
+      - name: migrate-appcache-to-appdata-config
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_config_done"
+            if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_config_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/config -> appData/config..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+        - name: appconfig-legacy
+          mountPath: /old-data
+          readOnly: true
+        - name: appconfig
+          mountPath: /new-data
+      - name: migrate-appcache-to-appdata-root
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_root_done"
+            if [ -f "$MARKER" ]; then echo "[migrate] marker present, skip."; exit 0; fi
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_root_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/root -> appData/root..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+        - name: app-cache-root-legacy
+          mountPath: /old-data
+          readOnly: true
+        - name: app-cache-root
+          mountPath: /new-data
+      - name: getconfigfile
+        image: "docker.io/itzcrazykns1337/vane:v1.12.2"
+        imagePullPolicy: IfNotPresent
+        command: ["node", "-e"]
+        args:
+          - |
+            const fs = require('fs');
+            const cfgPath = '/home/vane/config.toml';
+            const tplPath = '/home/vane-config/config.toml';
+            if (!fs.existsSync(cfgPath)) {
+              fs.copyFileSync(tplPath, cfgPath);
+            }
+            let t = fs.readFileSync(cfgPath, 'utf8');
+            const sections = {
+              'MODELS.OPENAI': 'OPENAI_APIKEY',
+              'MODELS.GROQ': 'GROQ_APIKEY',
+              'MODELS.ANTHROPIC': 'ANTHROPIC_APIKEY',
+              'MODELS.GEMINI': 'GEMINI_APIKEY',
+              'MODELS.CUSTOM_OPENAI': 'CUSTOM_OPENAI_APIKEY',
+              'MODELS.OLLAMA': 'OLLAMA_API_KEY',
+            };
+            for (const [section, envName] of Object.entries(sections)) {
+              const raw = process.env[envName] || '';
+              // Skip empty values so UI-managed keys are not wiped on restart.
+              if (!raw) continue;
+              const escaped = raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+              const secRe = section.replace(/\./g, '\\.');
+              const re = new RegExp(
+                '(\\[' + secRe + '\\][\\s\\S]*?API_KEY\\s*=\\s*)(?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\')'
+              );
+              if (re.test(t)) {
+                t = t.replace(re, '$1"' + escaped + '"');
+              }
+            }
+            fs.writeFileSync(cfgPath, t);
+        env:
+        - name: OPENAI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: OPENAI_APIKEY
+        - name: GROQ_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: GROQ_APIKEY
+        - name: ANTHROPIC_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ANTHROPIC_APIKEY
+        - name: GEMINI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: GEMINI_APIKEY
+        - name: CUSTOM_OPENAI_APIKEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: CUSTOM_OPENAI_APIKEY
+        - name: OLLAMA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: OLLAMA_API_KEY
+        volumeMounts:
+        - mountPath: /home/vane
+          name: appconfig
+        - mountPath: /home/vane-config/config.toml
+          name: config
+          subPath: config.toml
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /app-cache-root
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 16Mi
+        volumeMounts:
+          - name:  app-cache-root
+            mountPath: /app-cache-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: vane
+        image: "docker.io/itzcrazykns1337/vane:v1.12.2"
+        env:
+        - name: SEARXNG_API_URL
+          value: {{ .Values.olaresEnv.SEARXNG_API_URL | default "" | quote }}
+        - name: OLLAMA_API_URL
+          value: {{ .Values.olaresEnv.OLLAMA_BASE_URL | default "" | quote }}
+        - name: LLM_PROVIDER
+          value: "ollama"
+        - name: OLLAMA_BASE_URL
+          value: {{ .Values.olaresEnv.OLLAMA_BASE_URL | default "" | quote }}
+        {{- if .Values.olaresEnv.OLLAMA_MODEL }}
+        - name: OLLAMA_MODEL
+          value: "{{ .Values.olaresEnv.OLLAMA_MODEL }}"
+        {{- end }}
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: DATABASE_URL
+        - name: HOME
+          value: "/home/vane"
+        - name: HF_HOME
+          value: "/home/vane/data/huggingface"
+        - name: TRANSFORMERS_CACHE
+          value: "/home/vane/data/huggingface/transformers"
+        - name: HOSTNAME
+          value: '0.0.0.0'
+        ports:
+        - containerPort: 3000
+        resources:
+          limits:
+            cpu: "2"
+            memory: 3500Mi
+          requests:
+            cpu: 50m
+            memory: 8Mi
+        volumeMounts:
+        - mountPath: /home/vane/data
+          name: appcache
+        - mountPath: /home/vane/uploads
+          name: appuploads
+        - mountPath: /home/vane/config.toml
+          name: appconfig
+          subPath: config.toml        
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+        name: appcache
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/data'
+          type: DirectoryOrCreate
+        name: appcache-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/uploads'
+          type: DirectoryOrCreate
+        name: appuploads
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/uploads'
+          type: DirectoryOrCreate
+        name: appuploads-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/config'
+          type: DirectoryOrCreate
+        name: appconfig
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/config'
+          type: DirectoryOrCreate
+        name: appconfig-legacy
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}'
+          type: DirectoryOrCreate
+        name: app-cache-root
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}'
+          type: DirectoryOrCreate
+        name: app-cache-root-legacy
+      - name: config
+        configMap:
+          name: app-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: vane
+  name: vane
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: vane
+status:
+  loadBalancer: {}

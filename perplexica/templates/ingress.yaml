@@ -1,4 +1,4 @@
-
+﻿
 apiVersion: v1
 data:
   nginx.conf: |
@@ -8,9 +8,9 @@ data:
         access_log /opt/bitnami/openresty/nginx/logs/access.log;
         error_log /opt/bitnami/openresty/nginx/logs/error.log;
 
-        proxy_connect_timeout                          30s;
-        proxy_send_timeout                             60s;
-        proxy_read_timeout                             300s;
+        proxy_connect_timeout                          300s;
+        proxy_send_timeout                             600s;
+        proxy_read_timeout                             1800s;
         proxy_set_header      host                      $host;
         proxy_set_header      x-forwarded-host          $http_host;
 
@@ -19,13 +19,10 @@ data:
         proxy_set_header upgrade $http_upgrade;
         proxy_set_header connection "upgrade";
 
-        location /ws {
-            proxy_pass http://perplexica-backend:3001/;
-        }
-
-        location /api {
-            proxy_pass http://perplexica-backend:3001/api;
-        }
+        # Disable buffering for streaming responses (SSE)
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_set_header X-Accel-Buffering no;
 
         location / {
             proxy_pass http://perplexica:3000;
@@ -51,7 +48,8 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: perplexicaingress
-  strategy: {}
+  strategy:
+    type: Recreate
   template:
     metadata:
       creationTimestamp: null
@@ -69,7 +67,7 @@ spec:
               path: nginx.conf
       containers:
         - name: nginx
-          image: docker.io/aboveos/bitnami-openresty:1.25.3-2
+          image: "docker.io/beclab/aboveos-bitnami-openresty:1.25.3-2"
           ports:
             - containerPort: 8080
               protocol: TCP
@@ -90,16 +88,6 @@ spec:
             periodSeconds: 60
             successThreshold: 1
             failureThreshold: 10
-          # readinessProbe:
-          #   httpGet:
-          #     path: /
-          #     host: sdwebui.sdwebui-{{ .Values.admin }}
-          #     port: 7860
-          #     scheme: HTTP
-          #   initialDelaySeconds: 10
-          #   periodSeconds: 5
-          #   successThreshold: 1
-          #   failureThreshold: 10
           resources:
             limits:
               cpu: 100m

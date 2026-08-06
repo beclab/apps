@@ -1,0 +1,177 @@
+{{- $pdsDomainENV := split "," .Values.domain.pds -}}
+{{- $pdsDomain := index $pdsDomainENV "_0" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pds
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: pds
+spec:
+  replicas: {{ .Values.workloads.pds.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: pds
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: pds
+    spec:
+      initContainers:
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/pds -> appData/pds..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: pdsdata-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: pdsdata
+            mountPath: /new-data
+      - name: init-chmod-pds
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        command:
+          - sh
+          - '-c'
+          - |
+            mkdir -p /app-data-root/pds /app-data-root/blocks
+            chown -R 0:0 /app-data-root || true
+            chmod -R 777 /app-data-root || true
+        resources: {}
+        volumeMounts:
+          - name: pdsdata
+            mountPath: /app-data-root
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+      containers:
+      - name: pds
+        image: "docker.io/beclab/bluesky-social-pds:0.4.204"
+        ports:
+          - containerPort: {{ .Values.port | default 3000 }}
+            protocol: TCP
+        envFrom:
+          - configMapRef:
+              name: pds-env
+        env:
+          {{- $smtpServer := "" }}
+          {{- $smtpPort := "587" }}
+          {{- $smtpLogin := "" }}
+          {{- $smtpPassword := "" }}
+          {{- $smtpUseSSL := "" }}
+          {{- $smtpFromAddress := "" }}
+          {{- if .Values.olaresEnv }}
+          {{- $smtpServer = .Values.olaresEnv.SMTP_SERVER | default "" }}
+          {{- $smtpPort = .Values.olaresEnv.SMTP_PORT | default "587" }}
+          {{- $smtpLogin = .Values.olaresEnv.SMTP_LOGIN | default "" }}
+          {{- $smtpPassword = .Values.olaresEnv.SMTP_PASSWORD | default "" }}
+          {{- $smtpUseSSL = .Values.olaresEnv.SMTP_SSL | default "" }}
+          {{- $smtpFromAddress = .Values.olaresEnv.SMTP_FROM_ADDRESS | default "" }}
+          {{- end }}
+          {{- $hasSmtpURL := and .Values.env.PDS_EMAIL_SMTP_URL (ne .Values.env.PDS_EMAIL_SMTP_URL "") }}
+          {{- if not $hasSmtpURL }}
+          {{- if and $smtpServer (ne $smtpServer "") $smtpLogin (ne $smtpLogin "") }}
+          {{- $smtpProtocol := "smtp" }}
+          {{- if or (eq $smtpUseSSL "true") (eq $smtpUseSSL "1") (eq $smtpPort "465") }}
+          {{- $smtpProtocol = "smtps" }}
+          {{- end }}
+          {{- $smtpURL := printf "%s://%s:%s@%s:%s" $smtpProtocol $smtpLogin $smtpPassword $smtpServer $smtpPort }}
+          - name: PDS_EMAIL_SMTP_URL
+            value: {{ $smtpURL | quote }}
+          {{- end }}
+          {{- end }}
+          {{- $hasFromAddress := and .Values.env.PDS_EMAIL_FROM_ADDRESS (ne .Values.env.PDS_EMAIL_FROM_ADDRESS "") }}
+          {{- if not $hasFromAddress }}
+          {{- if and $smtpFromAddress (ne $smtpFromAddress "") }}
+          - name: PDS_EMAIL_FROM_ADDRESS
+            value: {{ $smtpFromAddress | quote }}
+          {{- end }}
+          {{- end }}
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /xrpc/_health
+            port: {{ .Values.port | default 3000 }}
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 10
+        livenessProbe:
+          httpGet:
+            path: /xrpc/_health
+            port: {{ .Values.port | default 3000 }}
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 5
+        volumeMounts:
+        - mountPath: {{ .Values.dataDirectory | default "/pds" }}
+          name: pdsdata
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/pds'
+          type: DirectoryOrCreate
+        name: pdsdata
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/pds'
+          type: DirectoryOrCreate
+        name: pdsdata-legacy
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pds
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: pds
+spec:
+  ports:
+  - name: "{{ .Values.port | default 3000 }}"
+    port: {{ .Values.port | default 3000 }}
+    targetPort: {{ .Values.port | default 3000 }}
+  selector:
+    io.kompose.service: pds

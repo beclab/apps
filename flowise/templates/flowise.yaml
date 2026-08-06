@@ -1,4 +1,4 @@
----
+﻿---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,10 +7,12 @@ metadata:
   labels:
     app: flowise
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.flowise.replicaCount }}
   selector:
     matchLabels:
       app: flowise
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -18,8 +20,8 @@ spec:
     spec:
       containers:
         - name: flowise
-          image: docker.io/flowiseai/flowise:2.2.7
-          imagePullPolicy: Always
+          image: "docker.io/beclab/flowiseai-flowise:3.0.3"
+          imagePullPolicy: IfNotPresent
           env:
             - name: PGID
               value: "1000"
@@ -69,7 +71,15 @@ spec:
       volumes:
         - name: flowise-data
           hostPath:
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: "{{ .Values.userspace.appData }}"
+              {{- else }}
             path: "{{ .Values.userspace.appData }}/flowise"
+              {{- end }}
+            {{- else }}
+            path: "{{ .Values.userspace.appData }}/flowise"
+            {{- end }}
             type: DirectoryOrCreate
 
 ---

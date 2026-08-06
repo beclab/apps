@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   creationTimestamp: null
@@ -7,7 +7,7 @@ metadata:
   name: listmonk
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.listmonk.replicaCount }}
   selector:
     matchLabels:
       io.kompose.service: listmonk
@@ -20,6 +20,44 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: listmonk
     spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: uploads-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: uploads
+              mountPath: /new-data
       containers:
         - env:
             - name: PGID
@@ -39,7 +77,10 @@ spec:
             - name: LISTMONK_db__user
               value: '{{ .Values.postgres.username }}'
             - name: LISTMONK_db__password
-              value: '{{ .Values.postgres.password }}'
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: LISTMONK_db__password
             - name: LISTMONK_db__database
               value: '{{ .Values.postgres.databases.listmonk }}'
             - name: LISTMONK_db__ssl_mode
@@ -52,15 +93,15 @@ spec:
               ./listmonk --install --idempotent --yes --config '' && \
               ./listmonk --upgrade --yes --config '' && \
               ./listmonk --config ''
-          image: docker.io/listmonk/listmonk:v4.1.0
+          image: "docker.io/listmonk/listmonk:v6.2.0"
           name: listmonk
           resources:
             requests:
               cpu: 500m
-              memory: 512Mi
+              memory: 768Mi
             limits:
-              cpu: 1000m
-              memory: 1Gi
+              cpu: 1500m
+              memory: 2Gi
           ports:
             - containerPort: 9000
           volumeMounts:
@@ -72,7 +113,11 @@ spec:
         - name: uploads
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appCache }}/listmonk'
+            path: '{{ .Values.userspace.appData }}'
+        - name: uploads-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}'
 status: {}
 ---
 apiVersion: v1

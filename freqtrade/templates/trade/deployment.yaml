@@ -1,0 +1,480 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-spot
+  name: freqtrade-spot
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: freqtrade-spot
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.service: freqtrade-spot
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          env:
+            - name: CHART_USERSPACE_APPDATA
+              value: {{ .Values.userspace.appData | quote }}
+            - name: CHART_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "freqtrade-spot init: userspace.appData=[${CHART_USERSPACE_APPDATA}] hostPath base=.../freqtrade-spot (single level under Olares app data root; release=[${CHART_RELEASE_NAME}] for debug only)"
+              mkdir -p /data /config /strategies
+              chown -R 1000:1000 /data /config /strategies
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+          securityContext:
+            runAsUser: 0
+        - name: init-seed-config-and-strategies
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              if [ ! -f /config/config.json ]; then cp /tmp/default-config/config.json /config/config.json; chown 1000:1000 /config/config.json; fi
+              if [ ! -f /strategies/Strategy001.py ]; then cp /tmp/default-strategies/Strategy001.py /strategies/Strategy001.py; chown 1000:1000 /strategies/Strategy001.py; fi
+          volumeMounts:
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+            - name: default-config
+              mountPath: /tmp/default-config
+              readOnly: true
+            - name: default-strategies
+              mountPath: /tmp/default-strategies
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: freqtrade
+          image: "docker.io/freqtradeorg/freqtrade:2026.3"
+          args:
+            - "trade"
+            - "--config"
+            - "/freqtrade/config/config.json"
+          ports:
+            - containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8080
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          env:
+            - name: FT_CONFIG
+              value: "/freqtrade/config/config.json"
+            - name: FT_USERDATA_DIR
+              value: "/freqtrade/user_data"
+            - name: FT_CMD
+              value: "trade"
+            - name: DISABLE_TRADING
+              value: "1"
+            - name: DATA_DIR
+              value: "/data"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /freqtrade/config
+            - name: strategies-dir
+              mountPath: /freqtrade/user_data/strategies
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-spot'
+            type: DirectoryOrCreate
+        - name: config-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-spot/config'
+            type: DirectoryOrCreate
+        - name: strategies-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-spot/strategies'
+            type: DirectoryOrCreate
+        - name: default-config
+          configMap:
+            name: freqtrade-spot-config
+        - name: default-strategies
+          configMap:
+            name: freqtrade-strategy
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-spot
+  name: freqtrade-spot
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "http"
+      port: 8080
+      targetPort: 8080
+  selector:
+    io.kompose.service: freqtrade-spot
+status:
+  loadBalancer: {}
+
+---
+# Futures bot (same image, different config and port).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-future
+  name: freqtrade-future
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: freqtrade-future
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.service: freqtrade-future
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          env:
+            - name: CHART_USERSPACE_APPDATA
+              value: {{ .Values.userspace.appData | quote }}
+            - name: CHART_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+          command:
+            - sh
+            - "-c"
+            - |
+              echo "freqtrade-future init: userspace.appData=[${CHART_USERSPACE_APPDATA}] release=[${CHART_RELEASE_NAME}]"
+              mkdir -p /data /config /strategies
+              chown -R 1000:1000 /data /config /strategies
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+          securityContext:
+            runAsUser: 0
+        - name: init-seed-config-and-strategies
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              if [ ! -f /config/config.json ]; then cp /tmp/default-config/config.json /config/config.json; chown 1000:1000 /config/config.json; fi
+              if [ ! -f /strategies/Strategy001.py ]; then cp /tmp/default-strategies/Strategy001.py /strategies/Strategy001.py; chown 1000:1000 /strategies/Strategy001.py; fi
+          volumeMounts:
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+            - name: default-config
+              mountPath: /tmp/default-config
+              readOnly: true
+            - name: default-strategies
+              mountPath: /tmp/default-strategies
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: freqtrade
+          image: "docker.io/freqtradeorg/freqtrade:2026.3"
+          args:
+            - "trade"
+            - "--config"
+            - "/freqtrade/config/config.json"
+          ports:
+            - containerPort: 8081
+          startupProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8081
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8081
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          env:
+            - name: FT_CONFIG
+              value: "/freqtrade/config/config.json"
+            - name: FT_USERDATA_DIR
+              value: "/freqtrade/user_data"
+            - name: FT_CMD
+              value: "trade"
+            - name: DISABLE_TRADING
+              value: "1"
+            - name: DATA_DIR
+              value: "/data"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /freqtrade/config
+            - name: strategies-dir
+              mountPath: /freqtrade/user_data/strategies
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-future'
+            type: DirectoryOrCreate
+        - name: config-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-future/config'
+            type: DirectoryOrCreate
+        - name: strategies-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-future/strategies'
+            type: DirectoryOrCreate
+        - name: default-config
+          configMap:
+            name: freqtrade-future-config
+        - name: default-strategies
+          configMap:
+            name: freqtrade-strategy
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-future
+  name: freqtrade-future
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "http"
+      port: 8081
+      targetPort: 8081
+  selector:
+    io.kompose.service: freqtrade-future
+status:
+  loadBalancer: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-backtest
+  name: freqtrade-backtest
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: freqtrade-backtest
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.service: freqtrade-backtest
+    spec:
+      initContainers:
+        - name: init-chmod-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /data /config /strategies /freqtrade/user_data/data /freqtrade/user_data/logs /freqtrade/user_data/backtest_results
+              chown -R 1000:1000 /data /config /strategies /freqtrade/user_data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+            - name: candle-data
+              mountPath: /freqtrade/user_data/data
+          securityContext:
+            runAsUser: 0
+        - name: init-seed-config-and-strategies
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - "-c"
+            - |
+              if [ ! -f /config/config.json ]; then cp /tmp/default-config/config.json /config/config.json; chown 1000:1000 /config/config.json; fi
+              if [ ! -f /strategies/Strategy001.py ]; then cp /tmp/default-strategies/Strategy001.py /strategies/Strategy001.py; chown 1000:1000 /strategies/Strategy001.py; fi
+          volumeMounts:
+            - name: config-dir
+              mountPath: /config
+            - name: strategies-dir
+              mountPath: /strategies
+            - name: default-config
+              mountPath: /tmp/default-config
+              readOnly: true
+            - name: default-strategies
+              mountPath: /tmp/default-strategies
+              readOnly: true
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: freqtrade
+          image: "docker.io/freqtradeorg/freqtrade:2026.3"
+          args:
+            - webserver
+            - --config
+            - /freqtrade/config/config.json
+            - --logfile
+            - /freqtrade/user_data/logs/freqtrade-webserver.log
+          ports:
+            - containerPort: 8082
+          startupProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8082
+              scheme: HTTP
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /api/v1/ping
+              port: 8082
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 3Gi
+          env:
+            - name: FT_CONFIG
+              value: "/freqtrade/config/config.json"
+            - name: FT_USERDATA_DIR
+              value: "/freqtrade/user_data"
+            - name: DATA_DIR
+              value: "/data"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config-dir
+              mountPath: /freqtrade/config
+            - name: strategies-dir
+              mountPath: /freqtrade/user_data/strategies
+            - name: candle-data
+              mountPath: /freqtrade/user_data/data
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-backtest'
+            type: DirectoryOrCreate
+        - name: config-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-backtest/config'
+            type: DirectoryOrCreate
+        - name: strategies-dir
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-backtest/strategies'
+            type: DirectoryOrCreate
+        - name: candle-data
+          hostPath:
+            path: '{{ .Values.userspace.appData | default "" }}/freqtrade-backtest/data'
+            type: DirectoryOrCreate
+        - name: default-config
+          configMap:
+            name: freqtrade-backtest-config
+        - name: default-strategies
+          configMap:
+            name: freqtrade-strategy
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: freqtrade-backtest
+  name: freqtrade-backtest
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082
+  selector:
+    io.kompose.service: freqtrade-backtest
+status:
+  loadBalancer: {}
+
+
+

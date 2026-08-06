@@ -1,30 +1,39 @@
-olaresManifest.version: '0.9.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  nextcloudweb: 1
+  nextcloud: 1
 metadata:
   name: nextcloud
   description: The productivity platform that keeps you in control
-  icon: https://file.bttcdn.com/appstore/nextcloud/icon.png
+  icon: https://app.cdn.olares.com/appstore/nextcloud/icon2.png
   appid: nextcloud
-  version: '1.0.4'
+  version: '1.0.19'
   title: Nextcloud
   categories:
-  - Productivity
+  - Productivity_v112
+
 permission:
   appData: true
   appCache: true
   userData:
   - Home
+  externalData: true
 spec:
-  versionName: '31.0.4'  
+  versionName: '31.0.4'
+  featuredImage: https://app.cdn.olares.com/appstore/nextcloud/1.webp
   promoteImage:
-  - https://file.bttcdn.com/appstore/nextcloud/promote_image_1.jpg
-  - https://file.bttcdn.com/appstore/nextcloud/promote_image_2.jpg
-  - https://file.bttcdn.com/appstore/nextcloud/promote_image_3.jpg
+  - https://app.cdn.olares.com/appstore/nextcloud/1.webp
+  - https://app.cdn.olares.com/appstore/nextcloud/2.webp
+  - https://app.cdn.olares.com/appstore/nextcloud/3.webp
+  - https://app.cdn.olares.com/appstore/nextcloud/4.webp
   fullDescription: |
     Nextcloud puts your data at your fingertips, under your control.
     Store your documents, calendar, contacts and photos on a server at home, at one of our providers or in a data center you trust.
 
-    Why is this so awesome?
+    **Why is this so awesome?**
     - Access your Data You can store your files, contacts, calendars, conversations and more on a server of your choosing.
     - Sync your Data You keep your files, contacts, calendars, and more synchronized amongst your devices.
     - Share your Data …by giving others access to the stuff you want them to see or to collaborate with.
@@ -32,25 +41,19 @@ spec:
     - Security with our encryption mechanisms, HackerOne bounty program and two-factor authentication.
 
   upgradeDescription: |
-    Upgrade App Version to 31.0.4
-    
-    What's Changed
-    - [stable31] fix(taskprocessing): use the event for AppAPI to get list of AI providers by @backportbot in #52120
-    - [stable31] fix(dav): Really only run the chunk cleanup once by @backportbot in #52054
-    - [stable31] fix(files_sharing): fix share creation error handling by @backportbot in #52078
-    - [stable31] feat(bulk-upload): change the default to disabled as there are still some bugs present by @backportbot in #52123
-    - [stable31] fix(federation): Don't load the addressbook when resolving a cloud ID by @backportbot in #52068
-    - [stable31] ignore missing theming app by @ArtificialOwl in #52135
-    - [stable31] fix(ContextAgent): Do not translate the name ContextAgent by @backportbot in #52169
-    - build(deps): bump marked from 15.0.7 to 15.0.8 by @dependabot in #52155
-    - [stable31] chore(files_trashbin): Add user details in log from Trashbin by @backportbot in #51999
-    - [stable31] fix: Handle missing share providers when promoting reshares by @backportbot in #52043
-    - build(deps): bump @nextcloud/event-bus from 3.3.1 to 3.3.2 by @dependabot in #51348
-    - build(deps): bump dompurify from 3.2.4 to 3.2.5 by @dependabot in #51964
-    - [stable31] fix(files_sharing): rate limit share creation 20 times per 10 minutes by @backportbot in #52206
-    - [stable31] fix(files_sharing): Apply default password setting in SharingDetailsTab by @backportbot in #52208
+    Switch the reverse-proxy image from Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) to the official OpenResty image `openresty/openresty:1.29.2.5-bookworm-fat`.
 
-    View full release note at: https://github.com/nextcloud/server/releases/tag/v31.0.4
+    Align nginx config mounts and log paths with the official image layout (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), and drop Bitnami-specific `OPENRESTY_CONF_FILE` wiring.
+
+    v1.0.18: Move `POSTGRES_PASSWORD` and `NEXTCLOUD_ADMIN_PASSWORD` into Secret (`secretKeyRef`).
+
+    Fix update (v1.0.14)
+
+    What's Fixed
+    - Fix Calendar, Contacts, and other CalDAV/CardDAV features stuck loading or failing with errors such as `findAllCalendars` / `_extractAdvertisedDavFeatures`
+    - The reverse proxy no longer short-circuits OPTIONS requests for `/remote.php/dav/` and related API paths; DAV headers are now passed through from Nextcloud correctly
+
+    Note: Nextcloud version remains 31.0.4. No application upgrade in this release.
 
   developer: Nextcloud GmbH
   submitter: Olares
@@ -94,30 +97,42 @@ middleware:
     namespace: nextcloud
 options:
   allowedOutboundPorts:
-    - 465
-    - 587
-  analytics:
-    enabled: true
+  - 465
+  - 587
   dependencies:
   - name: olares
-    version: '>=1.10.1-0'
+    version: '>=1.12.6-0'
     type: system
   policies:
-    - uriRegex: ^/(/login)(/.*)?(\?.*)?$
-      level: one_factor
-      oneTime: false
-      validDuration: 3600s
-      entranceName: nextcloud
-    - uriRegex: ^/
-      level: public
-      oneTime: false
-      validDuration: 3600s
-      entranceName: nextcloud
+  - uriRegex: ^/(/login)(/.*)?(\?.*)?$
+    level: one_factor
+    oneTime: false
+    validDuration: 3600s
+    entranceName: nextcloud
+  - uriRegex: ^/
+    level: public
+    oneTime: false
+    validDuration: 3600s
+    entranceName: nextcloud
 entrances:
 - name: nextcloud
   port: 8080
   host: nextcloud-web
   title: Nextcloud
-  icon: https://file.bttcdn.com/appstore/nextcloud/icon.png
+  icon: https://app.cdn.olares.com/appstore/nextcloud/icon2.png
   openMethod: window
   authLevel: internal
+
+envs:
+- envName: NEXTCLOUD_ADMIN_USER
+  type: string
+  required: true
+  editable: false
+  description: "Username must be at least 3 characters long, contain only letters and numbers, and include at least one letter."
+  regex: '^(?=.*[a-zA-Z])[A-Za-z0-9]{3,}$'
+- envName: NEXTCLOUD_ADMIN_PASSWORD
+  type: password
+  required: true
+  editable: false
+  description: "Password must be at least 8 characters long, with at least one uppercase letter, one lowercase letter, one number and one special character"
+  regex: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[\-!@#$%^&*()_+={}\[\]:,.?~])[A-Za-z\d\-!@#$%^&*()_+={}\[\]:,.?~]{8,}$'

@@ -1,0 +1,126 @@
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deerflow
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deerflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deerflow
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deerflow
+    spec:
+      initContainers:
+        - name: copy-app-to-host
+          image: docker.io/beclab/harveyff-deerflow:v1.0.17
+          command:
+            - sh
+            - -c
+            - |
+                set -e
+                apt update && apt install -y rsync
+                mkdir -p /mnt/app
+
+                if [ ! -f /mnt/app/conf.yaml ]; then
+                  echo "HostPath /mnt/app is empty. Copying image /app to hostPath using rsync..."
+                  rsync -av --update /app/. /mnt/app/
+                else
+                  echo "HostPath /mnt/app already exists. Skipping full copy."
+                fi
+
+                if [ ! -f /mnt/app/conf.yaml ]; then
+                  echo "/mnt/app/conf.yaml missing. Initializing from example..."
+                  cp /app/conf.yaml.example /mnt/app/conf.yaml
+                fi
+
+                if [ -d /mnt/app/.env ]; then
+                  echo "/mnt/app/.env is a directory. Removing..."
+                  rm -rf /mnt/app/.env
+                fi
+
+                if [ ! -f /mnt/app/.env ]; then
+                  echo "/mnt/app/.env missing. Initializing from example..."
+                  cp /app/.env.example /mnt/app/.env
+                fi
+
+                echo "conf.yaml contents:"
+                [ -f /mnt/app/conf.yaml ] && cat /mnt/app/conf.yaml || echo "conf.yaml not found."
+
+                echo ".env contents:"
+                [ -f /mnt/app/.env ] && cat /mnt/app/.env || echo ".env not found."
+          volumeMounts:
+            - name: app-volume
+              mountPath: /mnt/app
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: deerflow
+          image: docker.io/beclab/harveyff-deerflow:v1.0.17
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          envFrom:
+            - configMapRef:
+                name: deerflow-config
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 2Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /root/.cache
+            - name: outputs
+              mountPath: /app/outputs
+            - name: logs
+              mountPath: /app/exps/logs
+            - name: app-volume
+              mountPath: /app
+      volumes:
+        - name: checkpoints
+          hostPath:
+            path: "{{ .Values.sharedlib }}/ai/{{ .Release.Name }}/checkpoints"
+            type: DirectoryOrCreate
+        - name: outputs
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/AI/output/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
+            type: DirectoryOrCreate
+        - name: app-volume
+          hostPath:
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/app{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/app{{ end }}'
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deerflow-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deerflow
+  ports:
+    - name: api
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

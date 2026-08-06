@@ -1,0 +1,158 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rnasequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rnasequencing
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.rnasequencing.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: rnasequencing
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: rnasequencing
+    spec:
+      initContainers:
+        - name: migrate-appcache-to-appdata
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SOURCE=/old-data
+              DEST=/new-data
+              MARKER="${DEST}/.migration_from_appcache_done"
+
+              if [ -f "$MARKER" ]; then
+                echo "[migrate] marker present, skip."
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_done$' || true)" ]; then
+                echo "[migrate] appData already has data, skip."
+                echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                exit 0
+              fi
+
+              if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+                echo "[migrate] copying appCache -> appData..."
+                cp -a "$SOURCE"/. "$DEST"/
+                echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+                echo "[migrate] done; legacy appCache left intact for rollback."
+              else
+                echo "[migrate] no legacy data, fresh install."
+                echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              fi
+          volumeMounts:
+            - name: rnasequencing-data-legacy
+              mountPath: /old-data
+              readOnly: true
+            - name: rnasequencing-data
+              mountPath: /new-data
+      containers:
+        - name: rnasequencing
+          image: docker.io/beclab/lovehunter9-rna-sequencing:v0.0.5
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: PARENT_DIR
+              value: "/home/rapids/notebooks/playbook"
+          readinessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /lab
+              port: {{ .Values.port | default 3000 }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 1900m
+              memory: 40Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 1000m
+              memory: 20Gi
+              nvidia.com/gpu: 1
+          securityContext:
+            privileged: true
+            capabilities:
+              add: [ "SYS_ADMIN" ]
+            runAsUser: 0
+            runAsGroup: 0
+          ports:
+            - containerPort: 8888
+            - containerPort: 8787
+            - containerPort: 8786
+            - containerPort: 8501
+            - containerPort: 8050
+          volumeMounts:
+            - name: rnasequencing-data
+              mountPath: /home/rapids/notebooks
+              subPath: notebooks
+            - name: rnasequencing-data
+              mountPath: /dev/shm
+              subPath: dshm
+      restartPolicy: Always
+      volumes:
+        - name: rnasequencing-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: rnasequencing-data-legacy
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appCache }}'
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rnasequencing
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rnasequencing
+spec:
+  ports:
+    - name: "{{ .Values.port | default 3000 }}"
+      port: {{ .Values.port | default 3000 }}
+      targetPort: {{ .Values.port | default 3000 }}
+      protocol: TCP
+    - name: dask-dashboard
+      protocol: TCP
+      port: 8787
+      targetPort: 8787
+    - name: dask-scheduler
+      protocol: TCP
+      port: 8786
+      targetPort: 8786
+    - name: streamlit
+      protocol: TCP
+      port: 8501
+      targetPort: 8501
+    - name: plotly-dash
+      protocol: TCP
+      port: 8050
+      targetPort: 8050
+  selector:
+    io.kompose.service: rnasequencing
+status:
+  loadBalancer: {}

@@ -1,0 +1,221 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openwebui-seed-scripts
+  namespace: "{{ .Release.Namespace }}"
+data:
+  seed_task_auto_gen.py: |
+    #!/usr/bin/env python3
+    """Best-effort Open WebUI defaults seed.
+
+    Sidecar loop so users created after pod start are still covered.
+    One-shot force Interface auto-gen defaults off per user, then only
+    fills missing keys. Title uses nested ui.title.auto.
+    """
+
+    from __future__ import annotations
+
+    import argparse
+    import json
+    import os
+    import sqlite3
+    import sys
+    import time
+    import traceback
+
+    DB_PATH = os.environ.get("WEBUI_DB_PATH", "/data/webui.db")
+    INTERVAL_SEC = max(5, int(os.environ.get("SEED_INTERVAL_SEC", "10")))
+    OLD_FORCE_MARKER = "/data/.olares_task_auto_gen_default_off_v1"
+    UNGATE_MARKER = "/data/.olares_task_auto_gen_admin_ungate_v1"
+    ADMIN_KEYS = (
+        "task.title.enable",
+        "task.follow_up.enable",
+        "task.tags.enable",
+    )
+
+
+    def log(msg: str) -> None:
+        print(f"seed-task-auto-gen: {msg}", flush=True)
+
+
+    def load_json(value, default):
+        if value is None:
+            return default
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="replace")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                return default
+        return value if isinstance(value, type(default)) else default
+
+
+    def dump_json(value) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+    def ensure_dict(value):
+        value = load_json(value, {})
+        return value if isinstance(value, dict) else {}
+
+
+    def ungate_admin_if_previously_forced(conn: sqlite3.Connection) -> None:
+        if os.path.exists(UNGATE_MARKER):
+            return
+        if not os.path.exists(OLD_FORCE_MARKER):
+            open(UNGATE_MARKER, "a").close()
+            return
+        rows = conn.execute(
+            "SELECT id, data FROM config ORDER BY id DESC LIMIT 1"
+        ).fetchall()
+        if not rows:
+            return
+        cfg_id, raw = rows[0]
+        data = ensure_dict(raw)
+        task = data.setdefault("task", {})
+        if not isinstance(task, dict):
+            return
+        changed = False
+        for key in ADMIN_KEYS:
+            parts = key.split(".")
+            cur = data
+            ok = True
+            for p in parts[:-1]:
+                if not isinstance(cur.get(p), dict):
+                    ok = False
+                    break
+                cur = cur[p]
+            if not ok:
+                continue
+            if cur.get(parts[-1]) is False:
+                cur[parts[-1]] = True
+                changed = True
+        if changed:
+            conn.execute(
+                "UPDATE config SET data = ? WHERE id = ?",
+                (dump_json(data), cfg_id),
+            )
+            conn.commit()
+            log("ungated admin task.*.enable (were forced false by older chart)")
+        open(UNGATE_MARKER, "a").close()
+
+
+    def seed_user_ui_defaults(conn: sqlite3.Connection) -> tuple[int, int]:
+        """Returns (updated_count, user_count)."""
+        try:
+            users = conn.execute("SELECT id, settings FROM user").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                return 0, 0
+            raise
+        # v2: one-shot force false for the three Interface toggles, then only
+        # fill missing keys. Needed because the frontend defaults missing
+        # title.auto to true and can persist that before/after our first seed
+        # (so "never overwrite" alone leaves title stuck on).
+        SEED_MARK = "olaresTaskUiDefaults"
+        SEED_VER = 2
+
+        updated = 0
+        for uid, settings_raw in users:
+            settings = ensure_dict(settings_raw)
+            ui = settings.get("ui")
+            if not isinstance(ui, dict):
+                ui = {}
+                settings["ui"] = ui
+            changed = False
+
+            # Drop mistaken flat key from older seed script.
+            if "title.auto" in ui:
+                ui.pop("title.auto", None)
+                changed = True
+
+            title = ui.get("title")
+            if not isinstance(title, dict):
+                title = {}
+                ui["title"] = title
+
+            marked = ui.get(SEED_MARK) == SEED_VER
+            if not marked:
+                # One-shot: force defaults off even if frontend already wrote true.
+                title["auto"] = False
+                ui["autoFollowUps"] = False
+                ui["autoTags"] = False
+                ui[SEED_MARK] = SEED_VER
+                changed = True
+                log(f"one-shot force Interface auto-gen defaults off for {uid}")
+            else:
+                # After the one-shot, only fill missing keys; never overwrite.
+                if "auto" not in title:
+                    title["auto"] = False
+                    changed = True
+                for key in ("autoFollowUps", "autoTags"):
+                    if key not in ui:
+                        ui[key] = False
+                        changed = True
+
+            if not changed:
+                continue
+            conn.execute(
+                "UPDATE user SET settings = ? WHERE id = ?",
+                (json.dumps(settings), uid),
+            )
+            updated += 1
+            log(f"seeded user.settings.ui defaults for {uid}")
+        if updated:
+            conn.commit()
+        return updated, len(users)
+
+
+    def tick() -> None:
+        if not os.path.exists(DB_PATH):
+            log(f"{DB_PATH} not found yet; retrying later")
+            return
+
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            ungate_admin_if_previously_forced(conn)
+            updated, _user_count = seed_user_ui_defaults(conn)
+            if updated:
+                log(f"user ui seed applied; updated={updated}")
+        finally:
+            conn.close()
+
+
+    def main() -> int:
+        parser = argparse.ArgumentParser()
+        parser.add_argument(
+            "--loop",
+            action="store_true",
+            help="run forever as a sidecar (default for chart)",
+        )
+        args = parser.parse_args()
+
+        if not args.loop:
+            try:
+                tick()
+            except Exception:
+                traceback.print_exc()
+                log("best-effort one-shot failed; exiting 0")
+            return 0
+
+        log(f"sidecar loop starting; interval={INTERVAL_SEC}s")
+        while True:
+            try:
+                tick()
+            except Exception:
+                traceback.print_exc()
+                log("best-effort tick failed; will retry")
+            time.sleep(INTERVAL_SEC)
+
+
+    if __name__ == "__main__":
+        try:
+            raise SystemExit(main())
+        except SystemExit:
+            raise
+        except Exception:
+            traceback.print_exc()
+            log("fatal unexpected error; exiting 0 so the pod is not blocked")
+            raise SystemExit(0)

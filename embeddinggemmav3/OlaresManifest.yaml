@@ -1,0 +1,154 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: embeddinggemmav3
+  icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+  description: "EmbeddingGemma-300M text embeddings via IREmbeddingServer (OpenVINO / ONNX)"
+  appid: embeddinggemmav3
+  title: EmbeddingGemma
+  version: '1.0.11'
+  categories:
+    - AI
+sharedEntrances:
+  - name: embeddinggemmav3
+    host: sharedentrances-api
+    port: 0
+    title: EmbeddingGemma API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+entrances:
+  - name: embedclient
+    port: 8090
+    host: download-svc
+    title: EmbeddingGemma
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+    openMethod: window
+    authLevel: internal
+  - name: embedapi
+    port: 8090
+    host: download-svc
+    title: EmbeddingGemma API
+    icon: https://app.cdn.olares.com/appstore/embeddinggemmav3/icon.png
+    invisible: true
+    openMethod: window
+    authLevel: internal
+#   embeddinggemmav3 — embed-server engine Deployment (== appid / Release.Name)
+#   llminit            — llm-init (ENGINE_KIND=embed): download + API proxy
+workloadReplicas:
+  embeddinggemmav3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: '0.1.0'
+  fullDescription: |
+    **EmbeddingGemma-300M** text embedding service powered by IREmbeddingServer. Serves OpenAI-compatible `/v1/embeddings` and `/v1/models` on port 8080.
+
+    **Accelerator modes**
+    | Olares mode | Image | Backend | `EMBED_DEVICE` |
+    |-------------|-------|---------|----------------|
+    | `intel` | `embed-server:v0.1.0-ov-intel` | OpenVINO IR | `igpu` |
+    | `cpu` | `embed-server:v0.1.0-onnx-cpu` | ONNX CPU EP | `cpu` |
+    | `nvidia` | `embed-server:v0.1.0-onnx-cuda12/13` | ONNX CUDA EP | `cuda` |
+    | `nvidia-gb10` | `embed-server:v0.1.0-onnx-cuda13-gb10-arm64` | ONNX CUDA EP | `cuda` |
+
+    **Model download**
+    On first start, llm-init downloads from the unified Hugging Face repo into App Common cache (`appCommon/huggingface` → `/cache/hf/hub`):
+    - [beclab/embeddinggemma-300m](https://huggingface.co/beclab/embeddinggemma-300m)
+    - `intel` mode: `openvino/` subdirectory only
+    - All other modes: `onnx/` subdirectory only
+
+    **Device mounts**
+    - `intel`: `/dev/dri`, `/sys/class/drm` for Intel iGPU stack
+    - `nvidia` / `nvidia-gb10`: GPU injection via Olares scheduler
+
+    **Stack**
+    - **embed-server** (`beclab/embed-server:v0.1.0`, port 8080): Rust embedding inference (internal; reached as `http://embed:8080`).
+    - **llm-init** (`beclab/llm-init:test_v1`, `ENGINE_KIND=embed`, port 8090): model download, progress UI, and OpenAI API proxy (`/v1/embeddings`, `/v1/models`).
+      Use **embedclient** for download UI; **embedapi** / shared entrance hit llm-init proxy on port 8090.
+
+  developer: beclab
+  website: https://huggingface.co/google/embeddinggemma-300m
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+  license:
+    - text: Gemma
+      url: https://huggingface.co/google/embeddinggemma-300m
+
+  accelerator:
+    - mode: cpu
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+    - mode: nvidia
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+      requiredGPUMemory: 2048Mi
+      limitedGPUMemory: 4096Mi
+    - mode: nvidia-gb10
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 4Gi
+      limitedMemory: 8Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+    - mode: intel
+      requiredCpu: 400m
+      limitedCpu: "6"
+      requiredMemory: 3Gi
+      limitedMemory: 5Gi
+      requiredDisk: 3Gi
+      limitedDisk: 50Gi
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  allowMultipleInstall: true
+  LLMGatewaySupported: true
+  shared: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+envs:
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error

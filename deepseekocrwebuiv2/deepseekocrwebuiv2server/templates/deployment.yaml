@@ -1,0 +1,101 @@
+{{- $isNewVersion := and .Values.sysVersion (semverCompare ">=1.12.3-0" (toString .Values.sysVersion)) -}}
+{{- $modelPath := "/app/models" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deepseekocrwebuiv2
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: deepseekocrwebuiv2
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "deepseekocrwebuiv2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: deepseekocrwebuiv2
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deepseekocrwebuiv2
+    spec:
+      containers:
+        - name: deepseekocrwebuiv2
+          image: "docker.io/beclab/harveyff-deepseekocr-webui:v2.0.3"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              DONE_FILE="{{ $modelPath }}/.DeepSeek-OCR-2.done"
+              echo "[ocr-wait] Waiting for model download: $DONE_FILE ..."
+              while [ ! -f "$DONE_FILE" ]; do
+                echo "[ocr-wait] Model not ready, sleeping..."
+                sleep 10
+              done
+              echo "[ocr-wait] Model ready, starting OCR service."
+              python web_service_unified.py
+          ports:
+            - containerPort: 8001
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: "Etc/UTC"
+            - name: HF_ENDPOINT
+              value: "{{ .Values.olaresEnv.OLARES_USER_HUGGINGFACE_SERVICE }}"
+            - name: LOCAL_MODEL_PATH
+              value: "{{ $modelPath }}"
+            - name: HF_HOME
+              value: "{{ $modelPath }}"
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "0"
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0"
+            - name: GPU_IDLE_TIMEOUT
+              value: "60"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: SHM_SIZE
+              value: 8G
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 5Gi
+            limits:
+              cpu: "4"
+              memory: 20Gi
+          volumeMounts:
+            - name: models
+              mountPath: {{ $modelPath }}
+            - name: logs
+              mountPath: /app/log
+      volumes:
+        - name: models
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/{{ .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: logs
+          hostPath:
+            path: '{{ if $isNewVersion }}{{ .Values.userspace.appCache }}/logs{{ else }}{{ .Values.userspace.appCache }}/{{ .Release.Name }}/logs{{ end }}'
+            type: DirectoryOrCreate
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseekocrwebuiv2-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: deepseekocrwebuiv2
+  ports:
+    - name: api
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP

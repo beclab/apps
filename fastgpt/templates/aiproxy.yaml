@@ -1,4 +1,4 @@
----
+﻿---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,10 +7,12 @@ metadata:
   labels:
     app: aiproxy
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.aiproxy.replicaCount }}
   selector:
     matchLabels:
       app: aiproxy
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
@@ -18,14 +20,20 @@ spec:
     spec:
       containers:
         - name: aiproxy
-          image: registry.cn-hangzhou.aliyuncs.com/labring/aiproxy:v0.1.3
+          image: "docker.io/beclab/labring-aiproxy:v0.5.3"
           env:
             - name: ADMIN_KEY
-              value: "aiproxy"
+              valueFrom:
+                secretKeyRef:
+                  name: fastgpt-secrets
+                  key: ADMIN_KEY
             - name: LOG_DETAIL_STORAGE_HOURS
               value: "1"
             - name: SQL_DSN
-              value: "postgres://postgres:aiproxy@localhost:5432/aiproxy"
+              valueFrom:
+                secretKeyRef:
+                  name: fastgpt-secrets
+                  key: SQL_DSN
             - name: RETRY_TIMES
               value: "3"
             - name: BILLING_ENABLED
@@ -43,7 +51,7 @@ spec:
               memory: "500Mi"
 
         - name: aiproxy-pg
-          image: registry.cn-hangzhou.aliyuncs.com/fastgpt/pgvector:v0.8.0-pg15
+          image: "docker.io/beclab/pgvector-pgvector:0.8.0-pg15"
           env:
             - name: TZ
               value: "Asia/Shanghai"
@@ -52,7 +60,10 @@ spec:
             - name: POSTGRES_DB
               value: "aiproxy"
             - name: POSTGRES_PASSWORD
-              value: "aiproxy"
+              valueFrom:
+                secretKeyRef:
+                  name: fastgpt-secrets
+                  key: AIPROXY_POSTGRES_PASSWORD
           ports:
             - containerPort: 5432
           volumeMounts:
@@ -68,7 +79,7 @@ spec:
       volumes:
         - name: pg-data
           hostPath:
-            path: "{{ .Values.userspace.appData }}/fastgpt/aiproxy/pg"
+            path: "{{ .Values.userspace.appData }}/aiproxy/pg"
             type: DirectoryOrCreate
 
 ---

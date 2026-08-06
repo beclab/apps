@@ -1,27 +1,32 @@
-olaresManifest.version: '0.9.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  steamheadless: 1
 metadata:
   name: steamheadless
   description: A Headless Steam Service
-  icon: https://file.bttcdn.com/appstore/steamheadless/icon.png
+  icon: https://app.cdn.olares.com/appstore/steamheadless/icon.png
   appid: steamheadless
-  version: '1.0.10'
+  version: '1.0.36'
   title: Steam Headless
   categories:
-  - Entertainment
+  - Fun
+
 entrances:
 - name: steamheadless
   host: steamheadless
   port: 8083
   title: Steam Headless
-  icon: https://file.bttcdn.com/appstore/steamheadless/icon.png
+  icon: https://app.cdn.olares.com/appstore/steamheadless/icon.png
   authLevel: private
   openMethod: window
 - name: sunshineweb
   host: sunshineweb
   port: 47990
   title: Sunshine Web
-  icon: https://docs.lizardbyte.dev/projects/sunshine/en/latest/_static/sunshine.png
+  icon: https://app.cdn.olares.com/appstore/steamheadless/sunshine.webp
   authLevel: private
   openMethod: window
   invisible: true
@@ -29,7 +34,7 @@ entrances:
   host: steamheadlessaudio
   port: 8088
   title: Steam Audio
-  icon: https://file.bttcdn.com/appstore/steamheadless/icon.png
+  icon: https://app.cdn.olares.com/appstore/steamheadless/icon.png
   authLevel: internal
   openMethod: window
   invisible: true
@@ -83,11 +88,13 @@ tailscale:
     dst:
     - "*:47998,47999,48000,48002"    
 permission:
-  appData: true
   appCache: true
 spec:
   versionName: '0.2.0'
-  featuredImage: https://file.bttcdn.com/appstore/steamheadless/banner.jpg
+  featuredImage: https://app.cdn.olares.com/appstore/steamheadless/1.webp
+  promoteImage:
+  - https://app.cdn.olares.com/appstore/steamheadless/1.webp
+  - https://app.cdn.olares.com/appstore/steamheadless/2.webp
   fullDescription: |
     Steam Headless is a Remote Game Streaming Server.
 
@@ -95,7 +102,7 @@ spec:
 
     Easily deploy a Steam Docker instance in seconds.
 
-    Features:
+    **Features**
     Steam Client configured for running on Linux with Proton
     Moonlight compatible server for easy remote desktop streaming
     One click installation of EmeDeck, Heroic and Lutris
@@ -106,8 +113,13 @@ spec:
     Root access
     Based on Debian Bookworm
   upgradeDescription: |
+    v1.0.36: Keep durable volumes on `appCache` (no appData migration); require control-plane (master) affinity; move `SUNSHINE_PASS` into Secret (`secretKeyRef`).
+
+    Storage: durable volumes c0/c1 moved from `appCache` to `appData`. On first start after upgrade, initContainers copy legacy appCache contents into appData when the destination is empty (markers: `.migration_from_appcache_c0_done`, `.migration_from_appcache_c1_done`). Old appCache data is left intact for rollback.
+
     Update Chart Config
-    - Fix GPU Hami compatibility
+    - Fix Moonlight auto discovery when change ip
+
   developer: Steam-Headless
   sourceCode: https://github.com/Steam-Headless/docker-steam-headless
   submitter: Olares
@@ -119,15 +131,29 @@ spec:
   limitedMemory: 64Gi
   requiredDisk: 1Gi
   limitedDisk: 10Gi
-  requiredCpu: 2
-  limitedCpu: 8
+  requiredCpu: 4
+  limitedCpu: 18
   requiredGpu: 4Gi
   limitedGpu: 16Gi
   supportArch:
   - amd64
 options:
   apiTimeout: 0
+  conflicts:
+  - name: isaaclab
+    type: application
   dependencies:
   - name: olares
     type: system
-    version: '>=1.11.6-0'
+    version: '>=1.12.6-0'
+envs:
+  - envName: SUNSHINE_USER
+    required: true
+    type: string
+    editable: false
+    regex: '^[\w]{1,}$'
+  - envName: SUNSHINE_PASS
+    required: true
+    type: password
+    editable: false
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{1,}$'

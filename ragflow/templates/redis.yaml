@@ -1,30 +1,69 @@
-apiVersion: apps/v1
+﻿apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
   namespace: {{ .Release.Namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.workloads.redis.replicaCount }}
   selector:
     matchLabels:
       app: redis
+  strategy:
+    type: Recreate         
   template:
     metadata:
       labels:
         app: redis
     spec:
       initContainers:
+      - name: migrate-appcache-to-appdata
+        image: "docker.io/beclab/busybox:1.37"
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -e
+            SOURCE=/old-data
+            DEST=/new-data
+            MARKER="${DEST}/.migration_from_appcache_redis_done"
+
+            if [ -f "$MARKER" ]; then
+              echo "[migrate] marker present, skip."
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$DEST" 2>/dev/null | grep -v '^\.migration_from_appcache_redis_done$' || true)" ]; then
+              echo "[migrate] appData already has data, skip."
+              echo "skipped existing dest at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              exit 0
+            fi
+
+            if [ -n "$(ls -A "$SOURCE" 2>/dev/null || true)" ]; then
+              echo "[migrate] copying appCache/redis -> appData/redis..."
+              cp -a "$SOURCE"/. "$DEST"/
+              echo "migrated from appCache at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[migrate] done; legacy appCache left intact for rollback."
+            else
+              echo "[migrate] no legacy data, fresh install."
+              echo "fresh install at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+            fi
+        volumeMounts:
+          - name: redis-data-legacy
+            mountPath: /old-data
+            readOnly: true
+          - name: redis-data
+            mountPath: /new-data
       - name: init-chmod-data
-        image: 'docker.io/aboveos/busybox:latest'
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /appcache
+            chown -R 1000:1000 /data
         resources: {}
         volumeMounts:
-          - name:  appcache
-            mountPath: /appcache
+          - name: redis-data
+            mountPath: /data
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
         imagePullPolicy: IfNotPresent
@@ -32,8 +71,14 @@ spec:
           runAsUser: 0
       containers:
       - name: redis
-        image: valkey/valkey:8
-        command: ["redis-server", "--requirepass", "infini_rag_flow", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+        image: "docker.io/beclab/valkey-valkey:8"
+        command: ["sh", "-c", "redis-server --requirepass \"$REDIS_PASSWORD\" --maxmemory 128mb --maxmemory-policy allkeys-lru"]
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: REDIS_PASSWORD
         ports:
         - containerPort: 6379
         volumeMounts:
@@ -48,13 +93,13 @@ spec:
             memory: 512Mi
       volumes:
       - hostPath:
-          path: '{{ .Values.userspace.appCache }}/ragflow'
-          type: DirectoryOrCreate
-        name: appcache
-      - hostPath:
-          path: '{{ .Values.userspace.appCache }}/ragflow/redis'
+          path: '{{ .Values.userspace.appData }}/redis'
           type: DirectoryOrCreate
         name: redis-data
+      - hostPath:
+          path: '{{ .Values.userspace.appCache }}/redis'
+          type: DirectoryOrCreate
+        name: redis-data-legacy
 ---
 apiVersion: v1
 kind: Service

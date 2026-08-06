@@ -1,0 +1,504 @@
+# Single supervised runtime container (gateway + dashboard + terminal) + init
+# containers, sharing /opt/data (hostPath). Upstream deprecated the multi-
+# container split (gateway/dashboard separate): dashboard gateway-liveness needs
+# a SHARED PID namespace with the gateway, which K8s can only provide via
+# shareProcessNamespace -- and that breaks s6-overlay (it hard-fails unless it is
+# PID 1). So the supported layout is ONE container: `gateway run` auto-redirects
+# to s6 supervision (auto-restart on crash) and HERMES_DASHBOARD=1 supervises the
+# dashboard alongside it; the Olares terminal exec's into the SAME s6 tree, so
+# the dashboard/Channels/Profiles AND `hermes gateway start/stop/restart` all see
+# and control the real gateway. The `gateway run` CMD becomes a `sleep infinity`
+# heartbeat, so the container stays up (CLI recovery possible) even if the gateway
+# crash-loops.
+#
+# Dashboard auth: Hermes v0.18+ requires auth on non-loopback binds. We bind the
+# dashboard to 127.0.0.1:19119 (no Hermes auth gate) and expose :9119 via an
+# nginx sidecar; Olares entrance authLevel: internal is the sole gate.
+#
+# The s6-overlay v3 image MUST start as root (s6 chowns /run + /opt/data, then
+# s6-setuidgid-drops to hermes); pinning runAsUser breaks that drop, so we start
+# root and let s6 drop to hermes. The custom image bakes hermes at UID/GID 1000
+# (= Olares user-data owner), so no HERMES_UID/GID override is needed: stage2's
+# build-tree chown is a no-op (no overlayfs copy-up on boot) and the runtime
+# identity (1000) can write the Olares user-data mounts.
+#
+# Opt-in Python deps (Feishu, Honcho, Firecrawl, …): rely on upstream
+# HERMES_LAZY_INSTALL_TARGET=/opt/data/lazy-packages (baked in the hermes
+# image). Chart only sets HERMES_HOME=/opt/data; no init-time pip overlays.
+#
+# /opt/hermes is an immutable install tree (read-only). Node/npm writes there
+# fail with EACCES by design. Per upstream Docker guidance, all mutable state
+# goes to /opt/data: we point npm's global prefix at /opt/data/npm-global
+# (NPM_CONFIG_PREFIX) so `npm install -g` and `npx` work and persist, and add
+# that prefix bin to PATH. Local `npm install` works from any writable cwd
+# (e.g. HOME=/opt/data). We do NOT mount over or re-open /opt/hermes.
+{{- $hermesImage := "beclab/harveyff-hermes-agent:v2026.7.30-uid1000" -}}
+{{- $oe := .Values.olaresEnv | default dict }}
+---
+# Loopback dashboard (no Hermes auth gate) + nginx sidecar on :9119.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermesagent-dashboard-proxy
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: hermesagent
+data:
+  nginx.conf: |
+    events {
+      worker_connections 1024;
+    }
+
+    http {
+      upstream hermes-dashboard {
+        server 127.0.0.1:19119;
+      }
+
+      map $http_upgrade $connection_upgrade {
+        default upgrade;
+        '' close;
+      }
+
+      server {
+        listen 9119;
+        server_name _;
+
+        client_max_body_size 100m;
+        proxy_connect_timeout 60s;
+
+        location / {
+          proxy_pass http://hermes-dashboard;
+          proxy_http_version 1.1;
+          # Loopback dashboard only accepts loopback Host/Origin (GHSA-ppp5-vxwm-4cf7).
+          proxy_set_header Host 127.0.0.1:19119;
+          proxy_set_header Origin "http://127.0.0.1:19119";
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $connection_upgrade;
+          proxy_buffering off;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: hermesagent
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  replicas: {{ .Values.workloads.hermesagent.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: hermesagent
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: hermesagent
+        bytetrade.io/terminal: hermesagent
+    spec:
+      # Do NOT set runAsUser (breaks s6's drop); fsGroup keeps volumes at gid 1000.
+      securityContext:
+        fsGroup: 1000
+
+      initContainers:
+        # Chown /opt/data to 1000 before runtime (hostPath may start root-owned).
+        - name: init-chmod-data
+          image: "beclab/aboveos-busybox:1.37.0"
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command:
+            - sh
+            - "-c"
+            - |
+              mkdir -p /opt/data/.olares-cli/data
+              # Writable npm global prefix on the data volume (npm install -g / npx).
+              mkdir -p /opt/data/npm-global/lib/node_modules /opt/data/npm-global/bin
+              chown -R 1000:1000 /opt/data || true
+              chmod -R u+rwX,g+rwX /opt/data || true
+              # Hook interactive shells into drop-to-hermes (kubectl exec is root).
+              MARKER="# hermesagent: drop-to-hermes"
+              for rc in /opt/data/.bashrc /opt/data/.profile; do
+                if [ ! -f "$rc" ] || ! grep -qF "$MARKER" "$rc" 2>/dev/null; then
+                  {
+                    echo ""
+                    echo "$MARKER"
+                    echo '[ -f /etc/profile.d/99-drop-to-hermes.sh ] && . /etc/profile.d/99-drop-to-hermes.sh'
+                  } >> "$rc"
+                fi
+              done
+              # Keep brew + hermes + npm-global on PATH after bash -l resets profile.
+              PATH_MARKER="# hermesagent: brew-path"
+              for rc in /opt/data/.bashrc /opt/data/.profile; do
+                if ! grep -qF "$PATH_MARKER" "$rc" 2>/dev/null; then
+                  {
+                    echo ""
+                    echo "$PATH_MARKER"
+                    echo 'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"'
+                    echo 'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"'
+                    echo 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/opt/data/npm-global}"'
+                    echo 'export NODE_PATH="${NODE_PATH:-/opt/data/npm-global/lib/node_modules:/opt/data/node_modules}"'
+                    echo 'export PATH="/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+                  } >> "$rc"
+                fi
+              done
+              chown 1000:1000 /opt/data/.bashrc /opt/data/.profile 2>/dev/null || true
+              echo "[init] /opt/data ready (owner=1000:1000, .olares-cli seeded)"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # Materialize Linuxbrew + olares-cli + CLI shims onto the brew-volume.
+        - name: init-install-brew
+          image: "beclab/harveyff-openclaw-brew-base:2026.7.6-cli"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -uo pipefail
+              if [ ! -d /brew-staging/.linuxbrew ]; then
+                echo "[init-brew] FATAL: /brew-staging/.linuxbrew missing"
+                exit 1
+              fi
+              mkdir -p /home/linuxbrew/.linuxbrew
+              if cmp -s /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build 2>/dev/null; then
+                echo "[init-brew] brew base up to date"
+              else
+                echo "[init-brew] materializing brew base..."
+                cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
+              fi
+
+              # drop-to-hermes: interactive root kubectl exec re-execs as hermes (1000).
+              printf '%s\n' \
+                '#!/bin/sh' \
+                '# Olares: drop interactive root shells to hermes (UID 1000).' \
+                '[ "${_HERMES_DROP_TO_HERMES:-}" = 1 ] && return 0' \
+                '[ "$(id -u)" != 0 ] && return 0' \
+                'case "$-" in *i*) ;; *) [ -z "${PS1:-}" ] && return 0 ;; esac' \
+                'S6_SUID=/command/s6-setuidgid' \
+                '[ -x "$S6_SUID" ] || return 0' \
+                'export _HERMES_DROP_TO_HERMES=1' \
+                'export HOME=/opt/data' \
+                'export OLARES_CLI_HOME="${OLARES_CLI_HOME:-/opt/data/.olares-cli}"' \
+                'export OLARES_CLI_DATA_DIR="${OLARES_CLI_DATA_DIR:-/opt/data/.olares-cli/data}"' \
+                'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"' \
+                'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"' \
+                'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/opt/data/npm-global}"' \
+                'export NODE_PATH="${NODE_PATH:-/opt/data/npm-global/lib/node_modules:/opt/data/node_modules}"' \
+                'export PATH="/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+                'DROP_SHELL=/bin/bash' \
+                '[ -x "$DROP_SHELL" ] || DROP_SHELL=/bin/sh' \
+                'exec "$S6_SUID" hermes "$DROP_SHELL" -l' \
+                > /cli-bin/drop-to-hermes
+              chmod 0755 /cli-bin/drop-to-hermes
+
+              chown -R 1000:1000 /home/linuxbrew || true
+              echo "[init-brew] done"
+          resources: {}
+          volumeMounts:
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /cli-bin
+              name: cli-bin
+
+        # Flatten olares-* skills from the brew-base image (/skills-staging) into
+        # /opt/data/skills (per-dir refresh; skipped if /skills-staging absent).
+        - name: init-skills
+          image: "beclab/harveyff-openclaw-brew-base:2026.7.6-cli"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              if [ ! -d /skills-staging ]; then
+                echo "[init-skills] /skills-staging not in image; skipping (rebuild brew-base with skills to enable)"
+                exit 0
+              fi
+              mkdir -p /opt/data/skills
+              chown 1000:1000 /opt/data/skills || true
+              for d in /skills-staging/*/; do
+                name="$(basename "$d")"
+                rm -rf "/opt/data/skills/$name"
+                cp -a "$d" "/opt/data/skills/$name"
+                chown -R 1000:1000 "/opt/data/skills/$name"
+              done
+              echo "[init-skills] Olares skills flattened into /opt/data/skills:"
+              ls -1 /skills-staging
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+      containers:
+        # Single supervised runtime: `gateway run` registers the s6 slot,
+        # supervises the gateway (auto-restart on crash), and sleeps as the
+        # container heartbeat; HERMES_DASHBOARD=1 supervises the dashboard in
+        # the same PID namespace so Channels/Profiles/Terminal all see the
+        # real gateway and `hermes gateway start/stop/restart` works natively.
+        - name: hermesagent
+          image: "{{ $hermesImage }}"
+          imagePullPolicy: IfNotPresent
+          # Image ENTRYPOINT should be /init + main-wrapper; only override CMD.
+          args:
+            - gateway
+            - run
+          ports:
+            - name: dashboard
+              containerPort: 19119
+              protocol: TCP
+            - name: gateway
+              containerPort: 8642
+              protocol: TCP
+          env:
+            - name: TERM
+              value: xterm-256color
+            - name: HOME
+              value: /opt/data
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_DASHBOARD
+              value: "1"
+            # Loopback bind: Hermes skips dashboard auth gate; nginx sidecar
+            # exposes :9119 to the pod network for Olares internal entrance.
+            - name: HERMES_DASHBOARD_HOST
+              value: "127.0.0.1"
+            - name: HERMES_DASHBOARD_PORT
+              value: "19119"
+            - name: HOMEBREW_PREFIX
+              value: /home/linuxbrew/.linuxbrew
+            - name: HOMEBREW_NO_AUTO_UPDATE
+              value: "1"
+            - name: NPM_CONFIG_PREFIX
+              value: /opt/data/npm-global
+            - name: NODE_PATH
+              value: /opt/data/npm-global/lib/node_modules:/opt/data/node_modules
+            - name: PATH
+              value: "/opt/data/npm-global/bin:/opt/hermes/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/opt/hermes/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            - name: OLARES_CLI_HOME
+              value: /opt/data/.olares-cli
+            - name: OLARES_CLI_DATA_DIR
+              value: /opt/data/.olares-cli/data
+            # dash reads $ENV before interactive input (kubectl exec sh).
+            - name: ENV
+              value: /etc/profile.d/99-drop-to-hermes.sh
+            # API server binds 0.0.0.0:8642 only when enabled AND a key is set.
+            {{- $apiEnabled := eq (toString (index $oe "API_SERVER_ENABLED")) "true" }}
+            {{- $apiKey := index $oe "HERMES_API_SERVER_KEY" | default "" }}
+            {{- if and $apiEnabled $apiKey }}
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: "0.0.0.0"
+            - name: API_SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermesagent-secrets
+                  key: API_SERVER_KEY
+            {{- $cors := index $oe "API_SERVER_CORS_ORIGINS" | default "" }}
+            {{- if $cors }}
+            - name: API_SERVER_CORS_ORIGINS
+              value: {{ $cors | quote }}
+            {{- end }}
+            {{- $modelName := index $oe "API_SERVER_MODEL_NAME" | default "" }}
+            {{- if $modelName }}
+            - name: API_SERVER_MODEL_NAME
+              value: {{ $modelName | quote }}
+            {{- end }}
+            {{- end }}
+            # Optional provider keys from Olares user settings (Settings → Integration).
+            {{- $openai := index $oe "OPENAI_API_KEY" | default "" }}
+            {{- if $openai }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermesagent-secrets
+                  key: OPENAI_API_KEY
+            {{- end }}
+            {{- $anthropic := index $oe "ANTHROPIC_API_KEY" | default "" }}
+            {{- if $anthropic }}
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermesagent-secrets
+                  key: ANTHROPIC_API_KEY
+            {{- end }}
+            # Messaging allowlists (v0.19 still warns without these on gateways).
+            {{- if eq (toString (index $oe "GATEWAY_ALLOW_ALL_USERS" | default "false")) "true" }}
+            - name: GATEWAY_ALLOW_ALL_USERS
+              value: "true"
+            {{- end }}
+            {{- $gwUsers := index $oe "GATEWAY_ALLOWED_USERS" | default "" }}
+            {{- if $gwUsers }}
+            - name: GATEWAY_ALLOWED_USERS
+              value: {{ $gwUsers | quote }}
+            {{- end }}
+            {{- $tgUsers := index $oe "TELEGRAM_ALLOWED_USERS" | default "" }}
+            {{- if $tgUsers }}
+            - name: TELEGRAM_ALLOWED_USERS
+              value: {{ $tgUsers | quote }}
+            {{- end }}
+            {{- $dcUsers := index $oe "DISCORD_ALLOWED_USERS" | default "" }}
+            {{- if $dcUsers }}
+            - name: DISCORD_ALLOWED_USERS
+              value: {{ $dcUsers | quote }}
+            {{- end }}
+            # Cron + busy-input (Quicksilver / v0.19).
+            - name: HERMES_CRON_TIMEOUT
+              value: {{ index $oe "HERMES_CRON_TIMEOUT" | default "600" | quote }}
+            - name: HERMES_CRON_MAX_PARALLEL
+              value: {{ index $oe "HERMES_CRON_MAX_PARALLEL" | default "4" | quote }}
+            - name: HERMES_GATEWAY_BUSY_INPUT_MODE
+              value: {{ index $oe "HERMES_GATEWAY_BUSY_INPUT_MODE" | default "queue" | quote }}
+            - name: HERMES_GATEWAY_BUSY_ACK_ENABLED
+              value: {{ index $oe "HERMES_GATEWAY_BUSY_ACK_ENABLED" | default "true" | quote }}
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "test -d /opt/data"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket:
+              port: 19119
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "8"
+              memory: 20Gi
+            requests:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+            - mountPath: /home/linuxbrew
+              name: brew-volume
+            - mountPath: /dev/shm
+              name: dshm
+            - mountPath: /etc/profile.d/99-drop-to-hermes.sh
+              name: cli-bin
+              subPath: drop-to-hermes
+              readOnly: true
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/home/
+              name: olares-home-dir
+            {{- end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - mountPath: /home/userdata/external/
+              name: olares-external-dir
+            {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+
+        # TCP/HTTP proxy: pod :9119 → loopback dashboard :19119 (shared net ns).
+        - name: dashboard-proxy
+          image: "docker.io/beclab/aboveos-nginx:1.27.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: dashboard
+              containerPort: 9119
+              protocol: TCP
+          volumeMounts:
+            - name: dashboard-proxy-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          readinessProbe:
+            tcpSocket:
+              port: 9119
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+
+      restartPolicy: Always
+      volumes:
+        - name: app-data-home
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/home"
+            type: DirectoryOrCreate
+        - name: brew-volume
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/brew"
+            type: DirectoryOrCreate
+        - name: cli-bin
+          emptyDir: {}
+        - name: dashboard-proxy-config
+          configMap:
+            name: hermesagent-dashboard-proxy
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+        - name: olares-home-dir
+          hostPath:
+            path: "{{ .Values.userspace.userData }}"
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+        - name: olares-external-dir
+          hostPath:
+            path: "{{ .Values.sharedlib }}"
+            type: DirectoryOrCreate
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: hermesagent
+  name: hermesdashboard
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "9119"
+      port: 9119
+      targetPort: 9119
+  selector:
+    io.kompose.service: hermesagent
+---
+# Gateway OpenAI-compatible API service (stable DNS; binds only when API key set).
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    io.kompose.service: hermesagent
+  name: hermesgateway
+  namespace: "{{ .Release.Namespace }}"
+spec:
+  ports:
+    - name: "8642"
+      port: 8642
+      targetPort: 8642
+  selector:
+    io.kompose.service: hermesagent

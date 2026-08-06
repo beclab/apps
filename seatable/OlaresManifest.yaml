@@ -1,20 +1,28 @@
-olaresManifest.version: '0.9.0'
+olaresManifest.version: '0.12.0'
 olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  seatableweb: 1
+  seatable-mysql: 1
+  seatable-redis: 1
+  seatable: 1
 metadata:
   name: seatable
   description: SeaTable is a no-code database and app-building platform.
-  icon: https://file.bttcdn.com/appstore/seatable/icon.png
+  icon: https://app.cdn.olares.com/appstore/seatable/icon.png
   appid: seatable
-  version: '1.0.7'
+  version: '1.0.28'
   title: SeaTable
   categories:
-  - Productivity
+  - Productivity_v112
+
 entrances:
 - name: seatable
   port: 8080
   host: seatableweb
   title: SeaTable
-  icon: https://file.bttcdn.com/appstore/seatable/icon.png
+  icon: https://app.cdn.olares.com/appstore/seatable/icon.png
   authLevel: public
   openMethod: window
 permission:
@@ -23,32 +31,41 @@ permission:
   userData:
   - Home
 spec:
-  versionName: 'Enterprise:5.2.7'
-  featuredImage: https://file.bttcdn.com/appstore/seatable/1.webp
+  versionName: 'Enterprise:6.2.12'
+  featuredImage: https://app.cdn.olares.com/appstore/seatable/1.webp
   promoteImage:
-  - https://file.bttcdn.com/appstore/seatable/1.webp
-  - https://file.bttcdn.com/appstore/seatable/2.webp
-  - https://file.bttcdn.com/appstore/seatable/3.webp
-  - https://file.bttcdn.com/appstore/seatable/4.webp
+  - https://app.cdn.olares.com/appstore/seatable/1.webp
+  - https://app.cdn.olares.com/appstore/seatable/2.webp
+  - https://app.cdn.olares.com/appstore/seatable/3.webp
+  - https://app.cdn.olares.com/appstore/seatable/4.webp
   fullDescription: |    
-    ## Please Change The License ##
+    **Please Change The License**
     This is the Enterprise Edition of SeaTable. You must obtain a valid Enterprise On-Premises License from SeaTable and import the license file before using it.
 
-    ## Default Credentials  ##
-    account: seatable@olares.com 
-    password: olares
-
-    ## Overview ##
+    **Overview**
     SeaTable is a no-code database and app-building platform. At the first glimpse it looks like an online spreadsheet selection like google sheets, but under the hood it offers so much more. SeaTable helps you to record and manage all kinds of scattered information. Use Filters, Sortings or Group to work corabolative with friends and collegues. Visualize any data with various plugins like Kanban, Gallery or Calendar.
-    
+
     With APIs and SDKs, you can quickly scale to your needs, automate data processing and automate business processes.
 
-    Main features includes:
+    **Main features includes:**
     - A spreadsheet like interface to records data supporting collaboratively editing.
     - A form app to collect data from outside.
     - Mobile ready UI to be used on browsers in mobile system to view and collect data.
     - Comprehensive API and SDK for adding extensions.
     - Filters, sorts, charts and pivotal tables to visualize and analyze data.
+
+  upgradeDescription: |
+    Switch the reverse-proxy image from Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) to the official OpenResty image `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Align nginx config mounts and log paths with the official image layout (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), and drop Bitnami-specific `OPENRESTY_CONF_FILE` wiring.
+
+    v1.0.27: Fix gunicorn boot crash when `EMAIL_PORT` is empty (`SEATABLE_EMAIL_PORT` must be numeric or omitted).
+    v1.0.26: Raise install/resource floors (`requiredMemory` 4Gi); add `SEATABLE_EMAIL_USE_SSL` / SeaDoc+AI toggles (off by default).
+    v1.0.25: Soften probes (readiness/liveness on nginx :80) so first-boot SQL init is not killed by a :8000 liveness probe.
+    v1.0.24: Upgrade image to `seatable/seatable-enterprise:6.2.12` (from 5.2.7).
+    Align env with SeaTable >=5.3 (`SEATABLE_MYSQL_*`, `REDIS_*`, `JWT_PRIVATE_KEY`, `SECRET_KEY`); mount API Gateway nginx config.
+    Move DB/Redis/admin/email passwords and JWT/SECRET into Kubernetes Secret; drop legacy `sysVersion >= 1.12.3` path branching.
+    MariaDB keeps `beclab/mariadb:11.4.3-noble` with `innodb_snapshot_isolation=OFF` (required by SeaTable 6.x).
 
   developer: SeaTable GmbH
   website: https://seatable.com
@@ -60,12 +77,13 @@ spec:
   license:
   - text: EULA SeaTable Server Enterprise Edition
     url: https://seatable.com/en/lizenzvereinbarung/  
-  requiredMemory: 3Gi
-  limitedMemory: 12Gi
-  requiredDisk: 2Gi
-  limitedDisk: 8Gi
-  requiredCpu: 1
-  limitedCpu: 5
+  # Install floor raised vs prior 3Gi; keep below official whole-host ~8Gi guidance.
+  requiredMemory: 4Gi
+  limitedMemory: 16Gi
+  requiredDisk: 8Gi
+  limitedDisk: 50Gi
+  requiredCpu: 2
+  limitedCpu: 8
   supportArch:
   - amd64
 options:
@@ -75,10 +93,61 @@ options:
   dependencies:
   - name: olares
     type: system
-    version: '>=1.11.0-0'
+    version: '>=1.12.6-0'
   policies:
     - uriRegex: ^/(accounts/login)(/.*)?(\?.*)?$
       level: one_factor
       oneTime: false
       validDuration: 3600s
       entranceName: seatable
+envs:
+  - envName: EMAIL_USE_TLS
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_TLS
+  - envName: EMAIL_USE_SSL
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USE_SSL
+  - envName: EMAIL_HOST
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_SERVER
+  - envName: EMAIL_PORT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PORT
+  - envName: EMAIL_HOST_USER
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_USERNAME
+  - envName: EMAIL_HOST_PASSWORD
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_PASSWORD
+  - envName: DEFAULT_FROM_EMAIL
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_FROM_ADDRESS
+  - envName: SERVER_EMAIL
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_SMTP_FROM_ADDRESS
+  - envName: ADMIN_EMAIL
+    required: true
+    type: email
+    editable: false
+  - envName: ADMIN_PASSWORD
+    required: true
+    type: password
+    editable: false
+    description: "Password must be at least 6 characters"
+    regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{6,}$'

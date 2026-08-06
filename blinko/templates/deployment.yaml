@@ -1,0 +1,92 @@
+﻿---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: blinko
+  name: blinko
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ .Values.workloads.blinko.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: blinko
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: blinko
+    spec:
+      containers:
+      - env:
+        - name: PGID
+          value: "1000"
+        - name: PUID
+          value: "1000"
+        - name: TZ
+          value: Etc/UTC
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: DATABASE_URL
+        - name: NODE_ENV
+          value: production
+        - name: NEXTAUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: NEXTAUTH_SECRET
+        image: "docker.io/blinkospace/blinko:1.8.7"
+        name: blinko
+        ports:
+        - name: blinko
+          containerPort: 1111
+        resources:
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+          requests:
+            cpu: 100m
+            memory: 1Gi
+        volumeMounts:
+        - mountPath: /app/.blinko 
+          name: data
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          {{- if .Values.sysVersion }}
+            {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+          path: '{{ .Values.userspace.appData }}/data'
+            {{- else }}
+          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
+            {{- end }}
+          {{- else }}
+          path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}/data'
+          {{- end }}
+          type: DirectoryOrCreate
+        name: data
+status: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: blinko
+  name: blinko-svc
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "blinko"
+    port: 1111
+    targetPort: 1111
+  selector:
+    io.kompose.service: blinko
+status:
+  loadBalancer: {}

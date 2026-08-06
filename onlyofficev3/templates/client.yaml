@@ -1,0 +1,219 @@
+{{- $onlyofficeproxyENV := split  ","  .Values.domain.onlyofficeproxy -}}
+{{- $onlyofficeproxyDomain := index $onlyofficeproxyENV "_0" -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: "{{ .Release.Namespace }}"
+data:
+  default.json: |
+    {
+      "version": "1.9.0",
+      "log": {
+        "appenders": [
+          {
+            "type": "console"
+          }
+        ],
+        "replaceConsole": "true",
+        "levels": {
+          "nodeJS": "Debug"
+        }
+      },
+      "server": {
+        "port": 3000,
+        "siteUrl": "https://{{ $onlyofficeproxyDomain}}/",
+        "wopi": {
+          "discovery": "hosting/discovery"
+        },
+        "commandUrl": "coauthoring/CommandService.ashx",
+        "converterUrl": "ConvertService.ashx",
+        "apiUrl": "web-apps/apps/api/documents/api.js",
+        "preloaderUrl": "web-apps/apps/api/documents/cache-scripts.html",
+        "exampleUrl": "https://{{ $onlyofficeproxyDomain }}",
+        "storageFolder": "/documents",
+        "storagePath": "/documents",
+        "maxFileSize": 1073741824,
+        "maxNameLength": 50,
+        "mobileRegEx": "android|avantgo|playbook|blackberry|blazer|compal|elaine|fennec|hiptop|iemobile|ip(hone|od|ad)|iris|kindle|lge |maemo|midp|mmp|opera m(ob|in)i|palm( os)?|phone|p(ixi|re)\\/|plucker|pocket|psp|symbian|treo|up\\.(browser|link)|vodafone|wap|windows (ce|phone)|xda|xiino",
+        "token": {
+            "enable": true,
+            "useforrequest": true,
+            "algorithmRequest": "HS256",
+            "authorizationHeader": "Authorization",
+            "authorizationHeaderPrefix": "Bearer ",
+            "secret": "",
+            "expiresIn": "5m"
+        },
+        "verify_peer_off": true,
+        "languages": {
+          "en": "English",
+          "ar": "Arabic",
+          "hy": "Armenian",
+          "az": "Azerbaijani",
+          "eu": "Basque",
+          "be": "Belarusian",
+          "bg": "Bulgarian",
+          "ca": "Catalan",
+          "zh": "Chinese (Simplified)",
+          "zh-TW": "Chinese (Traditional)",
+          "cs": "Czech",
+          "da": "Danish",
+          "nl": "Dutch",
+          "en-GB": "English (United Kingdom)",
+          "fi": "Finnish",
+          "fr": "French",
+          "gl": "Galego",
+          "de": "German",
+          "el": "Greek",
+          "hu": "Hungarian",
+          "id": "Indonesian",
+          "it": "Italian",
+          "ja": "Japanese",
+          "ko": "Korean",
+          "lo": "Lao",
+          "lv": "Latvian",
+          "ms": "Malay (Malaysia)",
+          "no": "Norwegian",
+          "pl": "Polish",
+          "pt": "Portuguese (Brazil)",
+          "pt-PT": "Portuguese (Portugal)",
+          "ro": "Romanian",
+          "ru": "Russian",
+          "sr-Cyrl-RS": "Serbian (Cyrillic)",
+          "sr-Latn-RS": "Serbian (Latin)",
+          "si": "Sinhala (Sri Lanka)",
+          "sk": "Slovak",
+          "sl": "Slovenian",
+          "es": "Spanish",
+          "sv": "Swedish",
+          "tr": "Turkish",
+          "uk": "Ukrainian",
+          "vi": "Vietnamese",
+          "aa-AA": "Test Language"
+        }
+      },
+      "plugins": {
+        "pluginsData": []
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: onlyofficeclient
+  name: onlyofficeclient
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ .Values.workloads.onlyofficeclient.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: onlyofficeclient
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: onlyofficeclient
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: init-chmod-data
+        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+        command:
+          - sh
+          - '-c'
+          - |
+            chown -R 1000:1000 /documents
+        resources: {}
+        volumeMounts:
+          - name: appdata
+            mountPath: /documents
+        securityContext:
+          runAsUser: 0
+      - name: wait-for-jwtgeter
+        image: "docker.io/beclab/wait-for:0.1.0"
+        args:
+          - '-it'
+          - >-
+            jwtgeter:3030
+        resources: {}
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        imagePullPolicy: IfNotPresent
+      containers:
+      - image: "docker.io/beclab/onlyoffice-example-node:v1.0.0"
+        name: web
+        command:
+          - 'npm'
+          - 'run'
+          - 'start'
+        ports:
+        - containerPort: 3000
+        env:
+          - name: JWT_GETER_URL
+            value: 'http://jwtgeter:3030/onlyoffice/jwt'
+        resources:
+          limits:
+            cpu: "1"
+            memory: 1Gi
+          requests:
+            cpu: "0.1"
+            memory: 0.1Gi
+        volumeMounts:
+        - mountPath: /documents
+          name: appdata
+        - name: config
+          mountPath: /src/config/default.json
+          subPath: default.json
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+      restartPolicy: Always
+      volumes:
+      - hostPath:
+          path: '{{ .Values.userspace.appData }}/documents'
+          type: DirectoryOrCreate
+        name: appdata
+      - name: config
+        configMap:
+          name: config
+          defaultMode: 438
+          items:
+          - key: default.json
+            path: default.json
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+
+status: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  creationTimestamp: null
+  labels:
+    io.kompose.service: onlyofficeclient
+  name: onlyofficeclient
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  ports:
+  - name: "3000"
+    port: 3000
+    targetPort: 3000
+  selector:
+    io.kompose.service: onlyofficeclient
+status:
+  loadBalancer: {}
