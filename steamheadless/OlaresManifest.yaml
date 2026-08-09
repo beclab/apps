@@ -9,7 +9,7 @@ metadata:
   description: A Headless Steam Service
   icon: https://app.cdn.olares.com/appstore/steamheadless/icon.png
   appid: steamheadless
-  version: '1.0.36'
+  version: '1.0.37'
   title: Steam Headless
   categories:
   - Fun
@@ -88,6 +88,7 @@ tailscale:
     dst:
     - "*:47998,47999,48000,48002"    
 permission:
+  appData: true
   appCache: true
 spec:
   versionName: '0.2.0'
@@ -113,6 +114,25 @@ spec:
     Root access
     Based on Debian Bookworm
   upgradeDescription: |
+    v1.0.37: Desktop session runs as uid 1000
+    - PUID/PGID 1000; supervisord stays root so xorg, xvfb, vnc and udev still start
+    - Session D-Bus and XDG_RUNTIME_DIR move to /run/user/1000
+    - An init container chowns the home and games volumes, guarded by ! -uid 1000
+    - Chromium-based apps (Vivaldi, Electron) can sandbox, which they refuse to do as root
+    - Clear HAMi's /etc/ld.so.preload as root before Sunshine starts; its own
+      mount --bind workaround needs root and killed Sunshine with exit 32 at uid 1000
+
+    v1.0.37: Flatpak works out of the box
+    - Persist the system Flatpak store, seeded from the image when empty
+    - Run session D-Bus, polkitd and accounts-daemon so Flatpak apps and portals function
+    - Keep the Flatpak NVIDIA GL extension in sync with the host driver after driver upgrades
+
+    v1.0.37: Durable volume locations are configurable
+    - Defaults are unchanged: c0, c1 and the Flatpak store stay on `appCache`
+    - HOME_STORAGE and STEAM_LIBRARY_STORAGE each accept `appCache`, `appData`,
+      or an absolute host path, so save games and Flatpak app data can be placed
+      on storage that survives `market uninstall`
+
     v1.0.36: Keep durable volumes on `appCache` (no appData migration); require control-plane (master) affinity; move `SUNSHINE_PASS` into Secret (`secretKeyRef`).
 
     Storage: durable volumes c0/c1 moved from `appCache` to `appData`. On first start after upgrade, initContainers copy legacy appCache contents into appData when the destination is empty (markers: `.migration_from_appcache_c0_done`, `.migration_from_appcache_c1_done`). Old appCache data is left intact for rollback.
@@ -157,3 +177,21 @@ envs:
     type: password
     editable: false
     regex: '^[\w\-!@#$%^&*()+={}\[\]:,.?~]{1,}$'
+  # Where the desktop home (/home/default) is stored. Unset means appCache, as
+  # before. It holds save games, Flatpak app data and browser profiles, none of
+  # which survive `market uninstall` on appCache -- set appData to keep them, or
+  # an absolute host path to place them on separate storage.
+  - envName: HOME_STORAGE
+    required: false
+    type: string
+    editable: true
+    regex: '^(appData|appCache|/.+)$'
+  # Where the Steam library (/mnt/games) is stored. Unset means appCache, as
+  # before. The library is large and re-downloadable, so appCache (node-local,
+  # never JuiceFS on multi-node) is usually the right place; appData or an
+  # absolute host path move it elsewhere.
+  - envName: STEAM_LIBRARY_STORAGE
+    required: false
+    type: string
+    editable: true
+    regex: '^(appData|appCache|/.+)$'

@@ -1,4 +1,29 @@
-﻿---
+﻿{{- $image := "docker.io/beclab/steam-headless:v0.1.16" -}}
+{{- /* Durable volumes stay on appCache, as before. HOME_STORAGE (/home/default)
+       and STEAM_LIBRARY_STORAGE (/mnt/games) each opt one volume onto appData
+       or an absolute host path: appCache is node-local and never JuiceFS, but
+       `market uninstall` deletes it, while appData survives. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $us := .Values.userspace | default dict -}}
+{{- /* default "" keeps a nil userspace value from rendering as %!s(<nil>),
+       which is not a legal YAML token start during chart validation */ -}}
+{{- $appData := $us.appData | default "" -}}
+{{- $appCache := $us.appCache | default "" -}}
+{{- $home := $oe.HOME_STORAGE | default "appCache" -}}
+{{- $homePath := printf "%s/%s/c0" $appCache .Release.Name -}}
+{{- if hasPrefix "/" $home -}}
+  {{- $homePath = $home -}}
+{{- else if eq $home "appData" -}}
+  {{- $homePath = printf "%s/%s/c0" $appData .Release.Name -}}
+{{- end -}}
+{{- $lib := $oe.STEAM_LIBRARY_STORAGE | default "appCache" -}}
+{{- $gamesPath := printf "%s/%s/c1" $appCache .Release.Name -}}
+{{- if hasPrefix "/" $lib -}}
+  {{- $gamesPath = $lib -}}
+{{- else if eq $lib "appData" -}}
+  {{- $gamesPath = printf "%s/%s/c1" $appData .Release.Name -}}
+{{- end }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,6 +61,45 @@ spec:
                 - linux
               - key: node-role.kubernetes.io/control-plane
                 operator: Exists
+      initContainers:
+        # The session moved from uid 0 to uid 1000, so the durable volumes have
+        # to follow. Guarded by ! -uid 1000 so re-runs cost a stat pass, and a
+        # fresh install (which scaffolds root-owned dirs) self-heals.
+        - name: init-chown-volumes
+          image: {{ $image }}
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              for d in /chown-home /chown-games; do
+                n=$(find "$d" ! -uid 1000 -printf . 2>/dev/null | wc -c)
+                if [ "$n" -gt 0 ]; then
+                  echo "chown 1000:1000 on $n entries under $d"
+                  find "$d" ! -uid 1000 -exec chown -h 1000:1000 {} +
+                else
+                  echo "$d already uid 1000"
+                fi
+              done
+          volumeMounts:
+            - name: steam-headless-claim0
+              mountPath: /chown-home
+            - name: steam-headless-claim1
+              mountPath: /chown-games
+        - name: init-flatpak-system
+          image: {{ $image }}
+          command:
+            - sh
+            - -c
+            - |
+              if [ -z "$(ls -A /flatpak-persist 2>/dev/null)" ]; then
+                echo "Seeding system flatpak store from image..."
+                cp -a /var/lib/flatpak/. /flatpak-persist/
+              fi
+          volumeMounts:
+            - name: flatpak-system
+              mountPath: /flatpak-persist
       containers:
         - env:
             - name: NAME
@@ -50,10 +114,13 @@ spec:
               value: 2G
             - name: DOCKER_RUNTIME
               value: nvidia
+            # The session runs as uid 1000; supervisord itself stays root so the
+            # image's root units (xorg, xvfb, vnc, udev, wol) can still start.
+            # Chromium-based apps refuse to sandbox as root, which is the point.
             - name: PUID
-              value: '0'
+              value: '1000'
             - name: PGID
-              value: '0'
+              value: '1000'
             - name: UMASK
               value: '000'
             - name: USER_PASSWORD
@@ -98,7 +165,9 @@ spec:
                   fieldPath: status.hostIP
             - name: DBUS_SESSION_BUS_ADDRESS
               value: unix:path=/run/dbus/session_bus_socket
-          image: docker.io/beclab/steam-headless:v0.1.16
+            - name: XDG_RUNTIME_DIR
+              value: /run/user/1000
+          image: {{ $image }}
           livenessProbe:
             httpGet:
               path: /
@@ -167,7 +236,14 @@ spec:
                 - -c
                 - |
                   cat /dev/null > /usr/libexec/upowerd
-                  mkdir -p /run/dbus
+                  mkdir -p /run/dbus /run/user/1000
+                  chmod 755 /run/dbus
+                  chown 1000:1000 /run/user/1000
+                  chmod 700 /run/user/1000
+                  grep -qxF 'XDG_RUNTIME_DIR=/run/user/1000' /etc/environment || \
+                    echo 'XDG_RUNTIME_DIR=/run/user/1000' >> /etc/environment
+                  grep -qxF 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket' /etc/environment || \
+                    echo 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/dbus/session_bus_socket' >> /etc/environment
                   dbus-daemon --session --fork --nopidfile \
                     --address=unix:path=/run/dbus/session_bus_socket || true
           securityContext:
@@ -188,6 +264,32 @@ spec:
               mountPath: /dev/input/
             - name: dshm
               mountPath: /dev/shm
+            # Only the system store is persisted; everything is installed
+            # --system, and Flatpak app data follows the session's HOME into
+            # /home/default/.var/app, which is already on the c0 volume.
+            - name: flatpak-system
+              mountPath: /var/lib/flatpak
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/fix-dbus-perms.ini
+              subPath: fix-dbus-perms.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/dbus-user.ini
+              subPath: dbus-user.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/accounts-daemon.ini
+              subPath: accounts-daemon.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/polkitd.ini
+              subPath: polkitd.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/fix-ldso-preload.ini
+              subPath: fix-ldso-preload.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/flatpak-gl-sync.ini
+              subPath: flatpak-gl-sync.ini
+            - name: supervisor-extras
+              mountPath: /usr/local/share/steamheadless/flatpak-gl-sync.sh
+              subPath: flatpak-gl-sync.sh
         {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
             - name: snd
               mountPath: /dev/snd
@@ -197,11 +299,11 @@ spec:
         - name: steam-headless-claim0
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c0
+            path: {{ $homePath }}
         - name: steam-headless-claim1
           hostPath:
             type: DirectoryOrCreate
-            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/c1
+            path: {{ $gamesPath }}
         - name: input-devices
           hostPath:
             path: /dev/input/
@@ -209,6 +311,13 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
+        - name: flatpak-system
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ $appCache }}/{{ .Release.Name }}/flatpak-system
+        - name: supervisor-extras
+          configMap:
+            name: steamheadless-supervisor-extras
     {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
         - name: snd
           hostPath:
@@ -299,3 +408,161 @@ spec:
       protocol: TCP
       port: 47990
       targetPort: 47990
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: steamheadless-supervisor-extras
+  namespace: {{ .Release.Namespace }}
+data:
+  dbus-user.ini: |
+    [program:dbus-user]
+    priority=15
+    autostart=true
+    autorestart=true
+    directory=/
+    user=default
+    command=dbus-daemon --session --nofork --nopidfile --address=unix:path=/run/user/1000/bus
+    environment=HOME="/home/default",USER="default",XDG_RUNTIME_DIR="/run/user/1000"
+    stopsignal=INT
+    stdout_logfile=/var/log/supervisor/dbus-user.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/dbus-user.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
+
+  fix-dbus-perms.ini: |
+    [program:fix-dbus-perms]
+    priority=10
+    autostart=true
+    autorestart=false
+    startsecs=0
+    exitcodes=0
+    directory=/
+    user=root
+    # Runs before dbus-user (priority 15), which starts as uid 1000 and cannot
+    # create its own runtime dir under the root-owned /run/user.
+    command=sh -c 'chmod 755 /run/dbus; mkdir -p /run/user/1000; chown 1000:1000 /run/user/1000; chmod 700 /run/user/1000'
+    stdout_logfile=/dev/null
+    stderr_logfile=/dev/null
+
+  fix-ldso-preload.ini: |
+    [program:fix-ldso-preload]
+    priority=12
+    autostart=true
+    autorestart=false
+    startsecs=0
+    exitcodes=0
+    directory=/
+    user=root
+    # HAMi bind-mounts /etc/ld.so.preload (-> /usr/local/vgpu/libvgpu.so) into
+    # the container. start-sunshine.sh neutralizes it by bind-mounting an empty
+    # file over it, which needs root — as uid 1000 the mount fails, `set -e`
+    # aborts the script, and sunshine dies with mount(8)'s exit code 32.
+    # Clear it here instead, as root, before sunshine (priority 50) starts.
+    # Same end state the script produced, just earlier and without the mount.
+    command=sh -c 'if [ -e /etc/ld.so.preload ]; then umount /etc/ld.so.preload 2>/dev/null; rm -f /etc/ld.so.preload; fi'
+    stdout_logfile=/var/log/supervisor/fix-ldso-preload.log
+    stdout_logfile_maxbytes=1MB
+    stderr_logfile=/var/log/supervisor/fix-ldso-preload.err.log
+    stderr_logfile_maxbytes=1MB
+
+  polkitd.ini: |
+    [program:polkitd]
+    priority=17
+    autostart=true
+    autorestart=true
+    directory=/
+    user=root
+    command=/usr/lib/polkit-1/polkitd --no-debug
+    environment=HOME="/root",USER="root"
+    stopsignal=INT
+    stdout_logfile=/var/log/supervisor/polkitd.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/polkitd.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
+
+  flatpak-gl-sync.ini: |
+    [program:flatpak-gl-sync]
+    priority=30
+    autostart=true
+    autorestart=false
+    startsecs=0
+    exitcodes=0
+    directory=/
+    user=root
+    command=sh /usr/local/share/steamheadless/flatpak-gl-sync.sh
+    environment=HOME="/root",USER="root"
+    stdout_logfile=/var/log/supervisor/flatpak-gl-sync.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/flatpak-gl-sync.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
+
+  flatpak-gl-sync.sh: |
+    #!/bin/sh
+    # Keep the flatpak NVIDIA GL runtime extension in sync with the host driver.
+    #
+    # The image's 60-configure_gpu_driver.sh matches the container's native
+    # NVIDIA userspace to the loaded kernel module on every start, but the
+    # flatpak system store persists across restarts and keeps whatever
+    # org.freedesktop.Platform.GL.nvidia-<version> extension it had when it
+    # was last updated. Flatpak needs the extension version to match the
+    # kernel driver exactly, so after a host driver upgrade every flatpak app
+    # silently loses NVIDIA-accelerated GL until the matching extension is
+    # installed. AMD/Intel use the generic GL.default extension and are not
+    # affected. Stale versions are kept on purpose (driver downgrade safety);
+    # flatpak install is a no-op when the ref is already present.
+    set -u
+    VER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1 | tr -d ' ' | tr '.' '-')"
+    if [ -z "$VER" ]; then
+      echo "no NVIDIA driver detected; nothing to sync"
+      exit 0
+    fi
+    REF="org.freedesktop.Platform.GL.nvidia-${VER}"
+    if flatpak info --system "$REF" >/dev/null 2>&1; then
+      echo "$REF already installed"
+      exit 0
+    fi
+    # the flathub remote is configured by 80-configure_flatpak.sh during
+    # container init; wait for it (and for the network) before installing
+    tries=0
+    until flatpak remotes --system 2>/dev/null | grep -qi '^flathub'; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 30 ]; then
+        echo "flathub remote not available; giving up" >&2
+        exit 1
+      fi
+      sleep 10
+    done
+    tries=0
+    until flatpak install --system -y --noninteractive flathub "$REF"; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 5 ]; then
+        echo "failed to install $REF" >&2
+        exit 1
+      fi
+      sleep 30
+    done
+    echo "$REF installed"
+
+  accounts-daemon.ini: |
+    [program:accounts-daemon]
+    priority=20
+    autostart=true
+    autorestart=true
+    directory=/
+    user=root
+    command=/usr/libexec/accounts-daemon
+    environment=HOME="/root",USER="root"
+    stopsignal=INT
+    stdout_logfile=/var/log/supervisor/accounts-daemon.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/accounts-daemon.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
