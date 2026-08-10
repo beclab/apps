@@ -5,7 +5,7 @@
 {{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
 {{- $serverPassword := index $env "OPENCODE_SERVER_PASSWORD" | default "" }}
 {{- $serverUsername := index $env "OPENCODE_SERVER_USERNAME" | default "opencode" }}
-{{- $image := "beclab/opencode:1.18.9.1" }}
+{{- $image := "beclab/opencode:1.18.16.1" }}
 
 ---
 apiVersion: apps/v1
@@ -45,7 +45,14 @@ spec:
           command:
             - "sh"
             - "-c"
-            - "/opt/olares-bake/lib/init-setup.sh && exec /opt/olares-bake/lib/init-packages.sh"
+            - |
+              set -e
+              /opt/olares-bake/lib/init-setup.sh
+              /opt/olares-bake/lib/init-packages.sh
+              mkdir -p /home/opencode/.local/bin
+              cp /opt/certbot-wrapper/certbot /home/opencode/.local/bin/certbot
+              chmod a+rx /home/opencode/.local/bin/certbot
+              chown 1000:1000 /home/opencode/.local/bin/certbot
           env:
             - name: OLARES_OC_DOMAIN
               value: "{{ $opencodeDomain }}"
@@ -58,6 +65,9 @@ spec:
               mountPath: /home/opencode
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
+            - name: certbot-wrapper
+              mountPath: /opt/certbot-wrapper
+              readOnly: true
           resources:
             requests:
               cpu: 100m
@@ -417,6 +427,13 @@ spec:
             items:
               - key: nginx.conf
                 path: nginx.conf
+        - name: certbot-wrapper
+          configMap:
+            name: certbot-wrapper
+            defaultMode: 493
+            items:
+              - key: certbot
+                path: certbot
         # Parent of the overlay tree (upper/work/merged + marker). init-overlay
         # mounts this Bidirectional so the overlay mounts it creates propagate to
         # the node and are visible to the other containers' merged binds below.
