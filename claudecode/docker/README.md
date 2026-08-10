@@ -35,6 +35,7 @@ allowed when needed.
 (vendor binary from `@olares/cli`, same as clawdbot). Olares skill pack under
 `/skills-staging`; `init-skills` flattens into `$HOME/.claude/skills` on the PVC
 (Claude Code user skills; agent flag `claude-code` via `npx skills add`).
+**`certbot`** (Let's Encrypt) via apt, same role as opencode / clawdbot brew-base.
 
 **Not included:** the `claude` CLI binary (installed at runtime by
 `init-install-claude` into the shared PVC). `ripgrep` is omitted on purpose:
@@ -44,13 +45,13 @@ Claude Code bundles its own.
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-claudecode-base:0.5.6 .
+docker build -t beclab/harveyff-claudecode-base:0.5.7 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name claudecode-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-claudecode-base:0.5.6 \
+  -t beclab/harveyff-claudecode-base:0.5.7 \
   --push .
 ```
 

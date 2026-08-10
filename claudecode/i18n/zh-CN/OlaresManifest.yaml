@@ -13,6 +13,7 @@ spec:
     - 兼容 Claude Pro/Max 订阅（OAuth 登录）或 Console API Key，同时支持 Amazon Bedrock 和 Google Vertex AI。
     - 工作区镜像预装常见语言运行时与构建工具链（Python、Node.js、Go、Rust、OpenJDK 21、Ruby、PHP、Lua），以及数据库客户端（PostgreSQL、MySQL/MariaDB、Redis）、git-lfs、protobuf 编译器、Gradle、tmux、dig/ss/nc、shellcheck、clang-format/tidy、graphviz，以及各类常见 -dev 头文件（libpq、MySQL 客户端、curl、ICU、LDAP）等，便于在无 root 下完成常见开发任务。
     - 可选 Docker-in-Docker 边车（`ENABLE_DIND`，默认开启）：在终端中直接运行 `docker build`、`docker compose` 等容器化开发命令（特权边车容器）。
+    - 工作区镜像预装 `certbot`（Let's Encrypt）；init 写入 `/opt/data/.config/letsencrypt/cli.ini` 并在 `~/.local/bin` 安装包装脚本，与 opencode / clawdbot 相同，uid 1000 可直接运行 `certbot`。
 
     **首次使用设置**
     打开 `Claude Code CLI` 入口并运行 `claude` 启动 OAuth 登录流程，或在应用环境变量中设置 `ANTHROPIC_API_KEY` 并重启应用。
@@ -28,4 +29,19 @@ spec:
 
     上述变量在 chart 中按条件注入：留空字符串或 `false` 时**不会**写入容器环境，Claude Code 会视其为真正"未设置"（必须如此——它对 `CLAUDE_CODE_USE_*` 的判断是按是否存在，而不是按值）。
   upgradeDescription: |
-    Terminal 侧车镜像升级至 `beclab/terminal:v0.0.13`（原 v0.0.11）。
+    **v0.1.15**
+
+    **Claude Code CLI**
+    - 安装版本由 **2.1.191** 升级至 **2.1.226**（latest 通道；`init-install-claude` 使用 chart `appVersion` 拉取）。
+
+    **基础镜像（`beclab/harveyff-claudecode-base:0.5.7`，原 0.5.6）**
+    - 预装 **certbot** + `python3-certbot`，支持 Let's Encrypt / 自定义域名 TLS（与 opencode / clawdbot 同一套非 root 用法）。
+    - Dockerfile：`apt-get update` 增加重试并放宽 InRelease 有效期校验，避免 Debian 镜像短暂不同步导致构建失败。
+
+    **Chart**
+    - 新增 `templates/certbot-wrapper.yaml`；`init-chmod-data` 写入 `/opt/data/.config/letsencrypt/cli.ini`（RSA；config/work/logs 位于 `/opt/data/letsencrypt/*`），并将 `~/.local/bin/certbot` 包装脚本安装到 PATH，uid 1000 可直接运行 certbot，无需手动传 `--config-dir`。
+    - Deployment 中所有 init/主容器镜像统一为 **0.5.7**。
+
+    **升级与测试**
+    - 保留现有 PVC 与 OAuth/API Key 配置；版本 sentinel 变化时会重新安装 Claude 二进制。
+    - 已在 **olarestest001** 验证：upload 升级 → `running`；`claude --version` → 2.1.226；certbot wrapper 可用。

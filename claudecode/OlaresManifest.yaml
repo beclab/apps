@@ -11,7 +11,7 @@ metadata:
   description: Anthropic's official agentic coding CLI that lives in your terminal
   appid: claudecode
   title: Claude Code
-  version: 0.1.13
+  version: 0.1.15
   categories:
   - Developer Tools
   - Productivity_v112
@@ -25,7 +25,7 @@ entrances:
   openMethod: window
   authLevel: internal
 spec:
-  versionName: '2.1.191'
+  versionName: '2.1.226'
   fullDescription: |
     **Overview**
     Claude Code is Anthropic's official agentic coding tool that lives in your terminal. It understands your codebase, executes routine tasks through natural language, and helps you move fast while staying in flow.
@@ -37,6 +37,7 @@ spec:
     - Works with a Claude Pro/Max subscription (OAuth) or a Console API key; also supports Amazon Bedrock and Google Vertex AI.
     - Workspace image ships common language runtimes and build toolchains (Python, Node.js, Go, Rust, OpenJDK 21, Ruby, PHP, Lua) plus database clients (PostgreSQL, MySQL/MariaDB, Redis), git-lfs, protobuf compiler, Gradle, tmux, dig/ss/nc, shellcheck, clang-format/tidy, graphviz, and extra -dev headers (libpq, MySQL client, curl, ICU, LDAP) so agents can run typical dev commands without root.
     - Optional Docker-in-Docker sidecar (`ENABLE_DIND`, default on): run `docker build`, `docker compose`, and containerized dev stacks from the terminal.
+    - `certbot` (Let's Encrypt) is pre-installed in the workspace image; init installs a `~/.local/bin/certbot` wrapper and seeds `/opt/data/.config/letsencrypt/cli.ini` so uid 1000 can run `certbot` without manual flags (same pattern as opencode / clawdbot).
 
     **First-time Setup**
     Open the `Claude Code CLI` entrance and run `claude` to launch the OAuth login flow, or set `ANTHROPIC_API_KEY` in the app environment variables and restart.
@@ -53,7 +54,22 @@ spec:
     These vars are conditionally injected: blank strings and `false` toggles are *not* placed into the container env, so Claude Code sees them as truly unset (which is required — it treats `CLAUDE_CODE_USE_*` by presence, not value).
 
   upgradeDescription: |
-    Terminal sidecar image bumped to `beclab/terminal:v0.0.13` (was v0.0.11).
+    **v0.1.15**
+
+    **Claude Code CLI**
+    - Pin install version from **2.1.191** to **2.1.226** (latest channel; `init-install-claude` uses chart `appVersion`).
+
+    **Base image (`beclab/harveyff-claudecode-base:0.5.7`, was 0.5.6)**
+    - Pre-install **certbot** + `python3-certbot` for Let's Encrypt / custom-domain TLS (same intent as opencode / clawdbot).
+    - Dockerfile: retry `apt-get update` and relax InRelease validity checks to avoid transient Debian mirror build failures.
+
+    **Chart**
+    - Add `templates/certbot-wrapper.yaml`; `init-chmod-data` seeds `/opt/data/.config/letsencrypt/cli.ini` (RSA; writable config/work/logs under `/opt/data/letsencrypt/*`) and installs `~/.local/bin/certbot` so uid 1000 runs certbot without manual `--config-dir`.
+    - Bump all deployment image refs to **0.5.7**.
+
+    **Upgrade / test**
+    - PVC and OAuth/API-key settings are preserved; Claude binary re-installs when the version sentinel changes.
+    - Verified on **olarestest001**: upload upgrade → `running`; `claude --version` → 2.1.226; certbot wrapper on PATH.
 
   developer: Anthropic
   website: https://code.claude.com
