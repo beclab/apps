@@ -1,0 +1,27 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: certbot-wrapper
+  namespace: {{ .Release.Namespace }}
+data:
+  certbot: |
+    #!/bin/sh
+    # Olares: certbot defaults to root-owned /etc/letsencrypt and /var/log/letsencrypt.
+    # This wrapper (installed to ~/.local/bin on init) injects writable dirs under $HOME.
+    CONFIG_DIR="${CERTBOT_CONFIG_DIR:-/opt/data/letsencrypt/config}"
+    WORK_DIR="${CERTBOT_WORK_DIR:-/opt/data/letsencrypt/work}"
+    LOGS_DIR="${CERTBOT_LOGS_DIR:-/opt/data/letsencrypt/logs}"
+    REAL="/usr/bin/certbot"
+    if [ ! -x "$REAL" ]; then
+      REAL="$(PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" command -v certbot || true)"
+    fi
+    if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+      echo "certbot: binary not found in image" >&2
+      exit 127
+    fi
+    exec "$REAL" \
+      --config-dir "$CONFIG_DIR" \
+      --work-dir "$WORK_DIR" \
+      --logs-dir "$LOGS_DIR" \
+      "$@"

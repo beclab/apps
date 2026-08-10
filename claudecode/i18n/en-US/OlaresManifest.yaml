@@ -13,6 +13,7 @@ spec:
     - Works with a Claude Pro/Max subscription (OAuth) or a Console API key; also supports Amazon Bedrock and Google Vertex AI.
     - Workspace image ships common language runtimes and build toolchains (Python, Node.js, Go, Rust, OpenJDK 21, Ruby, PHP, Lua) plus database clients (PostgreSQL, MySQL/MariaDB, Redis), git-lfs, protobuf compiler, Gradle, tmux, dig/ss/nc, shellcheck, clang-format/tidy, graphviz, and extra -dev headers (libpq, MySQL client, curl, ICU, LDAP) so agents can run typical dev commands without root.
     - Optional DinD (`ENABLE_DIND`, default on): `docker` / `docker compose` in the terminal (privileged sidecar).
+    - `certbot` (Let's Encrypt) is pre-installed in the image; init seeds `cli.ini` and a `~/.local/bin/certbot` wrapper for uid 1000 (opencode / clawdbot pattern).
 
     **First-time Setup**
     Open the `Claude Code CLI` entrance and run `claude` to launch the OAuth login flow, or set `ANTHROPIC_API_KEY` in the app environment variables and restart.
@@ -28,4 +29,19 @@ spec:
 
     These vars are conditionally injected: blank strings and `false` toggles are *not* placed into the container env, so Claude Code sees them as truly unset (which is required — it treats `CLAUDE_CODE_USE_*` by presence, not value).
   upgradeDescription: |
-    Terminal sidecar image bumped to `beclab/terminal:v0.0.13` (was v0.0.11).
+    **v0.1.15**
+
+    **Claude Code CLI**
+    - Pin install version from **2.1.191** to **2.1.226** (latest channel; `init-install-claude` uses chart `appVersion`).
+
+    **Base image (`beclab/harveyff-claudecode-base:0.5.7`, was 0.5.6)**
+    - Pre-install **certbot** + `python3-certbot` for Let's Encrypt / custom-domain TLS (same intent as opencode / clawdbot).
+    - Dockerfile: retry `apt-get update` and relax InRelease validity checks to avoid transient Debian mirror build failures.
+
+    **Chart**
+    - Add `templates/certbot-wrapper.yaml`; `init-chmod-data` seeds `/opt/data/.config/letsencrypt/cli.ini` (RSA; writable config/work/logs under `/opt/data/letsencrypt/*`) and installs `~/.local/bin/certbot` so uid 1000 runs certbot without manual `--config-dir`.
+    - Bump all deployment image refs to **0.5.7**.
+
+    **Upgrade / test**
+    - PVC and OAuth/API-key settings are preserved; Claude binary re-installs when the version sentinel changes.
+    - Verified on **olarestest001**: upload upgrade → `running`; `claude --version` → 2.1.226; certbot wrapper on PATH.
