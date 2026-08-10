@@ -8,9 +8,9 @@
 #       * init-skills (root): flattens baked Olares skills into ~/.codex/skills.
 #       * init-install-codex (UID 1000): downloads the codex native
 #         binary from the matching GitHub Release tarball into
-#         /opt/data/.local/bin/ on first run for this version, then
-#         leaves a versioned sentinel so subsequent restarts skip the
-#         download and start instantly.
+#         /opt/data/.local/bin/ on first run for this version+arch,
+#         then leaves a version+target sentinel so subsequent restarts
+#         skip the download (and do not reuse a wrong-arch binary).
 #       * init-docker-cli (optional, ENABLE_DIND): copies docker CLI +
 #         compose/buildx plugins into a shared emptyDir.
 #   - Optional docker-dind sidecar (ENABLE_DIND, default on): privileged
@@ -132,21 +132,28 @@ spec:
             - -c
             - |
               set -euo pipefail
-              SENTINEL="$HOME/.install-state/codex-${CODEX_VERSION}"
               mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
 
-              if [ -x "$HOME/.local/bin/codex" ] && [ -f "$SENTINEL" ]; then
-                echo "[init-install-codex] cached binary found (installed $(cat "$SENTINEL"))"
-                "$HOME/.local/bin/codex" --version
-                exit 0
-              fi
-
+              # Resolve target triple first so the sentinel is arch-specific.
+              # A version-only sentinel previously reused an amd64 binary on
+              # arm64 (and vice versa) via hostPath, causing Exec format error.
               ARCH="$(uname -m)"
               case "$ARCH" in
                 x86_64|amd64)  TARGET="x86_64-unknown-linux-musl" ;;
                 aarch64|arm64) TARGET="aarch64-unknown-linux-musl" ;;
                 *) echo "[init-install-codex] unsupported arch: $ARCH" >&2; exit 1 ;;
               esac
+              SENTINEL="$HOME/.install-state/codex-${CODEX_VERSION}-${TARGET}"
+
+              if [ -x "$HOME/.local/bin/codex" ] && [ -f "$SENTINEL" ]; then
+                if "$HOME/.local/bin/codex" --version >/dev/null 2>&1; then
+                  echo "[init-install-codex] cached binary found (installed $(cat "$SENTINEL"), ${TARGET})"
+                  "$HOME/.local/bin/codex" --version
+                  exit 0
+                fi
+                echo "[init-install-codex] cached binary unusable on ${TARGET}; reinstalling"
+                rm -f "$HOME/.local/bin/codex"
+              fi
 
               URL="https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${TARGET}.tar.gz"
               echo "[init-install-codex] downloading $URL"
@@ -241,7 +248,10 @@ spec:
               value: /opt/data/.codex
             {{- with .Values.olaresEnv.OPENAI_API_KEY }}
             - name: OPENAI_API_KEY
-              value: {{ . | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Release.Name }}-secrets
+                  key: OPENAI_API_KEY
             {{- end }}
             {{- with .Values.olaresEnv.OPENAI_BASE_URL }}
             - name: OPENAI_BASE_URL
