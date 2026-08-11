@@ -1,0 +1,145 @@
+{{- /* ENGINE_ARGS is the daemon-tuning surface: OLLAMA_* env exported by ollama.sh
+       before `ollama serve`. llm-init uses engineArgsForLlminit (no KEEP_ALIVE). */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $engineArgs := include "ollamamuseglimmer30bdflashv3.engineArgs" (dict "Args" ($oe.ENGINE_ARGS | default "")) -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "chat" -}}
+{{- $cpuRequest := trim ($oe.OLLAMA_CPU_REQUEST | default "200m") -}}
+{{- $memRequest := trim ($oe.OLLAMA_MEMORY_REQUEST | default "19Gi") -}}
+{{- $cpuLimit := trim ($oe.OLLAMA_CPU_LIMIT | default "6") -}}
+{{- $memLimit := trim ($oe.OLLAMA_MEMORY_LIMIT | default "28Gi") -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.OLLAMA_REQUIRED_GPU_MEMORY | default "22Gi") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ollama
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.ollamamuseglimmer30bdflashv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: ollama
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: ollama
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: ollama-data
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/ollama"
+            type: DirectoryOrCreate
+        - name: cuda-compute-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/ollama/.nv"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: ollama
+          image: docker.io/ollama/ollama:0.32.8-rc0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/ollama.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: ollama
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+            - name: OLLAMA_PRELOAD
+              value: "true"
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            - name: OLLAMA_NOPRUNE
+              value: "1"
+            - name: OLLAMA_ORIGINS
+              value: "*"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: GGML_CUDA_DISABLE_GRAPHS
+              value: "1"
+          ports:
+            - name: ollama
+              containerPort: 11434
+          startupProbe:
+            tcpSocket:
+              port: 11434
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            failureThreshold: 10
+          volumeMounts:
+            - name: ollama-data
+              mountPath: /root/.ollama
+            - name: cuda-compute-cache
+              mountPath: /root/.nv/ComputeCache
+              subPath: ComputeCache
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if not $unifiedMem }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if not $unifiedMem }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ollama
+spec:
+  selector:
+    io.kompose.service: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434
+  type: ClusterIP
