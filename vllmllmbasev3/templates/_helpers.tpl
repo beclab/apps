@@ -57,11 +57,11 @@ amd64
 {{- $arch := include "llmbase.hostArch" . -}}
 {{- $img := .Values.engine.images | default dict -}}
 {{- if $isGb10 -}}
-{{- $img.nvidiaGb10 | default "docker.io/vllm/vllm-openai:latest-aarch64-cu130" -}}
+{{- $img.nvidiaGb10 | default "docker.io/vllm/vllm-openai:v0.27.1-aarch64" -}}
 {{- else if eq $arch "arm64" -}}
-{{- $img.nvidiaArm64 | default "docker.io/vllm/vllm-openai:v0.24.0-aarch64-cu129" -}}
+{{- $img.nvidiaArm64 | default "docker.io/vllm/vllm-openai:v0.27.1-aarch64" -}}
 {{- else -}}
-{{- $img.nvidia | default "docker.io/vllm/vllm-openai:v0.25.0" -}}
+{{- $img.nvidia | default "docker.io/vllm/vllm-openai:v0.27.1" -}}
 {{- end -}}
 {{- end -}}
 {{- /* Spark/GB10: detect from GPU.Type or node hardware (install-time .Values.nodes). */ -}}
