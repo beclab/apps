@@ -45,13 +45,13 @@ Claude Code bundles its own.
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-claudecode-base:0.5.7 .
+docker build -t beclab/harveyff-claudecode-base:0.5.8 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name claudecode-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-claudecode-base:0.5.7 \
+  -t beclab/harveyff-claudecode-base:0.5.8 \
   --push .
 ```
 

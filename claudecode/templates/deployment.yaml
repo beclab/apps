@@ -37,6 +37,14 @@ spec:
             - |
               set -e
               mkdir -p /opt/data/.local/bin /opt/data/.claude/skills /opt/data/.install-state
+              # PATH prepends ~/.local/bin so a leftover olares-cli there (often a
+              # symlink into a cloned Olares tree on the PVC) shadows the image
+              # binary at /usr/local/bin. Relink every start; do not copy the
+              # ~85MiB binary and do not reorder PATH (npm -g installs must still
+              # win for tools the image does not ship). Target need not exist in
+              # this ubuntu init image — it is valid in the main container.
+              ln -sfn /usr/local/bin/olares-cli /opt/data/.local/bin/olares-cli
+              echo "[init-chmod-data] ~/.local/bin/olares-cli -> /usr/local/bin/olares-cli"
               # certbot (clawdbot-style): non-root defaults under $HOME=/opt/data; Olares TLS needs RSA.
               mkdir -p /opt/data/.config/letsencrypt \
                        /opt/data/letsencrypt/config \
@@ -71,7 +79,7 @@ spec:
         # Flatten Olares skills from /skills-staging into Claude Code's
         # user skills dir (~/.claude/skills = /opt/data/.claude/skills).
         - name: init-skills
-          image: "beclab/harveyff-claudecode-base:0.5.7"
+          image: "beclab/harveyff-claudecode-base:0.5.8"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -104,7 +112,7 @@ spec:
         # only writes under $HOME. A sentinel file makes subsequent
         # Pod starts skip the download.
         - name: init-install-claude
-          image: "beclab/harveyff-claudecode-base:0.5.7"
+          image: "beclab/harveyff-claudecode-base:0.5.8"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -204,7 +212,7 @@ spec:
         # login / non-login / interactive / non-interactive shells all
         # see the claude binary on PATH.
         - name: claudecode
-          image: "beclab/harveyff-claudecode-base:0.5.7"
+          image: "beclab/harveyff-claudecode-base:0.5.8"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
