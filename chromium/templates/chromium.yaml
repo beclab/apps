@@ -89,7 +89,7 @@ spec:
               mountPath: /new-data
       containers:
         - name: chromium
-          image: "docker.io/beclab/harveyff-chromium:1e736296-ls34"
+          image: "docker.io/beclab/harveyff-chromium:ae9a7fca-ls44"
           {{- if $isOlaresOne }}
           securityContext:
             privileged: true
@@ -103,9 +103,12 @@ spec:
               value: Etc/UTC
             - name: DeviceName
               value: {{ .Values.deviceName }}
+            # ls44 defaults PIXELFLUX_WAYLAND=true; force X11 on Olares (Wayland mis-scales).
+            - name: PIXELFLUX_WAYLAND
+              value: "false"
             {{- if $isOlaresOne }}
             - name: CHROME_CLI
-              value: "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --use-gl=egl --enable-features=UseOzonePlatform,VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization,ReduceAcceptLanguageHeader {{ $homepage }}"
+              value: "--ignore-gpu-blocklist --enable-gpu-rasterization --enable-zero-copy --use-gl=egl --enable-features=VaapiVideoDecoder,VaapiVideoEncoder,CanvasOopRasterization,ReduceAcceptLanguageHeader {{ $homepage }}"
             - name: DRINODE
               value: /dev/dri/renderD128
             - name: DRI_NODE
@@ -134,15 +137,13 @@ spec:
             - containerPort: 8082
             {{- end }}
           startupProbe:
-            httpGet:
-              path: /
+            tcpSocket:
               port: http
             periodSeconds: 3
             failureThreshold: 40
             timeoutSeconds: 3
           readinessProbe:
-            httpGet:
-              path: /
+            tcpSocket:
               port: http
             periodSeconds: 5
             failureThreshold: 3
@@ -156,6 +157,9 @@ spec:
           volumeMounts:
             - mountPath: /config
               name: config
+            - mountPath: /etc/chromium/policies/managed
+              name: chromium-policies
+              readOnly: true
             - mountPath: /dev/shm
               name: dshm
             {{- if $isOlaresOne }}
@@ -168,6 +172,9 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appData }}/config
+        - name: chromium-policies
+          configMap:
+            name: chromium-policies
         - name: config-legacy
           hostPath:
             type: DirectoryOrCreate
