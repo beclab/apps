@@ -1,0 +1,180 @@
+{{- $opendesignDomainENV := split "," (.Values.domain.opendesign | default "") -}}
+{{- $opendesignDomain := index $opendesignDomainENV "_0" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opendesign
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: opendesign
+spec:
+  replicas: {{ .Values.workloads.opendesign.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: opendesign
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: opendesign
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          for d in /app/.od /tmp /app/.od/agent-tools/bin /app/.od/agent-tools/lib /app/.od/.config/opencode; do
+            mkdir -p "$d" && chown 1000:1000 "$d"
+          done
+          printf '%s\n' '{"permission":{"external_directory":{"/app/**":"allow"},"bash":{"*":"allow"},"read":{"*":"allow"},"write":{"*":"allow"}}}' > /app/.od/.config/opencode/opencode.json
+          chown 1000:1000 /app/.od/.config/opencode/opencode.json
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/.od
+        - name: tmp
+          mountPath: /tmp
+      - name: install-opencode
+        image: docker.io/beclab/alpine:3.18
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -ex
+          OPENCODE_VERSION=1.18.18
+          INSTALL_BIN=/app/.od/agent-tools/bin/opencode
+          if [ -x "$INSTALL_BIN" ] && "$INSTALL_BIN" --version >/dev/null 2>&1; then
+            exit 0
+          fi
+          rm -rf /app/.od/.opencode /app/.od/agent-tools
+          mkdir -p /app/.od/agent-tools/bin
+          apk add --no-cache curl ca-certificates libstdc++ libgcc
+          curl -fsSL -o /tmp/opencode.tar.gz \
+            "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64-baseline-musl.tar.gz"
+          tar -xzf /tmp/opencode.tar.gz -C /app/.od/agent-tools/bin
+          chmod 755 /app/.od/agent-tools/bin/opencode
+          rm -f /tmp/opencode.tar.gz
+          /app/.od/agent-tools/bin/opencode --version
+          chown -R 1000:1000 /app/.od/agent-tools
+        securityContext:
+          runAsUser: 0
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/.od
+      containers:
+      - name: opendesign
+        image: ghcr.io/nexu-io/od:0.19.1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: HOME
+          value: /app/.od
+        - name: PATH
+          value: /app/.od/agent-tools/bin:/usr/local/bin:/usr/bin:/bin
+        - name: OPENCODE_CONFIG_CONTENT
+          value: '{"permission":{"external_directory":{"/app/**":"allow"},"bash":{"*":"allow"},"read":{"*":"allow"},"write":{"*":"allow"}}}'
+        - name: NODE_ENV
+          value: production
+        - name: NODE_OPTIONS
+          value: --max-old-space-size=512
+        - name: OD_BIND_HOST
+          value: 0.0.0.0
+        - name: OD_PORT
+          value: "7456"
+        - name: OD_WEB_PORT
+          value: "7456"
+        - name: OD_DISABLE_API_AUTH
+          value: "1"
+        - name: OD_ALLOWED_ORIGINS
+          value: "https://{{ $opendesignDomain }}"
+        - name: OD_ALLOWED_INTERNAL_HOSTS
+          value: {{ .Values.olaresEnv.OD_ALLOWED_INTERNAL_HOSTS | default "" | quote }}
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: OPENAI_API_KEY
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: ANTHROPIC_API_KEY
+        - name: DEEPSEEK_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-secrets
+              key: DEEPSEEK_API_KEY
+        ports:
+        - name: http
+          containerPort: 7456
+          protocol: TCP
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+        volumeMounts:
+        - name: app-data
+          mountPath: /app/.od
+        - name: tmp
+          mountPath: /tmp
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 7456
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 12
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 7456
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+      volumes:
+      - name: app-data
+        hostPath:
+          type: DirectoryOrCreate
+          path: {{ .Values.userspace.appData }}
+      - name: tmp
+        emptyDir: {}
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opendesign
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: opendesign
+spec:
+  ports:
+  - name: http
+    port: 7456
+    targetPort: 7456
+  selector:
+    io.kompose.service: opendesign
