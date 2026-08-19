@@ -1,4 +1,5 @@
-﻿---
+﻿{{- $image := "docker.io/beclab/steam-headless:v0.1.19" -}}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +25,7 @@ spec:
         kompose.version: 1.34.0 (HEAD)
       labels:
         io.kompose.service: steam-headless
+        applications.app.bytetrade.io/macvlan-init: "true"
     spec:
       affinity:
         nodeAffinity:
@@ -36,6 +38,32 @@ spec:
                 - linux
               - key: node-role.kubernetes.io/control-plane
                 operator: Exists
+      initContainers:
+        # The session moved from uid 0 to uid 1000, so the durable volumes have
+        # to follow. Guarded by ! -uid 1000 so re-runs cost a stat pass, and a
+        # fresh install (which scaffolds root-owned dirs) self-heals.
+        - name: init-chown-volumes
+          image: {{ $image }}
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              for d in /chown-home /chown-games; do
+                n=$(find "$d" ! -uid 1000 -printf . 2>/dev/null | wc -c)
+                if [ "$n" -gt 0 ]; then
+                  echo "chown 1000:1000 on $n entries under $d"
+                  find "$d" ! -uid 1000 -exec chown -h 1000:1000 {} +
+                else
+                  echo "$d already uid 1000"
+                fi
+              done
+          volumeMounts:
+            - name: steam-headless-claim0
+              mountPath: /chown-home
+            - name: steam-headless-claim1
+              mountPath: /chown-games
       containers:
         - env:
             - name: NAME
@@ -51,9 +79,9 @@ spec:
             - name: DOCKER_RUNTIME
               value: nvidia
             - name: PUID
-              value: '0'
+              value: '1000'
             - name: PGID
-              value: '0'
+              value: '1000'
             - name: UMASK
               value: '000'
             - name: USER_PASSWORD
@@ -96,9 +124,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
-            - name: DBUS_SESSION_BUS_ADDRESS
-              value: unix:path=/run/dbus/session_bus_socket
-          image: docker.io/beclab/steam-headless:v0.1.16
+            - name: XDG_RUNTIME_DIR
+              value: /run/user/1000              
+          image: {{ $image }}
           livenessProbe:
             httpGet:
               path: /
@@ -167,9 +195,11 @@ spec:
                 - -c
                 - |
                   cat /dev/null > /usr/libexec/upowerd
-                  mkdir -p /run/dbus
-                  dbus-daemon --session --fork --nopidfile \
-                    --address=unix:path=/run/dbus/session_bus_socket || true
+                  mkdir -p /run/user/1000
+                  chown 1000:1000 /run/user/1000
+                  chmod 700 /run/user/1000
+                  grep -qxF 'XDG_RUNTIME_DIR=/run/user/1000' /etc/environment || \
+                    echo 'XDG_RUNTIME_DIR=/run/user/1000' >> /etc/environment
           securityContext:
             privileged: true
             runAsUser: 0
@@ -188,6 +218,18 @@ spec:
               mountPath: /dev/input/
             - name: dshm
               mountPath: /dev/shm
+            - name: flatpak-system-app
+              mountPath: /var/lib/flatpak/app
+            - name: flatpak-system-exports
+              mountPath: /var/lib/flatpak/exports
+            - name: flatpak-system-runtime
+              mountPath: /var/lib/flatpak/runtime
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/accounts-daemon.ini
+              subPath: accounts-daemon.ini
+            - name: supervisor-extras
+              mountPath: /etc/supervisor.d/polkitd.ini
+              subPath: polkitd.ini
         {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
             - name: snd
               mountPath: /dev/snd
@@ -209,6 +251,21 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
+        - name: flatpak-system-app
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/flatpak-system/app
+        - name: flatpak-system-exports
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/flatpak-system/exports
+        - name: flatpak-system-runtime
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appCache }}/{{ .Release.Name }}/flatpak-system/runtime
+        - name: supervisor-extras
+          configMap:
+            name: steamheadless-supervisor-extras
     {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
         - name: snd
           hostPath:
@@ -299,3 +356,44 @@ spec:
       protocol: TCP
       port: 47990
       targetPort: 47990
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: steamheadless-supervisor-extras
+  namespace: {{ .Release.Namespace }}
+data:
+  polkitd.ini: |
+    [program:polkitd]
+    priority=17
+    autostart=true
+    autorestart=true
+    directory=/
+    user=root
+    command=/usr/lib/polkit-1/polkitd 
+    environment=HOME="/root",USER="root"
+    stopsignal=INT
+    stdout_logfile=/var/log/supervisor/polkitd.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/polkitd.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
+
+  accounts-daemon.ini: |
+    [program:accounts-daemon]
+    priority=20
+    autostart=true
+    autorestart=true
+    directory=/
+    user=root
+    command=/usr/libexec/accounts-daemon
+    environment=HOME="/root",USER="root"
+    stopsignal=INT
+    stdout_logfile=/var/log/supervisor/accounts-daemon.log
+    stdout_logfile_maxbytes=10MB
+    stdout_logfile_backups=7
+    stderr_logfile=/var/log/supervisor/accounts-daemon.err.log
+    stderr_logfile_maxbytes=10MB
+    stderr_logfile_backups=7
