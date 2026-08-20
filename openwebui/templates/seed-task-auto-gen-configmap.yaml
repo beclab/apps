@@ -24,7 +24,10 @@ data:
     import traceback
 
     DB_PATH = os.environ.get("WEBUI_DB_PATH", "/data/webui.db")
-    INTERVAL_SEC = max(5, int(os.environ.get("SEED_INTERVAL_SEC", "10")))
+    INTERVAL_SEC = max(5, int(os.environ.get("SEED_INTERVAL_SEC", "60")))
+    IDLE_INTERVAL_SEC = max(INTERVAL_SEC, int(os.environ.get("SEED_IDLE_INTERVAL_SEC", "300")))
+    SQLITE_TIMEOUT_SEC = max(5, int(os.environ.get("SEED_SQLITE_TIMEOUT_SEC", "30")))
+    SQLITE_BUSY_MS = SQLITE_TIMEOUT_SEC * 1000
     OLD_FORCE_MARKER = "/data/.olares_task_auto_gen_default_off_v1"
     UNGATE_MARKER = "/data/.olares_task_auto_gen_admin_ungate_v1"
     ADMIN_KEYS = (
@@ -167,18 +170,28 @@ data:
         return updated, len(users)
 
 
-    def tick() -> None:
+    def tick() -> int:
+        """Returns number of user rows updated; -1 if the db was not ready."""
         if not os.path.exists(DB_PATH):
             log(f"{DB_PATH} not found yet; retrying later")
-            return
+            return -1
 
-        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn = sqlite3.connect(DB_PATH, timeout=SQLITE_TIMEOUT_SEC)
         try:
-            conn.execute("PRAGMA busy_timeout = 5000")
+            # Match Open WebUI: WAL + wait, so this sidecar does not fail-fast
+            # the same webui.db the app is writing during knowledge ingest.
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_MS}")
             ungate_admin_if_previously_forced(conn)
             updated, _user_count = seed_user_ui_defaults(conn)
             if updated:
                 log(f"user ui seed applied; updated={updated}")
+            return updated
+        except sqlite3.OperationalError as e:
+            if "locked" in str(e).lower() or "busy" in str(e).lower():
+                log(f"database busy, skipping tick: {e}")
+                return 0
+            raise
         finally:
             conn.close()
 
@@ -200,14 +213,23 @@ data:
                 log("best-effort one-shot failed; exiting 0")
             return 0
 
-        log(f"sidecar loop starting; interval={INTERVAL_SEC}s")
+        log(
+            f"sidecar loop starting; interval={INTERVAL_SEC}s "
+            f"idle={IDLE_INTERVAL_SEC}s timeout={SQLITE_TIMEOUT_SEC}s"
+        )
         while True:
+            updated = 0
             try:
-                tick()
+                updated = tick()
             except Exception:
                 traceback.print_exc()
                 log("best-effort tick failed; will retry")
-            time.sleep(INTERVAL_SEC)
+            # Back off when there is nothing to write so knowledge ingest
+            # is not competing with a SELECT every few seconds.
+            if updated == 0:
+                time.sleep(IDLE_INTERVAL_SEC)
+            else:
+                time.sleep(INTERVAL_SEC)
 
 
     if __name__ == "__main__":
