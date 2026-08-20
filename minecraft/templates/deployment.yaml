@@ -1,0 +1,146 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minecraft
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: minecraft
+spec:
+  replicas: {{ .Values.workloads.minecraft.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: minecraft
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: minecraft
+        bytetrade.io/terminal: minecraft
+        applications.app.bytetrade.io/macvlan-init: "true"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /data
+              chown 1000:1000 /data
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: minecraft
+          image: docker.io/itzg/minecraft-server:java25
+          imagePullPolicy: IfNotPresent
+          stdin: true
+          tty: true
+          ports:
+            - name: minecraft
+              containerPort: 25565
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: EULA
+              value: "TRUE"
+            - name: TYPE
+              value: VANILLA
+            - name: VERSION
+              value: LATEST
+            - name: MEMORY
+              value: 4G
+            - name: UID
+              value: "1000"
+            - name: GID
+              value: "1000"
+            - name: SKIP_CHOWN_DATA
+              value: "true"
+            - name: SKIP_SUDO
+              value: "true"
+            - name: ONLINE_MODE
+              value: "TRUE"
+            - name: MOTD
+              value: Olares Minecraft
+            - name: DIFFICULTY
+              value: normal
+            - name: MODE
+              value: survival
+            - name: MAX_PLAYERS
+              value: "8"
+            - name: VIEW_DISTANCE
+              value: "10"
+            - name: USE_AIKAR_FLAGS
+              value: "true"
+            - name: OVERRIDE_SERVER_PROPERTIES
+              value: "true"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "6"
+              memory: 8Gi
+          startupProbe:
+            tcpSocket:
+              port: 25565
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: 25565
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/data'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minecraft
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: minecraft
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: minecraft
+  ports:
+    - name: minecraft
+      port: 25565
+      targetPort: 25565
+      protocol: TCP
