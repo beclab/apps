@@ -1,0 +1,157 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: palworld
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: palworld
+spec:
+  replicas: {{ .Values.workloads.palworld.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: palworld
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: palworld
+        bytetrade.io/terminal: palworld
+        applications.app.bytetrade.io/macvlan-init: "true"
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 90
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /palworld
+              chown 1000:1000 /palworld
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /palworld
+      containers:
+        - name: palworld
+          image: docker.io/thijsvanloef/palworld-server-docker:v2.7.2
+          imagePullPolicy: IfNotPresent
+          stdin: true
+          tty: true
+          ports:
+            - name: palworld
+              containerPort: 8211
+              protocol: UDP
+            - name: query
+              containerPort: 27015
+              protocol: UDP
+            - name: rest
+              containerPort: 8212
+              protocol: TCP
+          env:
+            - name: TZ
+              value: Etc/UTC
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: PORT
+              value: "8211"
+            - name: QUERY_PORT
+              value: "27015"
+            - name: PLAYERS
+              value: "8"
+            - name: COMMUNITY
+              value: "false"
+            - name: SERVER_NAME
+              value: Olares Palworld
+            - name: SERVER_DESCRIPTION
+              value: Palworld dedicated server on Olares
+            - name: UPDATE_ON_BOOT
+              value: "true"
+            - name: REST_API_ENABLED
+              value: "true"
+            - name: REST_API_PORT
+              value: "8212"
+            - name: RCON_ENABLED
+              value: "false"
+            - name: ENABLE_PERF_THREADING_ARGS
+              value: "true"
+            - name: CROSSPLAY_PLATFORMS
+              value: "(Steam,Xbox,PS5,Mac)"
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ printf "%s-secrets" .Release.Name }}
+                  key: ADMIN_PASSWORD
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          startupProbe:
+            tcpSocket:
+              port: 8212
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 160
+          livenessProbe:
+            tcpSocket:
+              port: 8212
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 8
+          volumeMounts:
+            - name: data
+              mountPath: /palworld
+      volumes:
+        - name: data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/data'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: palworld
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: palworld
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: palworld
+  ports:
+    - name: palworld
+      port: 8211
+      targetPort: 8211
+      protocol: UDP
+    - name: query
+      port: 27015
+      targetPort: 27015
+      protocol: UDP
+    - name: rest
+      port: 8212
+      targetPort: 8212
+      protocol: TCP
