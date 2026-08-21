@@ -42,6 +42,12 @@
 {{- if not $gpuType -}}
 {{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
 {{- end -}}
+{{- /* The reasoning_effort levels this model's chat template accepts, and
+       the one it uses when a request names none. llm-init turns these into
+       the card's parameter rule, which is what Router publishes; unknown
+       levels fail at boot rather than reaching a client as options. */ -}}
+{{- $reasoningEffort := $oe.MODEL_REASONING_EFFORT | default "" -}}
+{{- $reasoningEffortDefault := $oe.MODEL_REASONING_EFFORT_DEFAULT | default "" -}}
 {{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
 {{- /* Keep ENGINE_ARGS symmetric with the engine Deployment: embedding
        mode must seed --embedding onto the model card / handoff, or the
@@ -109,7 +115,8 @@ spec:
           # v1.2.4 defaults to the stable LFS download path (hf_xet disabled
           # unless HF_ENABLE_XET=true); LFS streams each file to disk with a
           # bounded RAM footprint, avoiding the hf_xet OOM (huggingface_hub#3300).
-          image: docker.io/beclab/llm-init:v1.3.5
+          # v1.3.10 reads MODEL_REASONING_EFFORT.
+          image: docker.io/beclab/llm-init:v1.3.10
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
@@ -123,6 +130,14 @@ spec:
 {{- if $modelSupports }}
             - name: MODEL_SUPPORTS
               value: "{{ $modelSupports }}"
+{{- end }}
+{{- if $reasoningEffort }}
+            - name: MODEL_REASONING_EFFORT
+              value: "{{ $reasoningEffort }}"
+{{- end }}
+{{- if $reasoningEffortDefault }}
+            - name: MODEL_REASONING_EFFORT_DEFAULT
+              value: "{{ $reasoningEffortDefault }}"
 {{- end }}
             - name: ENGINE_ARGS
               value: "{{ $engineArgs }}"

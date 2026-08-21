@@ -7,9 +7,12 @@ metadata:
   description: "Qwen3.8-27B (GGUF UD-Q4_K_XL) served with llama.cpp."
   appid: llamacppqwen3827bggufv3
   title: Qwen3.8-27B (llama.cpp)
-  version: '1.0.0'
+  version: '1.0.5'
   categories:
     - AI
+    - models
+  tags:
+    - llm
 sharedEntrances:
   - name: llamacppqwen3827bggufv3
     host: sharedentrances-api
@@ -35,7 +38,13 @@ spec:
   onlyAdmin: true
   versionName: 'unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL'
   upgradeDescription: |
-    v1.0.0: first release. llama.cpp `server-cuda12-b10454`, llm-init v1.3.5. Unsloth Qwen3.8-27B UD-Q4_K_XL + mmproj, 102K context (`-c 104448`), MTP `--spec-draft-n-max 4`, GPU quota `23Gi`.
+    v1.0.5: Upgrade llm-init to v1.3.10; pin MODEL_REASONING_EFFORT and MODEL_REASONING_EFFORT_DEFAULT as non-editable env; upgrade llama.cpp to server-cuda12-b10548.
+
+    v1.0.4: Publish the reasoning levels this model actually accepts (low, medium, xhigh, default xhigh) on its model card, so a client can read them from Router instead of guessing. Requires llm-init v1.3.10.
+
+    v1.0.3: Lower the NVIDIA host-memory reservation so 1.12.6 timeslice nodes can install more easily (engine request 21Gi to 6Gi, chart requiredMemory 23Gi to 7Gi, covering the measured ~5.3Gi working set). GPU quota stays 23Gi.
+
+    v1.0.0: first release. llama.cpp server-cuda12-b10454, llm-init v1.3.5. Unsloth Qwen3.8-27B UD-Q4_K_XL + mmproj, 102K context (-c 104448), MTP --spec-draft-n-max 4, GPU quota 23Gi.
 
     Serves Unsloth Qwen3.8-27B GGUF (`qwen35` architecture) with vision projector.
   fullDescription: |
@@ -58,7 +67,7 @@ spec:
     First, Model Console downloads the model and gets it ready, then `llama.cpp` starts serving the model when it's ready. These two parts run separately but share files and progress info.
 
     **Stack**
-    - **llama.cpp** (`server-cuda12-b10454`): Runs the model and serves API requests (port 8081)
+    - **llama.cpp** (`server-cuda12-b10548`): Runs the model and serves API requests (port 8081)
     - **Model Console**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`.
 
     **Model Storage**
@@ -83,9 +92,9 @@ spec:
       requiredCpu: "1100m"
       requiredDisk: 50Mi
       limitedDisk: 500Gi
-      # Engine MEMORY_REQUEST 21Gi + llm-init <= requiredMemory 23Gi; MEMORY_LIMIT 30Gi + llm-init 2Gi <= limitedMemory 32Gi
+      # Engine MEMORY_REQUEST 6Gi + llm-init 256Mi <= requiredMemory 7Gi; MEMORY_LIMIT 30Gi + llm-init 2Gi <= limitedMemory 32Gi
       limitedMemory: "32Gi"
-      requiredMemory: "23Gi"
+      requiredMemory: "7Gi"
       requiredGPUMemory: "23Gi"
       limitedGPUMemory: "23Gi"
     - mode: nvidia-gb10
@@ -157,6 +166,27 @@ envs:
     - title: None
       value: none
     description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
+  # Not editable: which levels exist is a fact of this model and this chat
+  # template, not a preference. The template raises on anything outside
+  # low / medium / xhigh, so an extra level would turn into a failed
+  # request for whichever client read the levels off the model card.
+  - envName: MODEL_REASONING_EFFORT
+    required: false
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "low,medium,xhigh"
+    description:  "The reasoning_effort levels this model accepts, published on the model card so clients can read them instead of guessing."
+  # The level llama.cpp's template already uses when a request carries no
+  # reasoning_effort. It is published, never injected: nothing in the chain
+  # writes it into a request, so it has to match the engine's real default.
+  - envName: MODEL_REASONING_EFFORT_DEFAULT
+    required: false
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "xhigh"
+    description:  "The level this model uses when a request does not ask for one."
   - envName: ENGINE_ARGS
     required: true
     default: "-c 104448 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 4"
@@ -197,7 +227,7 @@ envs:
     applyOnChange: false
   - envName: LLAMACPP_MEMORY_REQUEST
     required: true
-    default: "21Gi"
+    default: "6Gi"
     type: string
     editable: false
     applyOnChange: false
