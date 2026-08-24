@@ -7,9 +7,10 @@ metadata:
   description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
   appid: llamacppllmbasev3
   title: llama.cpp Engine Base
-  version: '1.2.33'
+  version: '1.2.37'
   categories:
     - AI
+    - models
   tags:
     - engine
 sharedEntrances:
@@ -35,27 +36,37 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: 'b10454'
+  versionName: 'b10588'
   upgradeDescription: |
-    Chart 1.2.33 — bump engine to `server-cuda12-b10454` and llm-init to `v1.3.8`.
+    Chart 1.2.37 — bump engine to `server-cuda12-b10588`.
 
     **Images**
-    - llama.cpp: `docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10362` → `server-cuda12-b10454` (latest published beclab CUDA 12 server tag; amd64 + arm64). Upstream GitHub is already at b10456; no beclab b10455/b10456 image yet.
-    - llm-init: `docker.io/beclab/llm-init:v1.3.5` → `v1.3.8`.
+    - llama.cpp: `docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10454` → `server-cuda12-b10588` (amd64 + arm64).
+    - llm-init: unchanged at `v1.5.0`.
 
-    **Muse Glimmer 30B (Meta)** — requires **b10353+**; **b10454 includes** the `muse-glimmer` architecture ([llama.cpp #26841](https://github.com/ggml-org/llama.cpp/pull/26841)). Older builds (e.g. b10331) fail with `unknown model architecture: 'muse-glimmer'`.
+    134 upstream commits; core libraries move to llama.cpp 0.2.0 / ggml 0.21.0.
 
-    Clone this base and point env at [meta-models/Muse-Glimmer-30B-GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF) or community quants (e.g. unsloth). Typical layout:
-    - Main GGUF + `mmproj` in `MODEL_SOURCE` (comma-separated) for vision
-    - DFlash drafter (`dflash-kquant.gguf`) + `--spec-type draft-dflash` or `draft-dspark` in `ENGINE_ARGS` for speculative decode
+    **New model architectures** — clone this base and point `MODEL_SOURCE` / `MODEL_NAME` at the GGUF:
+    - BailingMoE3 ([#26608](https://github.com/ggml-org/llama.cpp/pull/26608)), with DSpark speculative decode ([#27508](https://github.com/ggml-org/llama.cpp/pull/27508))
+    - Granite SWA / GraniteMoE SWA ([#25505](https://github.com/ggml-org/llama.cpp/pull/25505))
+    - dots3-note, including vision + audio through `mmproj` ([#27060](https://github.com/ggml-org/llama.cpp/pull/27060), [#27524](https://github.com/ggml-org/llama.cpp/pull/27524))
+    - DSpark drafters for LFM2 ([#27383](https://github.com/ggml-org/llama.cpp/pull/27383)) and speculators-format checkpoints ([#26275](https://github.com/ggml-org/llama.cpp/pull/26275))
+    - Nemotron 3 Ultra conversion fix ([#27101](https://github.com/ggml-org/llama.cpp/pull/27101))
 
-    **Also in b10362 → b10454:**
-    - Chat templates receive OpenAI `reasoning_effort` ([llama.cpp #26941](https://github.com/ggml-org/llama.cpp/pull/26941)); Qwen3.8 uses `xhigh` / `medium` / `low` via `--chat-template-kwargs` or the request body
-    - MTP draft type auto-detect; DFlash / DSpark backend sampling
-    - MiniMax Text01 / M1 conversion support
-    - Server `/metrics` and `/slots` stay available during decode; mtmd and jinja fixes
+    **GPU and performance**
+    - DGX Spark (`nvidia-gb10`): faster batch-size-1 decode for dense models via MMVQ `nwarps=8` ([#26843](https://github.com/ggml-org/llama.cpp/pull/26843))
+    - CUDA MMVQ→MMQ decode crossover is now tuned per GPU and quant type ([#26079](https://github.com/ggml-org/llama.cpp/pull/26079)); cuBLAS handles use a static workspace ([#26574](https://github.com/ggml-org/llama.cpp/pull/26574))
+    - Layer auto-fit accounts for `n_streams` ([#27496](https://github.com/ggml-org/llama.cpp/pull/27496)); V is built as a view of K in iSWA attention ([#27392](https://github.com/ggml-org/llama.cpp/pull/27392))
+    - Fixes: backend split scheduler race ([#26040](https://github.com/ggml-org/llama.cpp/pull/26040)) and a null-pointer deref in speculative decode ([#27404](https://github.com/ggml-org/llama.cpp/pull/27404))
 
-    See https://github.com/ggml-org/llama.cpp/releases for full upstream release notes.
+    **Server and API**
+    - `/metrics` and `/slots` stay reachable while the server is sleeping ([#27376](https://github.com/ggml-org/llama.cpp/pull/27376))
+    - Model endpoints become private when `--api-key` authentication is enabled ([#26347](https://github.com/ggml-org/llama.cpp/pull/26347)); this chart runs without an engine API key, so the internal entrance is unaffected
+    - `--mmproj-device` places the vision projector on a chosen device ([#23255](https://github.com/ggml-org/llama.cpp/pull/23255)); WebP inputs are accepted via ffmpeg ([#27520](https://github.com/ggml-org/llama.cpp/pull/27520))
+    - Embedding output combined with draft-MTP is fixed ([#27400](https://github.com/ggml-org/llama.cpp/pull/27400)) — relevant to `MODEL_MODE=embedding`
+    - mtmd fixes for LFM2 image tiling, DeepSeek-OCR and Granite preprocessing; refreshed built-in WebUI
+
+    See https://github.com/ggml-org/llama.cpp/compare/b10454...b10588 for the full upstream diff.
   fullDescription: |
     **IMPORTANT NOTE**  
     This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
