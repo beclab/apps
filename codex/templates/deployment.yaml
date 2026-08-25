@@ -6,11 +6,16 @@
 #   - initContainers:
 #       * init-chmod-data (root): ensures /opt/data is owned by 1000:1000.
 #       * init-skills (root): flattens baked Olares skills into ~/.codex/skills.
-#       * init-install-codex (UID 1000): downloads the codex native
-#         binary from the matching GitHub Release tarball into
-#         /opt/data/.local/bin/ on first run for this version+arch,
-#         then leaves a version+target sentinel so subsequent restarts
-#         skip the download (and do not reuse a wrong-arch binary).
+#       * init-olares-model-config (UID 1000): writes/clears a managed
+#         block in ~/.codex/config.toml from OPENAI_BASE_URL +
+#         CODEX_MODEL so local vs cloud is env-driven (Claude Code
+#         pattern). Blank env = strip the block = official cloud.
+#       * init-install-codex (UID 1000): runs OpenAI's official
+#         standalone installer (chatgpt.com/codex/install.sh) into
+#         /opt/data/.local/bin + ~/.codex/packages/standalone on first
+#         run for this version+arch. A version+target sentinel skips
+#         later restarts. The old GitHub musl-tarball path only copied
+#         `codex` and left installs reporting missing agentic execution.
 #       * init-docker-cli (optional, ENABLE_DIND): copies docker CLI +
 #         compose/buildx plugins into a shared emptyDir.
 #   - Optional docker-dind sidecar (ENABLE_DIND, default on): privileged
@@ -76,7 +81,7 @@ spec:
         # Flatten Olares skills from /skills-staging into Codex's
         # user skills dir (~/.codex/skills = /opt/data/.codex/skills).
         - name: init-skills
-          image: "beclab/harveyff-codex-base:0.5.8"
+          image: "beclab/harveyff-codex-base:0.5.9"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -104,14 +109,13 @@ spec:
             - mountPath: /opt/data
               name: app-data-home
 
-        # First-run only (per appVersion): download the codex native
-        # binary from the matching GitHub Release tarball into the
-        # shared /opt/data PVC. Runs as UID 1000 since the installer
-        # only writes under $HOME. A versioned sentinel file makes
-        # subsequent Pod starts skip the download; bumping appVersion
-        # in Chart.yaml automatically forces a re-download.
-        - name: init-install-codex
-          image: "beclab/harveyff-codex-base:0.5.8"
+        # Always rewrite the Olares-managed model block so applyOnChange
+        # env edits take effect on the next Pod start. Codex persists
+        # provider routing in ~/.codex/config.toml (openai_base_url /
+        # model), not only via process env — leaving BASE_URL blank
+        # must delete the block or the previous local gateway sticks.
+        - name: init-olares-model-config
+          image: "beclab/ubuntu:24.04"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -123,6 +127,91 @@ spec:
           env:
             - name: HOME
               value: /opt/data
+            - name: CODEX_HOME
+              value: /opt/data/.codex
+            {{- with .Values.olaresEnv.OPENAI_BASE_URL }}
+            - name: OPENAI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.olaresEnv.CODEX_MODEL }}
+            - name: CODEX_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              CONFIG="${CODEX_HOME}/config.toml"
+              mkdir -p "$CODEX_HOME"
+              touch "$CONFIG"
+
+              stripped="$(mktemp)"
+              awk '
+                BEGIN { skip = 0 }
+                /^# BEGIN OLARES-MANAGED[[:space:]]*$/ { skip = 1; next }
+                /^# END OLARES-MANAGED[[:space:]]*$/ { skip = 0; next }
+                skip == 0 { print }
+              ' "$CONFIG" > "$stripped"
+
+              toml_escape() {
+                printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+              }
+
+              if [ -n "${OPENAI_BASE_URL:-}" ]; then
+                {
+                  # Root keys MUST come before any [table]. Appending
+                  # openai_base_url after [tui.model_availability_nux]
+                  # makes TOML treat the URL as a key of that table
+                  # (it expects u32), and Codex refuses to start.
+                  printf '# BEGIN OLARES-MANAGED\n'
+                  printf 'openai_base_url = "%s"\n' "$(toml_escape "$OPENAI_BASE_URL")"
+                  if [ -n "${CODEX_MODEL:-}" ]; then
+                    printf 'model = "%s"\n' "$(toml_escape "$CODEX_MODEL")"
+                  fi
+                  printf '# END OLARES-MANAGED\n'
+                  if [ -s "$stripped" ]; then
+                    printf '\n'
+                    sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' "$stripped"
+                    printf '\n'
+                  fi
+                } > "$CONFIG"
+                echo "[init-olares-model-config] local/gateway routing enabled (openai_base_url set)"
+              else
+                sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' "$stripped" > "$CONFIG"
+                echo "[init-olares-model-config] no OPENAI_BASE_URL; using official cloud / OAuth"
+              fi
+              rm -f "$stripped"
+              echo "[init-olares-model-config] wrote $CONFIG"
+          resources: {}
+          volumeMounts:
+            - mountPath: /opt/data
+              name: app-data-home
+
+        # First-run / version bump: official standalone installer into the
+        # shared /opt/data PVC (UID 1000; writes only under $HOME).
+        # Bumping appVersion changes the sentinel and forces a reinstall.
+        # Require ~/.codex/packages/standalone so a leftover musl `codex`
+        # binary is not treated as a complete install.
+        - name: init-install-codex
+          image: "beclab/harveyff-codex-base:0.5.9"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: HOME
+              value: /opt/data
+            - name: CODEX_HOME
+              value: /opt/data/.codex
+            - name: CODEX_INSTALL_DIR
+              value: /opt/data/.local/bin
+            - name: CODEX_NON_INTERACTIVE
+              value: "1"
             - name: JAVA_HOME
               value: /usr/lib/jvm/java-21-openjdk-current
             - name: CODEX_VERSION
@@ -132,55 +221,55 @@ spec:
             - -c
             - |
               set -euo pipefail
-              mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
+              mkdir -p "$HOME/.install-state" "$HOME/.local/bin" "$HOME/.codex"
 
-              # Resolve target triple first so the sentinel is arch-specific.
-              # A version-only sentinel previously reused an amd64 binary on
-              # arm64 (and vice versa) via hostPath, causing Exec format error.
+              # Sentinel is arch-specific so a hostPath cache cannot reuse
+              # an amd64 binary on arm64 (Exec format error).
               ARCH="$(uname -m)"
               case "$ARCH" in
                 x86_64|amd64)  TARGET="x86_64-unknown-linux-musl" ;;
                 aarch64|arm64) TARGET="aarch64-unknown-linux-musl" ;;
                 *) echo "[init-install-codex] unsupported arch: $ARCH" >&2; exit 1 ;;
               esac
-              SENTINEL="$HOME/.install-state/codex-${CODEX_VERSION}-${TARGET}"
+              SENTINEL="$HOME/.install-state/codex-standalone-${CODEX_VERSION}-${TARGET}"
+              STANDALONE_CURRENT="$HOME/.codex/packages/standalone/current"
 
-              if [ -x "$HOME/.local/bin/codex" ] && [ -f "$SENTINEL" ]; then
+              if [ -x "$HOME/.local/bin/codex" ] && [ -e "$STANDALONE_CURRENT" ] && [ -f "$SENTINEL" ]; then
                 if "$HOME/.local/bin/codex" --version >/dev/null 2>&1; then
-                  echo "[init-install-codex] cached binary found (installed $(cat "$SENTINEL"), ${TARGET})"
+                  echo "[init-install-codex] cached standalone package found (installed $(cat "$SENTINEL"), ${TARGET})"
                   "$HOME/.local/bin/codex" --version
                   exit 0
                 fi
                 echo "[init-install-codex] cached binary unusable on ${TARGET}; reinstalling"
-                rm -f "$HOME/.local/bin/codex"
               fi
 
-              URL="https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${TARGET}.tar.gz"
-              echo "[init-install-codex] downloading $URL"
+              INSTALLER="$(mktemp --suffix=.sh)"
+              trap 'rm -f "$INSTALLER"' EXIT
 
-              TMPDIR="$(mktemp -d)"
-              trap 'rm -rf "$TMPDIR"' EXIT
+              echo "[init-install-codex] fetching official installer..."
+              curl -fSL --retry 5 --retry-delay 3 \
+                https://chatgpt.com/codex/install.sh -o "$INSTALLER"
+              echo "[init-install-codex] installer downloaded ($(wc -c < "$INSTALLER") bytes)"
 
-              curl -fSL --retry 5 --retry-delay 3 -o "$TMPDIR/codex.tar.gz" "$URL"
-              tar -xzf "$TMPDIR/codex.tar.gz" -C "$TMPDIR"
+              echo "[init-install-codex] running official installer for ${CODEX_VERSION} (${TARGET})"
+              CODEX_INSTALL_DIR="$HOME/.local/bin" \
+              CODEX_HOME="$HOME/.codex" \
+              CODEX_NON_INTERACTIVE=1 \
+                bash "$INSTALLER" --release "${CODEX_VERSION}"
 
-              # The release tarball contains a single binary entry whose
-              # name includes the target triple, e.g. codex-x86_64-unknown-linux-musl.
-              BIN="$(find "$TMPDIR" -maxdepth 2 -type f -name "codex-${TARGET}" | head -n1)"
-              if [ -z "$BIN" ]; then
-                echo "[init-install-codex] could not locate extracted codex binary" >&2
-                ls -la "$TMPDIR" >&2
+              if [ ! -x "$HOME/.local/bin/codex" ]; then
+                echo "[init-install-codex] installer completed but binary not found at $HOME/.local/bin/codex" >&2
+                ls -la "$HOME/.local/bin" "$HOME/.codex/packages/standalone" 2>/dev/null >&2 || true
                 exit 1
               fi
 
-              install -m 0755 "$BIN" "$HOME/.local/bin/codex"
               date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
-              echo "[init-install-codex] installed codex ${CODEX_VERSION} for ${TARGET}"
+              echo "[init-install-codex] installed official standalone Codex ${CODEX_VERSION} for ${TARGET}"
               "$HOME/.local/bin/codex" --version
           resources:
             limits:
               cpu: "2"
-              memory: 2Gi
+              memory: 4Gi
             requests:
               cpu: 50m
               memory: 128Mi
@@ -223,7 +312,7 @@ spec:
         # login / non-login / interactive / non-interactive shells all
         # see the codex binary on PATH.
         - name: codex
-          image: "beclab/harveyff-codex-base:0.5.8"
+          image: "beclab/harveyff-codex-base:0.5.9"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
@@ -246,6 +335,12 @@ spec:
               value: "/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: CODEX_HOME
               value: /opt/data/.codex
+            {{- /*
+              Routing env vars are conditionally injected. Blank values
+              are omitted so Codex sees them as unset (OAuth / official
+              cloud). OPENAI_BASE_URL + CODEX_MODEL are also written
+              into ~/.codex/config.toml by init-olares-model-config.
+            */ -}}
             {{- with .Values.olaresEnv.OPENAI_API_KEY }}
             - name: OPENAI_API_KEY
               valueFrom:

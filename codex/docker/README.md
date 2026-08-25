@@ -37,21 +37,22 @@ allowed when needed.
 (Codex user skills via `.agents/skills` at build time; `init-skills` flattens into
 `$CODEX_HOME/skills` on the PVC; agent flag `codex` via `npx skills add`).
 
-**Not included:** the `codex` CLI binary (installed at runtime by
-`init-install-codex` into the shared PVC). `ripgrep` is omitted on purpose:
-Codex bundles its own.
+**Not included:** the `codex` CLI standalone package (installed at runtime by
+`init-install-codex` via OpenAI's official `install.sh` into
+`/opt/data/.local/bin` and `~/.codex/packages/standalone`). `ripgrep` is
+omitted from apt on purpose: Codex bundles its own.
 
 ## Build & push
 
 ```bash
 # Single-arch (local dev)
-docker build -t beclab/harveyff-codex-base:0.5.8 .
+docker build -t beclab/harveyff-codex-base:0.5.9 .
 
 # Multi-arch release (recommended, matches chart supportArch)
 docker buildx create --use --name codex-builder || true
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t beclab/harveyff-codex-base:0.5.8 \
+  -t beclab/harveyff-codex-base:0.5.9 \
   --push .
 ```
 
@@ -59,14 +60,15 @@ docker buildx build \
 
 When bumping apt dependencies or base Ubuntu:
 
-1. Increment the tag (e.g. `0.5.8 -> 0.5.9`).
+1. Increment the tag (e.g. `0.5.9 -> 0.5.10`).
 2. Update all references in `codex/templates/deployment.yaml`
    (init-skills + init-install-codex + main container).
 3. Bump `version` in `codex/Chart.yaml` and `metadata.version` in
    `OlaresManifest.yaml`.
 
-The `codex` binary itself (rust-v0.125.0 etc.) is controlled separately by
+The Codex standalone package (rust-v0.149.1 etc.) is controlled separately by
 `appVersion` in `Chart.yaml` and `metadata.version` / `spec.versionName` in
-`OlaresManifest.yaml`; it is pulled fresh from the matching GitHub Release
-tarball whenever `$HOME/.install-state/codex-<version>` is missing, regardless
-of base image tag.
+`OlaresManifest.yaml`. `init-install-codex` runs
+`https://chatgpt.com/codex/install.sh --release <appVersion>` whenever
+`$HOME/.install-state/codex-standalone-<version>-<target>` is missing or the
+install is binary-only (no `~/.codex/packages/standalone/current`).
