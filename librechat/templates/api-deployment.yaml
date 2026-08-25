@@ -19,8 +19,40 @@ spec:
       labels:
         app: librechat
         component: api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          for d in /app/data /app-config /app/uploads /app/logs /app/skill /app/client/public/images; do
+            mkdir -p "$d" && chown 1000:1000 "$d"
+          done
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: librechat-data
+          mountPath: /app/data
+        - name: api-keys-config
+          mountPath: /app-config
+        - name: librechat-uploads
+          mountPath: /app/uploads
+        - name: librechat-logs
+          mountPath: /app/logs
+        - name: librechat-skill
+          mountPath: /app/skill
+        - name: librechat-images
+          mountPath: /app/client/public/images
       - name: wait-for-mongodb
         image: "docker.io/beclab/wait-for:0.1.0"
         args:
@@ -128,7 +160,7 @@ spec:
         imagePullPolicy: IfNotPresent
       containers:
       - name: librechat-api
-        image: beclab/danny-avila-librechat:chart-1.9.6
+        image: docker.io/librechat/librechat:v0.8.7
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 3080
@@ -154,6 +186,23 @@ spec:
             secretKeyRef:
               name: librechat-secrets
               key: jwt-refresh-secret
+        - name: CREDS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: librechat-secrets
+              key: creds-key
+              optional: true
+        - name: CREDS_IV
+          valueFrom:
+            secretKeyRef:
+              name: librechat-secrets
+              key: creds-iv
+              optional: true
+        - name: MEILI_MASTER_KEY
+          valueFrom:
+            secretKeyRef:
+              name: librechat-meilisearch-secret
+              key: master-key
         command:
         - sh
         - '-c'
@@ -220,22 +269,30 @@ spec:
           readOnly: true
         - name: api-keys-config
           mountPath: /app-config
+        - name: librechat-uploads
+          mountPath: /app/uploads
+        - name: librechat-logs
+          mountPath: /app/logs
+        - name: librechat-skill
+          mountPath: /app/skill
+        - name: librechat-images
+          mountPath: /app/client/public/images
         livenessProbe:
           httpGet:
-            path: /api/health
+            path: /livez
             port: 3080
-          initialDelaySeconds: 30
+          initialDelaySeconds: 10
           periodSeconds: 30
           timeoutSeconds: 10
           failureThreshold: 3
         readinessProbe:
           httpGet:
-            path: /api/health
+            path: /readyz
             port: 3080
-          initialDelaySeconds: 20
-          periodSeconds: 10
+          initialDelaySeconds: 5
+          periodSeconds: 5
           timeoutSeconds: 5
-          failureThreshold: 3
+          failureThreshold: 6
         resources:
           requests:
             cpu: 300m
@@ -254,5 +311,21 @@ spec:
       - name: api-keys-config
         hostPath:
           path: '{{ .Values.userspace.appData }}/api-keys-config'
+          type: DirectoryOrCreate
+      - name: librechat-uploads
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/uploads'
+          type: DirectoryOrCreate
+      - name: librechat-logs
+        hostPath:
+          path: '{{ .Values.userspace.appCache }}/logs'
+          type: DirectoryOrCreate
+      - name: librechat-skill
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/skill'
+          type: DirectoryOrCreate
+      - name: librechat-images
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/images'
           type: DirectoryOrCreate
       restartPolicy: Always

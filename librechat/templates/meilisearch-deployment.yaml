@@ -22,12 +22,17 @@ spec:
     spec:
       containers:
       - name: meilisearch
-        image: beclab/getmeili-meilisearch:v1.29.0
+        image: docker.io/getmeili/meilisearch:v1.53.1
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 7700
           name: meilisearch
         env:
+        - name: MEILI_NO_ANALYTICS
+          value: "true"
+        # v1.53 refuses a v1.29 data.ms without this; keep the original hostPath.
+        - name: MEILI_UPGRADE_DB
+          value: "true"
         - name: MEILI_MASTER_KEY
           valueFrom:
             secretKeyRef:
@@ -36,18 +41,23 @@ spec:
         volumeMounts:
         - name: meilisearch-data
           mountPath: /meili_data
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 7700
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 120
         livenessProbe:
           httpGet:
             path: /health
             port: 7700
-          initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /health
             port: 7700
-          initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
         resources:
