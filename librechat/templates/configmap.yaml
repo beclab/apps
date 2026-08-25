@@ -1,6 +1,31 @@
 {{- $appDomainENV := split "," .Values.domain.librechatclient -}}
 {{- $appDomain := index $appDomainENV "_0" -}}
 {{- $topDomain := regexReplaceAll ".*?([^.]+\\.[^.]+)$" $appDomain "$1" -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $customURL := $oe.ENDPOINT_BASE_URL | default "" | trim -}}
+{{- if not $customURL -}}
+{{- $customURL = $oe.CUSTOM_ENDPOINT_BASE_URL | default "" | trim -}}
+{{- end -}}
+{{- if $customURL -}}
+{{- $customURL = trimSuffix "/" $customURL -}}
+{{- if not (hasSuffix "/v1" $customURL) -}}
+{{- $customURL = printf "%s/v1" $customURL -}}
+{{- end -}}
+{{- $customURL = printf "%s/" $customURL -}}
+{{- end -}}
+{{- $customName := $oe.ENDPOINT_NAME | default "" | trim -}}
+{{- if not $customName -}}
+{{- $customName = $oe.CUSTOM_ENDPOINT_NAME | default "" | trim -}}
+{{- end -}}
+{{- if not $customName -}}
+{{- $customName = "Custom" -}}
+{{- end -}}
+{{- $customKey := $oe.ENDPOINT_API_KEY | default $oe.CUSTOM_ENDPOINT_API_KEY | default "" -}}
+{{- $customModelsRaw := $oe.ENDPOINT_MODELS | default "" | trim -}}
+{{- if not $customModelsRaw -}}
+{{- $customModelsRaw = $oe.CUSTOM_ENDPOINT_MODELS | default "" | trim -}}
+{{- end -}}
+{{- $customModels := compact (splitList "," $customModelsRaw) -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -9,15 +34,30 @@ metadata:
   namespace: '{{ .Release.Namespace }}'
 data:
   librechat.yaml: |
-    version: 1.2.8
+    version: 1.3.13
+    cache: true
     endpoints:
       custom:
-        - name: "Ollama"
-          apiKey: "ollama"
-          baseURL: "https://your_ollama_base_url/v1"
+{{- if $customURL }}
+        - name: {{ $customName | quote }}
+          apiKey: {{ $customKey | quote }}
+          baseURL: {{ $customURL | quote }}
           models:
-            default: ["llama3"]
+            default:
+{{- if $customModels }}
+{{- range $customModels }}
+              - {{ . | trim | quote }}
+{{- end }}
+{{- else }}
+              []
+{{- end }}
             fetch: true
+          titleConvo: true
+          titleModel: "current_model"
+          modelDisplayLabel: {{ $customName | quote }}
+{{- else }}
+        []
+{{- end }}
 
 ---
 apiVersion: v1
@@ -40,6 +80,7 @@ data:
   
   # MeiliSearch Configuration
   MEILI_HOST: "http://librechat-meilisearch:7700"
+  LIBRECHAT_TEMP_CREDENTIALS_PATH: "/app/data/.env.temp"
   
   # Debug Logging
   DEBUG_LOGGING: "true"
