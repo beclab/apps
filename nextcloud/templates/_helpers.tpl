@@ -8,6 +8,8 @@ server {
     access_log /usr/local/openresty/nginx/logs/access.log;
     error_log /usr/local/openresty/nginx/logs/error.log;
 
+    client_max_body_size 512m;
+
     proxy_connect_timeout 30s;
     proxy_send_timeout 60s;
     proxy_read_timeout 300s;

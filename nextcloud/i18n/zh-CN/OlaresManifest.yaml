@@ -14,6 +14,16 @@ spec:
     - 加强安全 我们通过加密技术、HackerOne 赏金计划和双因素认证来保护您的数据安全。
 
   upgradeDescription: |
+    将 Nextcloud 从 31.0.4 升级到 31.0.14（同大版本，已有实例会原地执行 `occ upgrade`）。appData 用户文件与 Postgres 中间件数据会保留。运行中的数据卷请勿跨越大版本。
+
+    将应用镜像从 `beclab/aboveos-zhangdangfang-nextcloud:31.0.4.2` 替换为 `beclab/harveyff-nextcloud:31.0.14.1`（基于官方 `nextcloud:31.0.14-apache`，并将 `www-data` 映射为 uid/gid 1000 以适配 Olares hostPath）。多架构：amd64 与 arm64。
+
+    将 OpenResty 反向代理上传上限从默认 1MB 提高到 512MB（`client_max_body_size`），与镜像 `PHP_UPLOAD_LIMIT` 对齐。nginx ConfigMap 变更时通过 `checksum/nginx-config` 重建代理 Deployment。
+
+    始终信任局域网 hosts 域名 `<entrance>.<user>.olares.local`（官方镜像仅在首次安装时应用 `NEXTCLOUD_TRUSTED_DOMAINS`）。挂载 `zz-olares.config.php`，使可信域名与 overwrite 配置在每次启动时生效。
+
+    对 `*.olares.local` 使用 HTTP `overwriteprotocol`，使局域网 HTTP 登录会话 Cookie 可用；公网入口仍使用 HTTPS。将 `TRUSTED_PROXIES` 扩展为集群网段（`10.0.0.0/8`、`172.16.0.0/12`、`127.0.0.1`）。
+
     将反向代理镜像从 Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）切换为官方 OpenResty 镜像 `openresty/openresty:1.29.2.5-bookworm-fat`。
 
     同步调整 nginx 配置挂载与日志路径以匹配官方镜像布局（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`），并移除 Bitnami 专用的 `OPENRESTY_CONF_FILE` 配置。
@@ -23,5 +33,3 @@ spec:
     修复内容
     - 修复日历、通讯录等 CalDAV/CardDAV 功能一直加载或报错（如 `findAllCalendars`、`_extractAdvertisedDavFeatures`）
     - 反向代理不再对 `/remote.php/dav/` 等 API 路径的 OPTIONS 请求直接返回 204，DAV 响应头可正常从 Nextcloud 透传
-
-    说明：Nextcloud 仍为 31.0.4，本次无应用版本升级。
