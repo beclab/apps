@@ -1,0 +1,151 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: router
+  annotations:
+    applications.app.bytetrade.io/default-thirdlevel-domains: '[{"appName": "router","entranceName":"router-frontend","thirdLevelDomain":"router"}]'
+spec:
+  replicas: {{ .Values.workloads.router.replicaCount }}
+  selector:
+    matchLabels:
+      app: router
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: router
+    spec:
+      containers:
+        - name: router-frontend
+          image: docker.io/beclab/router-frontend:v2.5.0
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1000Mi
+            limits:
+              cpu: 2000m
+              memory: 2000Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 30
+            timeoutSeconds: 60
+            periodSeconds: 60
+            successThreshold: 1
+            failureThreshold: 10
+          startupProbe:
+            tcpSocket:
+              port: 80
+            timeoutSeconds: 5
+            periodSeconds: 10
+            successThreshold: 1
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          ports:
+            - containerPort: 80
+        - name: router-backend
+          image: docker.io/beclab/router:v2.5.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: LLM_GATEWAY_CONFIG
+              value: "/configs/config.yaml"
+            - name: LLM_GATEWAY_CRYPTO_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: LLM_GATEWAY_CRYPTO_ENCRYPTION_KEY
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1000Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: init-config
+              mountPath: /configs/config.yaml
+              subPath: config.yaml
+      volumes:
+        - name: init-config
+          configMap:
+            name: config
+            defaultMode: 438
+            items:
+              - key: config.yaml
+                path: config.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-svc
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: router-frontend
+spec:
+  selector:
+    app: router
+  ports:
+    - name: router-frontend
+      port: 80
+      targetPort: 80
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: router-backend
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: router-frontend
+spec:
+  selector:
+    app: router
+  ports:
+    - name: backend-http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-router
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: router-frontend
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 8080
+  selector:
+    app: router
+  type: ClusterIP

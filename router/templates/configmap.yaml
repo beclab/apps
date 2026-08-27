@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+  namespace: "{{ .Release.Namespace }}"
+data:
+  config.yaml: |
+    server:
+      port: 8080
+      read_header_timeout: 10s
+      shutdown_timeout: 30s
+    logging:
+      level: info
+      format: json
+    metrics:
+      enabled: true
+      path: /metrics
+      bearer_token: ""
+    auth:
+      source: lldap
+      admin_names: []
+      lldap:
+        readonly_url: "http://lldap-provider-svc.os-framework:28080"
+      kubeconfig: ""
+      kube_context: ""
+    database:
+      host: "{{ .Values.postgres.host }}"
+      port: "{{ .Values.postgres.port }}"
+      user: "{{ .Values.postgres.username }}"
+      password: "{{ .Values.postgres.password }}"
+      dbname: "{{ .Values.postgres.databases.router }}"
+      # disable is for local dev/compose. Production should use TLS or an
+      # equivalent trusted in-cluster transport policy.
+      sslmode: disable
+      max_open_conns: 25
+      max_idle_conns: 5
+      timeout: 5s
+      migrations_dir: migrations
+    olares:
+      market:
+        mock: false
+        base_url: http://market-provider-svc.os-framework:28080
+        mock_base_url:
+        token_namespace: "{{ .Release.Namespace }}"
+        token_sa: default
+      provider_sync:
+        market_url: http://market-provider-svc.os-framework:28080
+        owner: "{{ .Values.bfl.username }}"
+      app_directory:
+        source: crd
+        reconcile_interval: 5m
+        failure_threshold: 3
+      model_sync:
+        enabled: true
+        backfill_interval: 30s
+        progress_interval: 30s
+        progress_fast_interval: 3s
+    provider:
+      name: openai
+      base_url: https://api.openai.com/v1
+      api_key: ""
+      timeout: 320s
+      connect_timeout: 5s
+      read_timeout: 300s
+      retry_max: 1
+      retry_backoff: 200ms
+      breaker_min_requests: 10
+      breaker_failure_ratio: 0.5
+      breaker_open_seconds: 30s
+    crypto:
+      encryption_key: ""
+    events:
+      enabled: false
+      nats_url: ""
+      subject_prefix: "olares.llm-gateway"
+      buffer_size: 1024
