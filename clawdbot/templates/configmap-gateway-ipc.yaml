@@ -17,9 +17,68 @@ data:
   # SENTINEL_DELAY. The same sentinel also short-circuits the long
   # post-crash backoff so an operator can immediately retry after fixing
   # a bad config.
+  # OpenClaw 2026.8+ only reads OPENCLAW_*. Older images, user .env files,
+  # and leftover scripts still export CLAWDBOT_* / MOLTBOT_*. This maps
+  # those names into OPENCLAW_* when the new name is unset, and can also
+  # export CLAWDBOT_* from OPENCLAW_* so leftover scripts keep working.
+  openclaw-env-compat.sh: |
+    #!/usr/bin/env bash
+    openclaw_env_compat() {
+      local line name val dest
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        name="${line%%=*}"
+        val="${line#*=}"
+        case "$name" in
+          CLAWDBOT_*) dest="OPENCLAW_${name#CLAWDBOT_}" ;;
+          MOLTBOT_*) dest="OPENCLAW_${name#MOLTBOT_}" ;;
+          *) continue ;;
+        esac
+        if [ -z "${!dest+x}" ]; then
+          export "$dest=$val"
+        fi
+      done <<EOF
+    $(env | grep -E '^(CLAWDBOT_|MOLTBOT_)' || true)
+    EOF
+      if [ "${OPENCLAW_ENV_COMPAT_KEEP_LEGACY:-1}" != "0" ]; then
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          name="${line%%=*}"
+          val="${line#*=}"
+          case "$name" in
+            OPENCLAW_*) dest="CLAWDBOT_${name#OPENCLAW_}" ;;
+            *) continue ;;
+          esac
+          if [ -z "${!dest+x}" ]; then
+            export "$dest=$val"
+          fi
+        done <<EOF
+    $(env | grep -E '^OPENCLAW_' || true)
+    EOF
+      fi
+      if [ "${OPENCLAW_ENV_COMPAT_UNSET_LEGACY:-0}" = "1" ]; then
+        while IFS= read -r line; do
+          [ -z "$line" ] && continue
+          unset "${line%%=*}"
+        done <<EOF
+    $(env | grep -E '^(CLAWDBOT_|MOLTBOT_)' || true)
+    EOF
+      fi
+    }
+    openclaw_env_compat
+
   gateway-entrypoint.sh: |
     #!/usr/bin/env bash
     set -u
+
+    # 8.2+ only reads OPENCLAW_*. Map leftover CLAWDBOT_*/MOLTBOT_* then
+    # drop them so the process does not emit OPENCLAW_LEGACY_ENV_VARS.
+    export OPENCLAW_ENV_COMPAT_UNSET_LEGACY="${OPENCLAW_ENV_COMPAT_UNSET_LEGACY:-1}"
+    export OPENCLAW_ENV_COMPAT_KEEP_LEGACY="${OPENCLAW_ENV_COMPAT_KEEP_LEGACY:-0}"
+    if [ -f /usr/local/bin/openclaw-env-compat.sh ]; then
+      # shellcheck disable=SC1091
+      . /usr/local/bin/openclaw-env-compat.sh
+    fi
 
     RETRY_DELAY="${OPENCLAW_GATEWAY_RESTART_DELAY_SECONDS:-30}"
     SENTINEL="${OPENCLAW_GATEWAY_RESTART_SENTINEL:-/home/node/.openclaw/.gateway-restart-requested}"
@@ -99,6 +158,14 @@ data:
     READY_URL=http://127.0.0.1:18789/readyz
     WAIT=1
     [ "${1:-}" = "--no-wait" ] && WAIT=0
+    token="$(node -e 'try{const c=require("/home/node/.openclaw/openclaw.json"); process.stdout.write(String(c?.gateway?.auth?.token||""))}catch{}' 2>/dev/null || true)"
+    ready_curl() {
+      if [ -n "$token" ]; then
+        curl -fsS -o /dev/null --max-time "$1" -H "Authorization: Bearer ${token}" "${READY_URL}" 2>/dev/null
+      else
+        curl -fsS -o /dev/null --max-time "$1" "${READY_URL}" 2>/dev/null
+      fi
+    }
 
     mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
     : > "$SENTINEL"
@@ -108,8 +175,9 @@ data:
 
     # Phase 1: wait for the old gateway to stop answering /readyz, so we
     # don't mistake the pre-restart process for the post-restart one.
+    # v2026.8.2 rejects unauthenticated /readyz, so send the gateway token.
     for _ in $(seq 1 30); do
-      if ! curl -fsS -o /dev/null --max-time 1 "${READY_URL}" 2>/dev/null; then
+      if ! ready_curl 1; then
         echo "gateway: old process gone, waiting for new one"
         break
       fi
@@ -119,7 +187,7 @@ data:
     # Phase 2: wait for the respawned gateway to be ready again.
     for _ in $(seq 1 60); do
       sleep 1
-      if curl -fsS -o /dev/null --max-time 2 "${READY_URL}" 2>/dev/null; then
+      if ready_curl 2; then
         echo "gateway: ready"
         exit 0
       fi
