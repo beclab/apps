@@ -10,6 +10,14 @@ data:
       ''      close;
     }
 
+    # OpenClaw 2026.8.2+ requires the last proxy hop to overwrite
+    # X-Forwarded-For (not append). Prefer the platform-envoy client
+    # chain; fall back to the immediate peer if that header is empty.
+    map $http_x_forwarded_for $openclaw_xff {
+      default $http_x_forwarded_for;
+      ""      $remote_addr;
+    }
+
     server {
       listen 8080;
       access_log /usr/local/openresty/nginx/logs/access.log;
@@ -25,7 +33,7 @@ data:
           proxy_set_header Host              $host;
           proxy_set_header X-Forwarded-Host  $http_host;
           proxy_set_header X-Real-IP         $remote_addr;
-          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-For   $openclaw_xff;
           proxy_set_header X-Forwarded-Proto $scheme;
           proxy_connect_timeout 300s;
           proxy_send_timeout    300s;
@@ -39,7 +47,7 @@ data:
           proxy_set_header Host              $host;
           proxy_set_header X-Forwarded-Host  $http_host;
           proxy_set_header X-Real-IP         $remote_addr;
-          proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-For   $openclaw_xff;
           proxy_set_header X-Forwarded-Proto $scheme;
           proxy_set_header Upgrade           $http_upgrade;
           proxy_set_header Connection        $connection_upgrade;
