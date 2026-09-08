@@ -26,6 +26,78 @@ spec:
     spec:
       securityContext:
         runAsUser: 0
+      initContainers:
+        # subPath file mount creates config/ as root; www-data must own it to write config.php
+        - name: init-config-permissions
+          image: "docker.io/beclab/harveyff-nextcloud:31.0.14.1"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.databases.nextcloud }}"
+            - name: POSTGRES_USER
+              value: "{{ .Values.postgres.username }}"
+            - name: POSTGRES_HOST
+              value: "{{ .Values.postgres.host }}"
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /var/www/html/config /var/www/html/data
+              chown 1000:1000 /var/www/html/config /var/www/html/data
+              if [ ! -f /var/www/html/config/config.php ]; then
+                table_count="$(php -r '
+                  $dsn = "pgsql:host=" . getenv("POSTGRES_HOST") . ";dbname=" . getenv("POSTGRES_DB");
+                  $pdo = new PDO($dsn, getenv("POSTGRES_USER"), getenv("POSTGRES_PASSWORD"));
+                  echo $pdo->query("SELECT count(*) FROM pg_tables WHERE schemaname = '\''public'\''")->fetchColumn();
+                ')"
+                if [ "$table_count" != "0" ]; then
+                  echo >&2 "config.php is missing, but PostgreSQL contains $table_count public tables; refusing destructive automatic recovery"
+                  exit 1
+                fi
+
+                cp /usr/src/nextcloud/config/CAN_INSTALL /var/www/html/config/CAN_INSTALL
+                for f in /usr/src/nextcloud/config/*.php; do
+                  b=$(basename "$f")
+                  case "$b" in
+                    autoconfig.php|config.sample.php) continue ;;
+                  esac
+                  if [ ! -e "/var/www/html/config/$b" ]; then
+                    cp "$f" "/var/www/html/config/$b"
+                  fi
+                done
+                chown 1000:1000 /var/www/html/config /var/www/html/config/CAN_INSTALL
+                for f in /var/www/html/config/*.php; do
+                  [ -f "$f" ] || continue
+                  chown 1000:1000 "$f"
+                done
+
+                # A failed 1.0.23+ fresh install leaves the copied version.php
+                # behind even though PostgreSQL is empty. Remove only that
+                # false installation marker and the fallback SQLite files so
+                # the official entrypoint performs maintenance:install again.
+                rm -f /var/www/html/version.php
+                rm -f /var/www/html/data/owncloud.db \
+                      /var/www/html/data/owncloud.db-shm \
+                      /var/www/html/data/owncloud.db-wal
+              fi
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
       containers:
         - name: nextcloud
           image: "docker.io/beclab/harveyff-nextcloud:31.0.14.1"
