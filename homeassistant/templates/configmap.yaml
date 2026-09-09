@@ -10,29 +10,127 @@ data:
     # Load frontend themes from the themes folder
     frontend:
       themes: !include_dir_merge_named themes
-    http:
-      use_x_forwarded_for: true
-      use_x_frame_options: false
-      # Requests reach HA through the Olares in-cluster proxy and the local
-      # nginx sidecar, so the forwarded-for chain contains in-cluster/private
-      # IPs (e.g. 10.233.0.0/16). Trust all private / loopback / link-local /
-      # CGNAT ranges (IPv4 + IPv6) so HA walks back the whole infrastructure
-      # chain and resolves the real public client. Public IPs are intentionally
-      # NOT trusted, otherwise clients could spoof X-Forwarded-For.
-      trusted_proxies:
-        - "127.0.0.0/8"
-        - "::1"
-        - "10.0.0.0/8"
-        - "172.16.0.0/12"
-        - "192.168.0.0/16"
-        - "100.64.0.0/10"
-        - "169.254.0.0/16"
-        - "fc00::/7"
-        - "fe80::/10"
-      # Keep IP banning off: the app already sits behind Olares authentication,
-      # and because clients share the in-cluster proxy IP a few failed logins
-      # could otherwise ban that shared IP and lock everyone out of the app.
-      ip_ban_enabled: false
     automation: !include automations.yaml
     script: !include scripts.yaml
     scene: !include scenes.yaml
+  # Embedded inline: Olares chart hydration does not support Helm .Files.Get.
+  http-bootstrap.py: |
+    """Bootstrap Home Assistant's UI-managed HTTP configuration."""
+
+    from __future__ import annotations
+
+    from datetime import UTC, datetime
+    import json
+    import os
+    from pathlib import Path
+    import tempfile
+
+
+    HTTP_STORE = Path(
+        os.environ.get(
+            "HOMEASSISTANT_HTTP_STORE", "/homeassistant-config/.storage/http"
+        )
+    )
+    TRUSTED_PROXIES = [
+        "127.0.0.0/8",
+        "::1/128",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "169.254.0.0/16",
+        "fc00::/7",
+        "fe80::/10",
+    ]
+
+
+    def desired_stable() -> dict:
+        """Return the Olares-safe HTTP configuration for a fresh install."""
+        return {
+            "server_port": 8123,
+            "use_x_forwarded_for": True,
+            "trusted_proxies": TRUSTED_PROXIES,
+            "cors_allowed_origins": ["https://cast.home-assistant.io"],
+            "login_attempts_threshold": -1,
+            "ip_ban_enabled": False,
+            "ssl_profile": "modern",
+            "use_x_frame_options": False,
+            "created_at": datetime.now(UTC).isoformat(),
+            "error": None,
+            "error_message": None,
+        }
+
+
+    def write_store(payload: dict) -> None:
+        """Atomically persist the HTTP store with Home Assistant permissions."""
+        HTTP_STORE.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            dir=HTTP_STORE.parent, prefix=".http.", text=True
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as temporary:
+                json.dump(payload, temporary, indent=2)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, HTTP_STORE)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+
+
+    def main() -> None:
+        """Create fresh state or repair the 2026.8 unpromoted migration."""
+        if not HTTP_STORE.exists():
+            write_store(
+                {
+                    "version": 2,
+                    "minor_version": 2,
+                    "key": "http",
+                    "data": {
+                        "stable": desired_stable(),
+                        "pending": None,
+                        "yaml_migration_done": True,
+                    },
+                }
+            )
+            print("[http-bootstrap] initialized stable reverse-proxy configuration")
+            return
+
+        try:
+            payload = json.loads(HTTP_STORE.read_text(encoding="utf-8"))
+            data = payload["data"]
+            stable = data["stable"]
+            pending = data.get("pending")
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            raise SystemExit(
+                f"[http-bootstrap] refusing to modify invalid HTTP store: {error}"
+            ) from error
+
+        stable_has_proxy = bool(
+            stable.get("use_x_forwarded_for") and stable.get("trusted_proxies")
+        )
+        failed_yaml_trial = bool(
+            isinstance(pending, dict)
+            and pending.get("error") == "not_promoted"
+            and pending.get("use_x_forwarded_for")
+            and pending.get("trusted_proxies")
+        )
+        if stable_has_proxy or not failed_yaml_trial:
+            print("[http-bootstrap] existing HTTP configuration left unchanged")
+            return
+
+        repaired = dict(pending)
+        repaired["created_at"] = datetime.now(UTC).isoformat()
+        repaired["error"] = None
+        repaired["error_message"] = None
+        data["stable"] = repaired
+        data["pending"] = None
+        data["yaml_migration_done"] = True
+        write_store(payload)
+        print("[http-bootstrap] promoted failed proxy migration to stable")
+
+
+    if __name__ == "__main__":
+        main()
