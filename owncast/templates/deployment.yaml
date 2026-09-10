@@ -1,4 +1,4 @@
-﻿---
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,17 +18,39 @@ spec:
       labels:
         app: owncast
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /app/data
+              chown 1000:1000 /app/data
+              rm -rf /app/data/tmp /app/data/logs /app/data/hls /app/data/metrics
+              mkdir -p /app/data/tmp /app/data/logs /app/data/hls /app/data/metrics
+              find /app/data ! -user 1000 -exec chown 1000:1000 {} +
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
       containers:
         - name: owncast
-          image: "docker.io/beclab/owncast-owncast:0.2.3"
+          image: owncast/owncast:0.3.0
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
-            - containerPort: 1935
+            - name: http
+              containerPort: 8080
+            - name: rtmp
+              containerPort: 1935
           env:
-            - name: PGID
-              value: "0"
-            - name: PUID
-              value: "0"
             - name: TZ
               value: Etc/UTC
           resources:
@@ -41,6 +63,30 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /app/data
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
       volumes:
         - name: data
           hostPath:
