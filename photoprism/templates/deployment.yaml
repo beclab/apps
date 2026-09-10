@@ -18,28 +18,38 @@ spec:
       labels:
         app: photoprism
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
-      - name: init-chmod-data
-        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        imagePullPolicy: IfNotPresent
         command:
           - sh
           - '-c'
           - |
-            chown -R 1000:1000 /app-data-root; chown -R 1000:1000 /cache
-        resources: {}
+            set -e
+            mkdir -p /photoprism/originals /photoprism/storage /photoprism/originals/Pictures /photoprism/import
+            chown 1000:1000 /photoprism/originals /photoprism/storage /photoprism/originals/Pictures
         volumeMounts:
           - name: originals
-            mountPath: /app-data-root
-          - mountPath: /cache
-            name: app-cache-root
+            mountPath: /photoprism/originals
+          - name: storage
+            mountPath: /photoprism/storage
+          - name: pictures
+            mountPath: /photoprism/originals/Pictures
+          - name: import
+            mountPath: /photoprism/import
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: Always
         securityContext:
           runAsUser: 0
-      containers:     
+      containers:
       - name: photoprism
-        image: "docker.io/beclab/photoprism-photoprism:250707"
+        image: photoprism/photoprism:260728
+        imagePullPolicy: IfNotPresent
         resources:
           requests:
             cpu: 100m
@@ -48,14 +58,15 @@ spec:
             cpu: 2
             memory: 2Gi
         ports:
-        - containerPort: 2342
+        - name: http
+          containerPort: 2342
         env:
         - name: HOME
           value: /photoprism
         - name: PHOTOPRISM_DEBUG
           value: "true"
         - name: PHOTOPRISM_READONLY
-          value: "false"  
+          value: "false"
         - name: PHOTOPRISM_HTTP_HOST
           value: 0.0.0.0
         - name: PHOTOPRISM_HTTP_PORT
@@ -66,29 +77,49 @@ spec:
               name: {{ .Release.Name }}-secrets
               key: PHOTOPRISM_ADMIN_PASSWORD
         - name: PHOTOPRISM_ADMIN_USERNAME
-          value: "{{ .Values.olaresEnv.PHOTOPRISM_ADMIN_USERNAME }}"          
+          value: "{{ .Values.olaresEnv.PHOTOPRISM_ADMIN_USERNAME }}"
         - name: PHOTOPRISM_AUTH_MODE
           value: password
         - name: PHOTOPRISM_SITE_URL
-          value: https://{{ index .Values.domain (printf "%s-svc" .Release.Name) }}          
+          value: https://{{ index .Values.domain (printf "%s-svc" .Release.Name) }}
         volumeMounts:
         - mountPath: /photoprism/originals
           name: originals
         - mountPath: /photoprism/storage
           name: storage
         - mountPath: /photoprism/originals/Pictures
-          name: pictures       
+          name: pictures
         - mountPath: /photoprism/import
           name: import
+        startupProbe:
+          httpGet:
+            path: /api/v1/status
+            port: http
+            scheme: HTTP
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 36
+        livenessProbe:
+          httpGet:
+            path: /api/v1/status
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 20
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /api/v1/status
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
       volumes:
       - name: originals
         hostPath:
           type: DirectoryOrCreate
           path: "{{ .Values.userspace.userData }}/PhotoPrism"
-      - name: app-cache-root
-        hostPath:
-          type: DirectoryOrCreate
-          path: "{{ .Values.userspace.appData }}/photoprism"
       - name: storage
         hostPath:
           type: DirectoryOrCreate
@@ -112,7 +143,7 @@ spec:
   selector:
     app: {{ .Release.Name }}
   ports:
-    - protocol: TCP
+    - name: http
+      protocol: TCP
       port: 2342
       targetPort: 2342
-      
