@@ -12,31 +12,51 @@ spec:
     matchLabels:
       app: netdata
   strategy:
-    type: Recreate      
+    type: Recreate
   template:
     metadata:
       labels:
         app: netdata
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              for d in /var/lib/netdata /var/cache/netdata; do
+                mkdir -p "$d" && chown 1000:1000 "$d"
+              done
+          volumeMounts:
+            - name: netdata-lib
+              mountPath: /var/lib/netdata
+            - name: netdata-cache
+              mountPath: /var/cache/netdata
       containers:
         - name: netdata
-          image: "docker.io/beclab/netdata-netdata:v2.5.4"
+          image: netdata/netdata:v2.11.0
+          imagePullPolicy: IfNotPresent
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
+            - name: NETDATA_LISTENER_PORT
+              value: "19999"
           resources:
             requests:
               cpu: 500m
               memory: 500Mi
             limits:
               cpu: 1000m
-              memory: 1Gi
+              memory: 2Gi
           ports:
             - name: http
               containerPort: 19999
@@ -48,11 +68,32 @@ spec:
             - mountPath: /host/sys
               name: sys-data
               readOnly: true
+            - name: netdata-lib
+              mountPath: /var/lib/netdata
+            - name: netdata-cache
+              mountPath: /var/cache/netdata
             - name: smtp-config
               mountPath: /etc/msmtprc
               subPath: msmtprc
-          securityContext:
-            privileged: true
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /api/v1/info
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 20
+            timeoutSeconds: 5
+            periodSeconds: 15
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/v1/info
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
       volumes:
         - name: proc-data
           hostPath:
@@ -78,11 +119,19 @@ spec:
             {{- else }}
             path: "{{ .Values.userspace.appData }}/netdata/sys"
             {{- end }}
+        - name: netdata-lib
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}/lib"
+        - name: netdata-cache
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appCache }}/cache"
         - name: smtp-config
           configMap:
             name: netdata-smtp-config
             items:
-              - key: msmtprc 
+              - key: msmtprc
                 path: msmtprc
 ---
 apiVersion: v1
