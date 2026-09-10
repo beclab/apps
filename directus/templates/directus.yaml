@@ -20,7 +20,38 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: directus
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
+        - name: init-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command:
+            - sh
+            - -c
+            - |
+              for d in /directus/uploads /directus/extensions /directus/database /directus/templates; do
+                mkdir -p "$d" && chown 1000:1000 "$d"
+              done
+          securityContext:
+            runAsUser: 0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /directus/uploads
+              name: uploads
+            - mountPath: /directus/extensions
+              name: extensions
+            - mountPath: /directus/database
+              name: database
+            - mountPath: /directus/templates
+              name: templates
         - name: wait-postgres
           image: "docker.io/beclab/wait-for:0.1.0"
           args: ["-it", "{{ .Values.postgres.host }}:5432"]
@@ -45,6 +76,14 @@ spec:
               value: '8055'
             - name: PUBLIC_URL
               value: 'https://directus.example.com'
+            - name: STORAGE_LOCATIONS
+              value: 'local'
+            - name: STORAGE_LOCAL_DRIVER
+              value: 'local'
+            - name: STORAGE_LOCAL_ROOT
+              value: '/directus/uploads'
+            - name: IP_TRUST_PROXY
+              value: 'true'
             - name: SECRET
               valueFrom:
                 secretKeyRef:
@@ -83,7 +122,7 @@ spec:
             - name: REDIS
               value: 'redis://directus-redis:6379/0'
 
-          image: "docker.io/beclab/directus-directus:11.14.0"
+          image: "docker.io/directus/directus:12.3.1"
           name: directus
           resources:
             requests:
