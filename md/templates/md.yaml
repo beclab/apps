@@ -1,4 +1,39 @@
-﻿---
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: md-nginx
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    worker_processes auto;
+    error_log /tmp/error.log warn;
+    pid /tmp/nginx.pid;
+    events {
+      worker_connections 1024;
+    }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      sendfile on;
+      keepalive_timeout 65;
+      access_log /tmp/access.log;
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path /tmp/proxy_temp;
+      fastcgi_temp_path /tmp/fastcgi_temp;
+      uwsgi_temp_path /tmp/uwsgi_temp;
+      scgi_temp_path /tmp/scgi_temp;
+      server {
+        listen 8080;
+        server_name _;
+        root /usr/share/nginx/html;
+        index index.html;
+        location / {
+          try_files $uri $uri/ /index.html;
+        }
+      }
+    }
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,19 +53,17 @@ spec:
       labels:
         app: md
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       containers:
         - name: md
-          image: docker.io/beclab/doocs-md:2.0.4-nginx
+          image: doocs/md:2.1.0-nginx
           imagePullPolicy: IfNotPresent
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: "Etc/UTC"
-            - name: DISPLAY
-              value: ":0"
           resources:
             requests:
               cpu: "300m"
@@ -40,8 +73,13 @@ spec:
               memory: "1Gi"
           ports:
             - name: http
-              containerPort: 80 
+              containerPort: 8080
               protocol: TCP
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /
@@ -62,6 +100,11 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             failureThreshold: 3
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: md-nginx
+      restartPolicy: Always
 
 ---
 apiVersion: v1
@@ -75,7 +118,7 @@ spec:
   ports:
     - name: http
       port: 3000
-      targetPort: 80
+      targetPort: 8080
       protocol: TCP
   selector:
     app: md
