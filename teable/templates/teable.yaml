@@ -17,7 +17,35 @@ spec:
       labels:
         app: teable
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              chown 1000:1000 /app/.assets
+              mkdir -p /app/.temporary
+              chown 1000:1000 /app/.temporary
+              touch /swagger/openapi.json
+              chown 1000:1000 /swagger/openapi.json
+              chown 1000:1000 /next-cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - mountPath: /app/.assets
+              name: teable-data
+              subPath: teable
+            - mountPath: /app/.temporary
+              name: teable-tmp
+            - mountPath: /swagger
+              name: swagger-write
+            - mountPath: /next-cache
+              name: next-cache
+          imagePullPolicy: IfNotPresent
         - name: check-ready
           image: "docker.io/beclab/wait-for:0.1.0"
           args:
@@ -30,17 +58,15 @@ spec:
           imagePullPolicy: IfNotPresent
       containers:
         - name: teable
-          image: "docker.io/beclab/teableio-teable:3077582aef94c87199dade566f2459ef264f26bb"
+          image: "docker.io/teableio/teable:release.2026-09-07T09-32-29Z.2963"
           imagePullPolicy: IfNotPresent
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
+            - name: COREPACK_ENABLE_DOWNLOAD_PROMPT
+              value: "0"
+            - name: COREPACK_NPM_REGISTRY
+              value: "https://registry.npmmirror.com"
             - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
@@ -69,7 +95,7 @@ spec:
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /
+              path: /health
               port: 3000
             initialDelaySeconds: 120
             periodSeconds: 20
@@ -77,7 +103,7 @@ spec:
             failureThreshold: 6
           readinessProbe:
             httpGet:
-              path: /
+              path: /health
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 15
@@ -87,7 +113,20 @@ spec:
             - mountPath: /app/.assets
               name: teable-data
               subPath: teable
+            - mountPath: /app/.temporary
+              name: teable-tmp
+            - mountPath: /app/enterprise/backend-ee/dist/openapi.json
+              name: swagger-write
+              subPath: openapi.json
+            - mountPath: /app/enterprise/app-ee/.next/cache
+              name: next-cache
       volumes:
+        - name: next-cache
+          emptyDir: {}
+        - name: swagger-write
+          emptyDir: {}
+        - name: teable-tmp
+          emptyDir: {}
         - name: teable-data
           hostPath:
             type: DirectoryOrCreate
@@ -100,11 +139,12 @@ spec:
             {{- else }}
             path: '{{ .Values.userspace.appData }}/teable'
             {{- end }}
+{{- if gt (int .Values.workloads.teable.replicaCount) 0 }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: teable-db-migrate
+  name: teable-db-migrate-{{ .Release.Revision }}
   namespace: {{ .Release.Namespace }}
   labels:
     app: teable
@@ -113,19 +153,29 @@ spec:
   ttlSecondsAfterFinished: 100
   backoffLimit: 3
   template:
+    metadata:
+      labels:
+        app: teable
+        component: db-migrate
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        linkerd.io/inject: disabled
     spec:
       containers:
         - name: teable-db-migrate
-          image: "docker.io/beclab/teableio-teable-db-migrate:3077582aef94c87199dade566f2459ef264f26bb"
+          image: "docker.io/teableio/teable:release.2026-09-07T09-32-29Z.2963"
+          args:
+            - migrate-only
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
+            - name: COREPACK_ENABLE_DOWNLOAD_PROMPT
+              value: "0"
+            - name: COREPACK_NPM_REGISTRY
+              value: "https://registry.npmmirror.com"
             - name: SECRET_KEY
               valueFrom:
                 secretKeyRef:
@@ -144,6 +194,7 @@ spec:
               cpu: 500m
               memory: 500Mi
       restartPolicy: Never
+{{- end }}
 
 ---
 apiVersion: v1
