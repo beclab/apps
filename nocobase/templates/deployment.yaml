@@ -10,7 +10,7 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: nocobase
-  strategy: 
+  strategy:
     type: Recreate
   template:
     metadata:
@@ -18,16 +18,30 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: nocobase
     spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /app/nocobase/storage && chown 1000:1000 /app/nocobase/storage
+          volumeMounts:
+            - name: app-data-storage
+              mountPath: /app/nocobase/storage
       containers:
       - name: nocobase
-        image: "docker.io/beclab/nocobase-nocobase:1.9.20"
+        image: nocobase/nocobase:2.2.7
+        imagePullPolicy: IfNotPresent
         ports:
-        - containerPort: 80
+        - name: http
+          containerPort: 80
         env:
-        - name: PGID
-          value: "1000"
-        - name: PUID
-          value: "1000"
         - name: TZ
           value: Etc/UTC
         - name: APP_KEY
@@ -38,6 +52,8 @@ spec:
           value: postgres
         - name: DB_HOST
           value: {{ .Values.postgres.host }}
+        - name: DB_PORT
+          value: {{ .Values.postgres.port | quote }}
         - name: DB_DATABASE
           value: {{ .Values.postgres.databases.nocobase }}
         - name: DB_USER
@@ -47,8 +63,6 @@ spec:
             secretKeyRef:
               name: {{ .Release.Name }}-secrets
               key: DB_PASSWORD
-        # - name: DB_TIMEZONE
-        #   value: '+08:00'
         - name: DB_UNDERSCORED
           value: 'true'
         resources:
@@ -61,6 +75,30 @@ spec:
         volumeMounts:
         - name: app-data-storage
           mountPath: /app/nocobase/storage
+        startupProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 36
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 20
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
       restartPolicy: Always
       volumes:
       - name: app-data-storage
@@ -86,7 +124,7 @@ metadata:
     io.kompose.service: nocobase
 spec:
   ports:
-  - name: "80"
+  - name: http
     port: 80
     targetPort: 80
   selector:
