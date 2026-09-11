@@ -1,0 +1,196 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiopyannoteembedv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/pyannote/icon.png
+  description: A model for creating voice representations that applications can compare
+  appid: audiopyannoteembedv3
+  title: Pyannote Embedding
+  version: '1.0.17'
+  categories:
+    - AI
+    - models
+  tags:
+  - speaker-diarization
+  - audio
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audiopyannoteembedv3api
+    host: sharedentrances-api
+    port: 0
+    title: Pyannote Embedding API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/pyannote/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audiopyannoteembedv3
+    port: 8090
+    host: download-svc
+    title: Pyannote Embedding
+    icon: https://app.cdn.olares.com/appstore/audioengines/pyannote/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audiopyannoteembedv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'pyannote/embedding'
+  fullDescription: |
+    Pyannote Embedding turns a speech sample into a compact numerical representation of the speaker's voice. Applications can compare these representations to estimate whether samples contain the same speaker; the model does not identify people by name.
+
+    **Key features**
+    - Create a speaker embedding from a speech sample.
+    - Compare voice samples for speaker similarity.
+    - Support speaker matching in diarization and audio analysis.
+    - Run on the CPU without requiring a GPU.
+
+
+  developer: pyannoteAI
+  website: https://www.pyannote.ai/
+  sourceCode: https://huggingface.co/pyannote/embedding
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/pyannote/embedding
+  license:
+    - text: MIT
+      url: https://github.com/pyannote/pyannote-audio/blob/main/LICENSE
+
+  # Sum rule: envelope >= engine + llm-init (200m/256Mi req, 1/4Gi lim).
+  limitedCpu: "3"
+  requiredCpu: "400m"
+  requiredDisk: 50Mi
+  limitedDisk: 20Gi
+  limitedMemory: "8Gi"
+  requiredMemory: "768Mi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://beclab/embedding"
+    description: "HuggingFace source llm-init downloads into the shared cache. Public repository:
+      no access form and no connected HuggingFace account are needed."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "pyannote/embedding"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "audio"
+    options:
+    - title: Audio
+      value: audio
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "speaker_embed"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Speaker embedding (voiceprint)
+      value: speaker_embed
+    description: "Capabilities this app exposes."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "0"
+    description: "GPU memory required for this model. `0` means CPU-only."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "200m"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "512Mi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "2"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Engine-container flags (ENGINE_ARGS); speaker embedding currently accepts none."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
