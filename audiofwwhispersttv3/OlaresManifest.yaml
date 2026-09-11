@@ -1,0 +1,211 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiofwwhispersttv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/openai/icon.png
+  description: A local speech recognition model for multilingual audio transcription
+  appid: audiofwwhispersttv3
+  title: Whisper Large V3 (FW)
+  version: '1.0.13'
+  categories:
+    - AI
+    - models
+  tags:
+  - speech-to-text
+  - audio
+
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audiofwwhispersttv3api
+    host: sharedentrances-api
+    port: 0
+    title: Whisper Large V3 (FW) API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/openai/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audiofwwhispersttv3
+    port: 8090
+    host: download-svc
+    title: Whisper Large V3 (FW)
+    icon: https://app.cdn.olares.com/appstore/audioengines/openai/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audiofwwhispersttv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'openai/whisper-large-v3'
+  fullDescription: |
+    Whisper Large V3 (FW) converts speech in an audio recording into written text. It runs OpenAI Whisper Large V3 with the Faster-Whisper engine for local transcription.
+
+    **Key features**
+    - Transcribe recorded speech in multiple languages.
+    - Detect the spoken language automatically.
+    - Add timestamps to transcription segments.
+    - Make transcription available to compatible Olares applications.
+
+    A compatible NVIDIA GPU with at least `8Gi` of GPU memory is required.
+
+  developer: OpenAI
+  website: https://openai.com/
+  sourceCode: https://huggingface.co/openai/whisper-large-v3
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/openai/whisper-large-v3
+  license:
+    - text: MIT
+      url: https://github.com/openai/whisper/blob/main/LICENSE
+
+  accelerator:
+    # Sum rule: accelerator >= engine + llm-init (200m/256Mi req, 1/4Gi lim).
+    - mode: nvidia
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 80Gi
+      limitedMemory: "16Gi"
+      requiredMemory: "2304Mi"
+      requiredGPUMemory: "8Gi"
+      limitedGPUMemory: "8Gi"
+    - mode: nvidia-gb10
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 80Gi
+      limitedMemory: "12Gi"
+      requiredMemory: "8448Mi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://openai/whisper-large-v3"
+    description: "HuggingFace source llm-init downloads into the shared cache."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "openai/whisper-large-v3"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "audio"
+    options:
+    - title: Audio
+      value: audio
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "stt"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: STT (offline transcription)
+      value: stt
+    description: "Capabilities this app exposes."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "8Gi"
+    description: "GPU memory required for this model. `0` means CPU-only."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "500m"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "2Gi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "12Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    # No default: the built-in depends on whether the deployment was given a card.
+    description: "Engine-native flags (llm-init ENGINE_ARGS), e.g. --compute-type int8 --beam-size 5.
+      Given no GPU and left empty, the chart adds --device cpu; anything here REPLACES that whole
+      list. Dropping it is harmless — --device defaults to auto, which resolves to CPU anyway."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
