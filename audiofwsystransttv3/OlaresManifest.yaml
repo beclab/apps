@@ -1,0 +1,211 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiofwsystransttv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/systran/icon.png
+  description: A speech recognition model for multilingual audio transcription
+  appid: audiofwsystransttv3
+  title: Faster-Whisper Large V3
+  version: '1.0.13'
+  categories:
+    - AI
+    - models
+  tags:
+  - speech-to-text
+  - audio
+
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audiofwsystransttv3api
+    host: sharedentrances-api
+    port: 0
+    title: Faster-Whisper Large V3 API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/systran/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audiofwsystransttv3
+    port: 8090
+    host: download-svc
+    title: Faster-Whisper Large V3
+    icon: https://app.cdn.olares.com/appstore/audioengines/systran/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audiofwsystransttv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'Systran/faster-whisper-large-v3'
+  fullDescription: |
+    Faster-Whisper Large V3 converts speech in an audio recording into written text. It uses Systran's CTranslate2 conversion of OpenAI Whisper Large V3 for local transcription.
+
+    **Key features**
+    - Transcribe recorded speech in multiple languages.
+    - Detect the spoken language automatically.
+    - Add timestamps to transcription segments.
+    - Make transcription available to compatible Olares applications.
+
+    A compatible NVIDIA GPU with at least `6Gi` of GPU memory is required.
+
+  developer: SYSTRAN
+  website: https://www.systransoft.com/
+  sourceCode: https://huggingface.co/Systran/faster-whisper-large-v3
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/Systran/faster-whisper-large-v3
+  license:
+    - text: MIT
+      url: https://github.com/SYSTRAN/faster-whisper/blob/master/LICENSE
+
+  accelerator:
+    # Sum rule: accelerator >= engine + llm-init (200m/256Mi req, 1/4Gi lim).
+    - mode: nvidia
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "14Gi"
+      requiredMemory: "2304Mi"
+      requiredGPUMemory: "6Gi"
+      limitedGPUMemory: "6Gi"
+    - mode: nvidia-gb10
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "10Gi"
+      requiredMemory: "6400Mi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://Systran/faster-whisper-large-v3"
+    description: "HuggingFace source llm-init downloads into the shared cache."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "Systran/faster-whisper-large-v3"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "audio"
+    options:
+    - title: Audio
+      value: audio
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "stt"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: STT (offline transcription)
+      value: stt
+    description: "Capabilities this app exposes."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "6Gi"
+    description: "GPU memory required for this model. `0` means CPU-only."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "500m"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "2Gi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "10Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    # No default: the built-in depends on whether the deployment was given a card.
+    description: "Engine-native flags (llm-init ENGINE_ARGS), e.g. --compute-type int8 --beam-size 5.
+      Given no GPU and left empty, the chart adds --device cpu; anything here REPLACES that whole
+      list. Dropping it is harmless — --device defaults to auto, which resolves to CPU anyway."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
