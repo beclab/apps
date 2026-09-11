@@ -1,0 +1,150 @@
+{{- $olaresEnv := .Values.olaresEnv | default dict }}
+{{- $manifestEnvs := dict }}
+{{- range (.Files.Get "OlaresManifest.yaml" | fromYaml).envs }}
+{{-   $_ := set $manifestEnvs .envName .default }}
+{{- end }}
+{{- $modelName := (get $manifestEnvs "MODEL_NAME") | default $olaresEnv.MODEL_NAME }}
+{{- $modelMode := (get $manifestEnvs "MODEL_MODE") | default $olaresEnv.MODEL_MODE }}
+{{- $modelSupports := (get $manifestEnvs "MODEL_SUPPORTS") | default $olaresEnv.MODEL_SUPPORTS }}
+{{- $modelSource := (get $manifestEnvs "MODEL_SOURCE") | default $olaresEnv.MODEL_SOURCE }}
+{{- $logLevel := $olaresEnv.LOG_LEVEL | default (get $manifestEnvs "LOG_LEVEL") | default .Values.logLevel }}
+{{- $hfEndpoint := $olaresEnv.HF_ENDPOINT | default .Values.hf.endpoint }}
+{{- $hfToken := $olaresEnv.HF_TOKEN | default "" }}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llminit
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: {{ .Values.userspace.appCommon }}/huggingface
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: {{ $runStateHostPath }}
+            type: DirectoryOrCreate
+      initContainers:
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "mkdir -p /cache/hf/hub/.locks && chown -R 1000:1000 /cache/hf/hub /run/llm-init || true"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          image: "docker.io/beclab/llm-init:v1.7.16"
+          imagePullPolicy: {{ .Values.llminit.pullPolicy }}
+          env:
+            - name: ENGINE_KIND
+              value: audio
+            - name: MODEL_NAME
+              value: {{ $modelName | quote }}
+            - name: MODEL_MODE
+              value: {{ $modelMode | quote }}
+            - name: MODEL_SUPPORTS
+              value: {{ printf "supports_%s" $modelSupports | quote }}
+            - name: MODEL_SOURCE
+              value: {{ $modelSource | quote }}
+            - name: HF_ENDPOINT
+              value: {{ $hfEndpoint | quote }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: {{ $hfToken | quote }}
+{{- end }}
+            - name: MAX_CONCURRENT_DOWNLOADS
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: {{ $logLevel | quote }}
+            - name: LOG_FORMAT
+              value: json
+          ports:
+            - containerPort: 8090
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: audiospeakrsdiarv3
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: audiospeakrsdiarv3
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+      protocol: TCP
+  type: ClusterIP
