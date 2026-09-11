@@ -1,0 +1,157 @@
+{{- $manifestEnvs := dict }}
+{{- range (.Files.Get "OlaresManifest.yaml" | fromYaml).envs }}
+{{-   $_ := set $manifestEnvs .envName .default }}
+{{- end }}
+{{- $olaresEnv := .Values.olaresEnv | default dict }}
+{{- $modelName := (get $manifestEnvs "MODEL_NAME") | default $olaresEnv.MODEL_NAME }}
+{{- $modelMode := (get $manifestEnvs "MODEL_MODE") | default $olaresEnv.MODEL_MODE }}
+{{- $modelSupports := (get $manifestEnvs "MODEL_SUPPORTS") | default $olaresEnv.MODEL_SUPPORTS }}
+{{- $modelSource := (get $manifestEnvs "MODEL_SOURCE") | default $olaresEnv.MODEL_SOURCE }}
+{{- $logLevel := $olaresEnv.LOG_LEVEL | default (get $manifestEnvs "LOG_LEVEL") | default .Values.logLevel }}
+{{- $engineArgs := $olaresEnv.ENGINE_ARGS | default (get $manifestEnvs "ENGINE_ARGS") | default .Values.model.engineArgs | trim }}
+{{- $executionMode := $olaresEnv.EXECUTION_MODE | default (get $manifestEnvs "EXECUTION_MODE") | default .Values.model.executionMode }}
+{{- $engineArgs = printf "%s --execution-mode %s" $engineArgs $executionMode | trim }}
+{{- $hfEndpoint := $olaresEnv.HF_ENDPOINT | default .Values.hf.endpoint }}
+{{- $hfToken := $olaresEnv.HF_TOKEN | default "" }}
+{{- $cpuRequest := $olaresEnv.CPU_REQUEST | default (get $manifestEnvs "CPU_REQUEST") | trim }}
+{{- $memRequest := $olaresEnv.MEMORY_REQUEST | default (get $manifestEnvs "MEMORY_REQUEST") | trim }}
+{{- $cpuLimit := $olaresEnv.CPU_LIMIT | default (get $manifestEnvs "CPU_LIMIT") | trim }}
+{{- $memLimit := $olaresEnv.MEMORY_LIMIT | default (get $manifestEnvs "MEMORY_LIMIT") | trim }}
+{{- $gpuRaw := $olaresEnv.REQUIRED_GPU_MEMORY | default (get $manifestEnvs "REQUIRED_GPU_MEMORY") | trim }}
+{{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") }}
+{{- $gpuType := .Values.gpu | default "" }}
+{{- if not $gpuType }}
+{{- if .Values.GPU }}{{- $gpuType = .Values.GPU.Type | default "nvidia" }}{{- else }}{{- $gpuType = "nvidia" }}{{- end }}
+{{- end }}
+{{- $unifiedMem := and $wantGpu (eq $gpuType "nvidia-gb10") }}
+{{- if $unifiedMem }}
+{{- $gpuMiB := include "llmbase.gpuMiB" $gpuRaw }}
+{{- $memRequest = printf "%sMi" $gpuMiB }}
+{{- $memLimit = printf "%sMi" $gpuMiB }}
+{{- end }}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name }}
+{{- if not $modelName }}
+{{-   fail "MODEL_NAME resolves to nothing: the manifest's envs block is the source and it has no default" }}
+{{- end }}
+{{- if not .Values.image.tag }}
+{{- fail "image.tag is required: an untagged image cannot be traced back to a build, and package.py bakes this in as a literal so the platform cannot replace it with a remembered value" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audiospeakrsdiarv3
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: audiospeakrsdiarv3
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "audio-speakrs-speaker-diarization-community-1"
+spec:
+  replicas: {{ .Values.workloads.audiospeakrsdiarv3.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: audiospeakrsdiarv3
+  template:
+    metadata:
+      annotations:
+        checksum/wrappers: {{ include (print $.Template.BasePath "/wrappers.yaml") . | sha256sum }}
+      labels:
+        app: audiospeakrsdiarv3
+        app.bytetrade.io/shared-entrance: "true"
+    spec:
+      containers:
+        - name: audio-speakrs-speaker-diarization-community-1
+          image: "docker.io/beclab/audio-speakrs:sha-48adf68"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/wrappers/speakrs.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: audio
+            - name: MODEL_NAME
+              value: {{ $modelName | quote }}
+            - name: MODEL_SOURCE
+              value: {{ $modelSource | quote }}
+            - name: MODEL_SUPPORTS
+              value: {{ printf "supports_%s" $modelSupports | quote }}
+            - name: ENGINE_ARGS
+              value: {{ $engineArgs | quote }}
+            - name: ENGINE_PORT
+              value: "8000"
+            - name: LOG_LEVEL
+              value: {{ $logLevel | quote }}
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /cache/hf/hub
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: TZ
+              value: Etc/UTC
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: GPU_TYPE
+              value: nvidia
+            - name: GPU_CORE_UTILIZATION_POLICY
+              value: disable
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true   # this side only waits on the sentinel; llm-init is the writer
+            - name: wrappers
+              mountPath: /wrappers
+              readOnly: true
+            - name: app-data
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: {{ $cpuRequest | quote }}
+              memory: {{ $memRequest | quote }}
+            limits:
+              cpu: {{ $cpuLimit | quote }}
+              memory: {{ $memLimit | quote }}
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: {{ .Values.userspace.appCommon }}/huggingface
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: {{ $runStateHostPath }}
+            type: DirectoryOrCreate
+        - name: app-data
+          hostPath:
+            path: {{ .Values.userspace.appData }}
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: audio-wrappers
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audio-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: audiospeakrsdiarv3
+spec:
+  selector:
+    app: audiospeakrsdiarv3
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
