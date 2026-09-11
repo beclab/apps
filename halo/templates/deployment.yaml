@@ -21,11 +21,31 @@ spec:
       labels:
         app: halo
     spec:
-      containers:
-        - name: halo
-          image: "docker.io/beclab/halohub-halo:2.21.3"
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              base=/app/data/.halo2
+              for d in "$base" "$base/plugins" "$base/themes" "$base/attachments" "$base/logs" "$base/backups" "$base/indices"; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+              for d in plugins themes attachments logs backups indices; do
+                find "$base/$d" -maxdepth 1 ! -user 1000 -exec chown 1000:1000 {} + 2>/dev/null || true
+              done
           securityContext:
             runAsUser: 0
+          volumeMounts:
+            - name: halo-vol
+              mountPath: /app/data/.halo2
+      containers:
+        - name: halo
+          image: "docker.io/halohub/halo:2.26.0"
           env:
             - name: TZ
               value: "Etc/UTC"
@@ -55,14 +75,14 @@ spec:
           imagePullPolicy: IfNotPresent
           livenessProbe:
             httpGet:
-              path: /
+              path: /actuator/health/liveness
               port: 8090
               scheme: HTTP
             initialDelaySeconds: 30
-            timeoutSeconds: 60
-            periodSeconds: 60
+            timeoutSeconds: 10
+            periodSeconds: 30
             successThreshold: 1
-            failureThreshold: 10
+            failureThreshold: 5
           startupProbe:
             tcpSocket:
               port: 8090
