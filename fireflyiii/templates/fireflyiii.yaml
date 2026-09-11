@@ -85,9 +85,23 @@ spec:
               readOnly: true
             - name: fireflyiii-data
               mountPath: /new-data
+        - name: init-permissions
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /data/upload
+              chown 33:33 /data/upload
+          volumeMounts:
+            - name: fireflyiii-data
+              mountPath: /data
       containers:
         - name: fireflyiii
-          image: docker.io/beclab/fireflyiii-core:version-6.4.16
+          image: docker.io/fireflyiii/core:version-6.6.6
           envFrom:
             - configMapRef:
                 name: fireflyiii-env
@@ -113,6 +127,47 @@ spec:
             - name: MAIL_ENCRYPTION
               value: "{{ $smtpSecure }}"
             {{- end }}
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    set -e
+                    for attempt in $(seq 1 90); do
+                      if php -r 'exit(@file_get_contents("http://127.0.0.1:8080/login") === false ? 1 : 0);'; then
+                        break
+                      fi
+                      if [ "$attempt" -eq 90 ]; then
+                        echo "[passport] Firefly III did not become ready in time." >&2
+                        exit 1
+                      fi
+                      sleep 2
+                    done
+
+                    if php -r '
+                      require "vendor/autoload.php";
+                      $app = require "bootstrap/app.php";
+                      $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+                      $exists = Laravel\Passport\Client::query()
+                        ->where("personal_access_client", true)
+                        ->where("revoked", false)
+                        ->where(function ($query) {
+                          $query->where("provider", "users")->orWhereNull("provider");
+                        })
+                        ->exists();
+                      exit($exists ? 0 : 1);
+                    '; then
+                      echo "[passport] Personal access client already exists."
+                    else
+                      php artisan passport:client \
+                        --personal \
+                        --provider=users \
+                        --name="Firefly III Personal Access Client" \
+                        --no-interaction >/dev/null
+                      echo "[passport] Personal access client created."
+                    fi
           readinessProbe:
             httpGet:
               path: /
