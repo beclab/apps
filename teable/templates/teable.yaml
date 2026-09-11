@@ -27,7 +27,32 @@ spec:
             - sh
             - -c
             - |
-              chown 1000:1000 /app/.assets
+              set -eu
+              # Old images left upload directories owned by root. Replacing
+              # plugin files requires write permission on their parent directory.
+              for relative in . uploads uploads/public uploads/private \
+                uploads/public/plugin uploads/public/avatar uploads/public/form \
+                uploads/public/oauth uploads/public/logo uploads/public/template \
+                uploads/public/chat-data-visualization-code uploads/public/space-avatar \
+                uploads/private/table uploads/private/import uploads/private/export-base \
+                uploads/private/comment uploads/private/app uploads/private/chat-file \
+                uploads/private/automation uploads/private/record-history \
+                uploads/private/record-removal uploads/private/artifact \
+                uploads/private/workflow-run uploads/private/audit-log; do
+                directory="/app/.assets/$relative"
+                if [ -L "$directory" ]; then
+                  echo "Refusing upload directory symlink: $directory" >&2
+                  exit 1
+                fi
+                mkdir -p "$directory"
+                case "$(stat -c '%A' "$directory")" in
+                  drwx*) ;;
+                  *) chmod u+rwx "$directory" ;;
+                esac
+                if [ "$(stat -c '%u:%g' "$directory")" != '1000:1000' ]; then
+                  chown 1000:1000 "$directory"
+                fi
+              done
               mkdir -p /app/.temporary
               chown 1000:1000 /app/.temporary
               touch /swagger/openapi.json
@@ -58,7 +83,7 @@ spec:
           imagePullPolicy: IfNotPresent
       containers:
         - name: teable
-          image: "docker.io/teableio/teable:release.2026-09-07T09-32-29Z.2963"
+          image: "docker.io/teableio/teable:release.2026-09-11T07-36-49Z.3059"
           imagePullPolicy: IfNotPresent
           env:
             - name: TZ
@@ -163,7 +188,7 @@ spec:
     spec:
       containers:
         - name: teable-db-migrate
-          image: "docker.io/teableio/teable:release.2026-09-07T09-32-29Z.2963"
+          image: "docker.io/teableio/teable:release.2026-09-11T07-36-49Z.3059"
           args:
             - migrate-only
           securityContext:
