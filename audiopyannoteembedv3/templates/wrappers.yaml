@@ -1,0 +1,72 @@
+# Engine-container shell: source the helpers llm-init publishes, wait for the
+# download sentinel, then run the baked wrapper under supervise_engine so
+# Model Console can relaunch the engine without restarting the Pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audio-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+data:
+  pyannote.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=pyannote
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
+
+    want=""
+    case ${MODEL_SOURCE:-} in
+        hf://*)
+            repo=${MODEL_SOURCE#hf://}
+            repo=${repo%% *}
+            repo=${repo%%,*}
+            want="models--$(printf '%s' "$repo" | sed 's|/|--|g')"
+            ;;
+    esac
+
+    mine() {
+        [ -f "$SENTINEL" ] || return 1
+        [ -n "$want" ] || return 0
+        [ -f "$MODEL_PATH_FILE" ] || return 1
+        grep -q -- "$want" "$MODEL_PATH_FILE"
+    }
+
+    elapsed=0
+    while ! mine; do
+        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
+            log "timed out after ${WAIT_TIMEOUT}s waiting for a sentinel naming ${want:-any model}"
+            exit 1
+        fi
+        if [ -f "$SENTINEL" ] && [ -n "$want" ]; then
+            log "sentinel names $(tr -d '\r\n' < "$MODEL_PATH_FILE" 2>/dev/null || echo nothing), not $want (elapsed=${elapsed}s)"
+        else
+            log "waiting for $SENTINEL (elapsed=${elapsed}s)"
+        fi
+        sleep "$WAIT_INTERVAL"
+        elapsed=$((elapsed + WAIT_INTERVAL))
+    done
+    log "sentinel $SENTINEL names ${want:-any model} after ${elapsed}s; starting engine offline"
+
+    export HF_HUB_OFFLINE=1
+    export PYTHONUNBUFFERED=1
+
+    run_audio() {
+        log "starting engine offline (audio-python -m wrapper.app)"
+        exec audio-python -m wrapper.app "$@"
+    }
+
+    supervise_engine run_audio "$@"
