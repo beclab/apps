@@ -1,0 +1,244 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiofireredttsv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+  description: A text-to-speech model with preset, cloned, and designed voices
+  appid: audiofireredttsv3
+  title: FireRedTTS3 Instruct
+  version: '1.0.10'
+  categories:
+    - AI
+    - models
+  tags:
+  - text-to-speech
+  - audio
+
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audiofireredttsv3api
+    host: sharedentrances-api
+    port: 0
+    title: FireRedTTS3 Instruct API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audiofireredttsv3
+    port: 8090
+    host: download-svc
+    title: FireRedTTS3 Instruct
+    icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audiofireredttsv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'FireRedTeam/FireRedTTS3'
+  fullDescription: |
+    FireRedTTS3-Instruct turns written text into spoken audio. It supports preset voices, voice cloning from a reference recording, and voice creation from a written description.
+
+    **Key features**
+    - Generate speech with preset voices.
+    - Clone a voice from reference audio and its matching transcript.
+    - Design and save a voice from a natural-language description.
+    - Reuse cloned and designed voices on the same Olares installation.
+
+    A compatible NVIDIA GPU with at least `16Gi` of GPU memory is required.
+
+
+  developer: Xiaohongshu
+  website: https://fireredteam.github.io/demos/firered_tts_3/
+  sourceCode: https://huggingface.co/FireRedTeam/FireRedTTS3
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/FireRedTeam/FireRedTTS3
+  license:
+    - text: Apache-2.0
+      url: https://github.com/FireRedTeam/FireRedTTS3/blob/main/LICENSE
+
+  accelerator:
+    # Sum rule: accelerator >= engine + llm-init (200m/256Mi req, 1/4Gi lim). On nvidia-gb10 the
+    # engine's memory request AND limit become the GPU quota (unified memory).
+    - mode: nvidia
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "24Gi"
+      requiredMemory: "4352Mi"
+      requiredGPUMemory: "16Gi"
+      limitedGPUMemory: "16Gi"
+    - mode: nvidia-gb10
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "16640Mi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://FireRedTeam/FireRedTTS3 --exclude fireredtts3_base/*"
+    description: "HuggingFace source llm-init downloads into the shared cache. Instruct, RedAE and the tokenizer are enough; `--exclude` drops the 8.5 GiB Base checkpoint this image never loads."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "FireRedTeam/FireRedTTS3"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "tts"
+    options:
+    - title: TTS
+      value: tts
+    description: "Speech synthesis is its own mode: it answers the ElevenLabs-shaped voice routes recognition engines do not have, and Router routes by mode. Requires an Olares whose Router and Model Console know `tts`."
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "tts,tts_clone,tts_design"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: TTS (voices + speech)
+      value: tts
+    - title: TTS clone (save a reference as a voice_id)
+      value: tts_clone
+    - title: TTS design (build a voice from a written description)
+      value: tts_design
+    description: "One Instruct checkpoint covers all three. `tts` mounts list/speak; `tts_design` is advertised on the model card for `/v1/text-to-voice/*`; `tts_clone` mounts POST /v1/voices/add."
+  - envName: TTS_SPEED_MIN
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "0.25"
+    description: "Minimum synthesis speed published in the model card."
+  - envName: TTS_SPEED_DEFAULT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "1.0"
+    description: "Normal synthesis speed published in the model card."
+  - envName: TTS_SPEED_MAX
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4.0"
+    description: "Maximum synthesis speed published in the model card."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "16Gi"
+    description: "GPU memory required for this model. CUDA only; `0` is not supported."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "500m"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4Gi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "6"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "20Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "--n-timesteps 10 --inference-cfg 2.0 --design-cfg 1.2 --speak-speed 1.0 --ref-min-seconds 3 --ref-max-seconds 30 --ref-max-mb 5 --design-min-chars 3 --design-max-chars 500"
+    description: "Engine-native flags (llm-init ENGINE_ARGS). Filling this replaces the whole
+      string. --n-timesteps is the flow steps (official 10). --inference-cfg is clone CFG (official
+      2.0). --design-cfg is voice-design CFG (official 1.2). --speak-speed is the tempo
+      baseline the caller's ElevenLabs `speed` multiplies (0.25–4.0); 1.0 is the model's
+      own pace. --ref-min-seconds / --ref-max-seconds / --ref-max-mb
+      reject at /v1/voices/add (0 = off). --design-min-chars / --design-max-chars reject
+      at design (0 = off). Also read: --seed, --voice-dir, --preview-text,
+      --attn-implementation, --use-wetext (default on), --use-llm-tn (default off)."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
