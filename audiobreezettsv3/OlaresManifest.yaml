@@ -1,0 +1,252 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audiobreezettsv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+  description: "A text-to-speech model with built-in, cloned, and description-based voices"
+  appid: audiobreezettsv3
+  title: Breeze TTS 2
+  version: '1.0.17'
+  categories:
+    - AI
+    - models
+  tags:
+  - text-to-speech
+  - audio
+
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audiobreezettsv3api
+    host: sharedentrances-api
+    port: 0
+    title: Breeze TTS 2 API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audiobreezettsv3
+    port: 8090
+    host: download-svc
+    title: Breeze TTS 2
+    icon: https://app.cdn.olares.com/appstore/audioengines/soulx/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audiobreezettsv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'BreezeBlue/Breeze-TTS-2'
+  fullDescription: |
+    Breeze TTS 2 turns written Chinese or English text into spoken audio. You can use a built-in voice, copy a voice from a reference recording, or create a new voice by describing how it should sound.
+
+    **Key features**
+
+    - Generate speech in Chinese and English.
+    - Choose from the built-in voices available in this app.
+    - Clone a voice from clean reference audio and its matching transcript.
+    - Create a voice from a natural-language description without reference audio.
+    - Save and reuse cloned or created voices on the same Olares installation.
+
+    A compatible NVIDIA GPU with at least `12Gi` of GPU memory is required.
+
+    **Usage notes**
+
+    Breeze TTS 2 model weights, derivative models, and self-hosted outputs are licensed for research and non-commercial use only. Users must have the necessary rights and consent for reference recordings, cloned voices, and generated audio.
+
+    See the [Breeze TTS 2 model card](https://huggingface.co/BreezeBlue/Breeze-TTS-2) for license details and responsible-use requirements.
+  developer: BreezeBlue
+  website: https://huggingface.co/BreezeBlue/Breeze-TTS-2
+  sourceCode: https://github.com/breezeblue-ai/breeze-tts
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/BreezeBlue/Breeze-TTS-2
+  license:
+    - text: Apache-2.0
+      url: https://github.com/breezeblue-ai/breeze-tts/blob/main/LICENSE
+    - text: BreezeBlue Research / Non-Commercial (model weights)
+      url: https://huggingface.co/BreezeBlue/Breeze-TTS-2/blob/main/LICENSE
+
+  accelerator:
+    # Sum rule: accelerator >= engine + llm-init (200m/256Mi req, 1/4Gi lim). On nvidia-gb10 the
+    # engine's memory request AND limit become the GPU quota (unified memory).
+    - mode: nvidia
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "4352Mi"
+      requiredGPUMemory: "12Gi"
+      limitedGPUMemory: "12Gi"
+    - mode: nvidia-gb10
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "16Gi"
+      requiredMemory: "12544Mi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://BreezeBlue/Breeze-TTS-2"
+    description: "HuggingFace source llm-init downloads into the shared cache."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "BreezeBlue/Breeze-TTS-2"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "tts"
+    options:
+    - title: TTS
+      value: tts
+    description: "Speech synthesis is its own mode: it answers the ElevenLabs-shaped voice routes recognition engines do not have, and Router routes by mode. Requires an Olares whose Router and Model Console know `tts`."
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "tts,tts_clone,tts_design"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: TTS (voices + speech)
+      value: tts
+    - title: TTS clone (save a reference as a voice_id)
+      value: tts_clone
+    - title: TTS design (build a voice from a written description)
+      value: tts_design
+    description: "One 3B checkpoint covers all three. `tts` mounts list/speak; `tts_design` is advertised on the model card for `/v1/text-to-voice/*`; `tts_clone` mounts POST /v1/voices/add."
+  - envName: TTS_SPEED_MIN
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "0.25"
+    description: "Minimum synthesis speed published in the model card."
+  - envName: TTS_SPEED_DEFAULT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "1.0"
+    description: "Normal synthesis speed published in the model card."
+  - envName: TTS_SPEED_MAX
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4.0"
+    description: "Maximum synthesis speed published in the model card."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "12Gi"
+    description: "GPU memory required for this model. CUDA only; `0` is not supported."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "500m"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "4Gi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "6"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "16Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "--cfg-scale 1 --design-cfg 4 --ref-min-seconds 3 --ref-max-seconds 30 --ref-max-mb 5 --design-min-chars 3 --design-max-chars 500 --max-new-tokens 1500 --max-seq-len 2048"
+    description: "Engine-native flags (llm-init ENGINE_ARGS). Filling this replaces the whole
+      string. --cfg-scale clone CFG (official 1). --design-cfg design/direction CFG (official 4).
+      --ref-min-seconds / --ref-max-seconds / --ref-max-mb reject at /v1/voices/add (0 = off).
+      --design-min-chars / --design-max-chars reject at design (0 = off). --max-new-tokens and
+      --max-seq-len are official infer.py windows, and they also set how much text one slice
+      can hold, so lowering them makes the slices shorter. Also: --seed, --voice-dir,
+      --preview-text, --attn-implementation. Do not pass --fast-all: the CUDA Graph path needs
+      a C compiler this image does not carry, so the engine fails to load."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN

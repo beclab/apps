@@ -1,0 +1,41 @@
+# Engine-container shell: source the helpers llm-init publishes, wait for the
+# download sentinel, then run the baked wrapper under supervise_engine so
+# Model Console can relaunch the engine without restarting the Pod.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audio-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+data:
+  breeze.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=breeze
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+
+    export HF_HUB_OFFLINE=1
+    export PYTHONUNBUFFERED=1
+
+    run_audio() {
+        log "starting engine offline (audio-python -m wrapper.app)"
+        exec audio-python -m wrapper.app "$@"
+    }
+
+    supervise_engine run_audio "$@"
