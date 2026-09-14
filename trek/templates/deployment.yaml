@@ -22,6 +22,14 @@ data:
         '' close;
       }
 
+      # Preserve the public scheme supplied by the trusted Olares ingress.
+      # This sidecar receives HTTP even when the browser connects over HTTPS.
+      map $http_x_forwarded_proto $trek_forwarded_proto {
+        default $scheme;
+        https https;
+        http http;
+      }
+
       server {
         listen 8001;
         server_name _;
@@ -35,7 +43,7 @@ data:
           proxy_set_header Host $host;
           proxy_set_header X-Real-IP $remote_addr;
           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Proto $trek_forwarded_proto;
           proxy_set_header Upgrade $http_upgrade;
           proxy_set_header Connection $connection_upgrade;
           proxy_buffering off;
@@ -62,6 +70,9 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        # Reload the subPath-mounted nginx configuration on chart upgrades.
+        trek.olares.com/chart-version: {{ .Chart.Version | quote }}
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: trek
@@ -106,7 +117,7 @@ spec:
         - name: SMTP_SKIP_TLS_VERIFY
           value: "{{ .Values.olaresEnv.SMTP_SKIP_TLS_VERIFY }}"
         {{- end }}
-        image: "docker.io/beclab/mauriceboe-trek:2.9.12"
+        image: "docker.io/mauriceboe/trek:4.2.1"
         name: trek
         ports:
         - name: http
