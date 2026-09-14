@@ -1,7 +1,8 @@
-﻿apiVersion: batch/v1
+﻿{{- if gt (int (index .Values.workloads "mastodon-web").replicaCount) 0 }}
+apiVersion: batch/v1
 kind: Job
 metadata:
-  name: mastodon-init
+  name: mastodon-init-{{ .Release.Revision }}
   namespace: {{ .Release.Namespace }}
   labels:
     app.kubernetes.io/name: mastodon
@@ -23,6 +24,9 @@ spec:
         app.kubernetes.io/instance: mastodon
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/component: init
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        linkerd.io/inject: disabled
     spec:
       
       restartPolicy: OnFailure
@@ -35,7 +39,7 @@ spec:
       automountServiceAccountToken: false
       initContainers:
         - name: copy-assets-dir
-          image: "docker.io/beclab/linuxserver-mastodon:4.5.4"
+          image: "docker.io/linuxserver/mastodon:4.7.1"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -52,9 +56,6 @@ spec:
               - ALL
             privileged: false
             readOnlyRootFilesystem: true
-            runAsGroup: 1001
-            runAsNonRoot: true
-            runAsUser: 1001
             seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
@@ -79,7 +80,7 @@ spec:
         # as it follows the Job Pattern best practices
         # https://kubernetes.io/docs/concepts/workloads/controllers/job/#job-patterns
         - name: migrate-and-create-admin
-          image: "docker.io/beclab/linuxserver-mastodon:4.5.4"
+          image: "docker.io/linuxserver/mastodon:4.7.1"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -93,9 +94,6 @@ spec:
               - ALL
             privileged: false
             readOnlyRootFilesystem: false
-            runAsGroup: 0
-            runAsNonRoot: false
-            runAsUser: 0
             seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
@@ -141,7 +139,7 @@ spec:
             limits: {}
             requests: {}
         - name: mastodon-assets-precompile
-          image: "docker.io/beclab/linuxserver-mastodon:4.5.4"
+          image: "docker.io/linuxserver/mastodon:4.7.1"
           imagePullPolicy: IfNotPresent
           command:
             - /bin/bash
@@ -155,9 +153,6 @@ spec:
               - ALL
             privileged: false
             readOnlyRootFilesystem: false
-            runAsGroup: 0
-            runAsNonRoot: false
-            runAsUser: 0
             seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
@@ -220,3 +215,4 @@ spec:
           configMap:
             name: mastodon-init-scripts
             defaultMode: 0755
+{{- end }}

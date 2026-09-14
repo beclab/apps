@@ -27,6 +27,8 @@ spec:
         app.kubernetes.io/instance: mastodon
         app.kubernetes.io/managed-by: Helm
         app.kubernetes.io/component: web
+      annotations:
+        checksum/mastodon-default: {{ include (print $.Template.BasePath "/configmap-mastodon-default.yaml") . | sha256sum }}
     spec:
       serviceAccountName: mastodon
       
@@ -80,39 +82,21 @@ spec:
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
         - name: prepare-tmp-dir
-          image: "docker.io/beclab/linuxserver-mastodon:4.5.4"
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
           imagePullPolicy: IfNotPresent
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-              - ALL
-            privileged: false
-            readOnlyRootFilesystem: true
-            runAsGroup: 1001
-            runAsNonRoot: true
-            runAsUser: 1001
-            seLinuxOptions: {}
-            seccompProfile:
-              type: RuntimeDefault
+            runAsUser: 0
           command:
-            - /bin/bash
-          args:
-            - -ec
-            - |
-              #!/bin/bash
-              # HACK: Mastodon does not allow having a /tmp directory world-writable, so we need to create a /tmp dir
-              # with more restricted permissions
-              mkdir -p /tmp/tmp-dir
+            - sh
+            - -c
+            - mkdir -p /tmp/tmp-dir
           resources:
             limits:
-              cpu: 750m
-              ephemeral-storage: 1024Mi
-              memory: 768Mi
+              cpu: 100m
+              memory: 64Mi
             requests:
-              cpu: 500m
-              ephemeral-storage: 50Mi
-              memory: 512Mi
+              cpu: 10m
+              memory: 16Mi
           volumeMounts:
             - name: empty-dir
               mountPath: /tmp
@@ -141,7 +125,7 @@ spec:
           imagePullPolicy: IfNotPresent
       containers:
         - name: mastodon
-          image: "docker.io/beclab/linuxserver-mastodon:4.5.4"
+          image: "docker.io/linuxserver/mastodon:4.7.1"
           imagePullPolicy: IfNotPresent
           resources:
             requests:
@@ -151,16 +135,9 @@ spec:
               cpu: "3"
               memory: 4Gi
           securityContext:
-            # LinuxServer.io image requires root permissions to write to /tmp, /root, /app/www and other directories
             allowPrivilegeEscalation: true
-            # capabilities:
-            #   drop:
-            #   - ALL
             privileged: false
             readOnlyRootFilesystem: false
-            runAsGroup: 0
-            runAsNonRoot: false
-            runAsUser: 0
             seLinuxOptions: {}
             seccompProfile:
               type: RuntimeDefault
