@@ -20,10 +20,16 @@ spec:
       labels:
         io.kompose.service: pds
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
       - name: migrate-appcache-to-appdata
         image: "docker.io/beclab/busybox:1.37"
         imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
         command: ["sh", "-c"]
         args:
           - |
@@ -58,27 +64,27 @@ spec:
             readOnly: true
           - name: pdsdata
             mountPath: /new-data
-      - name: init-chmod-pds
+      - name: init-permissions
         image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
         command:
           - sh
           - '-c'
           - |
-            mkdir -p /app-data-root/pds /app-data-root/blocks
-            chown -R 0:0 /app-data-root || true
-            chmod -R 777 /app-data-root || true
-        resources: {}
+            set -e
+            mkdir -p /app-data-root /app-data-root/blocks
+            chown 1000:1000 /app-data-root /app-data-root/blocks
         volumeMounts:
           - name: pdsdata
             mountPath: /app-data-root
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
-        securityContext:
-          runAsUser: 0
       containers:
       - name: pds
-        image: "docker.io/beclab/bluesky-social-pds:0.4.204"
+        image: "docker.io/beclab/bluesky-social-pds:0.4.5027"
+        imagePullPolicy: IfNotPresent
         ports:
           - containerPort: {{ .Values.port | default 3000 }}
             protocol: TCP
@@ -126,11 +132,17 @@ spec:
           requests:
             cpu: 100m
             memory: 512Mi
+        startupProbe:
+          httpGet:
+            path: /xrpc/_health
+            port: {{ .Values.port | default 3000 }}
+          failureThreshold: 30
+          periodSeconds: 5
+          timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /xrpc/_health
             port: {{ .Values.port | default 3000 }}
-          initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
           successThreshold: 1
@@ -139,7 +151,6 @@ spec:
           httpGet:
             path: /xrpc/_health
             port: {{ .Values.port | default 3000 }}
-          initialDelaySeconds: 30
           periodSeconds: 30
           timeoutSeconds: 5
           successThreshold: 1
@@ -149,7 +160,6 @@ spec:
           name: pdsdata
         terminationMessagePath: /dev/termination-log
         terminationMessagePolicy: File
-        imagePullPolicy: IfNotPresent
       restartPolicy: Always
       volumes:
       - hostPath:
