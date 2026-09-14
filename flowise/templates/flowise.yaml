@@ -18,10 +18,39 @@ spec:
       labels:
         app: flowise
     spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - |
+              for d in /home/node/.flowise /home/node/.flowise/logs /home/node/.flowise/storage; do
+                mkdir -p "$d" && chown 1000:1000 "$d"
+              done
+          securityContext:
+            runAsUser: 0
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /home/node/.flowise
+              name: flowise-data
       containers:
         - name: flowise
-          image: "docker.io/beclab/flowiseai-flowise:3.0.3"
+          image: "flowiseai/flowise:3.1.4"
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
           env:
             - name: PGID
               value: "1000"
@@ -50,23 +79,23 @@ spec:
               path: /api/v1/ping
               port: http
               scheme: HTTP
-            initialDelaySeconds: 5
-            timeoutSeconds: 1
-            periodSeconds: 10
+            initialDelaySeconds: 40
+            timeoutSeconds: 5
+            periodSeconds: 15
             successThreshold: 1
-            failureThreshold: 3
+            failureThreshold: 8
           readinessProbe:
             httpGet:
               path: /api/v1/ping
               port: http
               scheme: HTTP
-            initialDelaySeconds: 5
-            timeoutSeconds: 1
+            initialDelaySeconds: 20
+            timeoutSeconds: 5
             periodSeconds: 10
             successThreshold: 1
-            failureThreshold: 3
+            failureThreshold: 12
           volumeMounts:
-            - mountPath: /root/.flowise
+            - mountPath: /home/node/.flowise
               name: flowise-data
       volumes:
         - name: flowise-data
