@@ -18,29 +18,54 @@ spec:
       labels:
         io.kompose.service: hoppscotch
     spec:
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      - name: seed-site
+        image: "hoppscotch/hoppscotch:2026.8.0"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -c
+        - cp -a /site/. /seed/
+        volumeMounts:
+        - name: site
+          mountPath: /seed
       containers:
       - name: hoppscotch
-        image: "docker.io/beclab/hoppscotch-hoppscotch:2025.9.2"
+        image: "hoppscotch/hoppscotch:2026.8.0"
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
         command: ["sh", "-c", "pnpm exec prisma migrate deploy && node /usr/src/app/aio_run.mjs"]
         envFrom:
         - configMapRef:
             name: hoppscotch-config
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
         livenessProbe:
             httpGet:
               path: /
-              port: 80
-            initialDelaySeconds: 30
+              port: http
+            initialDelaySeconds: 40
             periodSeconds: 10
-            failureThreshold: 3
+            failureThreshold: 6
             successThreshold: 1
             timeoutSeconds: 5
         readinessProbe:
           httpGet:
             path: /
-            port: 80
-          initialDelaySeconds: 10
+            port: http
+          initialDelaySeconds: 20
           periodSeconds: 5
-          failureThreshold: 3
+          failureThreshold: 12
           successThreshold: 1
           timeoutSeconds: 5
         resources:
@@ -50,6 +75,12 @@ spec:
           limits:
             memory: 2Gi
             cpu: 1000m
+        volumeMounts:
+        - name: site
+          mountPath: /site
+      volumes:
+      - name: site
+        emptyDir: {}
       restartPolicy: Always
 
 
@@ -68,4 +99,4 @@ spec:
   ports:
     - protocol: TCP
       port: 80
-      targetPort: 80
+      targetPort: 8000
