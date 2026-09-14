@@ -1,8 +1,8 @@
 # Engine wrapper script, mounted into the llama.cpp (engine) container at
-# /llm-init/wrappers. Inlined from llm-init deploy/wrappers with Olares
-# chart specifics (-hf "$MODEL_NAME"). Prefers ${RUN_DIR}/engine_args from
-# Model Console model-card SSOT; supervise_engine relaunches on
-# engine_restart bumps.
+# /llm-init/wrappers. Sources the helpers llm-init publishes into RUN_DIR
+# with Olares chart specifics (-hf "$MODEL_NAME"). Prefers
+# ${RUN_DIR}/engine_args from the Model Console model-card SSOT;
+# supervise_engine relaunches on engine_restart bumps.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -16,29 +16,19 @@ data:
     set -eu
 
     ENGINE=llamacpp
-    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
-    ENGINE_ARGS_FILE=${ENGINE_ARGS_FILE:-/run/llm-init/engine_args}
-    ENGINE_RESTART_FILE=${ENGINE_RESTART_FILE:-/run/llm-init/engine_restart}
-    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
-    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
-    ENGINE_ARGS_WAIT_TIMEOUT=${ENGINE_ARGS_WAIT_TIMEOUT:-60}
-    RESTART_POLL_INTERVAL=${RESTART_POLL_INTERVAL:-2}
-    ENGINE_STOP_GRACE_SECONDS=${ENGINE_STOP_GRACE_SECONDS:-15}
-    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
-
-    wait_for_engine_args_handoff() {
-        elapsed=0
-        while [ ! -f "$ENGINE_ARGS_FILE" ]; do
-            if [ "$elapsed" -ge "$ENGINE_ARGS_WAIT_TIMEOUT" ]; then
-                log "timed out after ${ENGINE_ARGS_WAIT_TIMEOUT}s waiting for $ENGINE_ARGS_FILE; using chart ENGINE_ARGS"
-                return 0
-            fi
-            log "waiting for $ENGINE_ARGS_FILE (elapsed=${elapsed}s)"
-            sleep "$WAIT_INTERVAL"
-            elapsed=$((elapsed + WAIT_INTERVAL))
-        done
-        log "engine_args handoff $ENGINE_ARGS_FILE found after ${elapsed}s"
-    }
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
 
     looks_like_hf_repo_id() {
         s=$1
@@ -57,15 +47,10 @@ data:
         esac
     }
 
-    load_engine_args_from_handoff() {
-        if [ -f "$ENGINE_ARGS_FILE" ]; then
-            ENGINE_ARGS=$(tr -d '\r\n' < "$ENGINE_ARGS_FILE")
-            export ENGINE_ARGS
-            log "loaded ENGINE_ARGS from $ENGINE_ARGS_FILE (${#ENGINE_ARGS} bytes)"
-        fi
-        # Upgrade path: hostPath model-spec may already have engine_args
-        # without --embedding. Handoff would otherwise override the chart
-        # ENGINE_ARGS that appends the flag. Force it when MODEL_MODE says so.
+    # Upgrade path: a hostPath model-spec may already carry engine_args without
+    # --embedding, and the handoff overrides the chart ENGINE_ARGS that appends
+    # the flag. Force it back when MODEL_MODE says this is an embedding model.
+    force_embedding_flag() {
         case "${MODEL_MODE:-}" in
             embedding)
                 case " ${ENGINE_ARGS:-} " in
@@ -80,113 +65,7 @@ data:
         esac
     }
 
-    read_restart_gen() {
-        if [ -f "$ENGINE_RESTART_FILE" ]; then
-            tr -d '\r\n' < "$ENGINE_RESTART_FILE"
-        else
-            printf '0'
-        fi
-    }
-
-    stop_engine_child() {
-        child=$1
-        if [ -z "$child" ]; then
-            return 0
-        fi
-        if ! kill -0 "$child" 2>/dev/null; then
-            wait "$child" 2>/dev/null || true
-            return 0
-        fi
-        log "stopping engine pid=$child (SIGTERM to process group)"
-        kill -TERM -"$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true
-        elapsed=0
-        while kill -0 "$child" 2>/dev/null; do
-            if [ "$elapsed" -ge "$ENGINE_STOP_GRACE_SECONDS" ]; then
-                log "engine pid=$child still alive after ${ENGINE_STOP_GRACE_SECONDS}s; SIGKILL"
-                kill -KILL -"$child" 2>/dev/null || kill -KILL "$child" 2>/dev/null || true
-                break
-            fi
-            sleep 1
-            elapsed=$((elapsed + 1))
-        done
-        wait "$child" 2>/dev/null || true
-    }
-
-    supervise_engine() {
-        _supervise_child=""
-        _supervise_exiting=0
-
-        _supervise_on_signal() {
-            _supervise_exiting=1
-            log "received stop signal; forwarding to engine"
-            if [ -n "${_supervise_child}" ]; then
-                stop_engine_child "$_supervise_child"
-            fi
-            exit 143
-        }
-        trap '_supervise_on_signal' TERM INT
-
-        gen=$(read_restart_gen)
-        while [ "$_supervise_exiting" -eq 0 ]; do
-            load_engine_args_from_handoff
-            log "launching engine (restart_gen=$gen)"
-            # Job control → background job is a process-group leader.
-            # Do NOT use `setsid CMD`: CMD is the shell function
-            # run_llamacpp, which setsid cannot execvp (CrashLoop on
-            # Linux images that ship util-linux setsid).
-            set -m 2>/dev/null || true
-            "$@" &
-            _supervise_child=$!
-            child=$_supervise_child
-            restarted=0
-            while kill -0 "$child" 2>/dev/null; do
-                sleep "$RESTART_POLL_INTERVAL"
-                if [ "$_supervise_exiting" -eq 1 ]; then
-                    break
-                fi
-                new=$(read_restart_gen)
-                if [ "$new" != "$gen" ]; then
-                    log "restart requested (gen $gen -> $new); stopping pid=$child"
-                    stop_engine_child "$child"
-                    _supervise_child=""
-                    gen=$new
-                    restarted=1
-                    break
-                fi
-            done
-            if [ "$_supervise_exiting" -eq 1 ]; then
-                break
-            fi
-            if [ "$restarted" -eq 1 ]; then
-                settle=0
-                while [ "$settle" -lt 10 ]; do
-                    sleep 1
-                    settle=$((settle + 1))
-                    if ! kill -0 "$child" 2>/dev/null; then
-                        break
-                    fi
-                done
-                continue
-            fi
-            wait "$child"
-            status=$?
-            _supervise_child=""
-            log "engine exited status=$status (no restart requested)"
-            exit "$status"
-        done
-    }
-
-    elapsed=0
-    while [ ! -f "$SENTINEL" ]; do
-        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
-            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
-            exit 1
-        fi
-        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
-        sleep "$WAIT_INTERVAL"
-        elapsed=$((elapsed + WAIT_INTERVAL))
-    done
-    log "sentinel $SENTINEL found after ${elapsed}s"
+    wait_for_sentinel
     wait_for_engine_args_handoff
 
     if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
@@ -217,6 +96,7 @@ data:
         # Preserve container CMD extras before ENGINE_ARGS word-splitting.
         extra_argv="$*"
         load_engine_args_from_handoff
+        force_embedding_flag
         ARGV=""
         if [ -n "${ENGINE_ARGS:-}" ]; then
             # shellcheck disable=SC2086
@@ -232,7 +112,7 @@ data:
         fi
         log "starting llama.cpp with -hf=$MODEL_NAME alias=${MODEL_NAME:-unset} argv=${ARGV:-<empty>} (bin=$LLAMA_SERVER_BIN)"
         # shellcheck disable=SC2086
-        "$LLAMA_SERVER_BIN" \
+        exec "$LLAMA_SERVER_BIN" \
             -hf "$MODEL_NAME" \
             --alias "${MODEL_NAME:-llm-init-model}" \
             --host 0.0.0.0 \
