@@ -15,15 +15,43 @@ spec:
     matchLabels:
       io.kompose.service: sillytavern
   strategy:
-    type: Recreate  
+    type: Recreate
   template:
     metadata:
       labels:
         io.kompose.service: sillytavern
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          for d in /config /data /plugins /extensions; do
+            mkdir -p "$d" && chown 1000:1000 "$d"
+          done
+        volumeMounts:
+        - name: appconfig
+          mountPath: /config
+        - name: appdata
+          mountPath: /data
+        - name: appplugins
+          mountPath: /plugins
+        - name: appextensions
+          mountPath: /extensions
       containers:
       - name: sillytavern
-        image: "docker.io/beclab/sillytavern-sillytavern:1.15.0"
+        image: "docker.io/beclab/sillytavern-sillytavern:1.18.0"
+        imagePullPolicy: IfNotPresent
         env:
         - name: NODE_ENV
           value: 'production'
@@ -36,7 +64,8 @@ spec:
         - name: SILLYTAVERN_LOGGING_MINLOGLEVEL
           value: '2'
         ports:
-        - containerPort: 8000
+        - name: http
+          containerPort: 8000
         resources:
           limits:
             cpu: "2"
@@ -56,6 +85,30 @@ spec:
           name: appplugins
         - mountPath: /home/node/app/public/scripts/extensions/third-party
           name: appextensions
+        startupProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 36
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 20
+          failureThreshold: 6
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+            scheme: HTTP
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 6
       volumes:
       - hostPath:
           path: '{{ if $isNewVersion }}{{ .Values.userspace.appData }}/config{{ else }}{{ .Values.userspace.appData }}/sillytavern/config{{ end }}'
@@ -94,6 +147,3 @@ spec:
     io.kompose.service: sillytavern
 status:
   loadBalancer: {}
-
-
-
