@@ -1,6 +1,6 @@
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
-{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- $engineArgs := include "llamacppqwen3827bggufv3.presetArgs" ($oe.ENGINE_ARGS | default "") -}}
 {{- /* MODEL_MODE=embedding -> auto-add llama.cpp's --embedding so it works out
        of the box; skipped if the user already passed it in ENGINE_ARGS. */ -}}
 {{- $modelMode := $oe.MODEL_MODE | default "" -}}
@@ -10,9 +10,9 @@
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
 {{- $cpuRequest := trim ($oe.LLAMACPP_CPU_REQUEST | default "200m") -}}
-{{- $memRequest := trim ($oe.LLAMACPP_MEMORY_REQUEST | default "21Gi") -}}
+{{- $memRequest := trim ($oe.LLAMACPP_MEMORY_REQUEST | default "7Gi") -}}
 {{- $cpuLimit := trim ($oe.LLAMACPP_CPU_LIMIT | default "6") -}}
-{{- $memLimit := trim ($oe.LLAMACPP_MEMORY_LIMIT | default "30Gi") -}}
+{{- $memLimit := trim ($oe.LLAMACPP_MEMORY_LIMIT | default "38Gi") -}}
 {{- $gpuType := .Values.gpu | default "" -}}
 {{- if not $gpuType -}}
 {{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
@@ -26,7 +26,7 @@
 {{- $memRequest = printf "%sMi" $gpuMiB -}}
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
-{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 # llama.cpp engine Deployment. wrappers/llamacpp.sh blocks on the sentinel
 # (download ready), then execs llama-server -hf "$MODEL_NAME".
@@ -73,12 +73,14 @@ spec:
             defaultMode: 0555
       containers:
         - name: llamacpp
-          image: docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10454
+          image: docker.io/beclab/ggml-org-llama.cpp:server-cuda13-b10920
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
           env:
             - name: ENGINE_KIND
               value: llamacpp
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
             - name: MODEL_NAME
               value: "{{ $modelName }}"
             - name: MODEL_MODE

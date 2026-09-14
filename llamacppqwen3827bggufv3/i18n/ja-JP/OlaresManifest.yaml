@@ -1,0 +1,41 @@
+metadata:
+  description: "llama.cpp で提供される Qwen3.8-27B (GGUF UD-Q4_K_XL)"
+  title: Qwen3.8-27B (llama.cpp)
+spec:
+  upgradeDescription: |
+    v1.0.14: Upgrade llama.cpp to server-cuda13-b10920. Keep the shared 102K context pool, two slots, and MTP draft depth 2.
+
+    v1.0.13: Upgrade llama.cpp to server-cuda12-b10884 and set the default MTP draft depth to 2. Migrate exact previous presets while preserving custom engine arguments.
+
+    v1.0.5：llm-init を v1.3.10 にアップグレード。MODEL_REASONING_EFFORT と MODEL_REASONING_EFFORT_DEFAULT を編集不可の環境変数として固定。llama.cpp を server-cuda12-b10548 にアップグレード。
+
+    v1.0.4：このモデルが実際に受け付ける推論レベル（low、medium、xhigh、デフォルト xhigh）をモデルカードで公開し、クライアントが推測する代わりに Router から読み取れるようにしました。llm-init v1.3.10 が必要です。
+
+    v1.0.3：1.12.6 timeslice ノードでインストールしやすくするため、NVIDIA ホストメモリ予約を削減（エンジン要求を 21Gi から 6Gi、chart requiredMemory を 23Gi から 7Gi に変更し、実測の約 5.3Gi のワーキングセットをカバー）。GPU クォータは 23Gi のままです。
+
+    v1.0.0：初回リリース。llama.cpp server-cuda12-b10454、llm-init v1.3.5。Unsloth Qwen3.8-27B UD-Q4_K_XL + mmproj、102K コンテキスト (-c 104448)、MTP --spec-draft-n-max 4、GPU クォータ 23Gi。
+  fullDescription: |
+    **モデル概要**
+    Qwen3.8-27B は Qwen3.5 アーキテクチャを基盤とする Qwen シリーズ（Alibaba）のビジョン言語モデルです。推論、ツール呼び出し、ネイティブな画像/動画理解に対応し、256K のコンテキストウィンドウを備えています。このアプリは、`unsloth/Qwen3.8-27B-GGUF` の `UD-Q4_K_XL` GGUF ビルドを llama.cpp 経由で提供します。
+
+    **プリセット構成**
+    - モデル：`unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL`（ビジョン用の `mmproj-F16.gguf` プロジェクターを使用）
+    - 機能：推論、ツール、ビジョン
+    - エンジン引数：`-c 104448 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 2 -kvu --spec-type draft-mtp --spec-draft-n-max 2`（102K コンテキスト、MTP 投機的デコード）
+    - 必要な GPU メモリ：`23Gi`
+
+    **アクセラレーターモード**
+    | モード          | デバイス           | 詳細                                             |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` の GPU メモリを使用。`-ngl all` で GPU 全体を使用 |
+    | `nvidia-gb10`  | GPU (Spark)       | 上記と同様ですが、メモリは pod によって管理されます |
+
+    **動作の仕組み**
+    まず Model Console がモデルをダウンロードして準備し、準備完了後に `llama.cpp` がモデルの提供を開始します。この 2 つは個別に動作しますが、ファイルと進捗情報を共有します。
+
+    **スタック**
+    - **llama.cpp** (`server-cuda13-b10920`)：モデルを実行し、API リクエストを処理します（ポート 8081）
+    - **Model Console**：モデルをダウンロードして進捗を表示し、ポート 8090 で OpenAI API を提供して `llamacpp` にプロキシします。
+
+    **モデルストレージ**
+    すべてのモデルファイルは `appCommon/huggingface` の共有フォルダーに保存され、`/cache/hf/hub` としてマウントされます。同様のアプリはすべて、この場所をモデル用に使用します。

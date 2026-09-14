@@ -1,0 +1,41 @@
+metadata:
+  description: "Qwen3.8-27B (GGUF UD-Q4_K_XL), bereitgestellt mit llama.cpp"
+  title: Qwen3.8-27B (llama.cpp)
+spec:
+  upgradeDescription: |
+    v1.0.14: Upgrade llama.cpp to server-cuda13-b10920. Keep the shared 102K context pool, two slots, and MTP draft depth 2.
+
+    v1.0.13: Upgrade llama.cpp to server-cuda12-b10884 and set the default MTP draft depth to 2. Migrate exact previous presets while preserving custom engine arguments.
+
+    v1.0.5: Upgrade von llm-init auf v1.3.10; MODEL_REASONING_EFFORT und MODEL_REASONING_EFFORT_DEFAULT als nicht bearbeitbare Umgebungsvariablen festlegen; Upgrade von llama.cpp auf server-cuda12-b10548.
+
+    v1.0.4: Die von diesem Modell tatsächlich akzeptierten Reasoning-Stufen (low, medium, xhigh, Standard xhigh) auf seiner Modellkarte veröffentlichen, damit ein Client sie über Router lesen kann, statt sie zu erraten. Erfordert llm-init v1.3.10.
+
+    v1.0.3: Die NVIDIA-Hostspeicherreservierung verringern, damit 1.12.6 Timeslice-Knoten die Installation einfacher durchführen können (Engine-Anforderung von 21Gi auf 6Gi, chart requiredMemory von 23Gi auf 7Gi, ausreichend für den gemessenen Arbeitssatz von ~5.3Gi). Das GPU-Kontingent bleibt bei 23Gi.
+
+    v1.0.0: Erste Veröffentlichung. llama.cpp server-cuda12-b10454, llm-init v1.3.5. Unsloth Qwen3.8-27B UD-Q4_K_XL + mmproj, 102K Kontext (-c 104448), MTP --spec-draft-n-max 4, GPU-Kontingent 23Gi.
+  fullDescription: |
+    **Modellübersicht**
+    Qwen3.8-27B ist ein Vision-Language-Modell aus der Qwen-Serie (Alibaba), das auf der Qwen3.5-Architektur basiert. Es unterstützt Denken, Tool-Aufrufe und natives Bild-/Videoverständnis mit einem Kontextfenster von 256K. Diese App stellt den `UD-Q4_K_XL`-GGUF-Build aus `unsloth/Qwen3.8-27B-GGUF` über llama.cpp bereit.
+
+    **Voreingestellte Konfiguration**
+    - Modell: `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (mit `mmproj-F16.gguf`-Projektor für Vision)
+    - Fähigkeiten: Denken, Tools, Vision
+    - Engine-Argumente: `-c 104448 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 2 -kvu --spec-type draft-mtp --spec-draft-n-max 2` (102K Kontext, spekulative MTP-Dekodierung)
+    - Erforderlicher GPU-Speicher: `23Gi`
+
+    **Beschleunigermodi**
+    | Modus          | Gerät             | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Verwendet `23Gi` GPU-Speicher; `-ngl all` für vollständige GPU-Nutzung |
+    | `nvidia-gb10`  | GPU (Spark)       | Wie oben, aber der Speicher wird vom Pod verwaltet |
+
+    **Funktionsweise**
+    Zunächst lädt Model Console das Modell herunter und bereitet es vor. Anschließend stellt `llama.cpp` das Modell bereit, sobald es fertig ist. Diese beiden Komponenten werden getrennt ausgeführt, nutzen aber gemeinsame Dateien und Fortschrittsinformationen.
+
+    **Stack**
+    - **llama.cpp** (`server-cuda13-b10920`): Führt das Modell aus und stellt API-Anfragen bereit (Port 8081)
+    - **Model Console**: Lädt das Modell herunter, zeigt den Fortschritt an und stellt die OpenAI API auf Port 8090 bereit, wobei Anfragen an `llamacpp` weitergeleitet werden.
+
+    **Modellspeicher**
+    Alle Modelldateien werden in einem gemeinsamen Ordner unter `appCommon/huggingface` gespeichert, der als `/cache/hf/hub` eingebunden ist. Alle ähnlichen Apps verwenden diesen Speicherort für Modelle.
