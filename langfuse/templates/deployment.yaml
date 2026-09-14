@@ -19,7 +19,10 @@ stringData:
   MINIO_ROOT_USER: "minio"
   MINIO_ROOT_PASSWORD: "olarestestpwd"
   REDIS_PASSWORD: "olares"
-  DATABASE_URL: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.langfuse }}"
+  # The citus role has a per-role connection cap, while Prisma sizes its pool
+  # from the host's core count, so the pool must be bounded explicitly.
+  DATABASE_URL: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.langfuse }}?connection_limit=5&pool_timeout=60&connect_timeout=30"
+  DIRECT_URL: "postgresql://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.langfuse }}?connection_limit=2&pool_timeout=60&connect_timeout=30"
   POSTGRES_PASSWORD: "{{ .Values.postgres.password }}"
 
 ---
@@ -79,8 +82,11 @@ spec:
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
       containers:
+        # Langfuse v4 requires ClickHouse >= 25.12 for lightweight updates, the
+        # JSON type and full-text search; on 25.5 the schema migrations fail.
         - name: clickhouse
-          image: "docker.io/beclab/clickhouse-clickhouse-server:25.5"
+          image: "clickhouse/clickhouse-server:26.4"
+          imagePullPolicy: IfNotPresent
           env:
             - name: CLICKHOUSE_DB
               value: default
@@ -100,13 +106,15 @@ spec:
             - name: ch-logs
               mountPath: /var/log/clickhouse-server
       volumes:
+        # ClickHouse 26.x cannot read a 25.5 data directory, so the major
+        # version is part of the path.
         - name: ch-data
           hostPath:
-            path: "{{ .Values.userspace.appData }}/langfuse/docker/data/clickhouse"
+            path: "{{ .Values.userspace.appData }}/langfuse/docker/data/clickhouse-26"
             type: DirectoryOrCreate
         - name: ch-logs
           hostPath:
-            path: "{{ .Values.userspace.appData }}/langfuse/docker/logs/clickhouse"
+            path: "{{ .Values.userspace.appData }}/langfuse/docker/logs/clickhouse-26"
             type: DirectoryOrCreate
 ---
 apiVersion: v1
@@ -189,18 +197,25 @@ spec:
       port: 9003
       targetPort: 9003
 
-# Create bucket `langfuse` once MinIO is up
+# Create bucket `langfuse` once MinIO is up.
+# Skip when replicaCount is 0 (app stop): a new Job named with
+# Release.Revision would loop forever waiting for scaled-down MinIO.
+{{- if gt (int .Values.workloads.minio.replicaCount) 0 }}
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: minio-make-bucket
+  name: minio-make-bucket-{{ .Release.Revision }}
   namespace: {{ .Release.Namespace }}
 spec:
   ttlSecondsAfterFinished: 100
   template:
     metadata:
-      labels: { job: minio-make-bucket }
+      labels:
+        job: minio-make-bucket
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        linkerd.io/inject: disabled
     spec:
       restartPolicy: OnFailure
       containers:
@@ -216,6 +231,7 @@ spec:
             - -c
             - >-
               until (mc alias set local http://minio:9002 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc mb -p local/langfuse); do echo waiting for minio; sleep 2; done; echo done;
+{{- end }}
 
 # ==========================
 # Langfuse Web (UI & API)
@@ -235,6 +251,7 @@ spec:
     metadata:
       labels: { app: langfuse }
     spec:
+      enableServiceLinks: false
       initContainers:
         - name: check-ready
           image: "docker.io/beclab/wait-for:0.1.0"
@@ -248,10 +265,18 @@ spec:
           imagePullPolicy: IfNotPresent
       containers:
         - name: web
-          image: "docker.io/beclab/langfuse-langfuse:3.103.0"
+          image: "langfuse/langfuse:4.30.0"
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
           env:
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            # Node sizes its heap from the container limit, and v4's web server
+            # exceeds what a 1Gi limit allows.
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=2560"
             - name: NEXTAUTH_URL
               valueFrom: { configMapKeyRef: { name: langfuse-config, key: NEXTAUTH_URL } }
             - name: NEXTAUTH_SECRET
@@ -261,6 +286,11 @@ spec:
                 secretKeyRef:
                   name: langfuse-secrets
                   key: DATABASE_URL
+            - name: DIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secrets
+                  key: DIRECT_URL
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -339,9 +369,34 @@ spec:
               valueFrom: { secretKeyRef: { name: langfuse-secrets, key: REDIS_PASSWORD } }
             - name: REDIS_TLS_ENABLED
               value: "false"
+          # First boot applies all Prisma and ClickHouse migrations; a liveness
+          # kill during that window leaves ClickHouse in a dirty state that the
+          # entrypoint refuses to start from, so the startup window is generous.
+          startupProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /api/public/health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/public/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
-            requests: { cpu: "100m", memory: "200Mi" }
-            limits:   { cpu: "1",    memory: "1Gi" }
+            requests: { cpu: "100m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "3Gi" }
 ---
 apiVersion: v1
 kind: Service
@@ -373,21 +428,30 @@ spec:
     metadata:
       labels: { app: langfuse-worker }
     spec:
+      enableServiceLinks: false
       initContainers:
+        # Waiting on langfuse-web keeps the worker's connection pool out of the
+        # way until web has finished the Postgres and ClickHouse migrations.
         - name: check-ready
           image: "docker.io/beclab/wait-for:0.1.0"
           args:
             - '-it'
             - >-
-              redis-svc:6379,{{ .Values.postgres.host }}:5432,clickhouse:8123
+              redis-svc:6379,{{ .Values.postgres.host }}:5432,clickhouse:8123,langfuse-web:3000
           resources: {}
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
       containers:
         - name: worker
-          image: "docker.io/beclab/langfuse-langfuse-worker:3.103.0"
+          image: "langfuse/langfuse-worker:4.30.0"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: health
+              containerPort: 3030
           env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=1536"
             - name: NEXTAUTH_URL
               valueFrom: { configMapKeyRef: { name: langfuse-config, key: NEXTAUTH_URL } }
             - name: DATABASE_URL
@@ -395,6 +459,11 @@ spec:
                 secretKeyRef:
                   name: langfuse-secrets
                   key: DATABASE_URL
+            - name: DIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-secrets
+                  key: DIRECT_URL
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -472,6 +541,28 @@ spec:
               valueFrom: { secretKeyRef: { name: langfuse-secrets, key: REDIS_PASSWORD } }
             - name: REDIS_TLS_ENABLED
               value: "false"
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: health
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: health
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           resources:
             requests: { cpu: "100m", memory: "500Mi" }
             limits:   { cpu: "1", memory: "2Gi" }
