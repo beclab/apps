@@ -20,20 +20,90 @@ spec:
       labels:
         app: maxkb
     spec:
+      initContainers:
+        - name: migrate-data
+          image: docker.io/beclab/busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              ROOT=/opt/maxkb
+              LEGACY=$ROOT/pg
+              OFFICIAL=$ROOT/data/postgresql/pgdata
+              MARKER=$ROOT/.olares-pg-migrated
+              PACK_SRC=$ROOT/packages
+              PACK_DST=$ROOT/python-packages
+
+              mkdir -p "$ROOT/data/postgresql" "$PACK_DST" "$OFFICIAL"
+
+              # v2 start-all.sh exits if a v1 cluster sits at the volume root.
+              if [ -f "$ROOT/PG_VERSION" ]; then
+                echo "olares-migrate: moving v1 files from volume root into official pgdata"
+                for n in PG_VERSION base global pg_wal pg_xlog pg_tblspc pg_stat pg_stat_tmp pg_logical pg_multixact pg_subtrans pg_clog pg_notify pg_serial pg_snapshots pg_commit_ts pg_dynshmem pg_replslot pg_twophase postgresql.conf postgresql.auto.conf pg_hba.conf pg_ident.conf postmaster.opts backup_label tablespace_map; do
+                  if [ -e "$ROOT/$n" ]; then
+                    mv "$ROOT/$n" "$OFFICIAL/"
+                  fi
+                done
+              fi
+
+              cluster_kb() {
+                if [ ! -f "$1/PG_VERSION" ]; then
+                  echo 0
+                  return
+                fi
+                du -s "$1" 2>/dev/null | awk '{print $1}'
+              }
+
+              if [ ! -f "$MARKER" ]; then
+                L=$(cluster_kb "$LEGACY")
+                O=$(cluster_kb "$OFFICIAL")
+                L=${L:-0}
+                O=${O:-0}
+                echo "olares-migrate: legacy_kb=$L official_kb=$O"
+                if [ "$L" -gt 0 ] && [ "$O" -eq 0 ]; then
+                  echo "olares-migrate: copy appData/pg -> data/postgresql/pgdata"
+                  cp -a "$LEGACY/." "$OFFICIAL/"
+                  echo from-legacy > "$MARKER"
+                elif [ "$L" -gt 0 ] && [ "$O" -gt 0 ]; then
+                  if [ "$L" -gt "$O" ]; then
+                    echo "olares-migrate: both clusters present, legacy larger; backup official and copy legacy"
+                    mv "$OFFICIAL" "$OFFICIAL.bak-official"
+                    mkdir -p "$OFFICIAL"
+                    cp -a "$LEGACY/." "$OFFICIAL/"
+                    echo from-legacy-prefer > "$MARKER"
+                  else
+                    echo "olares-migrate: both clusters present, keep official pgdata"
+                    echo keep-official > "$MARKER"
+                  fi
+                elif [ "$O" -gt 0 ]; then
+                  echo "olares-migrate: official pgdata only"
+                  echo official-only > "$MARKER"
+                else
+                  echo "olares-migrate: no existing cluster"
+                  echo fresh > "$MARKER"
+                fi
+              else
+                echo "olares-migrate: already decided: $(cat "$MARKER")"
+              fi
+
+              rm -f "$OFFICIAL/postmaster.pid"
+
+              if [ -d "$PACK_SRC" ] && [ ! -e "$PACK_DST/.migrated" ]; then
+                cp -a "$PACK_SRC/." "$PACK_DST/" 2>/dev/null || true
+                touch "$PACK_DST/.migrated"
+              fi
+          volumeMounts:
+            - name: data
+              mountPath: /opt/maxkb
+          securityContext:
+            runAsUser: 0
       containers:
         - name: maxkb
-          image: "docker.io/beclab/1panel-maxkb:v2.6.1"
+          image: "docker.io/1panel/maxkb:v2.10.6-lts"
           env:
-            - name: PGID
-              value: "1000"
-            - name: PUID
-              value: "1000"
             - name: TZ
               value: Etc/UTC
-            - name: DISPLAY
-              value: ":0"
-            - name: DEBUG
-              value: "true"
           resources:
             requests:
               cpu: 500m
@@ -47,18 +117,16 @@ spec:
               protocol: TCP
           volumeMounts:
             - name: data
-              mountPath: /var/lib/postgresql/data
-            - name: python-packages
-              mountPath: /opt/maxkb/app/sandbox/python-packages
+              mountPath: /opt/maxkb
+            - name: app-tmp
+              mountPath: /opt/maxkb-app/tmp
       volumes:
         - name: data
           hostPath:
             type: DirectoryOrCreate
-            path: "{{ .Values.userspace.appData }}/pg"
-        - name: python-packages
-          hostPath:
-            type: DirectoryOrCreate
-            path: "{{ .Values.userspace.appData }}/packages"
+            path: "{{ .Values.userspace.appData }}"
+        - name: app-tmp
+          emptyDir: {}
 
 ---
 apiVersion: v1
