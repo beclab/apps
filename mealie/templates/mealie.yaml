@@ -1,4 +1,4 @@
-﻿{{- $mealieDomainENV := split  ","  .Values.domain.mealie -}}
+{{- $mealieDomainENV := split  ","  .Values.domain.mealie -}}
 {{- $mealieDomain := index $mealieDomainENV "_0" -}}
 
 ---
@@ -22,10 +22,16 @@ spec:
       labels:
         io.kompose.service: mealie
     spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
         - name: migrate-appcache-to-appdata
-          image: "docker.io/beclab/busybox:1.37"
+          image: docker.io/beclab/aboveos-busybox:1.37.0
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
           command: ["sh", "-c"]
           args:
             - |
@@ -60,9 +66,26 @@ spec:
               readOnly: true
             - name: mealie-data
               mountPath: /new-data
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /app/data
+              chown 1000:1000 /app/data
+              find /app/data ! -user 1000 -exec chown 1000:1000 {} +
+          volumeMounts:
+            - name: mealie-data
+              mountPath: /app/data
       containers:
         - name: mealie
-          image: docker.io/beclab/mealie-recipes-mealie:v3.9.2
+          image: docker.io/beclab/mealie-recipes-mealie:v3.25.1
+          imagePullPolicy: IfNotPresent
           env:
             - name: BASE_URL
               value: 'https://{{ $mealieDomain }}'
@@ -73,7 +96,7 @@ spec:
             - name: DEFAULT_HOUSEHOLD
               value: "Family"
             - name: LOG_LEVEL
-              value: "DEBUG"
+              value: "INFO"
             - name: DB_ENGINE
               value: "postgres"
             - name: POSTGRES_USER
@@ -114,10 +137,35 @@ spec:
               cpu: 1000m
               memory: 2Gi
           ports:
-            - containerPort: 9000
+            - name: http
+              containerPort: 9000
           volumeMounts:
             - name: mealie-data
               mountPath: /app/data/
+          startupProbe:
+            httpGet:
+              path: /api/app/about
+              port: http
+              scheme: HTTP
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet:
+              path: /api/app/about
+              port: http
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 20
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/app/about
+              port: http
+              scheme: HTTP
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
 
       restartPolicy: Always
       volumes:
