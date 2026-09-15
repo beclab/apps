@@ -5,60 +5,7 @@ metadata:
   namespace: "{{ .Release.Namespace }}"
 data:
   nginx.conf: |
-    server {
-      listen 8080;
-      access_log /usr/local/openresty/nginx/logs/access.log;
-      error_log /usr/local/openresty/nginx/logs/error.log;
-
-      proxy_connect_timeout 30s;
-      proxy_send_timeout 60s;
-      proxy_read_timeout 300s;
-
-      proxy_set_header host $host;
-      proxy_set_header x-forwarded-host $http_host;
-      proxy_http_version 1.1;
-      proxy_set_header upgrade $http_upgrade;
-      proxy_set_header connection "upgrade";
-
-      proxy_set_header X-BFL-USER {{ .Values.bfl.username }};
-      proxy_set_header Cookie $http_cookie;
-      proxy_set_header X-Authorization $http_x_authorization;
-
-      location /coauthoring/CommandService.ashx {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80/coauthoring/CommandService.ashx;
-      }
-
-      location /ConvertService.ashx {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80/ConvertService.ashx;
-      }
-
-      location /coauthoring/ {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80/coauthoring/;
-      }
-
-      location /web-apps {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80/web-apps;
-      }
-
-      location ~ ^/9.2.0 {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80;
-      }
-
-      location /cache {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyoffice-svc.{{ .Release.Namespace }}.svc.cluster.local:80/cache;
-      }
-
-      location / {
-        add_header X-Frame-Options "";
-        proxy_pass http://onlyofficeclient.{{ .Release.Namespace }}.svc.cluster.local:3000;
-      }
-    }
+{{ include "onlyofficev3.nginx.conf" . | indent 4 }}
 
 ---
 apiVersion: apps/v1
@@ -73,11 +20,15 @@ spec:
   selector:
     matchLabels:
       io.kompose.service: onlyoffice
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: onlyoffice
+      annotations:
+        checksum/nginx-config: {{ include "onlyofficev3.nginx.conf" . | sha256sum }}
     spec:
       volumes:
         - name: nginx-config
@@ -87,9 +38,20 @@ spec:
             items:
               - key: nginx.conf
                 path: nginx.conf
+        - name: nginx-runtime
+          emptyDir: {}
       containers:
         - name: nginx
           image: "docker.io/openresty/openresty:1.29.2.5-bookworm-fat"
+          command:
+            - /usr/local/openresty/bin/openresty
+          args:
+            - -g
+            - "daemon off; pid /tmp/nginx.pid;"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -118,6 +80,8 @@ spec:
             - name: nginx-config
               mountPath: /etc/nginx/conf.d/default.conf
               subPath: nginx.conf
+            - name: nginx-runtime
+              mountPath: /var/run/openresty
 
 ---
 apiVersion: v1
