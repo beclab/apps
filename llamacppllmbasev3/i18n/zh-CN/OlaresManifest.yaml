@@ -4,25 +4,28 @@ metadata:
 
 spec:
   upgradeDescription: |
-    Chart 1.2.33 — 引擎升级到 `server-cuda12-b10454`，llm-init 升级到 `v1.3.8`。
+    Chart 1.2.38 — llama.cpp 镜像从 `server-cuda12-b10588` 升级到 `server-cuda12-b10969`。
 
-    **镜像**
-    - llama.cpp：`docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10362` → `server-cuda12-b10454`（当前已发布的最新 beclab CUDA 12 server 标签；amd64 + arm64）。上游 GitHub 已到 b10456；尚无 beclab 的 b10455/b10456 镜像。
-    - llm-init：`docker.io/beclab/llm-init:v1.3.5` → `v1.3.8`。
+    **模型兼容性**
+    - 新增 Qwen3.8-Flash-Next（`qwen4exp`）文本与视觉架构支持（[#27742](https://github.com/ggml-org/llama.cpp/pull/27742)），并包含后续循环状态回滚和推理修复。
+    - 新增 NVIDIA Nemotron-3-Puzzle-75B-A9B（[#25444](https://github.com/ggml-org/llama.cpp/pull/25444)）和 Tencent Hy 4 预览架构支持（[#28127](https://github.com/ggml-org/llama.cpp/pull/28127)）；使用时需准备匹配的模型权重和足够的资源。
 
-    **Muse Glimmer 30B（Meta）** — 需要 **b10353+**；**b10454 已包含** `muse-glimmer` 架构（[llama.cpp #26841](https://github.com/ggml-org/llama.cpp/pull/26841)）。更旧的构建（如 b10331）会报 `unknown model architecture: 'muse-glimmer'`。
+    **推测解码与 CUDA**
+    - 新增 DFlash2 草稿模型支持（[#27342](https://github.com/ggml-org/llama.cpp/pull/27342)），需配置兼容的草稿权重。上游提示：2026 年 8 月 27 日前转换的 DFlash2 GGUF 文件需重新转换，以保证视觉功能正确。
+    - 新增 DeepSeek-V4/GLM 的 CUDA 稀疏 Flash Attention（[#27970](https://github.com/ggml-org/llama.cpp/pull/27970)），将 MoE 融合优化扩展到推测解码（[#27621](https://github.com/ggml-org/llama.cpp/pull/27621)），优化 Q4_K/Q5_K 解码和 DGX Spark 预取（[#26705](https://github.com/ggml-org/llama.cpp/pull/26705)）。实际收益取决于模型与硬件。
 
-    克隆此基座后，将环境变量指向 [meta-models/Muse-Glimmer-30B-GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF) 或社区量化（如 unsloth）。常见布局：
-    - 主 GGUF + `mmproj` 写入 `MODEL_SOURCE`（逗号分隔）以支持视觉
-    - DFlash 草稿模型（`dflash-kquant.gguf`）并在 `ENGINE_ARGS` 中加 `--spec-type draft-dflash` 或 `draft-dspark` 以开启投机解码
+    **服务接口与对话行为**
+    - 新增 `--kv-unified-per-slot`，可在统一 KV 缓存模式下限制每个请求槽的上下文，`-c` 控制总缓存池（[#24124](https://github.com/ggml-org/llama.cpp/pull/24124)）。本次升级不会自动修改实例的上下文配置。
+    - 对支持的聊天模板，默认启用 `preserve_reasoning`；可通过 `--no-reasoning-preserve` 关闭（[#28174](https://github.com/ggml-org/llama.cpp/pull/28174)）。
+    - `input_audio`、`input_video` 请求支持 `data:` URL，修复媒体解码错误（[#27735](https://github.com/ggml-org/llama.cpp/pull/27735)）；需使用兼容的多模态模型与客户端。
 
-    **b10362 → b10454 其它变化：**
-    - 聊天模板可接收 OpenAI `reasoning_effort`（[llama.cpp #26941](https://github.com/ggml-org/llama.cpp/pull/26941)）；Qwen3.8 可用 `--chat-template-kwargs` 或请求体设置 `xhigh` / `medium` / `low`
-    - MTP 草稿类型自动检测；DFlash / DSpark 后端采样
-    - 支持 MiniMax Text01 / M1 转换
-    - 解码过程中 `/metrics` 与 `/slots` 仍可用；mtmd 与 jinja 修复
+    **稳定性与内存**
+    - 降低启用张量重排时模型加载阶段的内存峰值（[#27483](https://github.com/ggml-org/llama.cpp/pull/27483)）。
+    - 修复模型路由器并发请求的 LRU 卡住问题（[#28539](https://github.com/ggml-org/llama.cpp/pull/28539)）、图片输入后的推测解码（[#28715](https://github.com/ggml-org/llama.cpp/pull/28715)）和 CUDA Flash Attention 同步问题（[#27870](https://github.com/ggml-org/llama.cpp/pull/27870)）。
 
-    完整上游发布说明见 https://github.com/ggml-org/llama.cpp/releases
+    以上为上游引擎变化，各模型专属能力尚未全部由本次 Chart 升级验证。llm-init 保持 `v1.5.0`。
+    完整上游变更：https://github.com/ggml-org/llama.cpp/compare/b10588...b10969
+
   fullDescription: |
     **重要提示**  
     此应用是一个模板，不能单独使用。请按下方环境变量设置模型后，方可使用本应用提供模型服务。
