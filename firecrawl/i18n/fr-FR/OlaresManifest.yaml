@@ -1,0 +1,43 @@
+metadata:
+  title: Firecrawl
+  description: "Donnez plus de puissance à vos apps IA avec des données propres provenant de n'importe\
+  \ quel site web"
+spec:
+  upgradeDescription: |
+    Mettre à niveau Firecrawl vers l'upstream **2.11.158** (depuis 2.9.0).
+
+    **Images**
+    - API / queue-worker / nuq-worker / extract-worker / nuq-prefetch-worker : `docker.io/beclab/firecrawl-firecrawl:2.11.158` (miroir de `ghcr.io/firecrawl/firecrawl:2.11.158` ; remplace `beclab/firecrawl-api:v2.9.0`).
+    - Playwright : `beclab/harveyff-firecrawl-playwright-service:2.11.158` (GHCR upstream sans balise versionnée ; retagué depuis latest).
+    - NuQ Postgres : `beclab/harveyff-firecrawl-nuq-postgres:2.11.158` (GHCR upstream sans balise versionnée ; retagué depuis latest).
+    - RabbitMQ : `beclab/rabbitmq:3.13.7-management` (dans le chart).
+
+    **Architecture (aligner avec Helm / NuQ upstream)**
+    - Ajouter Service/Deployment RabbitMQ et ConfigMap `NUQ_RABBITMQ_URL=amqp://rabbitmq:5672`.
+    - Ajouter `extract-worker` (`dist/src/services/extract-worker.js`) et `nuq-prefetch-worker` (`nuq-prefetch-worker.js`).
+    - Conserver l'API séparée (`index.js`) + `queue-worker` + `nuq-worker` (**ne pas** utiliser `harness.js --start-docker` dans K8s).
+    - Brancher les ports worker / env `NUQ_*`, `IS_KUBERNETES=true`, `NUQ_DATABASE_URL_LISTEN` et fieldRef `NUQ_POD_NAME`.
+    - Correctif de clé de réplique Redis : utiliser `workloads.firecrawl-redis` au lieu de `firecrawl`.
+    - Remonter `requiredMemory` à 6Gi pour les charges supplémentaires.
+
+    **Notes**
+    - L'entrée bureau reste Bull Queue Manager (`/admin/CHANGEME/queues`). Les jobs crawl/scrape utilisent **NuQ** et n'y apparaîtront pas ; interrogez plutôt `GET /v2/crawl/{id}` / `GET /v2/scrape/{id}`.
+    - Les envs LLM optionnels (`OPENAI_*` / `OLLAMA_*` / `MODEL_NAME`) restent pour les fonctions d'extract IA.
+  fullDescription: |
+    **Aperçu**
+    Firecrawl est un service API qui prend une URL, la parcourt et la convertit en markdown propre ou en données structurées. Nous parcourons toutes les sous-pages accessibles et vous fournissons des données propres pour chacune. Aucun sitemap requis.
+
+    **Fonctionnalités**
+    - Scrape : parcourt une URL et obtient son contenu au format prêt pour LLM (markdown, données structurées via LLM Extract, capture d'écran, html)
+    - Crawl : parcourt toutes les URLs d'une page web et renvoie le contenu au format prêt pour LLM
+    - Map : saisissez un site web et obtenez toutes ses URLs — extrêmement rapide
+    - Extract : obtenez des données structurées d'une page, de plusieurs pages ou de sites web entiers avec l'IA.
+
+    **Capacités puissantes**
+    - Formats prêts pour LLM : markdown, données structurées, capture d'écran, HTML, liens, métadonnées
+    - Les parties difficiles : proxies, mécanismes anti-bot, contenu dynamique (rendu JS), parsing de sortie, orchestration
+    - Personnalisation : exclure des balises, crawler derrière des murs d'authentification avec des en-têtes personnalisés, profondeur max de crawl, etc.
+    - Parsing média : pdfs, docx, images
+    - Reliability first : conçu pour obtenir les données dont vous avez besoin — peu importe la difficulté
+    - Actions : cliquer, faire défiler, saisir, attendre et plus avant d'extraire les données
+    - Batching (nouveau) : scraper des milliers d'URLs en même temps avec un nouvel endpoint asynchrone.

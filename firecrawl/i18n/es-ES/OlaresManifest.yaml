@@ -1,0 +1,42 @@
+metadata:
+  title: Firecrawl
+  description: Potencie sus apps de IA con datos limpios de cualquier sitio web
+spec:
+  upgradeDescription: |
+    Actualizar Firecrawl al upstream **2.11.158** (desde 2.9.0).
+
+    **Imágenes**
+    - API / queue-worker / nuq-worker / extract-worker / nuq-prefetch-worker: `docker.io/beclab/firecrawl-firecrawl:2.11.158` (espejo de `ghcr.io/firecrawl/firecrawl:2.11.158`; reemplaza `beclab/firecrawl-api:v2.9.0`).
+    - Playwright: `beclab/harveyff-firecrawl-playwright-service:2.11.158` (GHCR upstream sin etiqueta versionada; retagueado desde latest).
+    - NuQ Postgres: `beclab/harveyff-firecrawl-nuq-postgres:2.11.158` (GHCR upstream sin etiqueta versionada; retagueado desde latest).
+    - RabbitMQ: `beclab/rabbitmq:3.13.7-management` (en el chart).
+
+    **Arquitectura (alinear con Helm / NuQ upstream)**
+    - Añadir Service/Deployment de RabbitMQ y ConfigMap `NUQ_RABBITMQ_URL=amqp://rabbitmq:5672`.
+    - Añadir `extract-worker` (`dist/src/services/extract-worker.js`) y `nuq-prefetch-worker` (`nuq-prefetch-worker.js`).
+    - Mantener API dividida (`index.js`) + `queue-worker` + `nuq-worker` (**no** usar `harness.js --start-docker` en K8s).
+    - Conectar puertos de worker / env `NUQ_*`, `IS_KUBERNETES=true`, `NUQ_DATABASE_URL_LISTEN` y fieldRef `NUQ_POD_NAME`.
+    - Fix de clave de réplica Redis: usar `workloads.firecrawl-redis` en lugar de `firecrawl`.
+    - Subir `requiredMemory` a 6Gi por las cargas extra.
+
+    **Notas**
+    - La entrada de escritorio sigue siendo Bull Queue Manager (`/admin/CHANGEME/queues`). Los trabajos crawl/scrape usan **NuQ** y no aparecerán ahí; consulte `GET /v2/crawl/{id}` / `GET /v2/scrape/{id}` en su lugar.
+    - Los envs LLM opcionales (`OPENAI_*` / `OLLAMA_*` / `MODEL_NAME`) permanecen para las funciones de extract con IA.
+  fullDescription: |
+    **Resumen**
+    Firecrawl es un servicio API que toma una URL, la rastrea y la convierte en markdown limpio o datos estructurados. Rastrearmos todas las subpáginas accesibles y le damos datos limpios de cada una. No se requiere sitemap.
+
+    **Características**
+    - Scrape: rastrea una URL y obtiene su contenido en formato listo para LLM (markdown, datos estructurados vía LLM Extract, captura de pantalla, html)
+    - Crawl: rastrea todas las URLs de una página web y devuelve el contenido en formato listo para LLM
+    - Map: introduzca un sitio web y obtenga todas sus URLs — extremadamente rápido
+    - Extract: obtenga datos estructurados de una página, varias páginas o sitios web enteros con IA.
+
+    **Capacidades potentes**
+    - Formatos listos para LLM: markdown, datos estructurados, captura de pantalla, HTML, enlaces, metadatos
+    - Lo difícil: proxies, mecanismos anti-bot, contenido dinámico (renderizado con JS), análisis de salida, orquestación
+    - Personalización: excluir etiquetas, rastrear detrás de muros de autenticación con cabeceras personalizadas, profundidad máxima de crawl, etc.
+    - Análisis de medios: pdfs, docx, imágenes
+    - Reliability first: diseñado para obtener los datos que necesita, por muy difícil que sea
+    - Actions: hacer clic, desplazarse, escribir, esperar y más antes de extraer datos
+    - Batching (nuevo): rastree miles de URLs a la vez con un nuevo endpoint asíncrono.
