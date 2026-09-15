@@ -4,13 +4,17 @@ Referenced by deployment.yaml; checksum in Deployment triggers rollout on change
 */}}
 {{- define "medusa.nginx.conf" -}}
 server {
-
+  client_body_temp_path /tmp/client_body;
+  proxy_temp_path /tmp/proxy;
+  fastcgi_temp_path /tmp/fastcgi;
+  uwsgi_temp_path /tmp/uwsgi;
+  scgi_temp_path /tmp/scgi;
   listen 8080;
 
   absolute_redirect off;
 
-  access_log /usr/local/openresty/nginx/logs/access.log;
-  error_log /usr/local/openresty/nginx/logs/error.log;
+  access_log /dev/stdout;
+  error_log /dev/stderr;
 
   # Official OpenResty defaults to 1m; product image uploads need more.
   client_max_body_size 100m;
