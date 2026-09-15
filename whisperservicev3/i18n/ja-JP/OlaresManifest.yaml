@@ -1,0 +1,57 @@
+metadata:
+  title: Whisper API
+  description: WhisperX 上の FastAPI サービス
+spec:
+  fullDescription: |
+    **重要なお知らせ**
+    これは共有アプリです。Olares システム全体でサービスは1つだけインストールされます。各ユーザーはデスクトップエントリをインストールしてアクセスするか、共有エントランス経由でサービス API を呼び出せます。
+
+    **前提条件**
+    インストール前に **HF_TOKEN**（Olares の Hugging Face トークンからマッピング）と **HF_ENDPOINT** を設定してください。インストールする管理者のトークンは、次のゲート付きリポジトリについて Hugging Face で**利用規約に同意**している必要があります：
+    - `pyannote/speaker-diarization-3.1`
+    - `pyannote/segmentation-3.0`
+
+    モデルはインストール時に llm-init 経由で共有 HF キャッシュにダウンロードされます：
+    - `Systran/faster-whisper-large-v3`（ASR、デフォルト）
+    - `pyannote/speaker-diarization-3.1` と `pyannote/segmentation-3.0`（話者ダイアライゼーション）
+    - `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn`（中国語の単語レベルアラインメント）
+
+    **パフォーマンスに関する注意**
+    インストール後の最初の文字起こしは、モデルが GPU メモリに読み込まれる間、明らかに時間がかかることがあります。以降のリクエストはより高速です。
+
+    **概要**
+    whisperX API は音声コンテンツの強化と分析のためのツールです。文字起こし、アラインメント、ダイアライゼーション、文字起こしとダイアライゼーション結果の結合など、音声・動画ファイル処理の一連のサービスを提供します。
+
+    利用可能なサービス
+    **Speech-to-Text (/speech-to-text)**
+    - 文字起こし用に音声／動画ファイルをアップロード
+    - 複数言語と Whisper モデルに対応
+
+    **Speech-to-Text URL (/speech-to-text-url)**
+    - URL から音声／動画を文字起こし
+    - 直接アップロードと同じ機能
+
+    **個別サービス:**
+    - Transcribe (/service/transcribe): 音声をテキストに変換
+    - Align (/service/align): 文字起こしを音声にアライン
+    - Diarize (/service/diarize): 話者ダイアライゼーション
+    - Combine (/service/combine): 文字起こしとダイアライゼーションを結合
+
+    **タスク管理:**
+    - 全タスク取得 (/task/all)
+    - タスク状態取得 (/task/{identifier})
+
+    **ヘルスチェックエンドポイント:**
+    - 基本ヘルスチェック (/health): シンプルなサービス状態確認
+    - Liveness プローブ (/health/live): アプリケーションが動作中か確認
+    - Readiness プローブ (/health/ready): リクエスト受付可能か確認（データベース接続確認を含む）
+  upgradeDescription: |
+    リバースプロキシのイメージを Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）から公式 OpenResty イメージ `openresty/openresty:1.29.2.5-bookworm-fat` に切り替えます。
+
+    nginx 設定のマウントとログパスを公式イメージのレイアウト（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`）に合わせ、Bitnami 固有の `OPENRESTY_CONF_FILE` 配線を削除します。
+
+    v1.1.11: HF_TOKEN / HF_ENDPOINT を OLARES_SYSTEM_HUGGINGFACE_*（システムレベル）からマッピング；HF_TOKEN required: false。
+
+    llm-init イメージを `beclab/llm-init:v1.3.1` に更新。
+
+    Whisper API を apiVersion v3 共有アプリパターンへ移行し、モデル供給を共有 llm-init ダウンローダーへ切り替え（whisperservicev2 → whisperservicev3）。アップストリームイメージ `beclab/pavelzbornik-whisperx-fastapi:0.8.0`（nltk + VAD 内蔵）を実行。独自 CDN tar.zst の `downloader-init` を、HF リポジトリ（`Systran/faster-whisper-large-v3`、`pyannote/speaker-diarization-3.1`、`pyannote/segmentation-3.0`）を共有クロスアプリ HF キャッシュ（App Common、`/cache/hf/hub`）へ取得するダウンロード専用 Deployment `llm-init:v1.3.1`（`whisperservicev3download`）に置き換え；エンジンは `HF_HUB_CACHE` 経由で読み、`/readyz` でゲート。英語アラインメント torchaudio ウェイトは初回の単語レベルアラインメント時に遅延取得し、永続 `/root/.cache` にキャッシュ。サブチャートを単一チャートに平坦化（エンジンはリリース名、nginx エントランス `whisperserviceclient`）、GPU 要件をアクセラレータモード一覧へ移動、`appCommon` + `workloadReplicas` を追加。ダイアライゼーション（pyannote）はゲート付き — 管理者 HF トークンがその規約に同意している必要があります。
