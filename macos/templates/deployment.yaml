@@ -1,6 +1,6 @@
 # macos config lifecycle (like librechat api-keys):
 # 1) ConfigMap macos-env: first install from .Values; upgrade preserves existing (lookup).
-# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appData/macos/config/.env.
+# 2) Init sync: merge ConfigMap (non-empty) > PVC .env > empty, write to appCache/config/.env.
 # 3) Runtime: VERSION/CDN_HOST from /config/.env; DISK_SIZE/RAM_SIZE/CPU_CORES from env.
 ---
 apiVersion: v1
@@ -43,7 +43,15 @@ spec:
       labels:
         app: macos
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       initContainers:
+
         - name: sync-env-to-pvc
           image: docker.io/beclab/aboveos-busybox:1.37.0
           imagePullPolicy: IfNotPresent
@@ -134,11 +142,11 @@ spec:
       terminationGracePeriodSeconds: 120
       volumes:
         - hostPath:
-            path: '{{ .Values.userspace.appCache }}'
+            path: '{{ .Values.userspace.appCache }}/storage'
             type: DirectoryOrCreate
           name: storage
         - hostPath:
-            path: '{{ .Values.userspace.appData }}/config'
+            path: '{{ .Values.userspace.appCache }}/config'
             type: DirectoryOrCreate
           name: macos-config
         - hostPath:
