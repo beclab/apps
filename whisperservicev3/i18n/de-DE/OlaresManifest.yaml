@@ -1,0 +1,57 @@
+metadata:
+  title: Whisper API
+  description: FastAPI-Dienst auf Basis von WhisperX
+spec:
+  fullDescription: |
+    **WICHTIGER HINWEIS**
+    Dies ist eine Shared App. Im gesamten Olares-System wird nur ein Dienst installiert. Jeder Benutzer kann einen Desktop-Eintrag installieren oder den gemeinsamen Eingang nutzen, um die Service-API aufzurufen.
+
+    **VORAUSSETZUNGEN**
+    Vor der Installation konfigurieren Sie **HF_TOKEN** (gemappt von Ihrem Olares-Hugging-Face-Token) und **HF_ENDPOINT**. Der Token des installierenden Admins muss die **Nutzungsbedingungen akzeptiert** haben auf Hugging Face für diese gated Repositories:
+    - `pyannote/speaker-diarization-3.1`
+    - `pyannote/segmentation-3.0`
+
+    Modelle werden bei der Installation über llm-init in den gemeinsamen HF-Cache heruntergeladen:
+    - `Systran/faster-whisper-large-v3` (ASR, Standard)
+    - `pyannote/speaker-diarization-3.1` und `pyannote/segmentation-3.0` (Sprecherdiarisierung)
+    - `jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn` (chinesische Wort-Alignment)
+
+    **HINWEIS ZUR LEISTUNG**
+    Die erste Transkription nach der Installation kann merklich länger dauern, während Modelle in den GPU-Speicher geladen werden; nachfolgende Anfragen sind schneller.
+
+    **ÜBERSICHT**
+    Die whisperX API ist ein Werkzeug zur Verbesserung und Analyse von Audioinhalten. Diese API bietet Dienste zur Verarbeitung von Audio- und Videodateien, einschließlich Transkription, Alignment, Diarisierung und Kombination von Transkript mit Diarisierungs-Ergebnissen.
+
+    Verfügbare Dienste
+    **Speech-to-Text (/speech-to-text)**
+    - Audio-/Videodateien zur Transkription hochladen
+    - Unterstützt mehrere Sprachen und Whisper-Modelle
+
+    **Speech-to-Text URL (/speech-to-text-url)**
+    - Audio/Video von URLs transkribieren
+    - Dieselben Funktionen wie beim direkten Upload
+
+    **Einzeldienste:**
+    - Transcribe (/service/transcribe): Sprache in Text umwandeln
+    - Align (/service/align): Transkript mit Audio ausrichten
+    - Diarize (/service/diarize): Sprecherdiarisierung
+    - Combine (/service/combine): Transkript mit Diarisierung zusammenführen
+
+    **Aufgabenverwaltung:**
+    - Alle Aufgaben abrufen (/task/all)
+    - Aufgabenstatus abrufen (/task/{identifier})
+
+    **Health-Check-Endpunkte:**
+    - Basis-Health-Check (/health): Einfache Statusprüfung
+    - Liveness-Probe (/health/live): Prüft, ob die Anwendung läuft
+    - Readiness-Probe (/health/ready): Prüft, ob die Anwendung Anfragen annehmen kann (inkl. Datenbankverbindungsprüfung)
+  upgradeDescription: |
+    Wechsel des Reverse-Proxy-Images von Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) zum offiziellen OpenResty-Image `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Nginx-Konfigurations-Mounts und Log-Pfade an das Layout des offiziellen Images anpassen (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`) und Bitnami-spezifisches `OPENRESTY_CONF_FILE`-Wiring entfernen.
+
+    v1.1.11: HF_TOKEN / HF_ENDPOINT von OLARES_SYSTEM_HUGGINGFACE_* (Systemebene) mappen; HF_TOKEN required: false.
+
+    llm-init-Image auf `beclab/llm-init:v1.3.1` aktualisiert.
+
+    Whisper API auf das Shared-App-Muster apiVersion v3 migriert und die Modellbereitstellung auf den gemeinsamen llm-init-Downloader umgestellt (whisperservicev2 → whisperservicev3). Läuft jetzt mit dem Upstream-Image `beclab/pavelzbornik-whisperx-fastapi:0.8.0` (nltk + VAD eingebacken). Der maßgeschneiderte CDN-tar.zst-`downloader-init` wurde durch ein nur-Download-Deployment `llm-init:v1.3.1` (`whisperservicev3download`) ersetzt, das die HF-Repos (`Systran/faster-whisper-large-v3`, `pyannote/speaker-diarization-3.1`, `pyannote/segmentation-3.0`) in den gemeinsamen HF-Cache (App Common, `/cache/hf/hub`) lädt; die Engine liest sie über `HF_HUB_CACHE` und gated auf `/readyz`. Die englischen Alignment-torchaudio-Gewichte werden beim ersten Wort-Alignment lazy geladen und in einem persistenten `/root/.cache` zwischengespeichert. Untercharts in einen einzelnen Chart abgeflacht (Engine nach Release benannt, nginx-Eingang `whisperserviceclient`), GPU-Anforderung in die Accelerator-Modi-Liste verschoben und `appCommon` + `workloadReplicas` hinzugefügt. Diarisierung (pyannote) ist gated — der Admin-HF-Token muss die Bedingungen akzeptiert haben.
