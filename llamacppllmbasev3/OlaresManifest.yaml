@@ -7,7 +7,7 @@ metadata:
   description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
   appid: llamacppllmbasev3
   title: llama.cpp Engine Base
-  version: '1.2.47'
+  version: '1.2.38'
   categories:
     - AI
     - models
@@ -36,9 +36,9 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: 'b10969 / b10731-rocm / b10752-intel / b10884-intel-iGPU'
+  versionName: 'b10969'
   upgradeDescription: |
-    Chart 1.2.47 — Upgrade the NVIDIA / Spark CUDA image from server-cuda12-b10752 to server-cuda12-b10969.
+    Chart 1.2.38 — Upgrade the llama.cpp CUDA image from server-cuda12-b10588 to server-cuda12-b10969.
 
   fullDescription: |
     **IMPORTANT NOTE**  
@@ -51,7 +51,7 @@ spec:
     - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. This is required.
     - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`.
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level: choose from `debug`, `info`, `warn`, or `error`.
-    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark and `intel` integrated GPUs, sets pod memory (include model, KV cache and runtime overhead); on `amd-gpu` and `intel-gpu` declares the discrete VRAM quota through the `gpu.bytetrade.io/required-gpu-memory` pod annotation.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
     
     **How It Works**
     First, `llm-init` downloads your model and gets it ready, then `llama.cpp` starts serving the model when it’s ready. These two parts run separately but share files and progress info.
@@ -65,9 +65,6 @@ spec:
     |----------------|-------------------|---------------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Set `LLAMACPP_REQUIRED_GPU_MEMORY`; use `-ngl all` for full GPU use |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                        |
-    | `amd-gpu`      | GPU (ROCm)        | Discrete AMD (e.g. Radeon AI PRO R9700 / gfx1201). Image `server-rocm-b10731`. Use `-ngl all`. Do not use `amd` (Ryzen iGPU). |
-    | `intel` | Intel integrated GPU (Panther Lake / SYCL) | `server-intel-b10884`; `-ngl all`; LLAMACPP_REQUIRED_GPU_MEMORY = shared pod memory (model + KV + runtime). |
-    | `intel-gpu`    | GPU (SYCL)        | Discrete Intel Arc (e.g. Arc Pro B70). Image `server-intel-b10752`. Use `-ngl all`. |
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
@@ -83,23 +80,13 @@ spec:
   locale:
     - en-US
     - zh-CN
-    - de-DE
-    - es-ES
-    - it-IT
-    - fr-FR
-    - ja-JP
   license:
     - text: MIT
       url: https://github.com/ggml-org/llama.cpp?tab=MIT-1-ov-file
 
   accelerator:
-    #   nvidia       - discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> nvidia.com/gpumem
-    #   nvidia-gb10  - DGX Spark unified memory; same env -> pod memory
-    #   amd-gpu      - discrete AMD ROCm; LLAMACPP_REQUIRED_GPU_MEMORY -> gpu-memory pod annotation
-    #   intel-gpu    - discrete Intel Arc SYCL; LLAMACPP_REQUIRED_GPU_MEMORY -> gpu-memory pod annotation
-    # The two discrete non-NVIDIA modes have no GPU-memory extended resource to
-    # carry the quota, so the chart puts it on gpu.bytetrade.io/required-gpu-memory
-    # and app-service reads that to resolve requiredGPUMemory: "-1".
+    #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
+    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
     - mode: nvidia
       limitedCpu: "-1"
       requiredCpu: "-1"
@@ -116,37 +103,11 @@ spec:
       limitedDisk: 500Gi
       limitedMemory: "-1"
       requiredMemory: "-1"
-    - mode: amd-gpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
-      requiredGPUMemory: "-1"
-      limitedGPUMemory: "-1"
-    - mode: intel
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
-    - mode: intel-gpu
-      limitedCpu: "-1"
-      requiredCpu: "-1"
-      requiredDisk: 50Mi
-      limitedDisk: 500Gi
-      limitedMemory: "-1"
-      requiredMemory: "-1"
-      requiredGPUMemory: "-1"
-      limitedGPUMemory: "-1"
 
   supportArch:
     - amd64
     - arm64
 permission:
-  appCache: true
   appData: true
   appCommon: true
 options:
@@ -209,7 +170,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`. Note that `-c` sizes the whole KV cache rather than one request, and omitting `-np` selects llama.cpp's default of 4 slots sharing it — set `-np 1` for a single long conversation, or raise `-c` to match the concurrency you want."
+    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`."
   - envName: LOG_LEVEL           # single-select: debug | info | warn | error
     required: false
     type: string
@@ -264,5 +225,5 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark and intel integrated GPUs it sets pod memory; include model, KV cache and runtime overhead. On amd-gpu and intel-gpu it declares the discrete VRAM quota through the gpu.bytetrade.io/required-gpu-memory pod annotation."
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
     regex: "^[0-9]+(Gi|Mi)?$"
