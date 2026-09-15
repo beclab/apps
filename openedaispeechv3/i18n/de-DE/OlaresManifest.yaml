@@ -1,0 +1,49 @@
+metadata:
+  title: OpenedAI Speech
+  description: Ein OpenAI-API-kompatibler Text-to-Speech-Server mit Coqui AI und/oder Piper TTS als Backend
+spec:
+  upgradeDescription: |
+    Wechseln Sie das Reverse-Proxy-Image von Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) zum offiziellen OpenResty-Image `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Passen Sie nginx-Konfigurations-Mounts und Log-Pfade an das Layout des offiziellen Images an (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`) und entfernen Sie die Bitnami-spezifische Verdrahtung von `OPENRESTY_CONF_FILE`.
+
+    OpenedAI Speech auf das apiVersion-v3 Shared-App-Muster migriert (openedaispeechv2 → openedaispeechv3).
+
+    **Änderungen**
+
+    - **Speicher**: Modelle und Konfiguration von `appCache` nach **`appData/voices`** und
+      **`appData/config`** verschoben für stärkere Persistenz über Upgrades hinweg.
+    - **Modellbereitstellung**: unverändert — kein llm-init oder CDN-Vorabdownload; Modelle werden
+      weiterhin vom Container beim ersten Start nach `appData/voices` geholt.
+    - **Architektur**: die Sub-Charts openedaispeechv2 / openedaispeechv2server zu einem
+      einzelnen Chart abgeflacht; Backends lösen sich im Release-Namespace auf (der Split
+      `*-shared` Admin / Nicht-Admin entfällt).
+    - **Accelerator**: Modus `cpu` für Piper (`tts-1`); Modus `nvidia` für XTTS / `tts-1-hd`.
+    - **Skalierung**: `workloadReplicas` deklariert die Engine- und nginx-Client-Workloads.
+  fullDescription: |
+    **WICHTIGER HINWEIS**
+    Dies ist eine Shared App. Im gesamten Olares-System wird nur ein Dienst installiert. Jeder Benutzer kann einen Desktop-Eintrag installieren, um darauf zuzugreifen, oder den Shared Entrance nutzen, um die Dienst-API aufzurufen.
+
+    **ÜBERSICHT**
+    OpenedAI Speech ist ein OpenAI-API-kompatibler Text-to-Speech-Server.
+    - Kompatibel mit der OpenAI audio/speech API
+    - Stellt den Endpunkt /v1/audio/speech bereit
+    - Nicht mit OpenAI verbunden, erfordert keinen OpenAI API Key
+    - Ein kostenloser, privater Text-to-Speech-Server mit benutzerdefinierter Stimmenklonierung
+
+    Mehrere Standardstimmen verfügbar:
+    - tts-1: alloy, echo, fable, onyx, nova und shimmer
+    - tts-1-hd: alloy, echo, fable, onyx, nova und shimmer
+
+    Unterstützt verschiedene Formate
+    - Antwort in mp3, opus, aac, flac, wav und pcm
+    - Geschwindigkeit zwischen 0.25-4.0 einstellen (und mehr)
+
+    **MODELLHINWEIS**
+    Kein Modellpaket zur Installationszeit. Beim ersten Containerstart lädt das Upstream-Image
+    Piper- und Coqui-XTTS-Gewichte (~2 GB) in persistente App-Daten unter `appData/voices`
+    (gemountet als `/app/voices`). Die Konfiguration liegt in `appData/config`.
+    Nachfolgende Neustarts nutzen das Datenverzeichnis erneut.
+
+    - **`tts-1` (Piper)**: nur CPU — wählen Sie den Accelerator-Modus **cpu**, wenn Sie keine GPU brauchen.
+    - **`tts-1-hd` (XTTS)**: erfordert **nvidia**-GPU (~4Gi VRAM).

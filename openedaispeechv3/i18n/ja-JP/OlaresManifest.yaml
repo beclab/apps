@@ -1,0 +1,48 @@
+metadata:
+  title: OpenedAI Speech
+  description: Coqui AI および／または piper TTS をバックエンドとする、OpenAI API 互換のテキスト読み上げサーバー
+spec:
+  upgradeDescription: |
+    リバースプロキシイメージを Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）から公式 OpenResty イメージ `openresty/openresty:1.29.2.5-bookworm-fat` に切り替えます。
+
+    nginx 設定のマウントとログパスを公式イメージのレイアウト（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`）に合わせ、Bitnami 固有の `OPENRESTY_CONF_FILE` 配線を削除します。
+
+    OpenedAI Speech を apiVersion v3 共有アプリパターンへ移行（openedaispeechv2 → openedaispeechv3）。
+
+    **変更点**
+
+    - **ストレージ**: モデルと設定を `appCache` から **`appData/voices`** および
+      **`appData/config`** へ移動し、アップグレード間の永続性を強化。
+    - **モデル供給**: 変更なし — llm-init や CDN 事前ダウンロードはなく、モデルは引き続き
+      コンテナ初回起動時に `appData/voices` へ取得。
+    - **アーキテクチャ**: openedaispeechv2 / openedaispeechv2server サブチャートを単一チャートに
+      フラット化；バックエンドはリリース名前空間内で解決（`*-shared` の admin／非 admin 分割を廃止）。
+    - **アクセラレータ**: Piper（`tts-1`）向け `cpu` モード；XTTS／`tts-1-hd` 向け `nvidia` モード。
+    - **スケーリング**: `workloadReplicas` がエンジンと nginx クライアントのワークロードを宣言。
+  fullDescription: |
+    **重要なお知らせ**
+    これは共有アプリです。Olares システム全体でインストールされるサービスは 1 つだけです。各ユーザーはデスクトップエントリをインストールしてアクセスするか、共有エントランス経由でサービス API を呼び出せます。
+
+    **概要**
+    OpenedAI Speech は OpenAI API 互換のテキスト読み上げサーバーです。
+    - OpenAI audio/speech API と互換
+    - /v1/audio/speech エンドポイントを提供
+    - OpenAI とは一切無関係で、OpenAI API Key は不要
+    - カスタム音声クローン対応の無料・プライベート TTS サーバー
+
+    複数の既定音声:
+    - tts-1: alloy, echo, fable, onyx, nova, shimmer
+    - tts-1-hd: alloy, echo, fable, onyx, nova, shimmer
+
+    各種フォーマット対応
+    - mp3、opus、aac、flac、wav、pcm で応答
+    - 速度を 0.25-4.0（およびそれ以上）に調整
+
+    **モデルに関する注記**
+    インストール時のモデル同梱はありません。コンテナ初回起動時にアップストリームイメージが
+    Piper と Coqui XTTS の重み（約 2GB）を永続アプリデータ `appData/voices`
+    （`/app/voices` にマウント）へダウンロードします。設定は `appData/config` にあります。
+    以降の再起動ではデータディレクトリを再利用します。
+
+    - **`tts-1`（Piper）**: CPU のみ — GPU が不要ならアクセラレータモード **cpu** を選択。
+    - **`tts-1-hd`（XTTS）**: **nvidia** GPU が必要（約 4Gi VRAM）。
