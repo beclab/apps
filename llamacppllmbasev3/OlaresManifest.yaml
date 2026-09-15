@@ -7,7 +7,7 @@ metadata:
   description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
   appid: llamacppllmbasev3
   title: llama.cpp Engine Base
-  version: '1.2.37'
+  version: '1.2.47'
   categories:
     - AI
     - models
@@ -36,37 +36,10 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: 'b10588'
+  versionName: 'b10969 / b10731-rocm / b10752-intel / b10884-intel-iGPU'
   upgradeDescription: |
-    Chart 1.2.37 — bump engine to `server-cuda12-b10588`.
+    Chart 1.2.47 — Upgrade the NVIDIA / Spark CUDA image from server-cuda12-b10752 to server-cuda12-b10969.
 
-    **Images**
-    - llama.cpp: `docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10454` → `server-cuda12-b10588` (amd64 + arm64).
-    - llm-init: unchanged at `v1.5.0`.
-
-    134 upstream commits; core libraries move to llama.cpp 0.2.0 / ggml 0.21.0.
-
-    **New model architectures** — clone this base and point `MODEL_SOURCE` / `MODEL_NAME` at the GGUF:
-    - BailingMoE3 ([#26608](https://github.com/ggml-org/llama.cpp/pull/26608)), with DSpark speculative decode ([#27508](https://github.com/ggml-org/llama.cpp/pull/27508))
-    - Granite SWA / GraniteMoE SWA ([#25505](https://github.com/ggml-org/llama.cpp/pull/25505))
-    - dots3-note, including vision + audio through `mmproj` ([#27060](https://github.com/ggml-org/llama.cpp/pull/27060), [#27524](https://github.com/ggml-org/llama.cpp/pull/27524))
-    - DSpark drafters for LFM2 ([#27383](https://github.com/ggml-org/llama.cpp/pull/27383)) and speculators-format checkpoints ([#26275](https://github.com/ggml-org/llama.cpp/pull/26275))
-    - Nemotron 3 Ultra conversion fix ([#27101](https://github.com/ggml-org/llama.cpp/pull/27101))
-
-    **GPU and performance**
-    - DGX Spark (`nvidia-gb10`): faster batch-size-1 decode for dense models via MMVQ `nwarps=8` ([#26843](https://github.com/ggml-org/llama.cpp/pull/26843))
-    - CUDA MMVQ→MMQ decode crossover is now tuned per GPU and quant type ([#26079](https://github.com/ggml-org/llama.cpp/pull/26079)); cuBLAS handles use a static workspace ([#26574](https://github.com/ggml-org/llama.cpp/pull/26574))
-    - Layer auto-fit accounts for `n_streams` ([#27496](https://github.com/ggml-org/llama.cpp/pull/27496)); V is built as a view of K in iSWA attention ([#27392](https://github.com/ggml-org/llama.cpp/pull/27392))
-    - Fixes: backend split scheduler race ([#26040](https://github.com/ggml-org/llama.cpp/pull/26040)) and a null-pointer deref in speculative decode ([#27404](https://github.com/ggml-org/llama.cpp/pull/27404))
-
-    **Server and API**
-    - `/metrics` and `/slots` stay reachable while the server is sleeping ([#27376](https://github.com/ggml-org/llama.cpp/pull/27376))
-    - Model endpoints become private when `--api-key` authentication is enabled ([#26347](https://github.com/ggml-org/llama.cpp/pull/26347)); this chart runs without an engine API key, so the internal entrance is unaffected
-    - `--mmproj-device` places the vision projector on a chosen device ([#23255](https://github.com/ggml-org/llama.cpp/pull/23255)); WebP inputs are accepted via ffmpeg ([#27520](https://github.com/ggml-org/llama.cpp/pull/27520))
-    - Embedding output combined with draft-MTP is fixed ([#27400](https://github.com/ggml-org/llama.cpp/pull/27400)) — relevant to `MODEL_MODE=embedding`
-    - mtmd fixes for LFM2 image tiling, DeepSeek-OCR and Granite preprocessing; refreshed built-in WebUI
-
-    See https://github.com/ggml-org/llama.cpp/compare/b10454...b10588 for the full upstream diff.
   fullDescription: |
     **IMPORTANT NOTE**  
     This app is a template and cannot be used on its own. To use it, set the environment variables below to connect a specific model.
@@ -78,7 +51,7 @@ spec:
     - `MODEL_SUPPORTS`: Model capability options (Vision / Tools / Thinking / None). Pick what your model supports. This is required.
     - `ENGINE_ARGS`: `-c 8192 -ngl all -fa on`. Extra llama.cpp options, like `-c 8192 -ngl all -fa on`. To fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`.
     - `LOG_LEVEL`: `debug`, `info`, `warn`, or `error`. Log level: choose from `debug`, `info`, `warn`, or `error`.
-    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark, sets pod memory.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`: `8Gi`, `8192`, or `8192Mi`. Model memory needed. Accepts values like `8Gi`, `8192`, or `8192Mi`. On NVIDIA, this sets `nvidia.com/gpumem` in MiB; on Spark and `intel` integrated GPUs, sets pod memory (include model, KV cache and runtime overhead); on `amd-gpu` and `intel-gpu` declares the discrete VRAM quota through the `gpu.bytetrade.io/required-gpu-memory` pod annotation.
     
     **How It Works**
     First, `llm-init` downloads your model and gets it ready, then `llama.cpp` starts serving the model when it’s ready. These two parts run separately but share files and progress info.
@@ -92,6 +65,9 @@ spec:
     |----------------|-------------------|---------------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)        | Set `LLAMACPP_REQUIRED_GPU_MEMORY`; use `-ngl all` for full GPU use |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod                        |
+    | `amd-gpu`      | GPU (ROCm)        | Discrete AMD (e.g. Radeon AI PRO R9700 / gfx1201). Image `server-rocm-b10731`. Use `-ngl all`. Do not use `amd` (Ryzen iGPU). |
+    | `intel` | Intel integrated GPU (Panther Lake / SYCL) | `server-intel-b10884`; `-ngl all`; LLAMACPP_REQUIRED_GPU_MEMORY = shared pod memory (model + KV + runtime). |
+    | `intel-gpu`    | GPU (SYCL)        | Discrete Intel Arc (e.g. Arc Pro B70). Image `server-intel-b10752`. Use `-ngl all`. |
 
     **Model Storage**
     All model files are stored in a shared folder at `appCommon/huggingface`, mounted as `/cache/hf/hub`. All similar apps use this location for models.
@@ -107,13 +83,23 @@ spec:
   locale:
     - en-US
     - zh-CN
+    - de-DE
+    - es-ES
+    - it-IT
+    - fr-FR
+    - ja-JP
   license:
     - text: MIT
       url: https://github.com/ggml-org/llama.cpp?tab=MIT-1-ov-file
 
   accelerator:
-    #   nvidia       — discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> gpumem
-    #   nvidia-gb10  — DGX Spark unified memory; same env -> pod memory
+    #   nvidia       - discrete GPU; LLAMACPP_REQUIRED_GPU_MEMORY -> nvidia.com/gpumem
+    #   nvidia-gb10  - DGX Spark unified memory; same env -> pod memory
+    #   amd-gpu      - discrete AMD ROCm; LLAMACPP_REQUIRED_GPU_MEMORY -> gpu-memory pod annotation
+    #   intel-gpu    - discrete Intel Arc SYCL; LLAMACPP_REQUIRED_GPU_MEMORY -> gpu-memory pod annotation
+    # The two discrete non-NVIDIA modes have no GPU-memory extended resource to
+    # carry the quota, so the chart puts it on gpu.bytetrade.io/required-gpu-memory
+    # and app-service reads that to resolve requiredGPUMemory: "-1".
     - mode: nvidia
       limitedCpu: "-1"
       requiredCpu: "-1"
@@ -130,11 +116,37 @@ spec:
       limitedDisk: 500Gi
       limitedMemory: "-1"
       requiredMemory: "-1"
+    - mode: amd-gpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
+    - mode: intel
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+    - mode: intel-gpu
+      limitedCpu: "-1"
+      requiredCpu: "-1"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      limitedMemory: "-1"
+      requiredMemory: "-1"
+      requiredGPUMemory: "-1"
+      limitedGPUMemory: "-1"
 
   supportArch:
     - amd64
     - arm64
 permission:
+  appCache: true
   appData: true
   appCommon: true
 options:
@@ -197,7 +209,7 @@ envs:
     type: string
     editable: true
     applyOnChange: true
-    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`."
+    description:  "Example: -c 8192 -ngl all -fa on. Extra llama.cpp options, to fully use GPU, add `-ngl all`. You can also use values like `LLAMA_ARG_*=val`. Note that `-c` sizes the whole KV cache rather than one request, and omitting `-np` selects llama.cpp's default of 4 slots sharing it — set `-np 1` for a single long conversation, or raise `-c` to match the concurrency you want."
   - envName: LOG_LEVEL           # single-select: debug | info | warn | error
     required: false
     type: string
@@ -252,5 +264,5 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark it sets pod memory."
+    description:  "Example: `8Gi`, `8192`, or `8192Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB. On Spark and intel integrated GPUs it sets pod memory; include model, KV cache and runtime overhead. On amd-gpu and intel-gpu it declares the discrete VRAM quota through the gpu.bytetrade.io/required-gpu-memory pod annotation."
     regex: "^[0-9]+(Gi|Mi)?$"

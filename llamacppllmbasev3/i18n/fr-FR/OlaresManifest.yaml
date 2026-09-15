@@ -1,0 +1,40 @@
+metadata:
+  description: "Base générique du moteur llama.cpp. Choisissez n'importe quel modèle GGUF à l'installation via env"
+  title: llama.cpp Engine Base
+
+spec:
+  upgradeDescription: |
+    Chart 1.2.47 — Mise à jour CUDA NVIDIA / Spark de server-cuda12-b10752 vers server-cuda12-b10969.
+
+  fullDescription: |
+    **NOTE IMPORTANTE**  
+    Cette app est un modèle et ne peut pas être utilisée seule. Pour l'utiliser, définissez les variables d'environnement ci-dessous pour connecter un modèle spécifique.
+
+    **Guide de configuration des variables d'environnement**
+    - `MODEL_SOURCE` : `hf://<repo> --include <file>.gguf`. Source pour télécharger votre modèle. Pour les fichiers fractionnés, n'incluez que la première partie ; pour les modèles vision-langage, ajoutez le projecteur avec une virgule, ex. `hf://<repo> --include model.gguf,hf://<repo> --include mmproj-F16.gguf`.
+    - `MODEL_NAME` : `owner/repo:quant`. Nom de votre modèle au format `owner/repo:quant`, ex. `unsloth/Qwen3.5-2B-GGUF:UD-Q4_K_XL`. Aussi utilisé comme alias OpenAI.
+    - `MODEL_MODE` : `chat` ou `embedding`. Si vous choisissez embedding, le chart ajoute automatiquement `--embedding`.
+    - `MODEL_SUPPORTS` : Capacités du modèle (Vision / Tools / Thinking / None). Choisissez ce que votre modèle prend en charge. Obligatoire.
+    - `ENGINE_ARGS` : `-c 8192 -ngl all -fa on`. Options llama.cpp supplémentaires, comme `-c 8192 -ngl all -fa on`. Pour utiliser pleinement le GPU, ajoutez `-ngl all`. Aussi des valeurs comme `LLAMA_ARG_*=val`.
+    - `LOG_LEVEL` : `debug`, `info`, `warn` ou `error`. Niveau de log : choisissez parmi `debug`, `info`, `warn` ou `error`.
+    - `LLAMACPP_REQUIRED_GPU_MEMORY` : `8Gi`, `8192` ou `8192Mi`. Mémoire modèle nécessaire. Accepte des valeurs comme `8Gi`, `8192` ou `8192Mi`. Sur NVIDIA, définit `nvidia.com/gpumem` en MiB ; sur Spark, la mémoire du pod ; sur `amd-gpu` et `intel-gpu`, déclare le quota de VRAM discrète via l'annotation de pod `gpu.bytetrade.io/required-gpu-memory`.
+
+    **Fonctionnement**
+    D'abord, `llm-init` télécharge votre modèle et le prépare, puis `llama.cpp` commence à servir le modèle quand il est prêt. Les deux parties tournent séparément mais partagent fichiers et infos de progression.
+
+    **Stack**
+    - **llama.cpp** : Exécute le modèle et sert les requêtes API (port 8081)
+    - **llm-init** : Télécharge le modèle, affiche la progression et fournit l'API OpenAI sur le port 8090, en proxy vers `llamacpp`.
+
+    **Modes accélérateur**
+    | Mode           | Périphérique      | Détails                                                            |
+    |----------------|-------------------|---------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Définir `LLAMACPP_REQUIRED_GPU_MEMORY` ; utiliser `-ngl all` pour GPU complet |
+    | `nvidia-gb10`  | GPU (Spark)       | Comme ci-dessus, mais la mémoire est gérée par le pod                 |
+
+    **Stockage des modèles**
+    Tous les fichiers modèle sont stockés dans le dossier partagé `appCommon/huggingface`, monté comme `/cache/hf/hub`. Des apps similaires utilisent cet emplacement pour les modèles.
+
+    **Conseils ressources**
+    - CPU, RAM et GPU s'autoconfigurent selon le chart ; les réglages disque sont fixes.
+    - Pour utiliser le GPU, définissez `-ngl all` dans `ENGINE_ARGS`. Utilisez `-ngl all` pour un offload GPU complet.

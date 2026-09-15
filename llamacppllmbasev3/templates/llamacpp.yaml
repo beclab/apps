@@ -13,26 +13,46 @@
 {{- $memRequest := trim ($oe.LLAMACPP_MEMORY_REQUEST | default "2Gi") -}}
 {{- $cpuLimit := trim ($oe.LLAMACPP_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.LLAMACPP_MEMORY_LIMIT | default "35Gi") -}}
-{{- $gpuType := .Values.gpu | default "" -}}
-{{- if not $gpuType -}}
-{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- $gpuType := include "llmbase.gpuType" . -}}
+{{- $engineImage := include "llamacppllmbasev3.engineImage" . -}}
+{{- $gb10FromNodes := eq (include "llmbase.isGb10" .) "true" -}}
+{{- $isAmdGpu := eq $gpuType "amd-gpu" -}}
+{{- $isIntelGpu := eq $gpuType "intel-gpu" -}}
+{{- $isIntel := eq $gpuType "intel" -}}
+{{- $needDri := or $isAmdGpu $isIntelGpu $isIntel -}}
+{{- $unifiedMem := or $gb10FromNodes (eq $gpuType "nvidia-gb10") $isIntel -}}
+{{- /* nvidia.com/gpumem is NVIDIA-HAMi only: HAMi's extender exempts it from
+       the node capacity check, so it can carry a quota the kubelet never
+       advertises. The discrete AMD/Intel plugins advertise a card count and
+       nothing else, so their quota cannot ride on a container resource at all
+       and travels on a pod annotation instead, which is inert to the
+       scheduler. app-service reads it to resolve the requiredGPUMemory /
+       limitedGPUMemory "-1" sentinel this manifest declares for those modes;
+       without it the sentinel resolves to 0 and the card is dropped from its
+       own compute binding on resume. */ -}}
+{{- $needNvidiaGpumem := and (not $unifiedMem) (not $isAmdGpu) (not $isIntelGpu) -}}
+{{- $needGpuMemAnnotation := or $isAmdGpu $isIntelGpu -}}
+{{- $shmLimit := "16Gi" -}}
+{{- if or $isIntelGpu $isIntel -}}
+{{- $shmLimit = "10Gi" -}}
 {{- end -}}
-{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
 {{- $engineArgs = include "llamacppllmbasev3.engineArgs" (dict "Args" $engineArgs) -}}
-{{- /* nvidia.com/gpumem needs a BARE MiB int; Spark unified memory reuses the
+{{- /* nvidia.com/gpumem needs a BARE MiB int; Spark / Intel integrated unified memory reuses the
        same value as pod memory ("<MiB>Mi"). */ -}}
 {{- $gpuMiB := include "llmbase.gpuMiB" ($oe.LLAMACPP_REQUIRED_GPU_MEMORY | default "4096") -}}
 {{- if $unifiedMem -}}
 {{- $memRequest = printf "%sMi" $gpuMiB -}}
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
-{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 # llama.cpp engine Deployment. wrappers/llamacpp.sh blocks on the sentinel
 # (download ready), then execs llama-server -hf "$MODEL_NAME".
 # llm-init reverse-proxies at http://llamacpp:8081 — Service name MUST be
-# "llamacpp". GPU base: CUDA server build + gpu-inject; put `-ngl all` in
-# ENGINE_ARGS to offload all layers to the GPU.
+# "llamacpp". GPU base: CUDA (nvidia / nvidia-gb10), ROCm (amd-gpu), or
+# Intel SYCL (intel / intel-gpu); put `-ngl all` in ENGINE_ARGS.
+# amd-gpu / intel-gpu VRAM quota is the gpu.bytetrade.io/*-gpu-memory pod
+# annotation (not nvidia.com/gpumem).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,6 +64,7 @@ metadata:
     io.kompose.service: llamacpp
   annotations:
     applications.app.bytetrade.io/gpu-inject: "llamacpp"
+    llamacppllmbasev3.io/engine-image: {{ $engineImage | quote }}
 spec:
   replicas: {{ .Values.workloads.llamacppllmbasev3.replicaCount }}
   selector:
@@ -56,6 +77,13 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: llamacpp
+{{- if $needGpuMemAnnotation }}
+      # VRAM quota for the modes that cannot express it as a resource. Plain
+      # Kubernetes quantity (unlike nvidia.com/gpumem, which is a bare MiB int).
+      annotations:
+        gpu.bytetrade.io/required-gpu-memory: "{{ $gpuMiB }}Mi"
+        gpu.bytetrade.io/limited-gpu-memory: "{{ $gpuMiB }}Mi"
+{{- end }}
     spec:
       restartPolicy: Always
       volumes:
@@ -71,9 +99,35 @@ spec:
           configMap:
             name: llm-init-wrappers
             defaultMode: 0555
+{{- if $isAmdGpu }}
+        - name: kfd
+          hostPath:
+            path: /dev/kfd
+            type: CharDevice
+{{- end }}
+{{- if $needDri }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $shmLimit }}
+{{- end }}
+{{- if $isAmdGpu }}
+      securityContext:
+        supplementalGroups:
+          - 44
+          - 992
+{{- end }}
       containers:
         - name: llamacpp
-          image: docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10588
+          image: "{{ $engineImage }}"
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
           env:
@@ -91,6 +145,8 @@ spec:
               value: "3600"
             - name: ENGINE_ARGS
               value: "{{ $engineArgs }}"
+            - name: OLARES_GPU_MODE
+              value: {{ $gpuType | quote }}
             - name: HF_HUB_CACHE
               value: /cache/hf/hub
 {{- if $hfEndpoint }}
@@ -125,22 +181,31 @@ spec:
             - name: wrappers
               mountPath: /llm-init/wrappers
               readOnly: true
+{{- if $isAmdGpu }}
+            - name: kfd
+              mountPath: /dev/kfd
+{{- end }}
+{{- if $needDri }}
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+            - name: dshm
+              mountPath: /dev/shm
+{{- end }}
           resources:
-            # nvidia.com/gpumem is the per-instance GPU memory quota read by the
-            # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
-            # It's a non-overcommittable extended resource, so it must be in BOTH
-            # requests and limits with the same value. Dropped on gb10 (unified
-            # memory uses pod memory instead) .
+            # nvidia.com/gpumem: nvidia only in chart; gb10 via pod memory +
+            # gpu-inject; amd-gpu / intel-gpu via the pod annotation above.
             requests:
               cpu: "{{ $cpuRequest }}"
               memory: "{{ $memRequest }}"
-{{- if not $unifiedMem }}
+{{- if $needNvidiaGpumem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
             limits:
               cpu: "{{ $cpuLimit }}"
               memory: "{{ $memLimit }}"
-{{- if not $unifiedMem }}
+{{- if $needNvidiaGpumem }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
 ---

@@ -4,25 +4,8 @@ metadata:
 
 spec:
   upgradeDescription: |
-    Chart 1.2.33 — 引擎升级到 `server-cuda12-b10454`，llm-init 升级到 `v1.3.8`。
+    Chart 1.2.47 — NVIDIA / Spark CUDA 镜像从 server-cuda12-b10752 升级到 server-cuda12-b10969。
 
-    **镜像**
-    - llama.cpp：`docker.io/beclab/ggml-org-llama.cpp:server-cuda12-b10362` → `server-cuda12-b10454`（当前已发布的最新 beclab CUDA 12 server 标签；amd64 + arm64）。上游 GitHub 已到 b10456；尚无 beclab 的 b10455/b10456 镜像。
-    - llm-init：`docker.io/beclab/llm-init:v1.3.5` → `v1.3.8`。
-
-    **Muse Glimmer 30B（Meta）** — 需要 **b10353+**；**b10454 已包含** `muse-glimmer` 架构（[llama.cpp #26841](https://github.com/ggml-org/llama.cpp/pull/26841)）。更旧的构建（如 b10331）会报 `unknown model architecture: 'muse-glimmer'`。
-
-    克隆此基座后，将环境变量指向 [meta-models/Muse-Glimmer-30B-GGUF](https://huggingface.co/meta-models/Muse-Glimmer-30B-GGUF) 或社区量化（如 unsloth）。常见布局：
-    - 主 GGUF + `mmproj` 写入 `MODEL_SOURCE`（逗号分隔）以支持视觉
-    - DFlash 草稿模型（`dflash-kquant.gguf`）并在 `ENGINE_ARGS` 中加 `--spec-type draft-dflash` 或 `draft-dspark` 以开启投机解码
-
-    **b10362 → b10454 其它变化：**
-    - 聊天模板可接收 OpenAI `reasoning_effort`（[llama.cpp #26941](https://github.com/ggml-org/llama.cpp/pull/26941)）；Qwen3.8 可用 `--chat-template-kwargs` 或请求体设置 `xhigh` / `medium` / `low`
-    - MTP 草稿类型自动检测；DFlash / DSpark 后端采样
-    - 支持 MiniMax Text01 / M1 转换
-    - 解码过程中 `/metrics` 与 `/slots` 仍可用；mtmd 与 jinja 修复
-
-    完整上游发布说明见 https://github.com/ggml-org/llama.cpp/releases
   fullDescription: |
     **重要提示**  
     此应用是一个模板，不能单独使用。请按下方环境变量设置模型后，方可使用本应用提供模型服务。
@@ -34,7 +17,7 @@ spec:
     - `MODEL_SUPPORTS`：模型能力选项（Vision / Tools / Thinking / None）。请选择您的模型支持的功能，必填。
     - `ENGINE_ARGS`：`-c 8192 -ngl all -fa on`。如需完全利用 GPU，请加 `-ngl all`。也可用如 `LLAMA_ARG_*=val` 的参数。
     - `LOG_LEVEL`：`debug`、`info`、`warn` 或 `error`。日志等级，请从上述选项中选择。
-    - `LLAMACPP_REQUIRED_GPU_MEMORY`：`8Gi`、`8192` 或 `8192Mi`。模型（仅 GPU 模式）所需显存。支持 `8Gi`、`8192`、`8192Mi` 等格式；NVIDIA 下设置 `nvidia.com/gpumem`（MiB），Spark 下设置 pod 显存。
+    - `LLAMACPP_REQUIRED_GPU_MEMORY`：`8Gi`、`8192` 或 `8192Mi`。模型（仅 GPU 模式）所需显存。支持 `8Gi`、`8192`、`8192Mi` 等格式；NVIDIA 下设置 `nvidia.com/gpumem`（MiB），Spark 下设置 pod 显存，`amd-gpu` 与 `intel-gpu` 下通过 pod annotation `gpu.bytetrade.io/required-gpu-memory` 声明独立显存配额。
 
     **工作流程说明**
     首先，`llm-init` 下载并准备模型，然后 `llama.cpp` 在模型准备好后启动服务。这两个部分独立运行但共享文件与进度信息。
@@ -48,6 +31,9 @@ spec:
     |----------------|------------------|--------------------------------------------------------------|
     | `nvidia`       | GPU (CUDA)       | 需设置 `LLAMACPP_REQUIRED_GPU_MEMORY`，用 `-ngl all` 完全利用 GPU |
     | `nvidia-gb10`  | GPU (Spark)      | 类似上方，但显存由 pod 管理                                  |
+    | `amd-gpu`      | GPU (ROCm)       | AMD 独显（R9700 / gfx1201）。镜像 `server-rocm-b10731`。不要用 `amd`（核显）。 |
+    | `intel` | Intel integrated GPU (Panther Lake / SYCL) | `server-intel-b10884`; `-ngl all`; LLAMACPP_REQUIRED_GPU_MEMORY = shared pod memory (model + KV + runtime). |
+    | `intel-gpu`    | GPU (SYCL)       | Intel Arc 独显（如 Arc Pro B70）。镜像 `server-intel-b10752`。请用 `-ngl all`。 |
 
     **模型存储**
     所有模型文件存储在共享目录 `appCommon/huggingface`（挂载为 `/cache/hf/hub`），同类应用均使用此目录。
