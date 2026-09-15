@@ -1,0 +1,64 @@
+metadata:
+  title: FaceFusion
+  description: Piattaforma leader di manipolazione del volto
+spec:
+  fullDescription: |
+    FaceFusion è una piattaforma leader di manipolazione del volto. Ti permette di scambiare volti senza sforzo e creare impressionanti manipolazioni fotografiche.
+
+    **Key Features:**
+    Advanced Facical Image Generation and Editing
+    - Utilizza algoritmi di alta qualità per un blending fluido e realistico dei tratti facciali con livelli di intensità personalizzabili; offre morphing facciale, blending di più volti e trasformazioni realistiche
+
+    Multiple Face Swapping:
+    - Supporta lo scambio di più volti in un singolo progetto.
+
+    Real-Time Processing:
+    - Fornisce anteprime e risultati istantanei, migliorando l'esperienza con face fusion veloce e interattiva.
+
+    Age Modification:
+    - Alterare l'età apparente di un volto
+
+    Lip Sync:
+    - garantisce che i volti scambiati nei video siano perfettamente sincronizzati con l'audio, creando movimenti della bocca fluidi che corrispondono al parlato.
+
+    Deep Swapper (DeepFaceLive Models):
+    - Processore dedicato di face-swap basato su modelli DeepFaceLive `.dfm` addestrati dalla community, con una libreria integrata di oltre 24 volti di celebrità pronti all'uso.
+
+    **Model storage (App Common, shared)**
+    I pack di modelli FaceFusion (3.0.0 → 3.6.0) risiedono nella cache HF Hub
+    condivisa cross-app App Common (`appCommon/huggingface`, percorso container fisso `/cache/hf/hub`).
+    Un sidecar solo download `llm-init` recupera ogni repo in quel store tramite
+    `OLARES_USER_HUGGINGFACE_SERVICE` dell'utente; il motore monta lo stesso store e
+    attende `download-svc:/readyz` prima di ricostruire la vista piatta
+    `/facefusion/.assets/models` come farm di symlink effimeri sui
+    snapshot in cache. I byte dei modelli sono deduplicati e riutilizzati tra le app.
+  upgradeDescription: |
+    Passaggio dell'immagine reverse-proxy da Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) all'immagine ufficiale OpenResty `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Allineamento dei mount della config nginx e dei percorsi dei log al layout dell'immagine ufficiale (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), e rimozione del wiring Bitnami specifico `OPENRESTY_CONF_FILE`.
+
+    Aggiornamento dell'immagine llm-init a `beclab/llm-init:v1.3.1`.
+
+    Migrazione V3 shared-app di FaceFusion (engine 3.6.1).
+
+    **What's Changed**
+
+    - **Download architecture**: sostituito il Job su misura `harveyff-hf-downloader-only`
+      con il Deployment condiviso solo download `llm-init`
+      (`facefusiondownloader`), allineato a speachesv3 / acestep15v3. I pack di modelli ora
+      atterrano nella cache HF condivisa cross-app (App Common, `/cache/hf/hub`) nel
+      layout standard `models--owner--repo/snapshots/<sha>/...`; il motore attende
+      `download-svc:/readyz` invece di sentinel `.done` per repo e ricostruisce
+      il layout piatto `/facefusion/.assets/models` come farm di symlink all'avvio.
+    - **Entrance routing**: nginx riscritto per allinearsi ad acestep15v3 — i path API di llm-init
+      sono pinnati a download-svc; `/` attende il download del modello E la readiness di Gradio
+      e ricarica automaticamente dal dashboard di download nell'app via `/__app_ready`.
+    - **Architecture**: il Deployment del motore è ora nominato secondo l'appid
+      (`facefusionv3`); l'ingresso nginx (`facefusionproxy`) e il downloader
+      (`facefusiondownloader`) sono workload indipendenti dichiarati via
+      `workloadReplicas`.
+    - **HF env**: mirror / token HF provengono dall'account HF di sistema dell'utente
+      via `valueFrom` (dichiarati localmente come `HF_ENDPOINT` / `HF_TOKEN`; i template
+      non referenziano più direttamente i nomi `OLARES_USER_*`, come richiesto da v3).
+    - **Resources**: `limitedMemory` portato a 21Gi così i limiti di engine (16Gi) + llm-init
+      (4Gi) + nginx (256Mi) rientrano nell'envelope.

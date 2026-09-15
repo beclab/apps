@@ -1,0 +1,61 @@
+metadata:
+  title: FaceFusion
+  description: 業界をリードする顔操作プラットフォーム
+spec:
+  fullDescription: |
+    FaceFusion は業界をリードする顔操作プラットフォームです。簡単に顔を入れ替え、息をのむような写真加工を作成できます。
+
+    **Key Features:**
+    Advanced Facical Image Generation and Editing
+    - 高品質アルゴリズムで顔の特徴をシームレスかつリアルにブレンド。強度調整、フェイシャルモーフィング、複数顔のブレンド、リアルな変換などに対応
+
+    Multiple Face Swapping:
+    - 1 つのプロジェクトで複数の顔の入れ替えに対応。
+
+    Real-Time Processing:
+    - 即時プレビューと結果を提供し、高速でインタラクティブな face fusion 体験を向上。
+
+    Age Modification:
+    - 顔の見た目の年齢を変更
+
+    Lip Sync:
+    - 動画で入れ替えた顔が音声と完璧に同期し、発話に合う自然な口の動きを実現。
+
+    Deep Swapper (DeepFaceLive Models):
+    - コミュニティ学習の DeepFaceLive `.dfm` モデルに裏打ちされた専用 face-swap プロセッサ。24 以上の有名人の顔の組み込みライブラリ付き。
+
+    **Model storage (App Common, shared)**
+    FaceFusion モデルパック（3.0.0 → 3.6.0）は共有クロスアプリ App Common
+    HF Hub キャッシュ（`appCommon/huggingface`、固定コンテナパス `/cache/hf/hub`）に格納。
+    `llm-init` ダウンロード専用サイドカーがユーザーの
+    `OLARES_USER_HUGGINGFACE_SERVICE` 経由で各リポジトリをそのストアへ取得；エンジンは同じストアをマウントし、
+    `download-svc:/readyz` を待ってから、キャッシュ済みスナップショット上の一時的なシンボリックリンクファームとして
+    フラットな `/facefusion/.assets/models` ビューを再構築。モデルバイトは重複排除されアプリ間で再利用されます。
+  upgradeDescription: |
+    リバースプロキシイメージを Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）から公式 OpenResty イメージ `openresty/openresty:1.29.2.5-bookworm-fat` に切り替え。
+
+    nginx 設定マウントとログパスを公式イメージのレイアウト（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`）に合わせ、Bitnami 固有の `OPENRESTY_CONF_FILE` 配線を削除。
+
+    llm-init イメージを `beclab/llm-init:v1.3.1` に更新。
+
+    FaceFusion の V3 共有アプリ移行（エンジン 3.6.1）。
+
+    **What's Changed**
+
+    - **Download architecture**: 専用の `harveyff-hf-downloader-only`
+      Job を共有 `llm-init` ダウンロード専用 Deployment
+      （`facefusiondownloader`）に置換、speachesv3 / acestep15v3 に合わせる。モデルパックは
+      共有クロスアプリ HF キャッシュ（App Common、`/cache/hf/hub`）に標準の
+      `models--owner--repo/snapshots/<sha>/...` レイアウトで配置；エンジンはリポジトリごとの `.done` センチネルではなく
+      `download-svc:/readyz` を待ち、起動時にフラットな `/facefusion/.assets/models` をシンボリックリンクファームとして再構築。
+    - **Entrance routing**: nginx を acestep15v3 に合わせて書き換え — llm-init API
+      パスを download-svc に固定；`/` はモデルダウンロード AND Gradio readiness を待ち、
+      `/__app_ready` 経由でダウンロードダッシュボードからアプリへ自動リロード。
+    - **Architecture**: エンジン Deployment を appid 名（`facefusionv3`）に；
+      nginx 入口（`facefusionproxy`）とダウンローダー（`facefusiondownloader`）は
+      `workloadReplicas` で宣言された独立ワークロード。
+    - **HF env**: HF ミラー／トークンはユーザーのシステム HF アカウントから
+      `valueFrom` 経由（ローカルでは `HF_ENDPOINT` / `HF_TOKEN`；テンプレートは v3 要件どおり
+      `OLARES_USER_*` 名を直接参照しない）。
+    - **Resources**: エンジン（16Gi）+ llm-init（4Gi）+ nginx（256Mi）の上限が収まるよう
+      `limitedMemory` を 21Gi に引き上げ。

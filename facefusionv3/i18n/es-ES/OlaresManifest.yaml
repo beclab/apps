@@ -1,0 +1,64 @@
+metadata:
+  title: FaceFusion
+  description: Plataforma líder de manipulación facial
+spec:
+  fullDescription: |
+    FaceFusion es una plataforma líder de manipulación facial. Te permite intercambiar rostros sin esfuerzo y crear impresionantes manipulaciones fotográficas.
+
+    **Key Features:**
+    Advanced Facical Image Generation and Editing
+    - Utiliza algoritmos de alta calidad para una fusión fluida y realista de rasgos faciales con niveles de intensidad personalizables; ofrece morphing facial, fusión de múltiples rostros y transformaciones realistas
+
+    Multiple Face Swapping:
+    - Admite el intercambio de múltiples rostros en un mismo proyecto.
+
+    Real-Time Processing:
+    - Ofrece vistas previas y resultados instantáneos, mejorando la experiencia con fusión facial rápida e interactiva.
+
+    Age Modification:
+    - Alterar la edad aparente de un rostro
+
+    Lip Sync:
+    - garantiza que los rostros intercambiados en vídeos estén perfectamente sincronizados con el audio, creando movimientos de boca fluidos que coinciden con el habla.
+
+    Deep Swapper (DeepFaceLive Models):
+    - Procesador dedicado de face-swap respaldado por modelos DeepFaceLive `.dfm` entrenados por la comunidad, con una biblioteca integrada de más de 24 rostros de celebridades listos para usar.
+
+    **Model storage (App Common, shared)**
+    Los packs de modelos de FaceFusion (3.0.0 → 3.6.0) viven en la caché HF Hub
+    compartida entre apps App Common (`appCommon/huggingface`, ruta fija del contenedor `/cache/hf/hub`).
+    Un sidecar solo descarga `llm-init` obtiene cada repo en ese almacén vía el
+    `OLARES_USER_HUGGINGFACE_SERVICE` del usuario; el motor monta el mismo almacén y
+    espera a `download-svc:/readyz` antes de reconstruir la vista plana
+    `/facefusion/.assets/models` como una granja efímera de symlinks sobre
+    los snapshots en caché. Los bytes del modelo se deduplican y se reutilizan entre apps.
+  upgradeDescription: |
+    Cambio de la imagen del reverse-proxy de Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) a la imagen oficial OpenResty `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Alineación de montajes de configuración nginx y rutas de logs con el layout de la imagen oficial (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), y eliminación del cableado Bitnami específico `OPENRESTY_CONF_FILE`.
+
+    Actualización de la imagen llm-init a `beclab/llm-init:v1.3.1`.
+
+    Migración V3 de app compartida de FaceFusion (motor 3.6.1).
+
+    **What's Changed**
+
+    - **Download architecture**: sustituido el Job a medida `harveyff-hf-downloader-only`
+      por el Deployment compartido solo descarga `llm-init`
+      (`facefusiondownloader`), alineado con speachesv3 / acestep15v3. Los packs de modelos ahora
+      aterrizan en la caché HF compartida entre apps (App Common, `/cache/hf/hub`) en el
+      layout estándar `models--owner--repo/snapshots/<sha>/...`; el motor espera
+      a `download-svc:/readyz` en lugar de sentinels `.done` por repo y reconstruye
+      el layout plano `/facefusion/.assets/models` como granja de symlinks al arrancar.
+    - **Entrance routing**: nginx reescrito para coincidir con acestep15v3 — las rutas API de llm-init
+      se fijan a download-svc; `/` espera la descarga del modelo Y la readiness de Gradio
+      y recarga automáticamente del dashboard de descarga a la app vía `/__app_ready`.
+    - **Architecture**: el Deployment del motor ahora se nombra según el appid
+      (`facefusionv3`); la entrada nginx (`facefusionproxy`) y el downloader
+      (`facefusiondownloader`) son workloads independientes declarados vía
+      `workloadReplicas`.
+    - **HF env**: el mirror / token HF se obtienen de la cuenta HF del sistema del usuario
+      vía `valueFrom` (declarados localmente como `HF_ENDPOINT` / `HF_TOKEN`; las plantillas
+      ya no referencian nombres `OLARES_USER_*` directamente, como exige v3).
+    - **Resources**: `limitedMemory` subido a 21Gi para que los límites del motor (16Gi) + llm-init
+      (4Gi) + nginx (256Mi) quepan en el sobre.

@@ -1,0 +1,64 @@
+metadata:
+  title: FaceFusion
+  description: Plateforme leader de manipulation de visages
+spec:
+  fullDescription: |
+    FaceFusion est une plateforme leader de manipulation de visages. Elle vous permet d'échanger des visages sans effort et de créer des manipulations photo époustouflantes.
+
+    **Key Features:**
+    Advanced Facical Image Generation and Editing
+    - Utilise des algorithmes de haute qualité pour un mélange fluide et réaliste des traits du visage avec des niveaux d'intensité personnalisables ; offre morphing facial, mélange de plusieurs visages et transformations réalistes
+
+    Multiple Face Swapping:
+    - Prend en charge l'échange de plusieurs visages dans un même projet.
+
+    Real-Time Processing:
+    - Fournit des aperçus et résultats instantanés, améliorant l'expérience avec une fusion faciale rapide et interactive.
+
+    Age Modification:
+    - Modifier l'âge apparent d'un visage
+
+    Lip Sync:
+    - garantit que les visages échangés dans les vidéos sont parfaitement synchronisés avec l'audio, créant des mouvements de bouche fluides correspondant à la parole.
+
+    Deep Swapper (DeepFaceLive Models):
+    - Processeur dédié de face-swap basé sur des modèles DeepFaceLive `.dfm` entraînés par la communauté, avec une bibliothèque intégrée de plus de 24 visages de célébrités prêts à l'emploi.
+
+    **Model storage (App Common, shared)**
+    Les packs de modèles FaceFusion (3.0.0 → 3.6.0) vivent dans le cache HF Hub
+    partagé cross-app App Common (`appCommon/huggingface`, chemin conteneur fixe `/cache/hf/hub`).
+    Un sidecar download-only `llm-init` récupère chaque repo dans ce store via le
+    `OLARES_USER_HUGGINGFACE_SERVICE` de l'utilisateur ; le moteur monte le même store et
+    attend `download-svc:/readyz` avant de reconstruire la vue plate
+    `/facefusion/.assets/models` comme une ferme de symlinks éphémères sur
+    les snapshots en cache. Les octets des modèles sont dédupliqués et réutilisés entre apps.
+  upgradeDescription: |
+    Remplacement de l'image reverse-proxy Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) par l'image officielle OpenResty `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Alignement des montages de configuration nginx et des chemins de logs sur la disposition de l'image officielle (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), et suppression du câblage Bitnami spécifique `OPENRESTY_CONF_FILE`.
+
+    Mise à jour de l'image llm-init vers `beclab/llm-init:v1.3.1`.
+
+    Migration V3 d'app partagée de FaceFusion (moteur 3.6.1).
+
+    **What's Changed**
+
+    - **Download architecture** : remplacement du Job sur mesure `harveyff-hf-downloader-only`
+      par le Deployment partagé download-only `llm-init`
+      (`facefusiondownloader`), aligné sur speachesv3 / acestep15v3. Les packs de modèles
+      atterrissent désormais dans le cache HF partagé cross-app (App Common, `/cache/hf/hub`) au
+      layout standard `models--owner--repo/snapshots/<sha>/...` ; le moteur attend
+      `download-svc:/readyz` au lieu de sentinelles `.done` par repo et reconstruit
+      le layout plat `/facefusion/.assets/models` comme ferme de symlinks au démarrage.
+    - **Entrance routing** : nginx réécrit pour correspondre à acestep15v3 — les chemins API llm-init
+      sont épinglés à download-svc ; `/` attend le téléchargement du modèle ET la readiness Gradio
+      et recharge automatiquement du dashboard de téléchargement vers l'app via `/__app_ready`.
+    - **Architecture** : le Deployment du moteur est maintenant nommé d'après l'appid
+      (`facefusionv3`) ; l'entrée nginx (`facefusionproxy`) et le downloader
+      (`facefusiondownloader`) sont des workloads indépendants déclarés via
+      `workloadReplicas`.
+    - **HF env** : le mirror / token HF proviennent du compte HF système de l'utilisateur
+      via `valueFrom` (déclarés localement comme `HF_ENDPOINT` / `HF_TOKEN` ; les templates
+      ne référencent plus directement les noms `OLARES_USER_*`, comme exigé par v3).
+    - **Resources** : `limitedMemory` porté à 21Gi pour que les limites moteur (16Gi) + llm-init
+      (4Gi) + nginx (256Mi) tiennent dans l'enveloppe.
