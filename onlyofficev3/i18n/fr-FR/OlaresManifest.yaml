@@ -1,0 +1,36 @@
+metadata:
+  title: OnlyOffice
+  description: Exécutez votre office privé avec ONLYOFFICE
+spec:
+  fullDescription: |
+    ONLYOFFICE Docs est une suite bureautique collaborative en ligne gratuite comprenant visionneuses et éditeurs pour textes, tableurs et présentations, formulaires et PDF, pleinement compatible avec les formats Office Open XML : .docx, .xlsx, .pptx, et permettant l'édition collaborative en temps réel.
+
+    **NOTE IMPORTANTE**
+    Lors du premier démarrage d'ONLYOFFICE, allez dans ControlHub. Dans le pod onlyoffice, ouvrez le terminal du conteneur « onlyoffice ». Entrez la commande `supervisorctl start ds:example`. Puis revenez à la page d'accueil et cliquez sur « go to test example » pour l'essayer.
+
+    ONLYOFFICE Docs inclut les éditeurs suivants :
+    **ONLYOFFICE Document Editor**
+    **ONLYOFFICE Spreadsheet Editor**
+    **ONLYOFFICE Presentation Editor**
+    **ONLYOFFICE Form Creator**
+    **ONLYOFFICE PDF editor, reader & converter**
+
+    Les éditeurs vous permettent de créer, modifier, enregistrer et exporter des documents texte, tableurs et présentations, et offrent en plus :
+    **Collaborative editing**
+    **Hieroglyph support**
+    **Reviewing**
+    **Spell-checking**
+  upgradeDescription: |
+    Augmenter la limite d'upload du reverse-proxy OpenResty à `client_max_body_size 100m` pour que les téléversements de documents ne soient pas rejetés avec HTTP 413 (OpenResty officiel par défaut à 1m). Relancer `onlyofficeproxy` lorsque le ConfigMap nginx change (`checksum/nginx-config`), car un montage `subPath` ne prend pas en compte les mises à jour in-place du ConfigMap.
+
+    Remplacer l'image du reverse-proxy Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) par l'image officielle OpenResty `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Aligner les montages de configuration nginx et les chemins de journaux sur la disposition de l'image officielle (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), et supprimer le câblage spécifique à Bitnami `OPENRESTY_CONF_FILE`.
+
+    ONLYOFFICE migré vers le modèle d'application partagée apiVersion v3 (onlyofficev2 → onlyofficev3).
+
+    **Changements**
+
+    - **Architecture** : sous-charts onlyofficev2/onlyofficev2server aplatis en un seul chart ; le Deployment DocumentServer porte désormais le nom de la release (`{{ .Release.Name }}` == appid) pour la vérification des charges v3, et le Deployment d'entrée nginx est `onlyofficeproxy`. Les références backend se résolvent désormais dans le namespace de la release au lieu des anciens noms cross-namespace `*-shared`.
+    - **Mise à l'échelle** : `workloadReplicas` déclare les comptes de réplicas pour DocumentServer `onlyofficev3`, `jwtgeter`, `onlyofficeclient` et la charge d'entrée `onlyofficeproxy`.
+    - **Runtime** : ONLYOFFICE DocumentServer 9.2.0 (inchangé).
