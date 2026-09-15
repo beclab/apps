@@ -87,6 +87,37 @@ spec:
         sysctls: []
 
       initContainers:
+        # Image paths are root/1001-owned; uid 1000 cannot mkdir certs, rewrite
+        # bitnami.conf, or write wp-config.php. Copy those trees onto emptyDir
+        # and chown 1000. Persist stays only at /bitnami/wordpress; do not copy
+        # this tree onto persist (image symlinks to /bitnami/wordpress would loop).
+        - name: init-apache-writable
+          image: "docker.io/beclab/aboveos-bitnami-wordpress:6.4.2-debian-11-r14"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              mkdir -p /writable/bitnami /writable/logs /writable/run /writable/tmp /writable/wordpress
+              cp -a /opt/bitnami/apache/conf/bitnami/. /writable/bitnami/
+              mkdir -p /writable/bitnami/certs
+              cp -a /opt/bitnami/wordpress/. /writable/wordpress/
+              chown -R 1000:1000 /writable/bitnami /writable/logs /writable/run /writable/tmp /writable/wordpress
+          volumeMounts:
+            - name: apache-bitnami
+              mountPath: /writable/bitnami
+            - name: apache-logs
+              mountPath: /writable/logs
+            - name: apache-run
+              mountPath: /writable/run
+            - name: bitnami-tmp
+              mountPath: /writable/tmp
+            - name: wordpress-opt
+              mountPath: /writable/wordpress
+
         # Reverse of 1.1.12: if appData still holds WordPress files after the Cache<-Data flip
         # (1.1.13+), force-copy them back onto appCache. Do NOT skip just because appCache
         # already has a fresh/empty tree.
@@ -437,6 +468,16 @@ spec:
             - mountPath: /bitnami/wordpress
               name: wordpress-data
               subPath: wordpress
+            - name: wordpress-opt
+              mountPath: /opt/bitnami/wordpress
+            - name: apache-bitnami
+              mountPath: /opt/bitnami/apache/conf/bitnami
+            - name: apache-logs
+              mountPath: /opt/bitnami/apache/logs
+            - name: apache-run
+              mountPath: /opt/bitnami/apache/var/run
+            - name: bitnami-tmp
+              mountPath: /opt/bitnami/tmp
       volumes:
         - name: wordpress-data-appdata
           hostPath:
@@ -446,4 +487,14 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: {{ .Values.userspace.appCache }}
+        - name: wordpress-opt
+          emptyDir: {}
+        - name: apache-bitnami
+          emptyDir: {}
+        - name: apache-logs
+          emptyDir: {}
+        - name: apache-run
+          emptyDir: {}
+        - name: bitnami-tmp
+          emptyDir: {}
 
