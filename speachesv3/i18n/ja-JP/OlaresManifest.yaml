@@ -1,0 +1,49 @@
+metadata:
+  title: Speaches
+  description: OpenAI 互換 TTS/STT サーバー
+spec:
+  fullDescription: |
+    Speaches はストリーミング文字起こし、翻訳、音声生成に対応した OpenAI API 互換サーバーです。Speech-to-Text は faster-whisper、Text-to-Speech は piper と Kokoro を使用します。TTS/STT モデル向けの Ollama を目指すプロジェクトです。
+
+    **主な機能**
+    - Kokoro および Piper モデルによる Text-to-Speech。
+    - faster-whisper による高品質 Speech-to-Text。
+    - OpenAI 互換 API（/v1/audio/speech、/v1/audio/transcriptions など）。
+    - 対話テスト用の内蔵 Gradio Web UI。
+    - CLI モデル管理用の内蔵ターミナル（ダウンロード、一覧、削除）。
+    - GPU 加速（NVIDIA CUDA）と CPU フォールバック。
+    - 他の Olares アプリとスムーズに連携する共有エントランス。
+
+    **モデルストレージ（App Common、共有）**
+    HF モデルは共有クロスアプリ App Common ストア `appCommon/huggingface` にあり、
+    固定コンテナパス `/cache/hf/hub` にマウントされます。llm-init のダウンロード専用
+    サイドカーが事前インストール STT/TTS モデルをそのストアへ取得し、Speaches は
+    同じストアをマウントして両モデルが揃うまで起動を待ちます。
+
+    **事前インストールモデル**
+    - Kokoro-82M-v1.0-ONNX（TTS）— 軽量で高品質な音声合成。
+    - faster-whisper-small（STT）— 高速で正確な音声認識。
+    - 追加モデルはターミナルエントランスからダウンロード可能。
+
+    **使い方**
+    - Speaches UI を開き Gradio で TTS/STT を対話的にテスト。
+    - ターミナルで HuggingFace から追加モデルをダウンロード。
+    - 他の Olares アプリは共有エントランスまたは API エントランス経由で API を呼び出し可能。
+    - API は OpenAI SDK・ライブラリと完全互換。
+  upgradeDescription: |
+    リバースプロキシイメージを Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）から公式 OpenResty イメージ `openresty/openresty:1.29.2.5-bookworm-fat` に切替。
+
+    nginx 設定マウントとログパスを公式イメージレイアウト（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`）に合わせ、Bitnami 固有の `OPENRESTY_CONF_FILE` 配線を削除。
+
+    llm-init イメージを `beclab/llm-init:v1.3.1` に更新。
+
+    Speaches の V3 共有アプリ移行（エンジン 0.8.2）。
+    - speachesserver / speaches サブチャートを単一チャートに平坦化。
+    - エンジン Deployment は appid 名（speachesv3）; nginx
+      エントランス（speachesingress）とターミナルは別ワークロードで、すべて
+      workloadReplicas 経由で宣言。
+    - モデルはユーザーごとの Huggingface/speaches ではなく、共有 App Common
+      ストア appCommon/huggingface（固定 /cache/hf/hub）に配置。
+    - 新しい llm-init ダウンロード専用サイドカーが事前インストール STT/TTS
+      モデルを共有ストアへ取得; エンジンは両方が揃うまで待機。
+    - HF ミラー/トークンは valueFrom でユーザーのシステム HF アカウントから取得。
