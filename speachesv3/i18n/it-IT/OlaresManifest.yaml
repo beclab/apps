@@ -1,0 +1,49 @@
+metadata:
+  title: Speaches
+  description: Server TTS/STT compatibile OpenAI
+spec:
+  fullDescription: |
+    Speaches è un server compatibile con l'API OpenAI per trascrizione, traduzione e generazione vocale in streaming. Speech-to-Text usa faster-whisper; Text-to-Speech usa piper e Kokoro. Il progetto punta a essere Ollama, ma per modelli TTS/STT.
+
+    **Funzionalità principali**
+    - Text-to-Speech con modelli Kokoro e Piper.
+    - Speech-to-Text con faster-whisper per trascrizione di alta qualità.
+    - API compatibile OpenAI (/v1/audio/speech, /v1/audio/transcriptions, ecc.).
+    - Web UI Gradio integrata per test interattivi.
+    - Terminale integrato per gestione modelli da CLI (download, elenco, rimozione).
+    - Accelerazione GPU (NVIDIA CUDA) con fallback CPU.
+    - Entrance condivisa per integrazione fluida con altre app Olares.
+
+    **Archiviazione modelli (App Common, condivisa)**
+    I modelli HF risiedono nello store App Common condiviso `appCommon/huggingface`,
+    montato nel percorso fisso del container `/cache/hf/hub`. Un sidecar llm-init solo-download
+    recupera i modelli STT/TTS preinstallati in quello store; Speaches monta
+    lo stesso store e attende che entrambi i modelli siano presenti prima di avviarsi.
+
+    **Modelli preinstallati**
+    - Kokoro-82M-v1.0-ONNX (TTS) — sintesi vocale leggera e di alta qualità.
+    - faster-whisper-small (STT) — riconoscimento vocale rapido e accurato.
+    - Ulteriori modelli scaricabili tramite l'entrance Terminal.
+
+    **Utilizzo**
+    - Apri la UI Speaches per testare TTS/STT interattivamente con Gradio.
+    - Usa il Terminal per scaricare altri modelli da HuggingFace.
+    - Altre app Olares possono chiamare l'API tramite entrance condivisa o entrance API.
+    - L'API è pienamente compatibile con SDK e librerie OpenAI.
+  upgradeDescription: |
+    Passaggio dell'immagine reverse-proxy da Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) all'immagine ufficiale OpenResty `openresty/openresty:1.29.2.5-bookworm-fat`.
+
+    Allineati mount della config nginx e percorsi di log al layout dell'immagine ufficiale (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), e rimossa la wiring Bitnami `OPENRESTY_CONF_FILE`.
+
+    Aggiornata l'immagine llm-init a `beclab/llm-init:v1.3.1`.
+
+    Migrazione V3 dell'app condivisa Speaches (motore 0.8.2).
+    - Sub-chart speachesserver / speaches uniti in un unico chart.
+    - Il Deployment del motore prende il nome dall'appid (speachesv3); l'entrance
+      nginx (speachesingress) e il terminal sono workload separati, tutti dichiarati
+      via workloadReplicas.
+    - I modelli vivono nello store App Common condiviso appCommon/huggingface
+      (/cache/hf/hub fisso), al posto della directory per-utente Huggingface/speaches.
+    - Un nuovo sidecar llm-init solo-download scarica i modelli STT/TTS
+      preinstallati nello store condiviso; il motore attende che entrambi siano presenti.
+    - Specchio/token HF provenienti dall'account HF di sistema dell'utente via valueFrom.
