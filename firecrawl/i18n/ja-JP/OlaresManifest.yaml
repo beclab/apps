@@ -1,0 +1,42 @@
+metadata:
+  title: Firecrawl
+  description: あらゆる Web サイトからのクリーンなデータで AI アプリを強化
+spec:
+  upgradeDescription: |
+    Firecrawl をアップストリーム **2.11.158** へアップグレード（2.9.0 から）。
+
+    **イメージ**
+    - API / queue-worker / nuq-worker / extract-worker / nuq-prefetch-worker: `docker.io/beclab/firecrawl-firecrawl:2.11.158`（`ghcr.io/firecrawl/firecrawl:2.11.158` をミラー；`beclab/firecrawl-api:v2.9.0` を置き換え）。
+    - Playwright: `beclab/harveyff-firecrawl-playwright-service:2.11.158`（アップストリーム GHCR にバージョン付きタグなし；latest からリタグ）。
+    - NuQ Postgres: `beclab/harveyff-firecrawl-nuq-postgres:2.11.158`（アップストリーム GHCR にバージョン付きタグなし；latest からリタグ）。
+    - RabbitMQ: `beclab/rabbitmq:3.13.7-management`（チャート内）。
+
+    **アーキテクチャ（アップストリーム Helm / NuQ に合わせる）**
+    - RabbitMQ Service/Deployment と ConfigMap `NUQ_RABBITMQ_URL=amqp://rabbitmq:5672` を追加。
+    - `extract-worker`（`dist/src/services/extract-worker.js`）と `nuq-prefetch-worker`（`nuq-prefetch-worker.js`）を追加。
+    - 分割 API（`index.js`）+ `queue-worker` + `nuq-worker` を維持（K8s では `harness.js --start-docker` を**使わない**）。
+    - ワーカーポート / `NUQ_*` env、`IS_KUBERNETES=true`、`NUQ_DATABASE_URL_LISTEN`、`NUQ_POD_NAME` fieldRef を配線。
+    - Redis レプリカキー修正: `firecrawl` ではなく `workloads.firecrawl-redis` を使用。
+    - 追加ワークロードのため `requiredMemory` を 6Gi に引き上げ。
+
+    **注意**
+    - デスクトップエントランスは引き続き Bull Queue Manager（`/admin/CHANGEME/queues`）。クロール／スクレイプジョブは **NuQ** を使いそこには表示されません；代わりに `GET /v2/crawl/{id}` / `GET /v2/scrape/{id}` をポーリングしてください。
+    - オプションの LLM env（`OPENAI_*` / `OLLAMA_*` / `MODEL_NAME`）は AI extract 機能用に残ります。
+  fullDescription: |
+    **概要**
+    Firecrawl は URL を受け取り、クロールしてクリーンな markdown または構造化データに変換する API サービスです。アクセス可能なすべてのサブページをクロールし、それぞれについてクリーンなデータを提供します。サイトマップは不要です。
+
+    **機能**
+    - Scrape: URL をスクレイプし、LLM 向け形式（markdown、LLM Extract による構造化データ、スクリーンショット、html）で内容を取得
+    - Crawl: Web ページのすべての URL をスクレイプし、LLM 向け形式で内容を返す
+    - Map: サイトを入力して全 URL を取得 — 極めて高速
+    - Extract: AI で単一ページ、複数ページ、またはサイト全体から構造化データを取得。
+
+    **強力な能力**
+    - LLM 向け形式: markdown、構造化データ、スクリーンショット、HTML、リンク、メタデータ
+    - 難しい部分: プロキシ、アンチボット機構、動的コンテンツ（JS レンダリング）、出力パース、オーケストレーション
+    - カスタマイズ性: タグ除外、カスタムヘッダーで認証壁の背後をクロール、最大クロール深度など
+    - メディパース: pdf、docx、画像
+    - Reliability first: どれほど難しくても必要なデータを取得する設計
+    - Actions: データ抽出前のクリック、スクロール、入力、待機など
+    - Batching（新）: 新しい非同期エンドポイントで数千 URL を同時スクレイプ。
