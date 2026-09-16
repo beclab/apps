@@ -5,7 +5,7 @@
 {{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
 {{- $serverPassword := index $env "OPENCODE_SERVER_PASSWORD" | default "" }}
 {{- $serverUsername := index $env "OPENCODE_SERVER_USERNAME" | default "opencode" }}
-{{- $image := "beclab/opencode:1.18.18.1" }}
+{{- $image := "beclab/opencode:1.18.31.1" }}
 
 ---
 apiVersion: apps/v1
@@ -297,18 +297,35 @@ spec:
             failureThreshold: 30
             periodSeconds: 10
           readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8080
+            # Check nginx locally; Pod-IP HTTP probes traverse Envoy external auth.
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --noproxy
+                - "*"
+                - --max-time
+                - "2"
+                - http://127.0.0.1:8080/healthz
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             successThreshold: 1
             failureThreshold: 10
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8080
+            exec:
+              command:
+                - curl
+                - --fail
+                - --silent
+                - --show-error
+                - --noproxy
+                - "*"
+                - --max-time
+                - "2"
+                - http://127.0.0.1:8080/healthz
             initialDelaySeconds: 15
             timeoutSeconds: 5
             periodSeconds: 30
@@ -384,8 +401,10 @@ spec:
               value: ""
           command:
             - dockerd
+            # Explicit local-only plaintext API avoids dockerd's deliberate TLS warning delay.
+            - --tls=false
             - --host
-            - tcp://0.0.0.0:2375
+            - tcp://127.0.0.1:2375
             - --host
             - unix:///var/run/docker.sock
             - --mtu=1450
@@ -394,7 +413,7 @@ spec:
           startupProbe:
             exec:
               command: ["docker", "info"]
-            initialDelaySeconds: 3
+            initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 60
             timeoutSeconds: 10
