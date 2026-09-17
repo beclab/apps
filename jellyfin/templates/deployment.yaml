@@ -1,23 +1,120 @@
-﻿apiVersion: v1
+apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: config-scripts
+  name: jellyfin-migration
   namespace: {{ .Release.Namespace }}
 data:
-  copy-config.sh: |
-    #!/bin/bash
-
-    new_dir="/config-new"
-    source_dir="/config"
-
-    if [ -z "$(ls -A $new_dir)" ]; then
-        echo "Directory $new_dir is empty. Copying contents from $source_dir..."
-        cp -r $source_dir/* $new_dir
-        echo "Contents copied successfully."
-    else
-        echo "Directory $new_dir is not empty, no action needed."
+  ownership.sh: |
+    #!/bin/sh
+    set -eu
+    state=/app-data-root/config/.olares-migrations
+    marker=$state/ownership-v1.done
+    for dir in /app-data-root /app-data-root/config /app-data-root/cache; do
+      [ -d "$dir" ] && [ ! -L "$dir" ] || exit 1
+    done
+    [ ! -L "$state" ] && [ ! -L "$marker" ] || exit 1
+    if [ -f "$marker" ] && [ "$(cat "$marker")" = ownership-v1 ]; then
+      echo 'Ownership v1 already completed; skipping tree traversal'
+      exit 0
+    fi
+    started=$(date +%s)
+    mkdir -p "$state"
+    journal=$state/ownership-v1.tsv
+    [ ! -L "$journal" ] || exit 1
+    touch "$journal"
+    before=$(wc -l < "$journal")
+    # Append original metadata before each change; retain it across retries.
+    for dir in /app-data-root /app-data-root/config /app-data-root/cache "$state"; do
+      if [ "$(stat -c %u "$dir")" = 0 ]; then
+        stat -c '%u:%g:%a %n' "$dir" >> "$journal"
+        chown 1000:1000 "$dir"
+      fi
+    done
+    for dir in /app-data-root/config /app-data-root/cache; do
+      device=$(stat -c %d "$dir")
+      find "$dir" -xdev -path "$state" -prune -o -user 0 \( -type d -o -type f \) -exec sh -ec '
+        journal=$1; device=$2; shift 2
+        for path do
+          [ ! -L "$path" ] || exit 1
+          [ "$(stat -c %d "$path")" = "$device" ] || continue
+          [ "$(stat -c %u "$path")" = 0 ] || continue
+          stat -c "%u:%g:%a %n" "$path" >> "$journal"
+          chown -h 1000:1000 "$path"
+        done
+      ' sh "$journal" "$device" {} +
+    done
+    if [ "$(stat -c %u "$journal")" = 0 ]; then
+      chown 1000:1000 "$journal"
+    fi
+    echo "Ownership v1 changed $(($(wc -l < "$journal") - before)) entries in $(($(date +%s) - started))s; awaiting UID1000 validation"
+  verify.sh: |
+    #!/bin/sh
+    set -eu
+    [ "$(id -u)" = 1000 ] || exit 1
+    for dir in /config /cache /config/config /config/data /config/.olares-migrations; do
+      [ ! -L "$dir" ] || exit 1
+      if [ -d "$dir" ]; then
+        probe=$(mktemp "$dir/.olares-write-test.XXXXXX")
+        rm "$probe"
+      fi
+    done
+    for file in /config/data/jellyfin.db /config/config/encoding.xml; do
+      [ ! -L "$file" ] || exit 1
+      if [ -e "$file" ]; then
+        [ -r "$file" ] && [ -w "$file" ] || { echo "Not readable/writable: $file" >&2; exit 1; }
+      fi
+    done
+    sh /migration/encoding.sh
+    marker=/config/.olares-migrations/ownership-v1.done
+    [ ! -L "$marker" ] || exit 1
+    if [ ! -f "$marker" ] || [ "$(cat "$marker")" != ownership-v1 ]; then
+      tmp=$(mktemp /config/.olares-migrations/ownership-v1.XXXXXX)
+      trap 'rm -f "$tmp"' EXIT HUP INT TERM
+      printf 'ownership-v1\n' > "$tmp"
+      mv "$tmp" "$marker"
+    fi
+    echo 'UID1000 write checks and encoding migration passed; ownership v1 complete'
+  encoding.sh: |
+    #!/bin/sh
+    set -eu
+    file=/config/config/encoding.xml
+    [ -f "$file" ] || exit 0
+    pattern='<EncoderPreset([[:space:]]+xsi:nil="true")?[[:space:]]*/>|<EncoderPreset>[[:space:]]*</EncoderPreset>'
+    if grep -Eq "$pattern" "$file"; then
+      backup="$file.pre-12.1"
+      if [ ! -e "$backup" ]; then
+        cp -p "$file" "$backup"
+        cmp -s "$file" "$backup"
+      fi
+      tmp=$(mktemp "$file.tmp.XXXXXX")
+      trap 'rm -f "$tmp"' EXIT HUP INT TERM
+      cp -p "$file" "$tmp"
+      sed -E "s#$pattern#<EncoderPreset>auto</EncoderPreset>#g" "$file" > "$tmp"
+      [ -s "$tmp" ]
+      if grep -Eq "$pattern" "$tmp"; then
+        echo 'Encoding migration incomplete; refusing to start' >&2
+        exit 1
+      fi
+      mv "$tmp" "$file"
+      echo 'Converted legacy empty EncoderPreset to auto; original encoding.xml retained'
     fi
 ---
+{{- $gpuObj := .Values.GPU | default dict }}
+{{- $gpuType := .Values.gpu | default ($gpuObj.Type) | default "cpu" }}
+{{- $isIntelMode := eq $gpuType "intel" }}
+{{- $isAmdMode := eq $gpuType "amd" }}
+{{- $isIgpuMode := or $isIntelMode $isAmdMode }}
+{{- $supportsGpuInject := false }}
+{{- if .Values.sysVersion }}
+{{- $supportsGpuInject = semverCompare ">=1.12.7-0" (toString .Values.sysVersion) }}
+{{- end }}
+{{- $envHwAccel := eq (toString (.Values.olaresEnv.ENABLE_HW_ACCEL | default "false")) "true" }}
+{{- $useNewAccel := and $supportsGpuInject $isIgpuMode }}
+{{- $useLegacyAccel := or (and (not $supportsGpuInject) $envHwAccel) (and (not $supportsGpuInject) $isIgpuMode) }}
+{{- $hwAccel := or $useNewAccel $useLegacyAccel }}
+{{- $needGpuInject := $useNewAccel }}
+{{- $needPrivileged := $useLegacyAccel }}
+{{- $needDriHostPath := $useLegacyAccel }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -25,6 +122,10 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: jellyfin
+  {{- if $needGpuInject }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  {{- end }}
 spec:
   replicas: {{ .Values.workloads.jellyfin.replicaCount }}
   selector:
@@ -38,7 +139,19 @@ spec:
         app: jellyfin
         applications.app.bytetrade.io/macvlan-init: "true"
     spec:
-      {{- $hwAccel := eq (toString (.Values.olaresEnv.ENABLE_HW_ACCEL | default "false")) "true" }}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        {{- if $hwAccel }}
+        supplementalGroups:
+          {{- if $useNewAccel }}
+          - 44
+          - 994
+          {{- else }}
+          - {{ .Values.olaresEnv.VIDEO_GID | default "44" | int }}
+          - {{ .Values.olaresEnv.RENDER_GID | default "994" | int }}
+          {{- end }}
+        {{- end }}
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -46,18 +159,15 @@ spec:
               - matchExpressions:
                   - key: node-role.kubernetes.io/control-plane
                     operator: Exists
-      {{- if $hwAccel }}
-      securityContext:
-        supplementalGroups:
-          - {{ .Values.olaresEnv.VIDEO_GID | default "44" | int }}
-          - {{ .Values.olaresEnv.RENDER_GID | default "994" | int }}
-      {{- end }}
       volumes:
+        - name: migration
+          configMap:
+            name: jellyfin-migration
         - name: home
           hostPath:
             type: Directory
             path: {{ .Values.userspace.userData }}
-        {{- if $hwAccel }}
+        {{- if $needDriHostPath }}
         - name: dri
           hostPath:
             path: /dev/dri
@@ -79,55 +189,53 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: "{{ .Values.sharedlib }}"
-        - name: config-scripts
-          configMap:
-            name: config-scripts
-            defaultMode: 438
-            items:
-            - key: copy-config.sh
-              path: copy-config.sh
       initContainers:
-        - name: init-config
-          image: "docker.io/beclab/jellyfin-jellyfin:10.11.11"
-          resources: {}
-          command: ["/bin/bash", "-c", "chmod +x /scripts/copy-config.sh & bash /scripts/copy-config.sh"]
-          volumeMounts:
-          - name: config
-            mountPath: /config-new
-          - name: config-scripts
-            mountPath: /scripts/copy-config.sh
-            subPath: copy-config.sh
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
         - name: init-chmod-data
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
-          command:
-            - sh
-            - '-c'
-            - |
-              # appData only — do not recurse the whole Home (user media libraries).
-              chown -R 1000:1000 /app-data-root
+          command: ["sh", "/migration/ownership.sh"]
           resources: {}
           volumeMounts:
-            - name: home
-              mountPath: /olares/userdata/home
+            - name: migration
+              mountPath: /migration
+              readOnly: true
             - name: app-data-root
               mountPath: /app-data-root
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
 
+        - name: migrate-encoding
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          command: ["sh", "/migration/verify.sh"]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: migration
+              mountPath: /migration
+              readOnly: true
+            - name: config
+              mountPath: /config
+            - name: cache
+              mountPath: /cache
+
       containers:
         - name: jellyfin
-          image: "docker.io/beclab/jellyfin-jellyfin:10.11.11"
+          image: "docker.io/beclab/jellyfin-jellyfin:12.1"
           imagePullPolicy: IfNotPresent
-          {{- if $hwAccel }}
-          # hostPath makes /dev/dri visible; privileged is required on Olares/k3s
-          # so the device cgroup allows open() on the DRM render node.
           securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            {{- if $needPrivileged }}
             privileged: true
-          {{- end }}
+            {{- end }}
           resources:
             requests:
               cpu: 100m
@@ -150,20 +258,19 @@ spec:
             mountPath: /olares/userdata/external
           - name: external
             mountPath: /external
-          {{- if $hwAccel }}
+          {{- if $needDriHostPath }}
           - name: dri
             mountPath: /dev/dri
           {{- end }}
           env:
           - name: PGID
-            value: "1000" 
+            value: "1000"
           - name: PUID
-            value: "1000" 
+            value: "1000"
           - name: UMASK
-            value: "002" 
+            value: "002"
           - name: TZ
             value: Etc/UTC
-          
 
 ---
 apiVersion: v1
@@ -174,9 +281,8 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: {{ .Release.Name }}
+    app: jellyfin
   ports:
     - protocol: TCP
       port: 8096
       targetPort: 8096
-      
