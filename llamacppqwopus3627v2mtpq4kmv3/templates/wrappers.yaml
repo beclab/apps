@@ -1,8 +1,9 @@
 # Engine wrapper script, mounted into the llama.cpp (engine) container at
-# /llm-init/wrappers. Inlined from llm-init deploy/wrappers/{common,llamacpp}.sh.
+# /llm-init/wrappers. Sources the helpers llm-init publishes into RUN_DIR and
+# runs llama-server under supervise_engine, so Model Console can relaunch the
+# engine with updated model-card engine_args without restarting the Pod.
 #
-# Waits for model_download_finish, then starts llama-server with
-#   -hf "$MODEL_NAME"   (owner/repo or owner/repo:quant)
+# Starts llama-server with -hf "$MODEL_NAME" (owner/repo or owner/repo:quant).
 # Sentinel model_path is not used for load; llm-init ensure must populate HF cache.
 apiVersion: v1
 kind: ConfigMap
@@ -17,10 +18,19 @@ data:
     set -eu
 
     ENGINE=llamacpp
-    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
-    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
-    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
-    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
 
     looks_like_hf_repo_id() {
         s=$1
@@ -39,17 +49,8 @@ data:
         esac
     }
 
-    elapsed=0
-    while [ ! -f "$SENTINEL" ]; do
-        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
-            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
-            exit 1
-        fi
-        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
-        sleep "$WAIT_INTERVAL"
-        elapsed=$((elapsed + WAIT_INTERVAL))
-    done
-    log "sentinel $SENTINEL found after ${elapsed}s"
+    wait_for_sentinel
+    wait_for_engine_args_handoff
 
     if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
         log "MODEL_NAME must be owner/repo or owner/repo:quant for -hf (got ${MODEL_NAME:-<empty>})"
@@ -75,27 +76,33 @@ data:
         export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
     fi
 
-    ARGV=""
-    if [ -n "${ENGINE_ARGS:-}" ]; then
+    run_llamacpp() {
+        # Preserve container CMD extras before ENGINE_ARGS word-splitting.
+        extra_argv="$*"
+        load_engine_args_from_handoff
+        ARGV=""
+        if [ -n "${ENGINE_ARGS:-}" ]; then
+            # shellcheck disable=SC2086
+            set -- $ENGINE_ARGS
+            for tok in "$@"; do
+                case "$tok" in
+                    -*)             ARGV="$ARGV $tok" ;;
+                    LLAMA_ARG_*=*)  export "$tok" && log "engine_args export: $tok" ;;
+                    *=*)            log "engine_args drop non-LLAMA_ARG env: $tok" ;;
+                    *)              ARGV="$ARGV $tok" ;;
+                esac
+            done
+        fi
+        log "starting llama.cpp with -hf=$MODEL_NAME alias=${MODEL_NAME:-unset} argv=${ARGV:-<empty>} (bin=$LLAMA_SERVER_BIN)"
         # shellcheck disable=SC2086
-        set -- $ENGINE_ARGS
-        for tok in "$@"; do
-            case "$tok" in
-                -*)             ARGV="$ARGV $tok" ;;
-                LLAMA_ARG_*=*)  export "$tok" && log "engine_args export: $tok" ;;
-                *=*)            log "engine_args drop non-LLAMA_ARG env: $tok" ;;
-                *)              ARGV="$ARGV $tok" ;;
-            esac
-        done
-    fi
+        exec "$LLAMA_SERVER_BIN" \
+            -hf "$MODEL_NAME" \
+            --alias "${MODEL_NAME:-llm-init-model}" \
+            --host 0.0.0.0 \
+            --port "${LLAMACPP_PORT:-8081}" \
+            --metrics \
+            $ARGV \
+            $extra_argv
+    }
 
-    log "starting llama.cpp with -hf=$MODEL_NAME alias=${MODEL_NAME:-unset} argv=${ARGV:-<empty>} (bin=$LLAMA_SERVER_BIN)"
-    # shellcheck disable=SC2086
-    exec "$LLAMA_SERVER_BIN" \
-        -hf "$MODEL_NAME" \
-        --alias "${MODEL_NAME:-llm-init-model}" \
-        --host 0.0.0.0 \
-        --port "${LLAMACPP_PORT:-8081}" \
-        --metrics \
-        $ARGV \
-        "$@"
+    supervise_engine run_llamacpp "$@"
