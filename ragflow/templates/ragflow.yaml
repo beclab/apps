@@ -1,3 +1,12 @@
+{{- $olaresEnv := .Values.olaresEnv | default dict -}}
+{{- $mcpEnabled := eq (toString ($olaresEnv.MCP_ENABLED | default "false")) "true" -}}
+{{- $embeddingBatchSize := "1" -}}
+{{- if hasKey $olaresEnv "EMBEDDING_BATCH_SIZE" -}}
+{{- $embeddingBatchSize = toString $olaresEnv.EMBEDDING_BATCH_SIZE | default "1" -}}
+{{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" $embeddingBatchSize) -}}
+{{- fail "EMBEDDING_BATCH_SIZE must be a positive integer" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,16 +80,28 @@ spec:
           runAsUser: 0
       containers:
       - name: ragflow
-        image: "docker.io/infiniflow/ragflow:v0.26.4"
+        image: "docker.io/infiniflow/ragflow:v0.27.2"
         args:
           - --enable-adminserver
+          - --init-model-provider-tables
+          {{- if $mcpEnabled }}
+          - --enable-mcpserver
+          - --mcp-host=0.0.0.0
+          - --mcp-port=9382
+          - --mcp-base-url=http://127.0.0.1:9380
+          - --mcp-mode=host
+          {{- end }}
         ports:
         - containerPort: 9380
         - containerPort: 9381
         - containerPort: 80
+        - name: mcp
+          containerPort: 9382
         env:
         - name: HF_ENDPOINT
-          value: '{{ .Values.olaresEnv.HF_ENDPOINT }}'
+          value: {{ $olaresEnv.HF_ENDPOINT | default "" | quote }}
+        - name: EMBEDDING_BATCH_SIZE
+          value: {{ $embeddingBatchSize | quote }}
         - name: MACOS
           value: '0'
         - name: API_PROXY_SCHEME
@@ -177,7 +198,11 @@ metadata:
   namespace: {{ .Release.Namespace }}
 spec:
   ports:
-  - port: 80
+  - name: http
+    port: 80
     targetPort: 80
+  - name: mcp
+    port: 9382
+    targetPort: mcp
   selector:
     app: ragflow
