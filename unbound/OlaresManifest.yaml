@@ -1,0 +1,123 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+
+workloadReplicas:
+  unbound: 1
+  terminal: 1
+metadata:
+  name: unbound
+  description: A DNS resolver that looks up domain names, validates replies, and caches results
+  icon: https://cdn.olares.com/images/2026/09/382924729874d39be7a8e236378034a6.png
+  appid: unbound
+  version: '1.0.9'
+  title: Unbound
+  categories:
+  - homelab
+  - developer
+  tags:
+  - network
+permission:
+  appData: true
+spec:
+  # Deliberately NOT setting `runAsUser: true` here. The webhook injects the uid
+  # at Pod level into this chart's terminal Deployment as well, and the terminal
+  # image's nginx then cannot create /var/cache/nginx/client_temp and crash-loops,
+  # which leaves the whole install stuck. The unbound Deployment already pins
+  # uid/gid 1000 in its own template, so the switch adds nothing here. No other
+  # terminal-based app in this repo sets it either.
+  versionName: '1.26.1'
+  featuredImage: https://cdn.olares.com/images/2026/09/cca2cd25d506f3ba1e6eac14c8903583.png
+  promoteImage:
+  - https://cdn.olares.com/images/2026/09/cca2cd25d506f3ba1e6eac14c8903583.png
+  - https://cdn.olares.com/images/2026/09/64ddadf9fb863a8e00e25c113d2f07ce.png
+  fullDescription: |
+    Unbound is a DNS resolver that translates domain names into IP addresses. It can find answers by querying the DNS hierarchy, validate digitally signed DNS data with DNSSEC, and cache results for later requests.
+
+    **Key features**
+
+    - Resolve domain names recursively without forwarding every request to a public DNS resolver.
+    - Check DNSSEC signatures to verify the authenticity and integrity of signed DNS data.
+    - Reuse cached answers for repeated queries.
+    - Serve as an upstream resolver for a DNS filter such as AdGuard Home.
+
+    **Using Unbound on Olares**
+
+    An administrator installs one shared resolver. Apps and devices must be configured to use it, directly or through a DNS filter. Configure Unbound by editing `unbound.conf` in the included terminal. The configuration is stored persistently across restarts and upgrades; there is no graphical configuration interface.
+
+    Recursive resolution requires outbound DNS access on port 53. If your network blocks or intercepts it, forwarding to a DNS-over-TLS provider on port 853 is an alternative you can configure. DNSSEC validates DNS data but does not encrypt queries; recursive queries to DNS servers are sent in plaintext.
+
+    [Unbound documentation](https://unbound.docs.nlnetlabs.nl/)
+  developer: NLnet Labs
+  website: https://nlnetlabs.nl/projects/unbound/
+  sourceCode: https://github.com/NLnetLabs/unbound
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  # Both Pods together: terminal's two containers request 100Mi each, and the
+  # unbound Pod requests 128Mi (its init container's 16Mi does not add to that
+  # -- init containers run before the regular ones, so a Pod requests the
+  # larger of the two, not the sum).
+  requiredMemory: 328Mi
+  limitedMemory: 512Mi
+  requiredDisk: 64Mi
+  limitedDisk: 256Mi
+  requiredCpu: 100m
+  limitedCpu: 1
+  doc: https://unbound.docs.nlnetlabs.nl/
+  license:
+  - text: BSD-3-Clause
+    url: https://github.com/NLnetLabs/unbound/blob/master/LICENSE
+  supportArch:
+    - amd64
+    - arm64
+  onlyAdmin: true
+options:
+  # A resolver is single-instance infrastructure, not a per-user app. Only one
+  # install can own the exposed host port anyway -- a second user's copy would
+  # run unreachable while its owner was told to use an address that reaches
+  # someone else's resolver -- and one warm cache beats N cold ones.
+  shared: true
+  allowedOutboundPorts:
+    # 53 for recursion; 853 for the DoT forwarding fallback documented in
+    # unbound.conf, used on networks that hijack outbound 53.
+    - 53
+    - 853
+    # 443 for unbound-anchor. Bootstrapping the DNSSEC trust anchor falls back
+    # to fetching root-anchors.xml from data.iana.org over HTTPS when port 53
+    # is answered by something other than the root servers -- which is the
+    # network this app exists for. Without the anchor the entrypoint retries
+    # forever and the app never becomes ready, reporting a port 53 problem
+    # while the path that was actually blocked is this one.
+    - 443
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+entrances:
+- name: terminal
+  host: terminal
+  port: 80
+  title: Unbound Terminal
+  icon: https://cdn.olares.com/images/2026/09/382924729874d39be7a8e236378034a6.png
+  authLevel: internal
+  openMethod: window
+ports:
+# Exposed on the node so a DNS filter can reach the resolver over both
+# transports. unbound.conf restricts access-control to private ranges.
+- name: tcp-5335
+  host: unbound-5335-tcp
+  port: 30535
+  protocol: tcp
+  exposePort: 5335
+- name: udp-5335
+  host: unbound-5335-udp
+  port: 30536
+  protocol: udp
+  exposePort: 5335

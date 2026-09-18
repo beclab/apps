@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terminal-account
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-exec-manager
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pod-exec-binding
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: terminal-account
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: pod-exec-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: terminal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: terminal
+spec:
+  replicas: {{ .Values.workloads.terminal.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: terminal
+  template:
+    metadata:
+      labels:
+        io.kompose.service: terminal
+    spec:
+      serviceAccountName: terminal-account
+      containers:
+        - name: nginx
+          image: docker.io/beclab/terminal:v0.0.14
+          command:
+            - nginx
+            - -g
+            - "daemon off;"
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: 5m
+              memory: 100Mi
+            limits:
+              cpu: 50m
+              memory: 512Mi
+        - name: terminal
+          image: docker.io/beclab/terminal:v0.0.14
+          command:
+            - apiserver
+          args:
+            - --namespace={{ .Release.Namespace }}
+            - --pod=bytetrade.io/terminal=unbound
+            - --container=unbound
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 5m
+              memory: 100Mi
+            limits:
+              cpu: 50m
+              memory: 512Mi
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: terminal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: terminal
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: terminal
+  ports:
+    - name: terminal
+      protocol: TCP
+      port: 80
+      targetPort: 80
