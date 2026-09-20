@@ -1,0 +1,53 @@
+metadata:
+  description: "Qwen3.6-27B MTP UD-Q4_K_XL servito con llama.cpp"
+  title: Qwen3.6-27B MTP (llama.cpp)
+
+spec:
+  upgradeDescription: |
+    v1.0.23: Model Console (llm-init) è stato aggiornato alla versione v1.7.21.
+
+    v1.0.22: Model Console viene aggiornato a llm-init v1.7.19.
+
+    v1.0.15: Abbassare la riserva di memoria host NVIDIA così i nodi timeslice 1.12.6 installano più facilmente (request engine 21Gi→6Gi, requiredMemory del chart 22Gi→7Gi). Quota GPU invariata.
+
+    v1.0.11: aggiornare llm-init a v1.3.8.
+    v1.0.10: aggiornare llama.cpp a `server-cuda12-b10068`; HF_TOKEN via Secret + OLARES_SYSTEM_HUGGINGFACE_*.
+
+    v1.0.9: Spostare `HF_TOKEN` in un Secret Kubernetes (`secretKeyRef`); mappare le env HF da `OLARES_SYSTEM_HUGGINGFACE_*`.
+
+    v1.0.8: LLAMACPP_MEMORY_LIMIT 30Gi; limite llm-init 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.7: memoria host nvidia — requiredMemory 22Gi, LLAMACPP_MEMORY_REQUEST 21Gi, LLAMACPP_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.6: memoria host nvidia — requiredMemory 16Gi, LLAMACPP_MEMORY_REQUEST 15Gi, LLAMACPP_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.5: alzare gli args engine a -c 131072.
+    v1.0.5: allineare requiredCpu=1300m di nvidia e nvidia-gb10.
+    v1.0.4: aggiornare llama.cpp a server-cuda12-b10068.
+    v1.0.4: aggiornare llm-init a v1.3.1.
+    v1.0.4: allineare nvidia requiredMemory=12Gi e LLAMACPP_MEMORY_REQUEST=11Gi (pattern qwopus).
+  fullDescription: |
+    **Model Overview**
+    Qwen3.6-27B MTP è una variante di modello di testo con teste Multi-Token Prediction (MTP) integrate della serie Qwen (Alibaba). Il draft decoding MTP predice più token per passo per un throughput di generazione più alto. Supporta thinking e tool calling. Questa app serve il build GGUF `UD-Q4_K_XL` da `unsloth/Qwen3.6-27B-MTP-GGUF` via llama.cpp (preset solo testo, senza vision/mmproj).
+
+    Consigliato quando serve una velocità di generazione token molto alta. I modelli con tecnologia MTP accelerano il decode redigendo più token a ogni passo.
+
+    **Preset Configuration**
+    - Model: `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
+    - Capabilities: thinking, tools
+    - Engine args: `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (contesto 98K, MTP draft-2, offload GPU completo, cache KV q8_0)
+    - MTP aggiunge un overhead VRAM modesto; in caso di OOM a contesto 98K pieno, riduci `-c` (es. `-c 65536`).
+    - Required GPU memory: `23Gi`
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Usa `23Gi` di memoria GPU; `-ngl all` per GPU completa  |
+    | `nvidia-gb10`  | GPU (Spark)       | Come sopra, ma la memoria è gestita dal pod     |
+    
+    **How It Works**
+    Prima Model Console scarica il modello e lo prepara, poi `llama.cpp` inizia a servire quando è pronto. MTP (`--spec-type draft-mtp`) usa la draft head integrata del modello per predire più token per passo e aumentare il throughput di decode.
+
+    **Stack**
+    - **llama.cpp**: Esegue il modello e serve le richieste API (porta 8081)
+    - **Model Console**: Scarica il modello, mostra i progressi e fornisce l’API OpenAI sulla porta 8090, facendo proxy verso `llamacpp`
+
+    **Model Storage**
+    Tutti i file del modello sono memorizzati in una cartella condivisa in `appCommon/huggingface`, montata come `/cache/hf/hub`. Tutte le app simili usano questa posizione per i modelli.
