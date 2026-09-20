@@ -1,0 +1,98 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $cpuRequest := trim ($oe.LAYOUT_CPU_REQUEST | default "1") -}}
+{{- $memRequest := trim ($oe.LAYOUT_MEMORY_REQUEST | default "1Gi") -}}
+{{- $cpuLimit := trim ($oe.LAYOUT_CPU_LIMIT | default "2") -}}
+{{- $memLimit := trim ($oe.LAYOUT_MEMORY_LIMIT | default "2Gi") -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+# PP-DocLayoutV3 ONNX (CPU). Service name MUST be "layout"
+# (OCRAdapter OCR_LAYOUT_URL default http://layout:8090).
+# ocrlayout.sh waits on sentinel + extra_model_path (ROLE=extra layout repo).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: layout
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: layout
+spec:
+  replicas: {{ .Values.workloads.layout.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: layout
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: layout
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: layout
+          image: {{ include "paddleocrhybrid.layoutImage" . }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/ocrlayout.sh"]
+          env:
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: LAYOUT_LISTEN
+              value: "0.0.0.0:8090"
+            - name: LAYOUT_BIN
+              value: "/usr/local/bin/ocr-layout"
+            - name: EXTRA_MODEL_PATH_FILE
+              value: "/run/llm-init/extra_model_path"
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+          ports:
+            - name: layout
+              containerPort: 8090
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: layout
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: layout
+spec:
+  selector:
+    io.kompose.service: layout
+  ports:
+    - name: layout
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
