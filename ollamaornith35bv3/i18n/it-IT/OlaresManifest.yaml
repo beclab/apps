@@ -1,0 +1,44 @@
+metadata:
+  title: Ornith 35B (Ollama)
+  description: Ornith 35B servito con Ollama
+spec:
+  upgradeDescription: |
+    v1.0.16: Model Console (llm-init) è stato aggiornato alla versione v1.7.21.
+
+    v1.0.15: Model Console viene aggiornato a llm-init v1.7.19.
+
+    v1.0.13: La Model Console ora può riavviare il daemon Ollama. llm-init e il daemon condividono una RUN_DIR sotto appCache e il wrapper avvia `ollama serve` con supervise_engine, quindi modificare engine_args sulla scheda del modello riavvia il daemon con i nuovi valori. La scheda del modello sopravvive anche a un riavvio del Pod e, essendo su disco, ha la precedenza sull'impostazione ENGINE_ARGS dell'app.
+
+    v1.0.10: Ridurre la prenotazione di memoria host NVIDIA affinché i nodi timeslice 1.12.6 installino più facilmente (richiesta engine 21Gi→6Gi, requiredMemory del chart 22Gi→7Gi). Quota GPU invariata.
+
+    v1.0.6: aggiorna ollama a 0.32.1.
+    v1.0.5: memoria host nvidia — requiredMemory 22Gi, OLLAMA_MEMORY_REQUEST 21Gi, OLLAMA_MEMORY_LIMIT 30Gi; limite llm-init 2Gi; limitedMemory 32Gi.
+    v1.0.4: aggiorna ollama a 0.31.2.
+    v1.0.4: aggiorna llm-init a v1.3.1.
+  fullDescription: |
+    **Panoramica del modello**
+    Ornith 35B è la build pacchettizzata con Ollama del modello MoE Ornith-1.0-35B di DeepReinforce, progettata per coding agentico con thinking, tool calling e supporto vision. Questa app scarica `ornith:35b` dalla libreria Ollama.
+
+    Consigliato quando il carico di lavoro è incentrato sulla scrittura di codice e operazioni di terminale automatizzate (coding agentico). Ornith-1.0-35B usa un framework RL di auto-miglioramento e punta a benchmark come SWE-bench e Terminal-Bench.
+
+    **Configurazione del preset**
+    - Modello: `ornith:35b`
+    - Capacità: thinking, tools, vision
+    - Argomenti engine: `OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=131072 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1` (contesto 128K, mantieni il modello in VRAM, flash attention, cache KV q8_0)
+    - Memoria GPU richiesta: `23Gi`
+
+    **Modalità accelerator**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Usa `23Gi` di memoria GPU; Ollama usa la GPU di default              |
+    | `nvidia-gb10`  | GPU (Spark)       | Come sopra, ma la memoria è gestita dal pod                          |
+
+    **Come funziona**
+    Prima, Model Console scarica il modello dalla libreria Ollama e lo prepara; poi il daemon Ollama inizia a servire il modello quando è pronto. Le due parti girano separatamente ma condividono file e info di avanzamento.
+
+    **Stack**
+    - **Daemon Ollama** (porta 11434): scarica e serve il modello
+    - **Model Console** (porta 8090): guida il pull del modello, mostra l'avanzamento e fornisce l'API OpenAI, con proxy verso Ollama
+
+    **Archiviazione del modello**
+    Tutti i modelli scaricati sono conservati in una cartella condivisa in `appCommon/ollama`. Tutte le app basate su Ollama condividono questa posizione, così i blob si deduplicano per digest tra le installazioni.

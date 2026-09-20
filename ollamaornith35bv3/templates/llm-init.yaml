@@ -46,6 +46,10 @@
 {{- /* User ENGINE_ARGS for llm-init: never OLLAMA_KEEP_ALIVE (see engineArgsForLlminit).
        Empty when user leaves ENGINE_ARGS blank — keep_alive is ollama-daemon-only. */ -}}
 {{- $engineArgs := include "ollamaornith35bv3.engineArgsForLlminit" (dict "Args" ($oe.ENGINE_ARGS | default "") "IsCpu" $isCpuMode) -}}
+{{- /* Shared RUN_DIR host path. Same convention as llamacppllmbasev3:
+       appCache (run/scratch state, not user data), namespaced per release.
+       Declared in both templates -- helm renders each file on its own. */ -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 # llm-init Pod (no GPU). Talks to the ollama daemon via the "ollama"
 # Service on :11434 (defined in templates/ollama.yaml). llm-init derives
@@ -75,13 +79,44 @@ spec:
         io.kompose.service: llm-init
     spec:
       restartPolicy: Always
+      volumes:
+        # Shared RUN_DIR: the one-way handoff channel to the ollama daemon
+        # (engine_args, engine_restart, wrappers/common.sh). llm-init and the
+        # daemon are separate Deployments, so an emptyDir cannot carry it --
+        # it has to be a path both Pods can reach.
+        #
+        # model-spec.json and progress_state.json live here too (both default
+        # under RUN_DIR), so a Model Console card edit survives a Pod restart.
+        # Consequence worth knowing: once the card exists on disk it wins over
+        # the chart's ENGINE_ARGS env, so a later edit of the ENGINE_ARGS
+        # setting is logged as ignored rather than applied. Edit engine args on
+        # the model card, not in the app settings.
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "mkdir -p /run/llm-init/wrappers && chown -R 1000:1000 /run/llm-init || true"
+          volumeMounts:
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/beclab/llm-init:v1.3.1
+          image: docker.io/beclab/llm-init:v1.7.21
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
               value: ollama
+            - name: RUN_DIR
+              value: /run/llm-init
             - name: ENGINE_ARGS
               value: "{{ $engineArgs }}"
             - name: MODEL_NAME
@@ -105,6 +140,9 @@ spec:
           ports:
             - name: http
               containerPort: 8090
+          volumeMounts:
+            - name: run-state
+              mountPath: /run/llm-init
           livenessProbe:
             httpGet:
               path: /livez
