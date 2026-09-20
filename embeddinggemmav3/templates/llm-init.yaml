@@ -5,9 +5,10 @@
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
 {{- $logLevel := $oe.LOG_LEVEL | default "info" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "embedding" -}}
 {{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 {{- $llmInitTag := include "embeddinggemmav3.llmInitTag" . -}}
-{{- $modelName := include "embeddinggemmav3.logicalModelName" . -}}
+{{- $modelName := $oe.MODEL_NAME | default (include "embeddinggemmav3.logicalModelName" .) -}}
 {{- $modelSource := include "embeddinggemmav3.modelSource" . -}}
 ---
 # llm-init (ENGINE_KIND=embed): model download + /v1/* proxy to sibling embed-server.
@@ -65,7 +66,7 @@ spec:
             - name: MODEL_NAME
               value: "{{ $modelName }}"
             - name: MODEL_MODE
-              value: "embedding"
+              value: "{{ $modelMode }}"
             - name: MODEL_SOURCE
               value: "{{ $modelSource }}"
 {{- if $hfEndpoint }}
@@ -74,7 +75,10 @@ spec:
 {{- end }}
 {{- if $hfToken }}
             - name: HF_TOKEN
-              value: "{{ $hfToken }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
 {{- end }}
             - name: RUN_DIR
               value: /run/llm-init

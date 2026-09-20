@@ -1,5 +1,16 @@
-# Engine wrapper aligned with llm-init deploy/wrappers/embed.sh + common.sh.
-# Reads /run/llm-init/model_path (written by llm-init with --subdir) → EMBED_MODEL_DIR.
+# Engine wrapper for embed-server.
+#
+# embed.sh is a verbatim copy of llm-init deploy/wrappers/embed.sh. The
+# helpers it sources are NOT here: llm-init publishes common.sh into the
+# shared run dir and the Deployment points WRAPPER_COMMON at that copy, so
+# supervise_engine -- which is what makes POST /api/engine/restart work --
+# has one implementation instead of one per chart. The script waits for it,
+# because nothing orders the two Deployments.
+#
+# This therefore requires an llm-init image that publishes the helpers, and
+# there is no copy left here to fall back to: with an older image the engine
+# waits out WRAPPER_COMMON_WAIT and exits. Bump llmInitTag in _helpers.tpl
+# in the same change that ships this.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,47 +19,45 @@ metadata:
   labels:
     io.kompose.service: embed-server
 data:
-  common.sh: |
-    #!/bin/sh
-    set -eu
-
-    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
-    MODEL_PATH_FILE=${MODEL_PATH_FILE:-/run/llm-init/model_path}
-    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
-    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
-
-    log() {
-        printf '[wrapper-%s] %s\n' "${ENGINE:-engine}" "$*"
-    }
-
-    wait_for_sentinel() {
-        elapsed=0
-        while [ ! -f "$SENTINEL" ]; do
-            if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
-                log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
-                exit 1
-            fi
-            log "waiting for $SENTINEL (elapsed=${elapsed}s)"
-            sleep "$WAIT_INTERVAL"
-            elapsed=$((elapsed + WAIT_INTERVAL))
-        done
-        log "sentinel $SENTINEL found after ${elapsed}s"
-    }
-
-    read_model_path() {
-        if [ ! -f "$MODEL_PATH_FILE" ]; then
-            log "model path file $MODEL_PATH_FILE not found"
-            exit 1
-        fi
-        tr -d '\r\n' < "$MODEL_PATH_FILE"
-    }
-
   embed.sh: |
     #!/bin/sh
-    set -eu
+    # Embed (IREmbeddingServer) engine wrapper.
+    #
+    # Waits for llm-init sentinel, sets EMBED_MODEL_DIR from model_path,
+    # then runs embed_server under supervise_engine so POST /api/engine/restart
+    # can relaunch an engine that has wedged. Engine configuration uses
+    # IREmbeddingServer native env (MODEL_ID, EMBED_DEVICE, ...), NOT llm-init
+    # ENGINE_ARGS: config.ParseEngineArgs rejects a non-empty value for this
+    # kind, so there is no engine_args handoff to wait for.
+    #
+    # MODEL_ID selects a compile-time registry entry (embed_core registry).
+    # GET /v1/models advertises ModelSpec.model_name; llm-init MODEL_NAME
+    # must match that logical name (see deploy/compose/.env.example).
+    #
+    # Required env (embed container):
+    #   MODEL_ID -- registry id, e.g. embeddinggemma-300m-ov
+    # Optional env:
+    #   EMBED_SERVER_BIN -- override binary (default /usr/local/bin/embed_server)
+    #   EMBED_PORT       -- default 8080 (matches deriveEngineURL for embed)
 
+    # shellcheck disable=SC2034
     ENGINE=embed
-    . "$(dirname "$0")/common.sh"
+    # Source the shared helpers: the sibling copy by default, or the one
+    # llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+    # can arrive late — the two containers are separate Deployments with no
+    # ordering between them — so waiting here is the normal path.
+    # Keep this block byte-identical across wrappers (tests/wrappers checks).
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
 
     wait_for_sentinel
     MODEL_PATH=$(read_model_path)
@@ -63,5 +72,9 @@ data:
         exit 127
     fi
 
-    log "starting embed_server model_dir=$MODEL_PATH model_id=${MODEL_ID:-unset} port=${EMBED_PORT:-8080}"
-    exec "$EMBED_SERVER_BIN" "$@"
+    run_embed() {
+        log "starting embed_server model_dir=$MODEL_PATH model_id=${MODEL_ID:-unset} port=${EMBED_PORT:-8080}"
+        exec "$EMBED_SERVER_BIN" "$@"
+    }
+
+    supervise_engine run_embed "$@"
