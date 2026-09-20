@@ -1,0 +1,48 @@
+metadata:
+  title: Gemma-4-12B (vLLM)
+  description: "vLLM で提供する Gemma-4-12B（AWQ-INT4）"
+spec:
+  upgradeDescription: |
+    v1.0.24: Model Console（llm-init）を v1.7.21 に更新しました。
+
+    v1.0.23: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.16: 1.12.6 タイムスライスノードでインストールしやすくするため NVIDIA ホストメモリ予約を引き下げ（エンジン要求 21Gi→6Gi、チャート requiredMemory 22Gi→7Gi）。GPU クォータは変更なし。
+
+    v1.0.12: ENGINE_ARGS が gemma4 のツール呼び出しおよび reasoning パーサーを使用。
+
+    v1.0.11: llm-init を v1.3.5 に更新。
+    v1.0.10: `HF_TOKEN` を Kubernetes Secret（`secretKeyRef`）へ移動；HF 環境変数を `OLARES_SYSTEM_HUGGINGFACE_*` からマッピング。
+
+    v1.0.9: vllm エンジンに共有 HF Hub キャッシュを指す HF_HUB_CACHE 環境変数を追加。
+    v1.0.8: VLLM_MEMORY_LIMIT 30Gi；llm-init 上限 2Gi；limitedMemory 32Gi（30+2）。
+    v1.0.7: nvidia ホストメモリ — requiredMemory 22Gi、VLLM_MEMORY_REQUEST 21Gi、VLLM_MEMORY_LIMIT 26Gi、limitedMemory 30Gi。
+    v1.0.6: nvidia ホストメモリ — requiredMemory 16Gi、VLLM_MEMORY_REQUEST 15Gi、VLLM_MEMORY_LIMIT 19Gi、limitedMemory 26Gi。
+    v1.0.5: llm-init を v1.3.1 に更新。
+  fullDescription: |
+    **モデル概要**
+    Gemma-4-12B-it は Google の Gemma 4 ファミリーの instruction-tuned ビジョン・言語モデルです。マルチモーダル理解、thinking、ツール呼び出し、ビジョンに対応します。本アプリは `cyankiwi/gemma-4-12B-it-AWQ-INT4` の `AWQ-INT4` 量子化ウェイトを vLLM 経由で提供します。
+
+    テキストと画像を組み合わせたマルチモーダルタスクに適しています。Gemma 4 モデルはビジョンと言語にわたる幅広いマルチモーダル理解向けに設計されています。
+
+    **プリセット構成**
+    - モデル: `cyankiwi/gemma-4-12B-it-AWQ-INT4`
+    - 能力: thinking、tools、vision
+    - エンジン引数: `--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser gemma4 --reasoning-parser gemma4 --enable-prefix-caching --enable-auto-tool-choice`
+    - 必要 GPU メモリ: `23Gi`
+
+    **アクセラレータモード**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` GPU メモリ使用；ENGINE_ARGS で `--gpu-memory-utilization` 調整 |
+    | `nvidia-gb10`  | GPU (Spark)       | `nvidia` と同様：`23Gi` GPU メモリ；ENGINE_ARGS の `--gpu-memory-utilization` |
+
+    **仕組み**
+    まず Model Console がモデルをダウンロードして準備し、準備ができたら vLLM がサービングを開始します。両コンテナは同一 Pod で動作し、モデルディレクトリと readiness センチネルを共有します。
+
+    **スタック**
+    - **vLLM**（ポート 8000）: モデルを実行し API リクエストを処理
+    - **Model Console**（ポート 8090）: モデルをダウンロードし進捗を表示、OpenAI API を提供し vLLM へプロキシ
+
+    **モデルストレージ**
+    すべてのモデルファイルは共有フォルダ `appCommon/huggingface` に保存され、`/cache/hf/hub` としてマウントされます。類似アプリはすべてこの場所をモデルに使用します。

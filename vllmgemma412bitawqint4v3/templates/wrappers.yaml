@@ -1,7 +1,9 @@
-# Engine wrapper mounted into the vLLM container at /llm-init/wrappers. Helpers
-# inlined from llm-init v1.1.0 common.sh + vllm.sh (single engine). llm-init
-# downloads the model and writes model_download_finish under /run/llm-init;
-# the wrapper waits on it, then loads --model from MODEL_NAME (owner/repo).
+# Engine wrapper mounted into the vLLM container at /llm-init/wrappers. Sources
+# the helpers llm-init publishes into RUN_DIR and runs vLLM under
+# supervise_engine, so Model Console can relaunch the engine with updated
+# model-card engine_args without restarting the Pod. llm-init downloads the
+# model and writes model_download_finish under /run/llm-init; the wrapper waits
+# on it, then loads --model from MODEL_NAME (owner/repo).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -53,10 +55,19 @@ data:
     set -eu
 
     ENGINE=vllm
-    SENTINEL=${SENTINEL:-/run/llm-init/model_download_finish}
-    WAIT_INTERVAL=${WAIT_INTERVAL:-5}
-    WAIT_TIMEOUT=${WAIT_TIMEOUT:-3600}
-    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
 
     # DGX Spark (GB10 unified memory): disable vLLM's UMA free-memory override so
     # cudaMemGetInfo is used (legacy charts cleared shared_sysmem_device_mem_sms;
@@ -130,18 +141,8 @@ data:
         esac
     }
 
-    # Block until the sentinel appears (or WAIT_TIMEOUT elapses).
-    elapsed=0
-    while [ ! -f "$SENTINEL" ]; do
-        if [ "$elapsed" -ge "$WAIT_TIMEOUT" ]; then
-            log "timed out after ${WAIT_TIMEOUT}s waiting for $SENTINEL"
-            exit 1
-        fi
-        log "waiting for $SENTINEL (elapsed=${elapsed}s)"
-        sleep "$WAIT_INTERVAL"
-        elapsed=$((elapsed + WAIT_INTERVAL))
-    done
-    log "sentinel $SENTINEL found after ${elapsed}s"
+    wait_for_sentinel
+    wait_for_engine_args_handoff
 
     if ! looks_like_hf_repo_id "${MODEL_NAME:-}"; then
         log "MODEL_NAME must be owner/repo for --model (got ${MODEL_NAME:-<empty>})"
@@ -150,20 +151,24 @@ data:
 
     patch_spark_mem_utils
 
-    # Olares env field is ENGINE_ARGS; value must be flags only (not "ENGINE_ARGS=...").
-    case "${ENGINE_ARGS:-}" in
-        ENGINE_ARGS=*) ENGINE_ARGS=${ENGINE_ARGS#ENGINE_ARGS=} ;;
-    esac
+    run_vllm() {
+        load_engine_args_from_handoff
+        # Olares env field is ENGINE_ARGS; value must be flags only (not "ENGINE_ARGS=...").
+        case "${ENGINE_ARGS:-}" in
+            ENGINE_ARGS=*) ENGINE_ARGS=${ENGINE_ARGS#ENGINE_ARGS=} ;;
+        esac
+        # Re-tuned on every launch: the card's engine_args may set a different
+        # --gpu-memory-utilization than the one this pod can actually afford.
+        spark_tune_gpu_memory_utilization
+        log "starting vLLM with model=$MODEL_NAME args=${ENGINE_ARGS:-<empty>}"
+        # shellcheck disable=SC2086  # intentional word-splitting of ENGINE_ARGS
+        exec python3 -m vllm.entrypoints.openai.api_server \
+            --model "$MODEL_NAME" \
+            --served-model-name "$MODEL_NAME" \
+            --host 0.0.0.0 \
+            --port "${VLLM_PORT:-8000}" \
+            ${ENGINE_ARGS:-} \
+            "$@"
+    }
 
-    spark_tune_gpu_memory_utilization
-
-    log "starting vLLM with model=$MODEL_NAME args=${ENGINE_ARGS:-<empty>}"
-
-    # shellcheck disable=SC2086  # intentional word-splitting of ENGINE_ARGS
-    exec python3 -m vllm.entrypoints.openai.api_server \
-        --model "$MODEL_NAME" \
-        --served-model-name "$MODEL_NAME" \
-        --host 0.0.0.0 \
-        --port "${VLLM_PORT:-8000}" \
-        ${ENGINE_ARGS:-} \
-        "$@"
+    supervise_engine run_vllm "$@"

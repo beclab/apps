@@ -6,7 +6,7 @@
 {{- /* Defaults avoid empty K8s quantities. CPU needs "m" (200m = 0.2 core).
        Sums (llm-init + vllm) must fit the manifest accelerator limits. */ -}}
 {{- $cpuRequest := trim ($oe.VLLM_CPU_REQUEST | default "200m") -}}
-{{- $memRequest := trim ($oe.VLLM_MEMORY_REQUEST | default "21Gi") -}}
+{{- $memRequest := trim ($oe.VLLM_MEMORY_REQUEST | default "6Gi") -}}
 {{- $cpuLimit := trim ($oe.VLLM_CPU_LIMIT | default "6") -}}
 {{- $memLimit := trim ($oe.VLLM_MEMORY_LIMIT | default "30Gi") -}}
 {{- $gpuType := .Values.gpu | default "" -}}
@@ -26,7 +26,7 @@
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
 {{- /* Must match llm-init.yaml: per-release run-state hostPath. */ -}}
-{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 # vLLM engine Deployment. wrappers/vllm.sh waits on llm-init's sentinel in
 # the shared run-state dir, then serves --model "$MODEL_NAME" on :8000. llm-init
@@ -82,6 +82,8 @@ spec:
           env:
             - name: ENGINE_KIND
               value: vllm
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
             - name: MODEL_NAME
               value: "{{ $modelName }}"
             - name: VLLM_PORT
@@ -95,6 +97,14 @@ spec:
             # container's default ~/.cache/huggingface (ephemeral, lost on restart).
             - name: HF_HUB_CACHE
               value: /cache/hf/hub
+            # Weights are guaranteed local — wait_for_sentinel gates startup on
+            # llm-init finishing the download — so skip the Hub entirely. Without
+            # this, huggingface_hub HEADs the Hub for every file it cannot find
+            # (chat_template.jinja, adapter configs, ...) and cannot write the
+            # .no_exist negative cache to the read-only mount above, so the same
+            # ~90 lookups repeat on every start (measured 160s -> 105s on a 12B AWQ).
+            - name: HF_HUB_OFFLINE
+              value: "1"
             - name: VLLM_CACHE_ROOT
               value: /cache/vllm
             - name: PYTHONUNBUFFERED
