@@ -1,0 +1,124 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llamacpp
+data:
+  llamacpp.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=llamacpp
+    # Wait for llm-init to publish shared helpers; the Deployments start independently.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+
+    # A snapshot directory contains both the model and its vision projector.
+    if [ -d "$MODEL_PATH" ]; then
+        GGUF_FILE=""
+        for f in "$MODEL_PATH"/*.gguf; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            case "$base" in
+                mmproj*|MMPROJ*|*mmproj*|*MMPROJ*) continue ;;
+            esac
+            GGUF_FILE="$f"
+            break
+        done
+        if [ -z "$GGUF_FILE" ]; then
+            log "no main .gguf under $MODEL_PATH"
+            exit 1
+        fi
+        log "resolved MODEL_PATH directory $MODEL_PATH -> $GGUF_FILE"
+        MODEL_PATH="$GGUF_FILE"
+    fi
+
+    MODEL_DIR=$(dirname "$MODEL_PATH")
+
+    LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
+    if [ -z "$LLAMA_SERVER_BIN" ]; then
+        if [ -x /app/llama-server ]; then
+            LLAMA_SERVER_BIN=/app/llama-server
+        else
+            LLAMA_SERVER_BIN="$(command -v llama-server 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
+        log "llama-server binary not found"
+        exit 127
+    fi
+
+    LLAMA_SERVER_DIR=$(dirname "$LLAMA_SERVER_BIN")
+    export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    if [ -d "${LLAMA_SERVER_DIR}/lib" ]; then
+        export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
+    fi
+
+    # Reload arguments on each launch so model-setting changes apply after restart.
+    run_llamacpp() {
+        # Save container arguments before splitting ENGINE_ARGS.
+        extra_argv="$*"
+        load_engine_args_from_handoff
+
+        ARGV=""
+        HAS_MMPROJ=0
+        if [ -n "${ENGINE_ARGS:-}" ]; then
+            # shellcheck disable=SC2086
+            set -- $ENGINE_ARGS
+            for tok in "$@"; do
+                case "$tok" in
+                    --mmproj) HAS_MMPROJ=1; ARGV="$ARGV $tok" ;;
+                    -*)       ARGV="$ARGV $tok" ;;
+                    LLAMA_ARG_*=*) export "$tok" && log "engine_args export: $tok" ;;
+                    *=*)      log "engine_args drop non-LLAMA_ARG env: $tok" ;;
+                    *)        ARGV="$ARGV $tok" ;;
+                esac
+            done
+        fi
+
+        if [ "$HAS_MMPROJ" -eq 0 ]; then
+            MMPROJ=""
+            for f in "$MODEL_DIR"/mmproj*.gguf "$MODEL_DIR"/MMPROJ*.gguf \
+                     "$MODEL_DIR"/*mmproj*.gguf "$MODEL_DIR"/*MMPROJ*.gguf; do
+                if [ -f "$f" ]; then
+                    MMPROJ="$f"
+                    break
+                fi
+            done
+            if [ -n "$MMPROJ" ]; then
+                ARGV="$ARGV --mmproj $MMPROJ"
+                log "auto mmproj=$MMPROJ"
+            else
+                log "WARN: no *mmproj*.gguf beside $MODEL_PATH (vision OCR may fail)"
+            fi
+        fi
+
+        log "starting llama-server -m=$MODEL_PATH alias=${MODEL_NAME:-surya2} argv=${ARGV:-<empty>}"
+        # shellcheck disable=SC2086
+        exec "$LLAMA_SERVER_BIN" \
+            -m "$MODEL_PATH" \
+            --alias "${MODEL_NAME:-surya2}" \
+            --host 0.0.0.0 \
+            --port "${LLAMACPP_PORT:-8081}" \
+            --metrics \
+            --temp 0 \
+            $ARGV \
+            $extra_argv
+    }
+
+    supervise_engine run_llamacpp "$@"
