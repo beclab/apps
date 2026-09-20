@@ -1,0 +1,48 @@
+metadata:
+  title: Gemma-4-12B (vLLM)
+  description: "Gemma-4-12B (AWQ-INT4) servido con vLLM"
+spec:
+  upgradeDescription: |
+    v1.0.24: Model Console (llm-init) se ha actualizado a v1.7.21.
+
+    v1.0.23: Model Console se actualiza a llm-init v1.7.19.
+
+    v1.0.16: Reducir la reserva de memoria de host NVIDIA para que los nodos timeslice 1.12.6 instalen más fácilmente (petición del motor 21Gi→6Gi, requiredMemory del chart 22Gi→7Gi). Cuota GPU sin cambios.
+
+    v1.0.12: ENGINE_ARGS usa los parsers de tool-call y reasoning de gemma4.
+
+    v1.0.11: actualizar llm-init a v1.3.5.
+    v1.0.10: Mover `HF_TOKEN` a Kubernetes Secret (`secretKeyRef`); mapear env HF desde `OLARES_SYSTEM_HUGGINGFACE_*`.
+
+    v1.0.9: el motor vllm añade la variable HF_HUB_CACHE apuntando a la caché HF Hub compartida.
+    v1.0.8: VLLM_MEMORY_LIMIT 30Gi; límite llm-init 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.7: memoria host nvidia — requiredMemory 22Gi, VLLM_MEMORY_REQUEST 21Gi, VLLM_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.6: memoria host nvidia — requiredMemory 16Gi, VLLM_MEMORY_REQUEST 15Gi, VLLM_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.5: actualizar llm-init a v1.3.1.
+  fullDescription: |
+    **Resumen del modelo**
+    Gemma-4-12B-it es un modelo visión-lenguaje ajustado por instrucciones de la familia Gemma 4 de Google. Admite comprensión multimodal, thinking, tool calling y visión. Esta app sirve los pesos cuantizados `AWQ-INT4` de `cyankiwi/gemma-4-12B-it-AWQ-INT4` mediante vLLM.
+
+    Adecuado para tareas multimodales que combinan texto e imágenes. Los modelos Gemma 4 están diseñados para una comprensión multimodal amplia en visión y lenguaje.
+
+    **Configuración preestablecida**
+    - Modelo: `cyankiwi/gemma-4-12B-it-AWQ-INT4`
+    - Capacidades: thinking, tools, vision
+    - Args del motor: `--max-model-len 65536 --gpu-memory-utilization 0.9 --tensor-parallel-size 1 --max-num-batched-tokens 8192 --tool-call-parser gemma4 --reasoning-parser gemma4 --enable-prefix-caching --enable-auto-tool-choice`
+    - Memoria GPU requerida: `23Gi`
+
+    **Modos de acelerador**
+    | Mode           | Device            | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Usa `23Gi` de memoria GPU; `--gpu-memory-utilization` en ENGINE_ARGS |
+    | `nvidia-gb10`  | GPU (Spark)       | Igual que `nvidia`: `23Gi` de memoria GPU; `--gpu-memory-utilization` en ENGINE_ARGS |
+
+    **Cómo funciona**
+    Primero, Model Console descarga y prepara el modelo; luego vLLM empieza a servirlo cuando está listo. Ambos contenedores se ejecutan en el mismo Pod y comparten el directorio del modelo y el sentinel de readiness.
+
+    **Stack**
+    - **vLLM** (puerto 8000): ejecuta el modelo y atiende peticiones API
+    - **Model Console** (puerto 8090): descarga el modelo, muestra el progreso y ofrece la API OpenAI, haciendo proxy a vLLM
+
+    **Almacenamiento del modelo**
+    Todos los archivos del modelo se guardan en una carpeta compartida en `appCommon/huggingface`, montada como `/cache/hf/hub`. Todas las apps similares usan esta ubicación para modelos.
