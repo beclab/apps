@@ -1,0 +1,211 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := "1250m" -}}
+{{- $memRequest := "2Gi" -}}
+{{- $cpuLimit := "2" -}}
+{{- $memLimit := "3Gi" -}}
+{{- $gpuMem := "4096Mi" -}}
+{{- $gpuMemMi := include "bgererankerv2m3.gpuMiB" $gpuMem -}}
+{{- $gpuType := include "bgererankerv2m3.gpuType" . -}}
+{{- $useOpenVino := eq (include "bgererankerv2m3.useOpenVino" .) "true" -}}
+{{- $isNvidia := or (eq $gpuType "nvidia") (eq $gpuType "nvidia-gb10") -}}
+{{- $isGb10 := eq $gpuType "nvidia-gb10" -}}
+{{- $isIntelDgpu := eq $gpuType "intel-gpu" -}}
+{{- $isIntelMode := or (eq $gpuType "intel") $isIntelDgpu -}}
+{{- $gpuObj := .Values.GPU | default dict -}}
+{{- $cudaMajor := $gpuObj.Cuda | default 12 -}}
+{{- $rerankTag := include "bgererankerv2m3.rerankTag" . -}}
+{{- $modelId := include "bgererankerv2m3.modelId" . -}}
+{{- $rerankImage := printf "docker.io/beclab/rerank-server:%s-onnx-cpu" $rerankTag -}}
+{{- $accelerator := "cpu" -}}
+{{- $rerankRuntime := "onnx" -}}
+{{- if $useOpenVino -}}
+{{- $rerankImage = printf "docker.io/beclab/rerank-server:%s-ov-intel-amd64" $rerankTag -}}
+{{- $accelerator = $gpuType -}}
+{{- $rerankRuntime = "openvino" -}}
+{{- $cpuRequest = "2" -}}
+{{- $memRequest = "4Gi" -}}
+{{- $cpuLimit = "4" -}}
+{{- $memLimit = "6Gi" -}}
+{{- else if $isNvidia -}}
+{{- if $isGb10 -}}
+{{- $rerankImage = printf "docker.io/beclab/rerank-server:%s-onnx-cuda13-gb10-arm64" $rerankTag -}}
+{{- $accelerator = "nvidia-gb10" -}}
+{{- $cpuRequest = "500m" -}}
+{{- $memRequest = "2Gi" -}}
+{{- $cpuLimit = "2" -}}
+{{- $memLimit = "4Gi" -}}
+{{- else -}}
+{{- if ge (float64 $cudaMajor) 13.0 -}}
+{{- $rerankImage = printf "docker.io/beclab/rerank-server:%s-onnx-cuda13" $rerankTag -}}
+{{- else -}}
+{{- $rerankImage = printf "docker.io/beclab/rerank-server:%s-onnx-cuda12" $rerankTag -}}
+{{- end -}}
+{{- $accelerator = "nvidia" -}}
+{{- $cpuRequest = "500m" -}}
+{{- $memRequest = "1Gi" -}}
+{{- $cpuLimit = "2" -}}
+{{- $memLimit = "2Gi" -}}
+{{- end -}}
+{{- end -}}
+{{- $needDri := $isIntelMode -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: rerank-server
+  {{- if or $isNvidia $isIntelDgpu }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "rerank-server"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.bgererankerv2m3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: rerank-server
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: rerank-server
+{{- if $isIntelDgpu }}
+      # Discrete Intel VRAM uses Olares pod annotations, not nvidia.com/gpumem.
+      annotations:
+        gpu.bytetrade.io/required-gpu-memory: "{{ $gpuMem }}"
+        gpu.bytetrade.io/limited-gpu-memory: "6144Mi"
+{{- end }}
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: rerank-server-wrappers
+            defaultMode: 0555
+{{- if $needDri }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+{{- end }}
+      containers:
+        - name: rerank-server
+          image: "{{ $rerankImage }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/rerank.sh"]
+          env:
+            - name: MODEL_ID
+              value: "{{ $modelId }}"
+            - name: ACCELERATOR
+              value: "{{ $accelerator }}"
+            - name: RERANK_RUNTIME
+              value: "{{ $rerankRuntime }}"
+            - name: RERANK_HOST
+              value: "0.0.0.0"
+            - name: RERANK_PORT
+              value: "8080"
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+{{- if $needDri }}
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+{{- end }}
+{{- if $needDri }}
+          securityContext:
+            privileged: true
+{{- end }}
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and $isNvidia (not $isGb10) }}
+              nvidia.com/gpumem: "{{ $gpuMemMi }}"
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rerankserver
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rerank-server
+spec:
+  selector:
+    io.kompose.service: rerank-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
+---
+# Compose service-name alias: llm-init ENGINE_KIND=rerank derives http://rerank:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: rerank
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: rerank-server
+spec:
+  selector:
+    io.kompose.service: rerank-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
