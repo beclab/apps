@@ -47,7 +47,7 @@
 {{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
-{{- $runStateHostPath := printf "%s/huggingface/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
 ---
 # llm-init Pod (no GPU). Downloads HF models, writes the readiness sentinel,
 # serves progress UI + OpenAI /v1/* proxy on :8090, reverse-proxies the engine
@@ -103,7 +103,7 @@ spec:
           # v1.2.4 defaults to the stable LFS download path (hf_xet disabled
           # unless HF_ENABLE_XET=true); LFS streams each file to disk with a
           # bounded RAM footprint, avoiding the hf_xet OOM (huggingface_hub#3300).
-          image: docker.io/beclab/llm-init:v1.3.1
+          image: docker.io/beclab/llm-init:v1.7.21
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
@@ -126,7 +126,10 @@ spec:
 {{- end }}
 {{- if $hfToken }}
             - name: HF_TOKEN
-              value: "{{ $hfToken }}"
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
 {{- end }}
             - name: RUN_DIR
               value: /run/llm-init
