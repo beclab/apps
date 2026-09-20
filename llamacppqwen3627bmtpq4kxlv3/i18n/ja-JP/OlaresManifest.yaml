@@ -1,0 +1,53 @@
+metadata:
+  description: "llama.cpp で提供する Qwen3.6-27B MTP UD-Q4_K_XL"
+  title: Qwen3.6-27B MTP (llama.cpp)
+
+spec:
+  upgradeDescription: |
+    v1.0.23: Model Console（llm-init）を v1.7.21 に更新しました。
+
+    v1.0.22: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.15: 1.12.6 の timeslice ノードでインストールしやすくするため NVIDIA ホストメモリ予約を引き下げ（エンジン request 21Gi→6Gi、chart requiredMemory 22Gi→7Gi）。GPU クォータは変更なし。
+
+    v1.0.11: llm-init を v1.3.8 へバンプ。
+    v1.0.10: llama.cpp を `server-cuda12-b10068` へバンプ。HF_TOKEN は Secret + OLARES_SYSTEM_HUGGINGFACE_*。
+
+    v1.0.9: `HF_TOKEN` を Kubernetes Secret（`secretKeyRef`）へ移動。HF 環境変数を `OLARES_SYSTEM_HUGGINGFACE_*` からマッピング。
+
+    v1.0.8: LLAMACPP_MEMORY_LIMIT 30Gi；llm-init limit 2Gi；limitedMemory 32Gi（30+2）。
+    v1.0.7: nvidia ホストメモリ — requiredMemory 22Gi、LLAMACPP_MEMORY_REQUEST 21Gi、LLAMACPP_MEMORY_LIMIT 26Gi、limitedMemory 30Gi。
+    v1.0.6: nvidia ホストメモリ — requiredMemory 16Gi、LLAMACPP_MEMORY_REQUEST 15Gi、LLAMACPP_MEMORY_LIMIT 19Gi、limitedMemory 26Gi。
+    v1.0.5: エンジン引数を -c 131072 へバンプ。
+    v1.0.5: nvidia と nvidia-gb10 の requiredCpu=1300m を揃える。
+    v1.0.4: llama.cpp を server-cuda12-b10068 へバンプ。
+    v1.0.4: llm-init を v1.3.1 へバンプ。
+    v1.0.4: nvidia requiredMemory=12Gi と LLAMACPP_MEMORY_REQUEST=11Gi を揃える（qwopus パターン）。
+  fullDescription: |
+    **Model Overview**
+    Qwen3.6-27B MTP は Qwen シリーズ（Alibaba）の組み込み Multi-Token Prediction（MTP）ヘッド付きテキストモデル変種です。MTP ドラフトデコードはステップごとに複数トークンを予測し、生成スループットを高めます。Thinking とツール呼び出しに対応。このアプリは `unsloth/Qwen3.6-27B-MTP-GGUF` の `UD-Q4_K_XL` GGUF ビルドを llama.cpp 経由で提供します（テキスト専用プリセット、vision/mmproj なし）。
+
+    非常に高いトークン生成速度が必要な場合に推奨。MTP 技術のモデルは各ステップで複数トークンをドラフトしてデコードを加速します。
+
+    **Preset Configuration**
+    - Model: `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
+    - Capabilities: thinking, tools
+    - Engine args: `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2`（98K コンテキスト、MTP draft-2、フル GPU オフロード、q8_0 KV キャッシュ）
+    - MTP は控えめな VRAM オーバーヘッドを追加。フル 98K コンテキストで OOM する場合は `-c` を下げてください（例: `-c 65536`）。
+    - Required GPU memory: `23Gi`
+
+    **Accelerator modes**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` GPU メモリを使用；`-ngl all` でフル GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | 上記と同様だがメモリは Pod が管理     |
+    
+    **How It Works**
+    まず Model Console がモデルをダウンロードして準備し、準備完了後に `llama.cpp` がサーブを開始します。MTP（`--spec-type draft-mtp`）はモデル組み込みのドラフトヘッドでステップごとに複数トークンを予測し、デコードスループットを高めます。
+
+    **Stack**
+    - **llama.cpp**: モデルを実行し API リクエストを処理（ポート 8081）
+    - **Model Console**: モデルをダウンロードし進捗を表示し、ポート 8090 で OpenAI API を提供して `llamacpp` へプロキシ
+
+    **Model Storage**
+    すべてのモデルファイルは共有フォルダ `appCommon/huggingface` に保存され、`/cache/hf/hub` としてマウントされます。同様のアプリはすべてこの場所を使用します。
