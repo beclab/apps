@@ -1,0 +1,69 @@
+metadata:
+  description: "Qwen3.5-9B (AWQ-4bit) bereitgestellt mit SGLang"
+  title: Qwen3.5-9B (SGLang)
+
+spec:
+  upgradeDescription: |
+    v1.0.23: Model Console wird auf llm-init v1.7.19 aktualisiert.
+
+    v1.0.20: SGLang von v0.5.17-cu130 auf v0.5.18-cu130 anheben.
+
+    **Änderungen** (v0.5.17 → v0.5.18)
+    - Neue Modelle: Muse Glimmer, Intern-S2-Mobius, SANA-Video, LingBot-Video-MoE, LTX-2.5, Cosmos3, LongCat-Image sowie Rezepte für Qwen3.8 / Ling-3.0 / Nemotron 3.5 Lightning
+    - Schnellerer Start: überlapptes Checkpoint-Staging, bis zu 2,38x schnelleres Laden per `--startup-weight-load-mode overlap`
+    - Durchsatz: TP LMHead als All-to-All für Pure-DP-dp-attention, FlashInfer-MNNVL-Pure-Allreduce, Kimi-K3-MLA-Kernels für MI355X optimiert
+    - Quantisierung: NVFP4-Checkpoints laufen auf AMD über `--quantization quark_mxfp4`
+    - Abhängigkeiten: torch 2.13.0 mit triton 3.7.1, flashinfer 0.6.17, sgl-kernel 0.4.6.post1
+    - Breaking: Caches kompilierter Kernel liegen nun unter `SGLANG_CACHE_DIR` (einmaliges Neukompilieren beim ersten Start); torchao-Integration entfernt
+
+    Detaillierte Versionshinweise:
+    https://github.com/sgl-project/sglang/releases
+
+    v1.0.15: NVIDIA-Hostspeicher-Reservierung gesenkt, damit 1.12.6 Timeslice-Knoten leichter installieren können (Engine-Request 21Gi→6Gi, Chart requiredMemory 22Gi→7Gi). GPU-Kontingent unverändert.
+
+    v1.0.11: SGLang von v0.5.14-cu130 auf v0.5.17-cu130 anheben.
+
+    **Änderungen** (v0.5.14 → v0.5.17)
+    - Neue Modelle: Kimi K3, MiniMax-H3, Inkling, GLM-5.2, LiquidAI LFM2.5, Kimi-K2.7-Code, LongCat 2.0, EmbeddingGemma, Hunyuan 3, Qwen3.6 NVFP4 und mehr
+    - DeepSeek-V4: GB300 Day-0-Serving, NVFP4 MoE, MegaMoE, Sparse-Prefill-/Indexer-Optimierungen, Waterfill- & LPLB-MoE-Lastverteilung
+    - Spekulatives Decoding: Spec V2 standardmäßig, DSpark, IndexShare MTP, ReplaySSM Ring Spec-Verify
+    - Parallelität & Cache: DCP-A2A-Backends, DWDP-MoE-Prefill, Decode-CP für MLA, UnifiedRadixTree standardmäßig, sitzungsbewusster Radix-Cache, schnellere Engine-Wiederherstellung
+    - Kernels & Runtime: Breakable CUDA Graph standardmäßig, KDA/GDN Linear-Attention auf Blackwell, erstes Rust-Frontend, natives Exa web_search
+    - Breaking: QServe/FBGEMM FP8 entfernt; NVFP4 GEMM erfordert FlashInfer
+
+    Detaillierte Versionshinweise:
+    https://github.com/sgl-project/sglang/releases
+
+    v1.0.10: llm-init auf v1.3.5 anheben.
+    v1.0.8: SGLANG_MEMORY_LIMIT 30Gi; llm-init-Limit 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.7: nvidia-Hostspeicher — requiredMemory 22Gi, SGLANG_MEMORY_REQUEST 21Gi, SGLANG_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.6: nvidia-Hostspeicher — requiredMemory 16Gi, SGLANG_MEMORY_REQUEST 15Gi, SGLANG_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.5: llm-init auf v1.3.1 anheben.
+  fullDescription: |
+    **Modellübersicht**
+    Qwen3.5-9B ist ein dichtes Vision-Language-Modell aus der Qwen-Serie (Alibaba). Es unterstützt Thinking, Tool Calling und Vision in einem kompakten 9B-Footprint. Diese App stellt die `AWQ-4bit`-quantisierten Gewichte von `cyankiwi/Qwen3.5-9B-AWQ-4bit` über SGLang bereit.
+
+    Eine praktische Wahl, wenn Sie ein fähiges multimodales Modell mit geringeren Ressourcenanforderungen brauchen. Qwen3.5-Modelle unterstützen Thinking, Tools und Vision für Chat- und Agenten-Workflows.
+
+    **Preset-Konfiguration**
+    - Modell: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+    - Fähigkeiten: thinking, tools, vision
+    - Engine-Args: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser qwen3 --tool-call-parser qwen3_coder`
+    - Erforderlicher GPU-Speicher: `23Gi`
+    - SGLang zeichnet sich durch Prefix Caching und strukturierte Ausgabe (JSON, Tool Calls, Agents) aus; Prefix Caching ist standardmäßig aktiviert.
+
+    **Beschleuniger-Modi**
+    | Modus          | Gerät             | Details                                                              |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Nutzt `23Gi` GPU-Speicher; `--mem-fraction-static` in ENGINE_ARGS anpassen |
+    | `nvidia-gb10`  | GPU (Spark)       | Wie `nvidia`: `23Gi` Speicher, vom Pod verwaltet                     |
+
+    **So funktioniert es**
+    Zuerst lädt Model Console das Modell herunter und bereitet es vor, dann beginnt SGLang mit dem Serving, wenn es bereit ist. Diese beiden Teile laufen in getrennten Deployments, teilen aber den HF-Cache und den Run-State über App-Common-Speicher.
+
+    **Stack**
+    - **SGLang** (Port 30000): führt das Modell aus und bedient API-Anfragen
+    - **Model Console** (Port 8090): lädt das Modell herunter, zeigt den Fortschritt und stellt die OpenAI API bereit, mit Proxy zu SGLang
+
+    **Modellspeicher**
+    Alle Modelldateien werden in einem gemeinsamen Ordner unter `appCommon/huggingface` gespeichert, gemountet als `/cache/hf/hub`. Alle ähnlichen Apps nutzen diesen Ort für Modelle.

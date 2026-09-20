@@ -1,0 +1,69 @@
+metadata:
+  description: "SGLang で提供する Qwen3.5-9B（AWQ-4bit）"
+  title: Qwen3.5-9B (SGLang)
+
+spec:
+  upgradeDescription: |
+    v1.0.23: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.20: SGLang を v0.5.17-cu130 から v0.5.18-cu130 に更新。
+
+    **変更内容**（v0.5.17 → v0.5.18）
+    - 新モデル: Muse Glimmer、Intern-S2-Mobius、SANA-Video、LingBot-Video-MoE、LTX-2.5、Cosmos3、LongCat-Image、および Qwen3.8 / Ling-3.0 / Nemotron 3.5 Lightning のレシピ
+    - 起動の高速化: チェックポイント読み込みと CUDA graph キャプチャのオーバーラップ、`--startup-weight-load-mode overlap` でモデルロード最大 2.38 倍
+    - スループット: pure-DP dp-attention 向け TP LMHead の all-to-all 化、FlashInfer MNNVL 純 allreduce、MI355X 向けにチューニングした Kimi K3 MLA カーネル
+    - 量子化: `--quantization quark_mxfp4` により NVFP4 チェックポイントを AMD で実行
+    - 依存関係: torch 2.13.0 と triton 3.7.1、flashinfer 0.6.17、sgl-kernel 0.4.6.post1
+    - Breaking: コンパイル済みカーネルのキャッシュが `SGLANG_CACHE_DIR` 配下に移動（アップグレード後の初回起動で一度だけ再コンパイル）；torchao 連携を削除
+
+    詳細なリリースノート:
+    https://github.com/sgl-project/sglang/releases
+
+    v1.0.15: 1.12.6 timeslice ノードがインストールしやすくなるよう NVIDIA ホストメモリ予約を引き下げ（エンジン要求 21Gi→6Gi、chart requiredMemory 22Gi→7Gi）。GPU クォータは変更なし。
+
+    v1.0.11: SGLang を v0.5.14-cu130 から v0.5.17-cu130 に更新。
+
+    **変更内容**（v0.5.14 → v0.5.17）
+    - 新モデル: Kimi K3、MiniMax-H3、Inkling、GLM-5.2、LiquidAI LFM2.5、Kimi-K2.7-Code、LongCat 2.0、EmbeddingGemma、Hunyuan 3、Qwen3.6 NVFP4 など
+    - DeepSeek-V4: GB300 day-0 サービング、NVFP4 MoE、MegaMoE、sparse-prefill／インデクサー最適化、Waterfill & LPLB MoE ロードバランシング
+    - 投機的デコーディング: デフォルトで Spec V2、DSpark、IndexShare MTP、ReplaySSM Ring Spec-Verify
+    - 並列性＆キャッシュ: DCP A2A バックエンド、DWDP MoE prefill、MLA 向け decode CP、UnifiedRadixTree デフォルト、セッション対応 radix cache、より高速なエンジン復旧
+    - カーネル＆ランタイム: Breakable CUDA Graph デフォルト、Blackwell 上の KDA/GDN linear-attention、初期 Rust フロントエンド、ネイティブ Exa web_search
+    - Breaking: QServe/FBGEMM FP8 を削除；NVFP4 GEMM は FlashInfer が必要
+
+    詳細なリリースノート:
+    https://github.com/sgl-project/sglang/releases
+
+    v1.0.10: llm-init を v1.3.5 に更新。
+    v1.0.8: SGLANG_MEMORY_LIMIT 30Gi；llm-init limit 2Gi；limitedMemory 32Gi（30+2）。
+    v1.0.7: nvidia ホストメモリ — requiredMemory 22Gi、SGLANG_MEMORY_REQUEST 21Gi、SGLANG_MEMORY_LIMIT 26Gi、limitedMemory 30Gi。
+    v1.0.6: nvidia ホストメモリ — requiredMemory 16Gi、SGLANG_MEMORY_REQUEST 15Gi、SGLANG_MEMORY_LIMIT 19Gi、limitedMemory 26Gi。
+    v1.0.5: llm-init を v1.3.1 に更新。
+  fullDescription: |
+    **モデル概要**
+    Qwen3.5-9B は Qwen シリーズ（Alibaba）の密なビジョン・ランゲージモデルです。コンパクトな 9B フットプリントで thinking、ツール呼び出し、ビジョンをサポートします。このアプリは `cyankiwi/Qwen3.5-9B-AWQ-4bit` の `AWQ-4bit` 量子化重みを SGLang 経由で提供します。
+
+    リソース要件を抑えつつ有能なマルチモーダルモデルが必要なときの実用的な選択肢です。Qwen3.5 モデルはチャットとエージェントのワークフロー向けに thinking、tools、ビジョンをサポートします。
+
+    **プリセット構成**
+    - モデル: `cyankiwi/Qwen3.5-9B-AWQ-4bit`
+    - 能力: thinking, tools, vision
+    - エンジン引数: `--context-length 65536 --mem-fraction-static 0.85 --chunked-prefill-size 4096 --reasoning-parser qwen3 --tool-call-parser qwen3_coder`
+    - 必要 GPU メモリ: `23Gi`
+    - SGLang はプレフィックスキャッシュと構造化出力（JSON、ツール呼び出し、エージェント）に優れ、プレフィックスキャッシュはデフォルトで有効です。
+
+    **アクセラレータモード**
+    | モード         | デバイス          | 詳細                                                                 |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` GPU メモリを使用；ENGINE_ARGS で `--mem-fraction-static` を調整 |
+    | `nvidia-gb10`  | GPU (Spark)       | `nvidia` と同じ：`23Gi` メモリ、pod が管理                           |
+
+    **動作の仕組み**
+    まず Model Console がモデルをダウンロードして準備し、準備ができたら SGLang がサービングを開始します。この 2 つは別々の Deployment で動作しますが、App Common ストレージ経由で HF キャッシュと実行状態を共有します。
+
+    **スタック**
+    - **SGLang**（ポート 30000）: モデルを実行し API リクエストを処理
+    - **Model Console**（ポート 8090）: モデルをダウンロードし進捗を表示し、OpenAI API を提供、SGLang へプロキシ
+
+    **モデルストレージ**
+    すべてのモデルファイルは `appCommon/huggingface` の共有フォルダに保存され、`/cache/hf/hub` としてマウントされます。同様のアプリはすべてこの場所をモデルに使用します。
