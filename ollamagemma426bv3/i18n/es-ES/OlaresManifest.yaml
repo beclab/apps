@@ -1,0 +1,44 @@
+metadata:
+  description: "Gemma 4 26B servido con Ollama"
+  title: Gemma 4 26B (Ollama)
+spec:
+  upgradeDescription: |
+    v1.0.17: Model Console (llm-init) se ha actualizado a v1.7.21.
+
+    v1.0.16: Model Console se actualiza a llm-init v1.7.19.
+
+    v1.0.14: La Model Console ya puede reiniciar el daemon de Ollama. llm-init y el daemon comparten un RUN_DIR bajo appCache y el wrapper ejecuta `ollama serve` con supervise_engine, así que editar engine_args en la tarjeta del modelo relanza el daemon con los nuevos valores. La tarjeta del modelo también sobrevive a un reinicio del Pod y, al estar en disco, tiene prioridad sobre el ajuste ENGINE_ARGS de la aplicación.
+
+    v1.0.11: Se reduce la reserva de memoria del host NVIDIA para facilitar la instalación en nodos timeslice 1.12.6 (solicitud del motor 21Gi→6Gi, requiredMemory del chart 22Gi→7Gi). La cuota de GPU no cambia.
+
+    v1.0.6: Ollama actualizado a 0.32.1.
+    v1.0.5: memoria del host NVIDIA — requiredMemory 22Gi, OLLAMA_MEMORY_REQUEST 21Gi, OLLAMA_MEMORY_LIMIT 30Gi; límite de llm-init 2Gi; limitedMemory 32Gi.
+    v1.0.4: Ollama actualizado a 0.31.2.
+    v1.0.4: llm-init actualizado a v1.3.1.
+  fullDescription: |
+    **Descripción del modelo**
+    Gemma 4 26B es un modelo de mezcla de expertos de la familia Gemma 4 de Google, ajustado con instrucciones para razonamiento, programación y tareas multimodales. Admite pensamiento, llamadas a herramientas y visión, con una amplia cobertura multimodal que incluye vídeo y audio en la línea Gemma 4. Esta aplicación descarga `gemma4:26b` de la biblioteca de Ollama.
+
+    Se recomienda cuando necesitas un alto rendimiento de decodificación junto con una completa compatibilidad multimodal. Gemma 4 26B ofrece amplias capacidades para cargas de trabajo de visión, vídeo y audio.
+
+    **Configuración predefinida**
+    - Modelo: `gemma4:26b`
+    - Capacidades: pensamiento, herramientas, visión
+    - Argumentos del motor: `OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=131072 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1` (contexto 128K, mantener el modelo en VRAM, flash attention, caché KV q8_0)
+    - Memoria GPU requerida: `23Gi`
+
+    **Modos de acelerador**
+    | Modo           | Dispositivo       | Detalles                                                             |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Usa `23Gi` de memoria GPU; Ollama usa la GPU de forma predeterminada |
+    | `nvidia-gb10`  | GPU (Spark)       | Como el anterior, pero el pod gestiona la memoria                    |
+
+    **Cómo funciona**
+    Primero, Model Console descarga el modelo de la biblioteca de Ollama y lo prepara; después, el daemon de Ollama comienza a servirlo. Ambas partes se ejecutan por separado, pero comparten archivos e información de progreso.
+
+    **Stack**
+    - **Daemon de Ollama** (puerto 11434): descarga y sirve el modelo
+    - **Model Console** (puerto 8090): controla la descarga, muestra el progreso y proporciona la OpenAI API mediante proxy a Ollama
+
+    **Almacenamiento del modelo**
+    Todos los modelos descargados se guardan en la carpeta compartida `appCommon/ollama`. Todas las aplicaciones basadas en Ollama comparten esta ubicación, por lo que los blobs se deduplican por resumen entre instalaciones.

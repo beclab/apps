@@ -1,0 +1,44 @@
+metadata:
+  description: "Ollama で提供される Gemma 4 26B"
+  title: Gemma 4 26B (Ollama)
+spec:
+  upgradeDescription: |
+    v1.0.17: Model Console（llm-init）を v1.7.21 に更新しました。
+
+    v1.0.16: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.14: Model Console から Ollama デーモンを再起動できるようになりました。llm-init とデーモンが appCache 配下の RUN_DIR を共有し、wrapper は supervise_engine のもとで `ollama serve` を起動するため、モデルカードの engine_args を変更するとデーモンが新しい値で起動し直します。モデルカードは Pod 再起動後も保持され、ディスク上のカードはアプリ設定の ENGINE_ARGS より優先されます。
+
+    v1.0.11: NVIDIA ホストメモリ予約量を削減し、1.12.6 timeslice ノードへインストールしやすくしました（エンジン要求 21Gi→6Gi、chart の requiredMemory 22Gi→7Gi）。GPU クォータは変更ありません。
+
+    v1.0.6: Ollama を 0.32.1 に更新。
+    v1.0.5: NVIDIA ホストメモリ — requiredMemory 22Gi、OLLAMA_MEMORY_REQUEST 21Gi、OLLAMA_MEMORY_LIMIT 30Gi、llm-init 上限 2Gi、limitedMemory 32Gi。
+    v1.0.4: Ollama を 0.31.2 に更新。
+    v1.0.4: llm-init を v1.3.1 に更新。
+  fullDescription: |
+    **モデル概要**
+    Gemma 4 26B は、Google の Gemma 4 ファミリーに属する Mixture-of-Experts モデルで、推論、コーディング、マルチモーダルタスク向けに指示チューニングされています。思考、ツール呼び出し、画像認識に対応し、Gemma 4 系列では動画や音声を含む幅広いマルチモーダル機能を備えています。このアプリは Ollama ライブラリから `gemma4:26b` を取得します。
+
+    高いデコードスループットと豊富なマルチモーダル対応を同時に必要とする場合に推奨します。Gemma 4 26B は画像、動画、音声ワークロード向けの広範な機能を提供します。
+
+    **プリセット構成**
+    - モデル: `gemma4:26b`
+    - 機能: 思考、ツール、画像認識
+    - エンジン引数: `OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=131072 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1`（128K コンテキスト、モデルを VRAM に保持、Flash Attention、q8_0 KV キャッシュ）
+    - 必要な GPU メモリ: `23Gi`
+
+    **アクセラレーターモード**
+    | モード         | デバイス          | 詳細                                                                 |
+    |----------------|-------------------|----------------------------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` の GPU メモリを使用。Ollama はデフォルトで GPU を使用        |
+    | `nvidia-gb10`  | GPU (Spark)       | 上記と同様。ただしメモリは pod が管理                               |
+
+    **動作の仕組み**
+    まず Model Console が Ollama ライブラリからモデルを取得して準備し、その後 Ollama デーモンがモデルの提供を開始します。両者は別々に動作しますが、ファイルと進捗情報を共有します。
+
+    **スタック**
+    - **Ollama デーモン**（ポート 11434）: モデルを取得して提供
+    - **Model Console**（ポート 8090）: モデル取得の制御、進捗表示、Ollama へのプロキシを介した OpenAI API の提供
+
+    **モデルストレージ**
+    取得したすべてのモデルは共有フォルダー `appCommon/ollama` に保存されます。Ollama ベースの全アプリがこの場所を共有するため、インストール間で blob がダイジェストにより重複排除されます。
