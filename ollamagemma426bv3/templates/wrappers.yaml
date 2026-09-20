@@ -1,6 +1,16 @@
 # Engine wrapper script, mounted into the Ollama daemon container at
-# /llm-init/wrappers. Exports ENGINE_ARGS, starts ollama serve, then preloads
-# the install-time model into VRAM after llm-init pull (name from MODEL_SOURCE).
+# /llm-init/wrappers.
+#
+# Shape follows deploy/wrappers/ollama.sh in the llm-init repo: source the
+# helpers llm-init publishes into RUN_DIR, wait for the model-card handoff,
+# then run `ollama serve` under supervise_engine so a Model Console edit to
+# engine_args relaunches the daemon. Only the VRAM preload below is this
+# chart's own -- supervise_engine itself is not something a chart copy should
+# own (see docs/architecture/engine-boot.html#restart).
+#
+# The container sets WRAPPER_COMMON=/run/llm-init/wrappers/common.sh, so this
+# ConfigMap deliberately carries no fallback copy: the helpers ship with the
+# llm-init image (>= v1.5.0) and are rewritten into RUN_DIR on every boot.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,23 +21,35 @@ metadata:
 data:
   ollama.sh: |
     #!/bin/sh
-    set -eu
+    # Ollama wrapper.
+    #
+    # ENGINE_ARGS is a KEY=VALUE list of OLLAMA_* daemon env. The chart env is
+    # only the fallback: when llm-init has published ${RUN_DIR}/engine_args the
+    # card wins, and supervise_engine reloads it before every launch. The card
+    # never carries OLLAMA_KEEP_ALIVE (llm-init strips it -- it forwards the
+    # value on /api/chat instead), so the -1 default is re-applied below on
+    # each launch rather than inherited from the chart env.
 
+    # shellcheck disable=SC2034
     ENGINE=ollama
-    log() { printf '[wrapper-%s] %s\n' "$ENGINE" "$*"; }
+    # Source the shared helpers: the sibling copy by default, or the one
+    # llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+    # can arrive late — the two containers are separate Deployments with no
+    # ordering between them — so waiting here is the normal path.
+    # Keep this block byte-identical across wrappers (tests/wrappers checks).
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
 
-    engine_args_export_env() {
-        args="${ENGINE_ARGS:-}"
-        [ -z "$args" ] && return 0
-        # shellcheck disable=SC2086
-        set -- $args
-        for tok in "$@"; do
-            case "$tok" in
-                *=*) export "$tok" && log "engine_args export: $tok" ;;
-                *)   log "engine_args drop non-KV token: $tok" ;;
-            esac
-        done
-    }
+    export OLLAMA_HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
 
     # Ollama names are model:tag. MODEL_SOURCE (ollama://qwen3.5:4b) is authoritative;
     # MODEL_NAME may use a hyphen (qwen3.5-4b) which show/run will not resolve.
@@ -82,8 +104,6 @@ data:
 
     preload_via_api() {
         model="$1"
-        host="${OLLAMA_HOST#http://}"
-        host="${host#https://}"
         case "${MODEL_MODE:-chat}" in
             embedding|embed)
                 if ollama embed "$model" "warmup" >/dev/null 2>&1; then
@@ -95,6 +115,12 @@ data:
         ollama run "$model" "Hello" >/dev/null 2>&1
     }
 
+    # preload_model polls until `ollama show` resolves a candidate (the daemon is
+    # up AND llm-init has finished the pull), then warms VRAM. It runs beside the
+    # daemon rather than before it: supervise_engine has to end up tracking the
+    # `ollama serve` PID itself, so run_ollama execs and cannot wait for anything
+    # afterwards. Bounded by OLLAMA_PRELOAD_TIMEOUT so a launch that never gets a
+    # model does not leave a poller behind.
     preload_model() {
         case "${OLLAMA_PRELOAD:-true}" in
             false|FALSE|0|no|NO|off|OFF)
@@ -139,22 +165,21 @@ data:
         fi
     }
 
-    export OLLAMA_HOST="${OLLAMA_HOST:-0.0.0.0:11434}"
-    engine_args_export_env
-    normalize_keep_alive
-    export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}"
     build_model_candidates
 
-    log "starting ollama serve on $OLLAMA_HOST"
-    ollama serve "$@" &
-    SERVER_PID=$!
-    trap 'kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; exit 0' INT TERM
+    # No download sentinel for Ollama; still wait for model-card handoff so we
+    # do not briefly serve with chart ENGINE_ARGS while llm-init reconciles.
+    wait_for_engine_args_handoff
 
-    until ollama list >/dev/null 2>&1; do
-        sleep 1
-    done
-    log "ollama API ready"
+    run_ollama() {
+        engine_args_export_env
+        normalize_keep_alive
+        export OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:--1}"
+        # Re-run on every launch: a card edit relaunches the daemon, which drops
+        # what was resident in VRAM.
+        preload_model &
+        log "starting ollama serve on $OLLAMA_HOST"
+        exec ollama serve "$@"
+    }
 
-    preload_model
-
-    wait "$SERVER_PID"
+    supervise_engine run_ollama "$@"
