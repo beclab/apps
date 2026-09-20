@@ -1,0 +1,74 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: ticket
+{{- if and .Values.sysVersion (semverCompare ">=1.12.7-0" (toString .Values.sysVersion)) }}
+  annotations:
+    applications.app.bytetrade.io/default-thirdlevel-domains: '[{"appName": "ticket","entranceName":"ticket","thirdLevelDomain":"ticket"}]'
+{{- end }}
+spec:
+  replicas: {{ .Values.workloads.ticket.replicaCount }}
+  selector:
+    matchLabels:
+      app: ticket
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: ticket
+      annotations:
+        checksum/nginx-config: {{ include "ticket.nginx.conf" . | sha256sum }}
+    spec:
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: {{ .Release.Name }}-nginx-config
+            defaultMode: 438
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: nginx-templates
+          emptyDir: {}
+      containers:
+        - name: nginx
+{{/*          image: "{{ .Values.images.web.repository }}:{{ .Values.images.web.tag }}"*/}}
+          image: "beclab/olares-ticket-web-assisthub:v0.9.7"
+          imagePullPolicy: {{ .Values.images.web.pullPolicy }}
+          env:
+            - name: SERVER_API_URL
+              value: "{{ .Values.olaresEnv.SERVER_API_URL }}"
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: nginx.conf
+            - name: nginx-templates
+              mountPath: /etc/nginx/templates
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+
+    
