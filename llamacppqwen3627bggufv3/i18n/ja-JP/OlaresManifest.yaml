@@ -1,0 +1,48 @@
+metadata:
+  title: Qwen3.6-27B (llama.cpp)
+  description: "llama.cpp で提供する Qwen3.6-27B（GGUF Q4_K_M）"
+spec:
+  upgradeDescription: |
+    v1.0.20: Model Console（llm-init）を v1.7.21 に更新しました。
+
+    v1.0.19: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.13: 1.12.6 タイムスライスノードでインストールしやすくするため NVIDIA ホストメモリ予約を引き下げ（エンジン要求 21Gi→6Gi、チャート requiredMemory 22Gi→7Gi）。GPU クォータは変更なし。
+
+    v1.0.9: llama.cpp を `server-cuda12-b10068` に更新；HF_TOKEN を Secret + OLARES_SYSTEM_HUGGINGFACE_* 経由に。
+
+    v1.0.8: `HF_TOKEN` を Kubernetes Secret（`secretKeyRef`）へ移動；HF 環境変数を `OLARES_SYSTEM_HUGGINGFACE_*` からマッピング。
+
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi；llm-init 上限 2Gi；limitedMemory 32Gi（30+2）。
+    v1.0.6: nvidia ホストメモリ — requiredMemory 22Gi、LLAMACPP_MEMORY_REQUEST 21Gi、LLAMACPP_MEMORY_LIMIT 26Gi、limitedMemory 30Gi。
+    v1.0.5: nvidia ホストメモリ — requiredMemory 16Gi、LLAMACPP_MEMORY_REQUEST 15Gi、LLAMACPP_MEMORY_LIMIT 19Gi、limitedMemory 26Gi。
+    v1.0.4: llama.cpp を server-cuda12-b10068 に更新。
+    v1.0.4: llm-init を v1.3.1 に更新。
+    v1.0.4: nvidia requiredMemory=12Gi と LLAMACPP_MEMORY_REQUEST=11Gi を整合（qwopus パターン）。
+  fullDescription: |
+    **モデル概要**
+    Qwen3.6-27B は Qwen シリーズ（Alibaba）のビジョン・言語モデルです。組み込み Vision エンコーダによるマルチモーダル理解を統合し、非常に長いコンテキストウィンドウに対応し、thinking・ツール呼び出し・ビジョン機能を備えます。本アプリは `unsloth/Qwen3.6-27B-GGUF` の `Q4_K_M` GGUF ビルドを llama.cpp 経由で提供します。
+
+    多くのシナリオのデフォルトモデルとして推奨され、エージェントコーディング、マルチモーダルビジョン、会話、長文処理に優れます。自動化されたターミナル操作やコード記述にも特に強いです。
+
+    **プリセット構成**
+    - モデル: `unsloth/Qwen3.6-27B-GGUF:Q4_K_M`（ビジョン用 `mmproj-F16.gguf` プロジェクター付き）
+    - 能力: thinking、tools、vision
+    - エンジン引数: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1`（128K コンテキスト、フル GPU オフロード、KV キャッシュを q8_0 量子化）
+    - 必要 GPU メモリ: `23Gi`
+
+    **アクセラレータモード**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | `23Gi` GPU メモリ使用；`-ngl all` でフル GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | 上記と同様だがメモリは Pod が管理     |
+
+    **仕組み**
+    まず Model Console がモデルをダウンロードして準備し、準備ができたら `llama.cpp` がサービングを開始します。両者は別々に動作しつつ、ファイルと進捗情報を共有します。
+
+    **スタック**
+    - **llama.cpp**: モデルを実行し API リクエストを処理（ポート 8081）
+    - **Model Console**: モデルをダウンロードし進捗を表示、ポート 8090 で OpenAI API を提供し `llamacpp` へプロキシ。
+
+    **モデルストレージ**
+    すべてのモデルファイルは共有フォルダ `appCommon/huggingface` に保存され、`/cache/hf/hub` としてマウントされます。類似アプリはすべてこの場所をモデルに使用します。
