@@ -38,7 +38,7 @@ Unified repo: https://huggingface.co/beclab/embeddinggemma-300m
 | Component | Image |
 |-----------|-------|
 | embed-server | `beclab/embed-server:v0.1.0-*` |
-| llm-init | `beclab/llm-init:test_v1` |
+| llm-init | `beclab/llm-init:v1.3.5` |
 
 ## Device mounts
 
