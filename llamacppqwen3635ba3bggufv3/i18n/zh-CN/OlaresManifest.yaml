@@ -3,6 +3,36 @@ metadata:
   title: Qwen3.6-35B-A3B (llama.cpp)
 
 spec:
+  upgradeDescription: |
+    v1.0.24: Model Console（llm-init）版本更新为 v1.7.21。
+
+    v1.0.23: Model Console 升级到 llm-init v1.7.19。
+
+    v1.0.16: llm-init v1.6.1 —— 闸门与容量读数改为跟随 ENGINE_ARGS，不再沿用进程
+      启动时读到的那一份。本预设的默认行为不变，但改卡的两个方向现在都生效：加上
+      -np 并配 -no-kvu 后每个槽位有自己的份额，闸门会退出，不再为引擎已经在管的
+      池子白付两跳 tokenize；反过来也一样。无论哪个方向，卡上报的窗口与槽位数都
+      来自重新拉起的引擎实际解析出的值。在此之前只有重启应用才能做到这件事。
+
+    v1.0.15: llm-init v1.6.0 —— 本预设没写 -np，而 llama.cpp 在这种情况下的默认值
+      是 4 个槽位共用一个 KV 池，不是 llm-init 以前上报的单槽。所以 Router 宣称的
+      并发是错的，而且四个槽位每一个都能申请到整个 131072 token 的池子。现在请求会
+      先预留池子空间再转发，池子满了就等，等不到返回 503 kv_budget_exhausted，
+      而不是让池子在解码中途耗尽——那会把当时所有正在生成的请求一起打掉。同时也
+      开始读引擎自己的 /props，窗口和槽位数来自它实际解析出的值，而非参数的推断。
+
+    v1.0.13: 下调 NVIDIA 主机内存预留，方便 1.12.6 时间分片节点安装（引擎 request 21Gi→6Gi，应用 requiredMemory 22Gi→7Gi）。显存配额不变。
+
+    v1.0.9: bump llama.cpp to `server-cuda12-b10068`; HF_TOKEN via Secret + OLARES_SYSTEM_HUGGINGFACE_*.
+
+    v1.0.8: Move `HF_TOKEN` into Kubernetes Secret (`secretKeyRef`); map HF env from `OLARES_SYSTEM_HUGGINGFACE_*`.
+
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi; llm-init limit 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.6: nvidia host memory — requiredMemory 22Gi, LLAMACPP_MEMORY_REQUEST 21Gi, LLAMACPP_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.5: nvidia host memory — requiredMemory 16Gi, LLAMACPP_MEMORY_REQUEST 15Gi, LLAMACPP_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.4: bump llama.cpp to server-cuda12-b10068.
+    v1.0.4: bump llm-init to v1.3.1.
+    v1.0.4: align nvidia requiredMemory=12Gi and LLAMACPP_MEMORY_REQUEST=11Gi (qwopus pattern).
   fullDescription: |
     **模型简介**
     Qwen3.6-35B-A3B 是阿里巴巴 Qwen 系列的 MoE 视觉语言模型，总参数量 35B、每次激活约 3B。内置视觉编码器，支持超长上下文，开箱即用支持思考、工具调用与视觉能力。本应用通过 llama.cpp 运行 `unsloth/Qwen3.6-35B-A3B-GGUF` 的 `UD-IQ4_XS` GGUF 量化版本。

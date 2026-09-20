@@ -1,0 +1,65 @@
+metadata:
+  description: llama.cpp で提供する Qwen3.6-35B-A3B（GGUF UD-IQ4_XS）
+  title: Qwen3.6-35B-A3B (llama.cpp)
+spec:
+  upgradeDescription: |
+    v1.0.24: Model Console（llm-init）を v1.7.21 に更新しました。
+
+    v1.0.23: Model Console を llm-init v1.7.19 にアップグレードしました。
+
+    v1.0.16: llm-init v1.6.1 — ゲートと容量読み取りが起動時に読んだコピーではなく
+      ENGINE_ARGS に従うように。このプリセットは出荷状態では影響を受けませんが、
+      編集の両方向が効くようになりました：-no-kvu 付きで -np を追加すると各スロットに
+      独自の割当が与えられ、エンジンがすでに監視しているプールに対してトークナイザー
+      ホップを二重課金する代わりにゲートが後退し、いずれにせよカードは再起動された
+      エンジンが実際に解決したウィンドウとスロット数を報告します。以前は
+      Deployment の再起動だけがそれを行っていました。
+    
+    v1.0.15: llm-init v1.6.0 — このプリセットは -np を指定せず、llama.cpp 自身の
+      デフォルトは単一スロットではなく、1 つの KV プールを共有する 4 スロットです。
+      そのため Router が広告する幅が誤りで、4 スロットがそれぞれ 131072 トークンの
+      プール全体を要求できました。リクエストは転送前にプール枠を予約し、満杯時は待ち、
+      デコード途中でプールが尽きる代わりに 503 kv_budget_exhausted を返します
+      （当時生成中のすべてのリクエストが失敗していました）。エンジン自身の /props も
+      読むようになり、ウィンドウとスロット数はフラグの暗示ではなくエンジンが
+      解決した値から来ます。
+    
+    v1.0.13: 1.12.6 timeslice ノードがインストールしやすくなるよう NVIDIA ホストメモリ予約を引き下げ（エンジン要求 21Gi→6Gi、chart requiredMemory 22Gi→7Gi）。GPU クォータは変更なし。
+    
+    v1.0.9: llama.cpp を `server-cuda12-b10068` に更新；HF_TOKEN を Secret + OLARES_SYSTEM_HUGGINGFACE_* 経由に。
+    
+    v1.0.8: `HF_TOKEN` を Kubernetes Secret（`secretKeyRef`）へ移動；HF env を `OLARES_SYSTEM_HUGGINGFACE_*` からマップ。
+    
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi；llm-init limit 2Gi；limitedMemory 32Gi（30+2）。
+    v1.0.6: nvidia ホストメモリ — requiredMemory 22Gi、LLAMACPP_MEMORY_REQUEST 21Gi、LLAMACPP_MEMORY_LIMIT 26Gi、limitedMemory 30Gi。
+    v1.0.5: nvidia ホストメモリ — requiredMemory 16Gi、LLAMACPP_MEMORY_REQUEST 15Gi、LLAMACPP_MEMORY_LIMIT 19Gi、limitedMemory 26Gi。
+    v1.0.4: llama.cpp を server-cuda12-b10068 に更新。
+    v1.0.4: llm-init を v1.3.1 に更新。
+    v1.0.4: nvidia requiredMemory=12Gi と LLAMACPP_MEMORY_REQUEST=11Gi を揃える（qwopus パターン）。
+  fullDescription: |
+    **モデル概要**
+    Qwen3.6-35B-A3B は Qwen シリーズ（Alibaba）の Mixture-of-Experts ビジョン・ランゲージモデルで、総パラメータ 35B、トークンあたり約 3B がアクティブです。組み込みビジョンエンコーダー、非常に長いコンテキスト対応、thinking・ツール呼び出し・ビジョン機能を備えます。このアプリは `unsloth/Qwen3.6-35B-A3B-GGUF` の `UD-IQ4_XS` GGUF ビルドを llama.cpp 経由で提供します。
+    
+    長いコンテキストと視覚理解が必要なマルチモーダルワークロードに適しています。Qwen3.6 35B シリーズは拡張コンテキストウィンドウをネイティブサポートし、画像＋テキストタスク用のビジョンエンコーダーを含みます。
+    
+    **プリセット構成**
+    - Model: `unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS`（ビジョン用 `mmproj-F16.gguf` プロジェクター付き）
+    - Capabilities: thinking, tools, vision
+    - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0`（128K コンテキスト、フル GPU オフロード、KV キャッシュを q8_0 量子化）
+    - 必要な GPU メモリ: `23Gi`
+    
+    **アクセラレータモード**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
+    
+    **動作の仕組み**
+    まず Model Console がモデルをダウンロードして準備し、準備ができたら `llama.cpp` がサービングを開始します。この 2 つは別々に動作しますが、ファイルと進捗情報を共有します。
+    
+    **スタック**
+    - **llama.cpp**: モデルを実行し API リクエストを処理（ポート 8081）
+    - **Model Console**: モデルをダウンロードし進捗を表示し、ポート 8090 で OpenAI API を提供、`llamacpp` へプロキシ。
+    
+    **モデルストレージ**
+    すべてのモデルファイルは `appCommon/huggingface` の共有フォルダに保存され、`/cache/hf/hub` としてマウントされます。同様のアプリはすべてこの場所をモデルに使用します。

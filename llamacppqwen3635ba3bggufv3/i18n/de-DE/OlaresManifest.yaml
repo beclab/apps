@@ -1,0 +1,67 @@
+metadata:
+  description: Qwen3.6-35B-A3B (GGUF UD-IQ4_XS) bereitgestellt mit llama.cpp
+  title: Qwen3.6-35B-A3B (llama.cpp)
+spec:
+  upgradeDescription: |
+    v1.0.24: Model Console (llm-init) wurde auf v1.7.21 aktualisiert.
+
+    v1.0.23: Model Console wird auf llm-init v1.7.19 aktualisiert.
+
+    v1.0.16: llm-init v1.6.1 — Gate und Kapazitätsablesung folgen
+      ENGINE_ARGS statt der Kopie, die sie beim Start gelesen haben. Dieses Preset ist
+      wie ausgeliefert unbeeinflusst, aber beide Richtungen einer Bearbeitung greifen jetzt:
+      das Hinzufügen von -np mit -no-kvu gibt jedem Slot seinen Anteil und das Gate
+      tritt zurück, statt zwei Tokenizer-Hops für einen Pool zu belasten,
+      den die Engine bereits überwacht, und in jedem Fall meldet die Karte Fenster
+      und Slot-Anzahl, die die neu gestartete Engine tatsächlich aufgelöst hat. Zuvor
+      tat das nur ein Neustart des Deployments.
+    
+    v1.0.15: llm-init v1.6.0 — dieses Preset nennt kein -np, und llama.cpps eigener
+      Default dort sind 4 Slots, die einen KV-Pool teilen, nicht der einzelne Slot, den llm-init
+      früher meldete. Die von Router beworbene Breite war daher falsch, und vier Slots
+      konnten jeweils den gesamten 131072-Token-Pool beanspruchen. Anfragen reservieren jetzt Pool-
+      Platz, bevor sie weitergeleitet werden, und warten, wenn er voll ist, mit Antwort 503
+      kv_budget_exhausted, statt den Pool mitten im Decode ausgehen zu lassen, was
+      jede zu dem Zeitpunkt generierende Anfrage scheitern ließ. Die eigene /props der Engine
+      wird jetzt auch gelesen, sodass Fenster und Slot-Anzahl von dem kommen, was sie aufgelöst
+      hat, statt von dem, was die Flags implizierten.
+    
+    v1.0.13: NVIDIA-Hostspeicher-Reservierung gesenkt, damit 1.12.6 Timeslice-Knoten leichter installieren können (Engine-Request 21Gi→6Gi, Chart requiredMemory 22Gi→7Gi). GPU-Kontingent unverändert.
+    
+    v1.0.9: llama.cpp auf `server-cuda12-b10068` angehoben; HF_TOKEN via Secret + OLARES_SYSTEM_HUGGINGFACE_*.
+    
+    v1.0.8: `HF_TOKEN` in Kubernetes Secret (`secretKeyRef`) verschieben; HF-Env aus `OLARES_SYSTEM_HUGGINGFACE_*` mappen.
+    
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi; llm-init Limit 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.6: nvidia Hostspeicher — requiredMemory 22Gi, LLAMACPP_MEMORY_REQUEST 21Gi, LLAMACPP_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.5: nvidia Hostspeicher — requiredMemory 16Gi, LLAMACPP_MEMORY_REQUEST 15Gi, LLAMACPP_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.4: llama.cpp auf server-cuda12-b10068 anheben.
+    v1.0.4: llm-init auf v1.3.1 anheben.
+    v1.0.4: nvidia requiredMemory=12Gi und LLAMACPP_MEMORY_REQUEST=11Gi angleichen (qwopus-Muster).
+  fullDescription: |
+    **Modellübersicht**
+    Qwen3.6-35B-A3B ist ein Mixture-of-Experts-Vision-Language-Modell aus der Qwen-Serie (Alibaba) mit 35B Gesamtparametern und etwa 3B aktiv pro Token. Es verfügt über einen eingebauten Vision-Encoder, sehr lange Kontextunterstützung und bietet Thinking, Tool-Calling und Vision-Fähigkeiten. Diese App stellt den `UD-IQ4_XS`-GGUF-Build von `unsloth/Qwen3.6-35B-A3B-GGUF` über llama.cpp bereit.
+    
+    Gut geeignet für multimodale Workloads, die langen Kontext und Vision-Verständnis brauchen. Die Qwen3.6-35B-Serie unterstützt nativ erweiterte Kontextfenster und enthält einen Vision-Encoder für Bild-und-Text-Aufgaben.
+    
+    **Preset-Konfiguration**
+    - Model: `unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (mit `mmproj-F16.gguf`-Projektor für Vision)
+    - Capabilities: thinking, tools, vision
+    - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0` (128K Kontext, volles GPU-Offload, KV-Cache auf q8_0 quantisiert)
+    - Erforderlicher GPU-Speicher: `23Gi`
+    
+    **Beschleuniger-Modi**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
+    
+    **So funktioniert es**
+    Zuerst lädt Model Console das Modell herunter und bereitet es vor, dann beginnt `llama.cpp` mit dem Serving, wenn es bereit ist. Diese beiden Teile laufen getrennt, teilen aber Dateien und Fortschrittsinformationen.
+    
+    **Software-Stack**
+    - **llama.cpp**: Führt das Modell aus und bedient API-Anfragen (Port 8081)
+    - **Model Console**: Lädt das Modell herunter, zeigt den Fortschritt und stellt die OpenAI API auf Port 8090 bereit, mit Proxy zu `llamacpp`.
+    
+    **Modellspeicher**
+    Alle Modelldateien werden in einem gemeinsamen Ordner unter `appCommon/huggingface` gespeichert, gemountet als `/cache/hf/hub`. Alle ähnlichen Apps nutzen diesen Ort für Modelle.
