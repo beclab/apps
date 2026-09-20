@@ -1,0 +1,103 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-bff
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: ticket-bff
+spec:
+  replicas: {{ (index .Values.workloads "ticket-bff").replicaCount }}
+  selector:
+    matchLabels:
+      app: ticket-bff
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        app: ticket-bff
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: Exists
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/master
+                    operator: Exists
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: olares-home
+          hostPath:
+            type: Directory
+            path: {{ .Values.userspace.userData }}
+      containers:
+        - name: bff
+{{/*          image: "{{ .Values.images.bff.repository }}:{{ .Values.images.bff.tag }}"*/}}
+          image: "beclab/olares-ticket-bff:v0.0.43"
+          imagePullPolicy: {{ .Values.images.bff.pullPolicy }}
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "4200"
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: OLARESD_BASE_URL
+              value: "http://$(HOST_IP):18088"
+            - name: TICKET_API_BASE_URL
+              value: "{{ .Values.olaresEnv.SERVER_API_URL }}"
+            - name: BFF_REQUIRE_AUTH
+              value: "{{ .Values.bff.requireAuth }}"
+            - name: OLARESD_LOG_ROOT
+              value: "{{ .Values.bff.homeMountPath }}/pod_logs"
+            - name: BFF_REQUEST_TIMEOUT_MS
+              value: "{{ .Values.bff.requestTimeoutMs }}"
+            - name: BFF_UPLOAD_TIMEOUT_MS
+              value: "{{ .Values.bff.uploadTimeoutMs }}"
+            - name: OLARES_ID
+              value: '{{ .Values.bfl.username }}@{{ trimPrefix (printf "%s." .Values.bfl.username) .Values.user.zone }}'
+          ports:
+            - containerPort: 4200
+              protocol: TCP
+          volumeMounts:
+            - name: olares-home
+              mountPath: {{ .Values.bff.homeMountPath }}
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4200
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+
+
+
+    
