@@ -1,0 +1,207 @@
+# Wrappers ConfigMap (llamacpp + layout).
+# - llamacpp.sh: wait sentinel, resolve main GGUF (skip mmproj*), auto --mmproj
+# - ocrlayout.sh: wait sentinel + extra_model_path → MODEL_PATH / LAYOUT_MODEL_DIR
+#
+# The helpers both scripts source are NOT here: llm-init publishes common.sh
+# into the shared run dir and both Deployments point WRAPPER_COMMON at that
+# copy, so supervise_engine -- which is what makes POST /api/engine/restart
+# work -- has one implementation instead of one per chart. The scripts wait for
+# it, because nothing orders these Deployments against llm-init's.
+#
+# This therefore requires an llm-init image that publishes the helpers, and
+# there is no copy left here to fall back to: with an older image the engines
+# wait out WRAPPER_COMMON_WAIT and exit. Bump llmInitTag in _helpers.tpl in the
+# same change that ships this.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llamacpp
+data:
+  llamacpp.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=llamacpp
+    # Source the shared helpers: the sibling copy by default, or the one
+    # llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+    # can arrive late — the two containers are separate Deployments with no
+    # ordering between them — so waiting here is the normal path.
+    # Keep this block byte-identical across wrappers (tests/wrappers checks).
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+
+    # Whole-repo HF snapshot: pick main GGUF (not *mmproj*).
+    # Lexical first *.gguf would wrongly pick PaddleOCR-VL-1.5-mmproj.gguf.
+    if [ -d "$MODEL_PATH" ]; then
+        GGUF_FILE=""
+        for f in "$MODEL_PATH"/*.gguf; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            case "$base" in
+                *mmproj*|MMPROJ*|Mmproj*) continue ;;
+            esac
+            GGUF_FILE="$f"
+            break
+        done
+        if [ -z "$GGUF_FILE" ]; then
+            log "no main .gguf under $MODEL_PATH"
+            exit 1
+        fi
+        log "resolved MODEL_PATH directory $MODEL_PATH -> $GGUF_FILE"
+        MODEL_PATH="$GGUF_FILE"
+    fi
+
+    MODEL_DIR=$(dirname "$MODEL_PATH")
+
+    LLAMA_SERVER_BIN="${LLAMA_SERVER_BIN:-}"
+    if [ -z "$LLAMA_SERVER_BIN" ]; then
+        if [ -x /app/llama-server ]; then
+            LLAMA_SERVER_BIN=/app/llama-server
+        else
+            LLAMA_SERVER_BIN="$(command -v llama-server 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$LLAMA_SERVER_BIN" ] || [ ! -x "$LLAMA_SERVER_BIN" ]; then
+        log "llama-server binary not found"
+        exit 127
+    fi
+
+    LLAMA_SERVER_DIR=$(dirname "$LLAMA_SERVER_BIN")
+    export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    if [ -d "${LLAMA_SERVER_DIR}/lib" ]; then
+        export LD_LIBRARY_PATH="${LLAMA_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
+    fi
+
+    # Everything that reads ENGINE_ARGS lives in here: supervise_engine
+    # reloads the handoff before each launch, so a restart after a model-card
+    # edit has to re-derive argv rather than reuse what boot computed.
+    run_llamacpp() {
+        # Preserve container CMD extras before ENGINE_ARGS word-splitting.
+        extra_argv="$*"
+        load_engine_args_from_handoff
+
+        ARGV=""
+        HAS_MMPROJ=0
+        if [ -n "${ENGINE_ARGS:-}" ]; then
+            # shellcheck disable=SC2086
+            set -- $ENGINE_ARGS
+            for tok in "$@"; do
+                case "$tok" in
+                    --mmproj) HAS_MMPROJ=1; ARGV="$ARGV $tok" ;;
+                    -*)       ARGV="$ARGV $tok" ;;
+                    LLAMA_ARG_*=*) export "$tok" && log "engine_args export: $tok" ;;
+                    *=*)      log "engine_args drop non-LLAMA_ARG env: $tok" ;;
+                    *)        ARGV="$ARGV $tok" ;;
+                esac
+            done
+        fi
+
+        if [ "$HAS_MMPROJ" -eq 0 ]; then
+            MMPROJ=""
+            for f in "$MODEL_DIR"/*mmproj*.gguf "$MODEL_DIR"/*MMPROJ*.gguf; do
+                if [ -f "$f" ]; then
+                    MMPROJ="$f"
+                    break
+                fi
+            done
+            if [ -n "$MMPROJ" ]; then
+                ARGV="$ARGV --mmproj $MMPROJ"
+                log "auto mmproj=$MMPROJ"
+            else
+                log "WARN: no *mmproj*.gguf beside $MODEL_PATH (vision OCR may fail)"
+            fi
+        fi
+
+        log "starting llama-server -m=$MODEL_PATH alias=${MODEL_NAME:-paddle-hybrid} argv=${ARGV:-<empty>}"
+        # shellcheck disable=SC2086
+        exec "$LLAMA_SERVER_BIN" \
+            -m "$MODEL_PATH" \
+            --alias "${MODEL_NAME:-paddle-hybrid}" \
+            --host 0.0.0.0 \
+            --port "${LLAMACPP_PORT:-8081}" \
+            --metrics \
+            --temp 0 \
+            $ARGV \
+            $extra_argv
+    }
+
+    supervise_engine run_llamacpp "$@"
+
+  ocrlayout.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=ocrlayout
+    # Source the shared helpers: the sibling copy by default, or the one
+    # llm-init publishes into RUN_DIR when WRAPPER_COMMON says so. That copy
+    # can arrive late — the two containers are separate Deployments with no
+    # ordering between them — so waiting here is the normal path.
+    # Keep this block byte-identical across wrappers (tests/wrappers checks).
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+    wait_for_extra_model_path
+    LAYOUT_DIR=$(read_extra_model_path_first_line)
+
+    if [ -f "$LAYOUT_DIR" ]; then
+        parent=$(dirname "$LAYOUT_DIR")
+        log "extra path is a file; using parent directory $parent"
+        LAYOUT_DIR=$parent
+    fi
+
+    if [ ! -d "$LAYOUT_DIR" ]; then
+        log "LAYOUT_MODEL_DIR=$LAYOUT_DIR is not a directory"
+        exit 1
+    fi
+
+    export LAYOUT_MODEL_DIR="$LAYOUT_DIR"
+    export MODEL_PATH="$LAYOUT_DIR"
+    log "LAYOUT_MODEL_DIR=$LAYOUT_MODEL_DIR MODEL_PATH=$MODEL_PATH"
+
+    LAYOUT_BIN="${LAYOUT_BIN:-}"
+    if [ -z "$LAYOUT_BIN" ]; then
+        if [ -x /usr/local/bin/ocr-layout ]; then
+            LAYOUT_BIN=/usr/local/bin/ocr-layout
+        else
+            LAYOUT_BIN="$(command -v ocr-layout 2>/dev/null || true)"
+        fi
+    fi
+    if [ -z "$LAYOUT_BIN" ] || [ ! -x "$LAYOUT_BIN" ]; then
+        log "ocr-layout binary not found (checked /usr/local/bin/ocr-layout, \$PATH, \$LAYOUT_BIN)"
+        exit 127
+    fi
+
+    export LAYOUT_LISTEN="${LAYOUT_LISTEN:-0.0.0.0:8090}"
+
+    run_ocrlayout() {
+        log "starting layout-service bin=$LAYOUT_BIN LAYOUT_LISTEN=$LAYOUT_LISTEN"
+        exec "$LAYOUT_BIN" "$@"
+    }
+
+    supervise_engine run_ocrlayout "$@"
