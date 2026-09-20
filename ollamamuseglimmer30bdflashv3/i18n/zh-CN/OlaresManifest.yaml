@@ -1,44 +1,19 @@
 metadata:
-  description: "Muse Glimmer 30B Q4_K_M + DFlash 推测解码加速，基于 Ollama 运行。"
   title: Muse Glimmer 30B DFlash
-
+  description: 用于文本处理、图像理解和工具调用任务的本地 AI 模型
 spec:
-  upgradeDescription: |
-    v1.0.12: Model Console（llm-init）版本更新为 v1.7.21。
-
-    v1.0.11: Model Console 升级到 llm-init v1.7.19。
-
-    v1.0.9: Model Console 现在可以重启 Ollama daemon。llm-init 与 daemon 共享 appCache 下的 RUN_DIR，wrapper 改在 supervise_engine 下启动 `ollama serve`，因此在模型卡上修改 engine_args 会让 daemon 带着新参数重新起来。模型卡也会在 Pod 重启后保留——它落盘之后优先级高于应用设置里的 ENGINE_ARGS。
-
-    v1.0.6: 下调 NVIDIA 主机内存预留，方便 1.12.6 时间分片节点安装（引擎 request 19Gi→6Gi，应用 requiredMemory 20Gi→7Gi）。显存配额不变。
-
-    v1.0.1: fix zh-CN i18n encoding; document DFlash decode throughput (~35-65 tok/s).
-    v1.0.0: initial release - Muse Glimmer 30B Q4_K_M with bundled DFlash drafter via Ollama 0.32.8-rc0.
   fullDescription: |
-    **模型概述**
-    与标准 `30b-q4_K_M` 标签相同的主模型，额外 bundled DFlash drafter（约 1.6GB）用于更快生成。从 Ollama 库拉取 `muse-glimmer:30b-q4_K_M-dflash`（约 20GB，128K 上下文）。输出质量与标准自回归解码一致；长 Agent 回复场景吞吐通常更高。
+    Muse Glimmer 30B 是 Meta 开发的模型，可接收文本和图像输入并生成文本回复，支持推理、编程辅助和需要使用工具的任务。本应用通过 Ollama 在本地运行模型，并包含 DFlash 辅助模型。DFlash 先提出候选文本，再由主模型检查，以帮助加快生成速度。
 
-    需要 **Ollama 0.32.8-rc0 或更新版本**。
+    **主要功能**
 
-    **预设配置**
-    - 模型：`muse-glimmer:30b-q4_K_M-dflash`
-    - 能力：thinking、tools、vision
-    - Modelfile 默认：`draft_num_predict=3`（DFlash；自定义 Modelfile 设为 0 可关闭）
-    - 引擎参数：`OLLAMA_KEEP_ALIVE=-1 OLLAMA_CONTEXT_LENGTH=131072 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1`
-    - 所需 GPU 显存：`22Gi`
-    - 典型解码吞吐：约 **35–65 tok/s**（视 GPU 与上下文长度而定；通常高于标准标签）
+    - 响应文本提示，并回答有关截图、图表、文档等图像的问题。
+    - 在提供工具的兼容应用中使用思考和工具调用功能。
+    - 处理需要多个步骤的任务。
+    - 使用 DFlash 加速文本生成；速度取决于硬件和具体请求。
 
-    **推荐 API 参数：** `temperature=1.0`、`top_p=0.95`、`top_k=64`；复杂 Agent 任务使用较高 reasoning effort（`high`/`xhigh`）。
+    **在 Olares 上使用模型**
 
-    **加速器模式**
-    | 模式           | 设备             | 说明                                                         |
-    |----------------|------------------|--------------------------------------------------------------|
-    | `nvidia`       | GPU (CUDA)       | 使用 `22Gi` 显存                                             |
-    | `nvidia-gb10`  | GPU (Spark)      | 类似上方，显存由 pod 管理                                    |
+    Model Console 下载并管理 `muse-glimmer:30b-q4_K_M-dflash`，供兼容的 Olares 应用使用。默认上下文窗口为 128K tokens，决定模型一次能够处理多少对话和其他输入内容。
 
-    **技术栈**
-    - **Ollama 守护进程**（11434 端口）
-    - **Model Console**（8090 端口）：OpenAI API 代理
-
-    **模型存储**
-    位于共享目录 `appCommon/ollama`，与其他 Ollama 应用共用（blob 按 digest 去重）。
+    [Muse Glimmer 模型介绍](https://huggingface.co/meta-models/Muse-Glimmer-30B)
