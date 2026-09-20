@@ -1,0 +1,143 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default (include "dotsocr.modelName" .) -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "-ngl 99" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := trim ($oe.LLAMACPP_CPU_REQUEST | default "1500m") -}}
+{{- $memRequest := trim ($oe.LLAMACPP_MEMORY_REQUEST | default "1Gi") -}}
+{{- $cpuLimit := trim ($oe.LLAMACPP_CPU_LIMIT | default "4") -}}
+{{- $memLimit := trim ($oe.LLAMACPP_MEMORY_LIMIT | default "4Gi") -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}
+{{- end -}}
+{{- /* Do not fail() on cpu/intel: Market check-chart helm-renders mode=cpu to extract images.
+       Installability is gated by OlaresManifest accelerator (nvidia / nvidia-gb10 only). */ -}}
+{{- $isCpuMode := or (eq $gpuType "cpu") (eq $gpuType "intel") -}}
+{{- $unifiedMem := eq $gpuType "nvidia-gb10" -}}
+{{- $gpuMiB := include "dotsocr.gpuMiB" ($oe.LLAMACPP_REQUIRED_GPU_MEMORY | default "11Gi") -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = printf "%sMi" $gpuMiB -}}
+{{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- end -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+# llama.cpp CUDA engine. Deployment name == Release.Name (allowMultipleInstall).
+# Service name MUST be "llamacpp" (OCRAdapter LLAMACPP_URL default).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llamacpp
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "llamacpp"
+spec:
+  replicas: {{ .Values.workloads.dotsocr.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llamacpp
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llamacpp
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      containers:
+        - name: llamacpp
+          image: {{ include "dotsocr.llamacppImage" . }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/llamacpp.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: llamacpp
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: LLAMACPP_PORT
+              value: "8081"
+            - name: WAIT_TIMEOUT
+              value: "3600"
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          ports:
+            - name: llamacpp
+              containerPort: 8081
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and (not $isCpuMode) (not $unifiedMem) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llamacpp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llamacpp
+spec:
+  selector:
+    io.kompose.service: llamacpp
+  ports:
+    - name: llamacpp
+      port: 8081
+      targetPort: 8081
+  type: ClusterIP

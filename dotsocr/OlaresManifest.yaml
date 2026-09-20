@@ -1,0 +1,224 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: dotsocr
+  icon: "https://app.cdn.olares.com/appstore/dotsocr/icon.png"
+  description: "Multilingual document text recognition with layout understanding"
+  appid: dotsocr
+  title: dots.ocr
+  version: '1.0.16'
+  categories:
+    - AI
+    - models
+  tags:
+    - ocr
+sharedEntrances:
+  - name: dotsocr
+    host: sharedentrances-api
+    port: 0
+    title: dots.ocr API
+    invisible: true
+    authLevel: internal
+    icon: "https://app.cdn.olares.com/appstore/dotsocr/icon.png"
+entrances:
+  - name: ocrclient
+    port: 8090
+    host: download-svc
+    title: dots.ocr
+    icon: "https://app.cdn.olares.com/appstore/dotsocr/icon.png"
+    openMethod: window
+    authLevel: internal
+  - name: ocrapi
+    port: 8090
+    host: download-svc
+    title: dots.ocr API
+    icon: "https://app.cdn.olares.com/appstore/dotsocr/icon.png"
+    invisible: true
+    openMethod: window
+    authLevel: internal
+#   dotsocr     — llama.cpp CUDA (== appid / Release.Name)
+#   llminit     — llm-init (ENGINE_KIND=ocr): download + /v1/ocr* proxy
+#   ocradapter  — OCRAdapter job worker
+workloadReplicas:
+  dotsocr: 1
+  llminit: 1
+  ocradapter: 1
+spec:
+  onlyAdmin: true
+  versionName: 'ggml-org/dots.ocr-GGUF:Q8_0'
+  fullDescription: |
+    dots.ocr extracts text from document images and PDF pages while interpreting page layout and reading order. Its multilingual model recognizes text, tables, and formulas to help turn document pages into reusable content.
+
+    This app provides the Q8 version of dots.ocr to compatible Olares applications. It requires a supported NVIDIA GPU. Complex layouts, tables, and formulas may need manual review.
+  developer: dots studio
+  website: https://studio.dots.ai/
+  sourceCode: https://github.com/studio-dots-ai/dots.ocr
+  doc: https://github.com/studio-dots-ai/dots.ocr#readme
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  license:
+    - text: MIT
+      url: https://github.com/studio-dots-ai/dots.ocr/blob/master/LICENSE
+  accelerator:
+    # Sum ≈ llamacpp + llm-init + ocradapter. GPU from Q8 peak ~9.1Gi → 11Gi.
+    - mode: nvidia
+      requiredCpu: "2"
+      limitedCpu: "6"
+      requiredMemory: "4Gi"
+      limitedMemory: "8Gi"
+      requiredDisk: "5Gi"
+      limitedDisk: "50Gi"
+      requiredGPUMemory: "11Gi"
+      limitedGPUMemory: "12Gi"
+    - mode: nvidia-gb10
+      requiredCpu: "2"
+      limitedCpu: "6"
+      requiredMemory: "12Gi"
+      limitedMemory: "16Gi"
+      requiredDisk: "5Gi"
+      limitedDisk: "50Gi"
+
+  supportArch:
+    - amd64
+    - arm64
+
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+
+middleware:
+  redis:
+    namespace: dotsocr
+
+options:
+  apiTimeout: 0
+  allowMultipleInstall: true
+  LLMGatewaySupported: true
+  shared: true
+  dependencies:
+    - name: olares
+      version: '>=1.12.6-0'
+      type: system
+
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    # Comma dual-source (each one --include) → two single-file hf downloads.
+    # Do NOT use one hf:// with two --include: that path left only mmproj in snapshot.
+    default: "hf://ggml-org/dots.ocr-GGUF --include dots.ocr-Q8_0.gguf,hf://ggml-org/dots.ocr-GGUF --include mmproj-dots.ocr-Q8_0.gguf"
+    description: "Comma dual hf:// (main GGUF + mmproj). Each segment one --include so only Q8 files download (skip F16)."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "dots"
+    description: "OCRAdapter pipeline id (must be dots)."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "ocr"
+    options:
+      - title: OCR
+        value: ocr
+  - envName: ENGINE_ARGS
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "-ngl 99"
+    description: "llama.cpp flags on the engine Pod only (not llm-init). mmproj is auto-resolved next to the main GGUF."
+  - envName: LLAMACPP_REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "11Gi"
+    description: "Per-instance GPU memory (nvidia.com/gpumem). Q8 profile peak ~9.1Gi."
+  - envName: LLAMACPP_CPU_REQUEST
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "1500m"
+  - envName: LLAMACPP_CPU_LIMIT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "4"
+  - envName: LLAMACPP_MEMORY_REQUEST
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "1Gi"
+  - envName: LLAMACPP_MEMORY_LIMIT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "4Gi"
+  - envName: OCR_PIPELINE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "dots"
+  - envName: OCR_MAX_INFLIGHT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "1"
+  - envName: OCR_PDF_STRATEGY
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "vision"
+  - envName: OCR_DEFAULT_FORMAT
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "text"
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_HUGGINGFACE_TOKEN
+  - envName: LOG_LEVEL
+    required: false
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+      - title: debug
+        value: debug
+      - title: info
+        value: info
+      - title: warn
+        value: warn
+      - title: error
+        value: error

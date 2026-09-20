@@ -1,0 +1,106 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default (include "dotsocr.modelName" .) -}}
+{{- $pipeline := $oe.OCR_PIPELINE | default "dots" -}}
+{{- $maxInflight := $oe.OCR_MAX_INFLIGHT | default "1" -}}
+{{- $pdfStrategy := $oe.OCR_PDF_STRATEGY | default "vision" -}}
+{{- $defaultFormat := $oe.OCR_DEFAULT_FORMAT | default "text" -}}
+{{- $logLevel := $oe.LOG_LEVEL | default "info" -}}
+{{- $redisURL := include "dotsocr.redisURL" . -}}
+{{- $spoolHostPath := printf "%s/ocr-spool/%s" .Values.userspace.appCache .Release.Name -}}
+---
+# OCRAdapter: Service name MUST be "ocradapter" (llm-init ENGINE_KIND=ocr → http://ocradapter:8080).
+# Uses Olares middleware Redis (.Values.redis), not an in-chart redis Deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocradapter
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: ocradapter
+spec:
+  replicas: {{ .Values.workloads.ocradapter.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: ocradapter
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: ocradapter
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: ocr-spool
+          hostPath:
+            path: "{{ $spoolHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "mkdir -p /var/ocr-spool && chown -R 1000:1000 /var/ocr-spool || true"
+          volumeMounts:
+            - name: ocr-spool
+              mountPath: /var/ocr-spool
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: ocradapter
+          image: {{ include "dotsocr.ocrAdapterImage" . }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: OCR_PIPELINE
+              value: "{{ $pipeline }}"
+            - name: LISTEN_ADDR
+              value: "0.0.0.0:8080"
+            - name: LLAMACPP_URL
+              value: "http://llamacpp:8081"
+            - name: REDIS_URL
+              value: "{{ $redisURL }}"
+            - name: OCR_REDIS_PREFIX
+              value: "ocr:{{ .Release.Name }}:"
+            - name: OCR_SPOOL_DIR
+              value: "/var/ocr-spool"
+            - name: OCR_MAX_INFLIGHT
+              value: "{{ $maxInflight }}"
+            - name: OCR_PDF_STRATEGY
+              value: "{{ $pdfStrategy }}"
+            - name: OCR_DEFAULT_FORMAT
+              value: "{{ $defaultFormat }}"
+            - name: RUST_LOG
+              value: "{{ $logLevel }}"
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: ocr-spool
+              mountPath: /var/ocr-spool
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocradapter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: ocradapter
+spec:
+  selector:
+    io.kompose.service: ocradapter
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP
