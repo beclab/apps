@@ -1,0 +1,67 @@
+metadata:
+  description: Qwen3.6-35B-A3B (GGUF UD-IQ4_XS) servido con llama.cpp
+  title: Qwen3.6-35B-A3B (llama.cpp)
+spec:
+  upgradeDescription: |
+    v1.0.24: Model Console (llm-init) se ha actualizado a v1.7.21.
+
+    v1.0.23: Model Console se actualiza a llm-init v1.7.19.
+
+    v1.0.16: llm-init v1.6.1 — la puerta y la lectura de capacidad siguen
+      ENGINE_ARGS en lugar de la copia que leyeron al arrancar. Este preset no se ve
+      afectado tal como se entrega, pero ambas direcciones de una edición ahora surten efecto:
+      añadir -np con -no-kvu da a cada slot su parte y la puerta
+      se aparta en lugar de cobrar dos saltos de tokenizer por un pool
+      que el motor ya está vigilando, y en cualquier caso la tarjeta reporta la
+      ventana y el recuento de slots que el motor relanzado resolvió realmente. Antes
+      de esto, solo reiniciar el deployment hacía eso.
+    
+    v1.0.15: llm-init v1.6.0 — este preset no nombra -np, y el propio default de llama.cpp
+      ahí son 4 slots que comparten un pool KV, no el slot único que llm-init
+      solía reportar. Así que el ancho que Router anunciaba era incorrecto, y cuatro slots
+      podían reclamar cada uno todo el pool de 131072 tokens. Las peticiones ahora reservan espacio
+      del pool antes de reenviarse y esperan cuando está lleno, respondiendo 503
+      kv_budget_exhausted en lugar de dejar que el pool se agote a mitad del decode, lo que
+      hacía fallar cada petición que generaba en ese momento. También se lee ahora el /props
+      propio del motor, así que la ventana y el recuento de slots vienen de lo que resolvió
+      en lugar de lo que implicaban los flags.
+    
+    v1.0.13: Bajar la reserva de memoria de host NVIDIA para que los nodos timeslice 1.12.6 puedan instalar más fácilmente (solicitud del motor 21Gi→6Gi, chart requiredMemory 22Gi→7Gi). Cuota de GPU sin cambios.
+    
+    v1.0.9: subir llama.cpp a `server-cuda12-b10068`; HF_TOKEN vía Secret + OLARES_SYSTEM_HUGGINGFACE_*.
+    
+    v1.0.8: Mover `HF_TOKEN` a Kubernetes Secret (`secretKeyRef`); mapear env HF desde `OLARES_SYSTEM_HUGGINGFACE_*`.
+    
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi; límite llm-init 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.6: memoria host nvidia — requiredMemory 22Gi, LLAMACPP_MEMORY_REQUEST 21Gi, LLAMACPP_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.5: memoria host nvidia — requiredMemory 16Gi, LLAMACPP_MEMORY_REQUEST 15Gi, LLAMACPP_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.4: subir llama.cpp a server-cuda12-b10068.
+    v1.0.4: subir llm-init a v1.3.1.
+    v1.0.4: alinear nvidia requiredMemory=12Gi y LLAMACPP_MEMORY_REQUEST=11Gi (patrón qwopus).
+  fullDescription: |
+    **Descripción del modelo**
+    Qwen3.6-35B-A3B es un modelo visión-lenguaje Mixture-of-Experts de la serie Qwen (Alibaba), con 35B parámetros totales y unos 3B activos por token. Incluye un encoder de visión integrado, soporte de contexto muy largo y capacidades de thinking, tool-calling y visión. Esta app sirve el build GGUF `UD-IQ4_XS` de `unsloth/Qwen3.6-35B-A3B-GGUF` vía llama.cpp.
+    
+    Bien adaptado a cargas multimodales que necesitan contexto largo y comprensión visual. La serie Qwen3.6 35B soporta nativamente ventanas de contexto extendidas e incluye un encoder de visión para tareas de imagen y texto.
+    
+    **Configuración del preset**
+    - Model: `unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS` (con proyector `mmproj-F16.gguf` para visión)
+    - Capabilities: thinking, tools, vision
+    - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0` (contexto 128K, offload GPU completo, caché KV cuantizada a q8_0)
+    - Memoria GPU requerida: `23Gi`
+    
+    **Modos de acelerador**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
+    
+    **Cómo funciona**
+    Primero, Model Console descarga el modelo y lo prepara, luego `llama.cpp` empieza a servir el modelo cuando está listo. Estas dos partes se ejecutan por separado pero comparten archivos e información de progreso.
+    
+    **Pila**
+    - **llama.cpp**: Ejecuta el modelo y atiende peticiones API (puerto 8081)
+    - **Model Console**: Descarga el modelo, muestra el progreso y proporciona la API OpenAI en el puerto 8090, haciendo proxy a `llamacpp`.
+    
+    **Almacenamiento del modelo**
+    Todos los archivos del modelo se guardan en una carpeta compartida en `appCommon/huggingface`, montada como `/cache/hf/hub`. Todas las apps similares usan esta ubicación para modelos.

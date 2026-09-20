@@ -7,9 +7,12 @@ metadata:
   description: "Qwen3.6-35B-A3B (GGUF UD-IQ4_XS) served with llama.cpp."
   appid: llamacppqwen3635ba3bggufv3
   title: Qwen3.6-35B-A3B (llama.cpp)
-  version: '1.0.9'
+  version: '1.0.24'
   categories:
-    - AI
+  - AI
+  - models
+  tags:
+  - llm
 sharedEntrances:
   - name: llamacppqwen3635ba3bggufv3
     host: sharedentrances-api
@@ -35,6 +38,46 @@ spec:
   onlyAdmin: true
   versionName: 'unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS'
   upgradeDescription: |
+    v1.0.24: Model Console (llm-init) updated to v1.7.21.
+
+    v1.0.23: Model Console upgrades to llm-init v1.7.19.
+
+    v1.0.22: llm-init v1.7.12 — completes the previous fix. A restart now
+      prompts the health check to reconsider its schedule immediately, rather
+      than waiting out an interval that was already running, which could be
+      longer than the whole relaunch. The loading state appears about a second
+      after the engine stops rather than seven.
+    v1.0.21: llm-init v1.7.11 — the engine is checked every second while a
+      restart it was asked for is still outstanding. At the steady ten-second
+      interval a quick relaunch could take the engine away and give it back
+      between two checks, so the phase never moved and a console that had
+      just asked for the restart saw nothing at all.
+    v1.0.20: llm-init v1.7.10 — an engine restart is visible in the model's
+      phase while it happens, instead of being hidden by the sixty-second
+      grace on a missing engine, and a restart signaled to an engine that
+      was already down is confirmed once it comes back rather than reported
+      as unverifiable.
+    v1.0.16: llm-init v1.6.1 — the gate and the capacity reading follow
+      ENGINE_ARGS instead of the copy they read at startup. This preset is
+      unaffected as shipped, but both directions of an edit now take effect:
+      adding -np with -no-kvu gives each slot its own share and the gate
+      steps out rather than going on charging two tokenizer hops for a pool
+      the engine is already policing, and either way the card reports the
+      window and slot count the relaunched engine actually resolved. Before
+      this, only restarting the deployment did that.
+
+    v1.0.15: llm-init v1.6.0 — this preset names no -np, and llama.cpp's own
+      default there is 4 slots sharing one KV pool, not the single slot llm-init
+      used to report. So the width Router advertises was wrong, and four slots
+      could each claim the whole 131072-token pool. Requests now reserve pool
+      room before being forwarded and wait when it is full, answering 503
+      kv_budget_exhausted rather than letting the pool run out mid-decode, which
+      failed every request generating at that moment. The engine's own /props is
+      also read now, so the window and slot count come from what it resolved
+      instead of what the flags implied.
+
+    v1.0.13: Lower the NVIDIA host-memory reservation so 1.12.6 timeslice nodes can install more easily (engine request 21Gi→6Gi, chart requiredMemory 22Gi→7Gi). GPU quota unchanged.
+
     v1.0.9: bump llama.cpp to `server-cuda12-b10068`; HF_TOKEN via Secret + OLARES_SYSTEM_HUGGINGFACE_*.
 
     v1.0.8: Move `HF_TOKEN` into Kubernetes Secret (`secretKeyRef`); map HF env from `OLARES_SYSTEM_HUGGINGFACE_*`.
@@ -81,6 +124,11 @@ spec:
   locale:
     - en-US
     - zh-CN
+    - de-DE
+    - es-ES
+    - it-IT
+    - fr-FR
+    - ja-JP
   license:
     - text: Apache-2.0
       url: https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF
@@ -93,9 +141,9 @@ spec:
       requiredCpu: "1100m"
       requiredDisk: 50Mi
       limitedDisk: 500Gi
-      # Engine MEMORY_REQUEST 21Gi + llm-init <= requiredMemory 22Gi; MEMORY_LIMIT 30Gi + llm-init 2Gi <= limitedMemory 32Gi
+      # Engine MEMORY_REQUEST 6Gi + llm-init <= requiredMemory 7Gi; MEMORY_LIMIT 30Gi + llm-init 2Gi <= limitedMemory 32Gi
       limitedMemory: "32Gi"
-      requiredMemory: "22Gi"
+      requiredMemory: "7Gi"
       requiredGPUMemory: "23Gi"
       limitedGPUMemory: "24Gi"
     - mode: nvidia-gb10
@@ -110,6 +158,7 @@ spec:
     - amd64
     - arm64
 permission:
+  appCache: true
   appData: true
   appCommon: true
 options:
@@ -205,9 +254,9 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-  - envName: LLAMACPP_MEMORY_REQUEST # sum with llm-init <= requiredMemory 22Gi
+  - envName: LLAMACPP_MEMORY_REQUEST # sum with llm-init <= requiredMemory 7Gi
     required: true
-    default: "21Gi"
+    default: "6Gi"
     type: string
     editable: false
     applyOnChange: false
