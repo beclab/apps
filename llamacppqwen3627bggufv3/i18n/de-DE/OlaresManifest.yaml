@@ -1,0 +1,48 @@
+metadata:
+  title: Qwen3.6-27B (llama.cpp)
+  description: "Qwen3.6-27B (GGUF Q4_K_M) bereitgestellt mit llama.cpp"
+spec:
+  upgradeDescription: |
+    v1.0.20: Model Console (llm-init) wurde auf v1.7.21 aktualisiert.
+
+    v1.0.19: Model Console wird auf llm-init v1.7.19 aktualisiert.
+
+    v1.0.13: NVIDIA-Host-Speicherreservierung gesenkt, damit 1.12.6 Timeslice-Nodes leichter installieren können (Engine-Request 21Gi→6Gi, Chart requiredMemory 22Gi→7Gi). GPU-Quote unverändert.
+
+    v1.0.9: llama.cpp auf `server-cuda12-b10068` aktualisiert; HF_TOKEN via Secret + OLARES_SYSTEM_HUGGINGFACE_*.
+
+    v1.0.8: `HF_TOKEN` in Kubernetes Secret (`secretKeyRef`) verschoben; HF-Env von `OLARES_SYSTEM_HUGGINGFACE_*` gemappt.
+
+    v1.0.7: LLAMACPP_MEMORY_LIMIT 30Gi; llm-init Limit 2Gi; limitedMemory 32Gi (30+2).
+    v1.0.6: nvidia Host-Speicher — requiredMemory 22Gi, LLAMACPP_MEMORY_REQUEST 21Gi, LLAMACPP_MEMORY_LIMIT 26Gi, limitedMemory 30Gi.
+    v1.0.5: nvidia Host-Speicher — requiredMemory 16Gi, LLAMACPP_MEMORY_REQUEST 15Gi, LLAMACPP_MEMORY_LIMIT 19Gi, limitedMemory 26Gi.
+    v1.0.4: llama.cpp auf server-cuda12-b10068 aktualisiert.
+    v1.0.4: llm-init auf v1.3.1 aktualisiert.
+    v1.0.4: nvidia requiredMemory=12Gi und LLAMACPP_MEMORY_REQUEST=11Gi ausgerichtet (qwopus-Muster).
+  fullDescription: |
+    **Modellübersicht**
+    Qwen3.6-27B ist ein Vision-Language-Modell der Qwen-Serie (Alibaba). Es integriert multimodales Verständnis mit einem eingebauten Vision-Encoder, unterstützt sehr lange Kontextfenster und bietet Thinking-, Tool-Calling- und Vision-Fähigkeiten. Diese App stellt den `Q4_K_M`-GGUF-Build von `unsloth/Qwen3.6-27B-GGUF` über llama.cpp bereit.
+
+    Empfohlen als Standardmodell für die meisten Szenarien, excelliert es bei agentischem Coding, multimodaler Vision, Konversation und Langtextverarbeitung. Besonders stark ist es auch bei automatisierten Terminaloperationen und dem Schreiben von Code.
+
+    **Voreingestellte Konfiguration**
+    - Modell: `unsloth/Qwen3.6-27B-GGUF:Q4_K_M` (mit `mmproj-F16.gguf`-Projektor für Vision)
+    - Fähigkeiten: thinking, tools, vision
+    - Engine-Args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1` (128K-Kontext, volles GPU-Offload, KV-Cache auf q8_0 quantisiert)
+    - Erforderlicher GPU-Speicher: `23Gi`
+
+    **Accelerator-Modi**
+    | Mode           | Device            | Details                                          |
+    |----------------|-------------------|--------------------------------------------------|
+    | `nvidia`       | GPU (CUDA)        | Nutzt `23Gi` GPU-Speicher; `-ngl all` für volle GPU  |
+    | `nvidia-gb10`  | GPU (Spark)       | Wie oben, aber Speicher wird vom Pod verwaltet     |
+
+    **So funktioniert es**
+    Zuerst lädt die Model Console das Modell herunter und bereitet es vor, dann startet `llama.cpp` die Bereitstellung, sobald es bereit ist. Beide Teile laufen getrennt, teilen aber Dateien und Fortschrittsinformationen.
+
+    **Stack**
+    - **llama.cpp**: Führt das Modell aus und bedient API-Anfragen (Port 8081)
+    - **Model Console**: Lädt das Modell herunter, zeigt den Fortschritt und stellt die OpenAI-API auf Port 8090 bereit, mit Proxy zu `llamacpp`.
+
+    **Modellspeicher**
+    Alle Modelldateien liegen in einem gemeinsamen Ordner unter `appCommon/huggingface`, gemountet als `/cache/hf/hub`. Alle ähnlichen Apps nutzen diesen Ort für Modelle.
