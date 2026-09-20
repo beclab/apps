@@ -1,0 +1,142 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: acestepmusicv3
+  description: Music generation from text descriptions and lyrics
+  icon: https://app.cdn.olares.com/appstore/acestep/icon2.png
+  appid: acestepmusicv3
+  version: '0.1.65'
+  title: ACE-Step Music XL-SFT
+  categories:
+  - Creativity
+  - AI
+  - models
+  tags:
+  - text-to-audio
+
+entrances:
+  - name: modelconsole
+    port: 8090
+    host: download-svc
+    title: ACE-Step Model Console
+    icon: https://app.cdn.olares.com/appstore/acestep/icon2.png
+    authLevel: internal
+    openMethod: window
+
+sharedEntrances:
+  - name: api
+    # Model applications declare 0 here; in-cluster resolution uses the
+    # sharedentrances-api Service's HTTP port 80.
+    port: 0
+    host: sharedentrances-api
+    title: ACE-Step Music API
+    icon: https://app.cdn.olares.com/appstore/acestep/icon2.png
+    authLevel: internal
+    invisible: true
+
+# Declares every workload's replica count (v3 schema). Keys MUST match the
+# rendered Deployment metadata.name and values.yaml workloads.<name>:
+#   acestepmusicv3 — ACE-Step 1.5 staged music engine
+#   llminit        — Model Console, downloader, and standard Music API proxy
+workloadReplicas:
+  acestepmusicv3: 1
+  llminit: 1
+
+permission:
+  appData: true
+  appCache: true   # llm-init sentinel/run-state under appCache/llm-init-run/<release>
+  # ACE-Step HF models live in the shared cross-app App Common store
+  # (appCommon/huggingface, mounted at the fixed /cache/hf/hub container path).
+  appCommon: true
+
+spec:
+  versionName: 'ACE-Step/acestep-v15-xl-sft'
+  fullDescription: |
+    ACE-Step Music XL-SFT generates songs with vocals or instrumental music from text descriptions and lyrics. It provides the ACE-Step 1.5 XL-SFT model and a 4B language model to compatible Olares music applications.
+
+    **Key features**
+
+    - Draft song descriptions and lyrics from a short idea.
+    - Generate music with controls for style, tempo, key, and vocal language.
+    - Regenerate a selected section of existing audio.
+    - Provide lyric timing for newly generated vocal songs.
+
+    This app requires Olares 1.12.7 or later and is configured for an NVIDIA GPU with 24 GiB of memory on an amd64 system. Open Model Console to download the models and check their status, then use a compatible music application to create songs.
+
+  developer: ACE-Step
+  website: https://huggingface.co/ACE-Step/acestep-v15-xl-sft
+  sourceCode: https://github.com/ace-step/ACE-Step-1.5
+  submitter: Olares
+  locale:
+    - de-DE
+    - en-US
+    - es-ES
+    - fr-FR
+    - it-IT
+    - ja-JP
+    - zh-CN
+  doc: https://github.com/ace-step/ACE-Step-1.5
+  license:
+    - text: MIT License
+      url: https://github.com/ace-step/ACE-Step-1.5/blob/main/LICENSE
+
+  accelerator:
+  # nvidia — discrete GPU; GPU memory via nvidia.com/gpumem. amd64 only.
+  - mode: nvidia
+    requiredCpu: "2"
+    limitedCpu: "12"
+    requiredMemory: 32Gi
+    limitedMemory: 72Gi
+    requiredDisk: 40Gi
+    limitedDisk: 100Gi
+    requiredGPUMemory: 20Gi
+    limitedGPUMemory: 24Gi
+
+  supportArch:
+    - amd64
+  onlyAdmin: true
+
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://ACE-Step/Ace-Step1.5 --revision 19671f406d603126926c1b7e2adc169acbcade22,hf://ACE-Step/acestep-v15-xl-sft --revision d06de46b4622f781cf07f4a013a67d591ca52819,hf://ACE-Step/acestep-5Hz-lm-4B --revision 0a3ec94b557aea7d508da38b31cfe7341f6ff737"
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "ACE-Step/acestep-v15-xl-sft"
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "music_generation"
+    options:
+      - title: Music Generation
+        value: music_generation
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
+  - envName: HF_ENDPOINT
+    required: true
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+
+options:
+  shared: true
+  LLMGatewaySupported: true
+  templateOnly: false
+  apiTimeout: 0
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.7-0'

@@ -1,0 +1,256 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $queueWorkers := include "acestepmusicv3.queueWorkers" . -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    # Keep the selector used by the retired OpenResty deployment. Deployment
+    # selectors are immutable, so retaining it allows an in-place 0.1.11
+    # upgrade while replacing the pod contents with the music engine.
+    io.kompose.service: acestepweb
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.acestepmusicv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: acestepweb
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: acestepweb
+      annotations:
+        app.olares.com/chart-version: {{ .Chart.Version | quote }}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command: ["sh", "-c", "chown 1000:1000 /app/checkpoints /app/data /app/.cache"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/checkpoints
+            - name: app-data
+              mountPath: /app/data
+            - name: runtime-cache
+              mountPath: /app/.cache
+      containers:
+        - name: music-engine
+          image: docker.io/beclab/ace-step-ace-step-1.5:0.1.8
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          ports:
+            - name: http
+              containerPort: 8001
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              CACHE=/cache/hf/hub
+              WRAPPER_COMMON=/run/llm-init/wrappers/common.sh
+              elapsed=0
+              until [ -f "$WRAPPER_COMMON" ]; do
+                if [ "$elapsed" -ge 3600 ]; then
+                  echo "[music-wrapper] timed out waiting for $WRAPPER_COMMON" >&2
+                  exit 1
+                fi
+                echo "[music-wrapper] waiting for Model Console handoff"
+                sleep 5
+                elapsed=$((elapsed + 5))
+              done
+              ENGINE=music
+              export ENGINE WRAPPER_COMMON
+              . "$WRAPPER_COMMON"
+              wait_for_sentinel
+
+              snap() {
+                repo="$1"
+                ref="$CACHE/$repo/refs/main"
+                if [ -f "$ref" ]; then
+                  printf '%s\n' "$CACHE/$repo/snapshots/$(cat "$ref")"
+                else
+                  find "$CACHE/$repo/snapshots" -mindepth 1 -maxdepth 1 -type d | head -1
+                fi
+              }
+              MAIN_SNAP="$(snap models--ACE-Step--Ace-Step1.5)"
+              XL_SFT_SNAP="$(snap models--ACE-Step--acestep-v15-xl-sft)"
+              LM_SNAP="$(snap models--ACE-Step--acestep-5Hz-lm-4B)"
+              [ -d "$MAIN_SNAP" ] && [ -d "$XL_SFT_SNAP" ] && [ -d "$LM_SNAP" ]
+              for file in "$MAIN_SNAP"/* "$MAIN_SNAP"/.[!.]*; do
+                [ -e "$file" ] || continue
+                ln -sfn "$file" "/app/checkpoints/$(basename "$file")"
+              done
+              ln -sfn "${XL_SFT_SNAP%/}" /app/checkpoints/acestep-v15-xl-sft
+              ln -sfn "${LM_SNAP%/}" /app/checkpoints/acestep-5Hz-lm-4B
+
+              python3 - /app/checkpoints/acestep-v15-xl-sft /app/checkpoints/acestep-5Hz-lm-4B <<'PY'
+              import json
+              import pathlib
+              import sys
+              for text in sys.argv[1:]:
+                  directory = pathlib.Path(text)
+                  index_path = directory / "model.safetensors.index.json"
+                  with index_path.open("r", encoding="utf-8") as handle:
+                      shards = sorted(set(json.load(handle).get("weight_map", {}).values()))
+                  missing = [name for name in shards if not (directory / name).is_file() or not (directory / name).stat().st_size]
+                  if not shards or missing:
+                      raise RuntimeError(f"incomplete checkpoint {directory}: {missing}")
+                  print(f"[music-wrapper] verified {len(shards)} shard(s) in {directory}", flush=True)
+              PY
+
+              run_music() {
+                cd /app
+                mkdir -p "$HOME/.cache" "$MPLCONFIGDIR"
+                exec /app/.venv/bin/python /opt/olares/music_adapter.py
+              }
+              supervise_engine run_music
+          env:
+            # The upstream image runs as a numeric UID without an /etc/passwd
+            # entry. PyTorch 3.x asks getpass for a cache-directory username,
+            # so provide the standard identity variables explicitly.
+            - name: USER
+              value: app
+            - name: LOGNAME
+              value: app
+            - name: HOME
+              value: /app/data/runtime
+            - name: XDG_CACHE_HOME
+              value: /app/data/runtime/.cache
+            - name: MPLCONFIGDIR
+              value: /app/data/runtime/.config/matplotlib
+            - name: MODEL_NAME
+              value: "ACE-Step/acestep-v15-xl-sft"
+            - name: HF_ENDPOINT
+              value: {{ $oe.HF_ENDPOINT | default "https://huggingface.co" | quote }}
+            - name: ACESTEP_CONFIG_PATH
+              value: acestep-v15-xl-sft
+            - name: LM_CODE_MAX_ATTEMPTS
+              value: "2"
+            - name: ACESTEP_INIT_SERVICE
+              value: "true"
+            - name: ACESTEP_INIT_LLM
+              value: "true"
+            - name: ACESTEP_LM_MODEL_PATH
+              value: acestep-5Hz-lm-4B
+            - name: ACESTEP_LM_BACKEND
+              value: vllm
+            - name: ACESTEP_MODE
+              value: api
+            - name: ACESTEP_API_WORKERS
+              value: "1"
+            - name: ACESTEP_QUEUE_WORKERS
+              value: "{{ $queueWorkers }}"
+            - name: ACESTEP_TMPDIR
+              value: /app/data/tmp
+            - name: ACESTEP_USE_FLASH_ATTENTION
+              value: "true"
+            - name: ACESTEP_OFFLOAD_TO_CPU
+              value: "true"
+            - name: ACESTEP_OFFLOAD_DIT_TO_CPU
+              value: "true"
+            - name: ACESTEP_SAVE_MEMORY
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+          envFrom:
+            - configMapRef:
+                name: acestep-config
+          livenessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /v1/models
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 360
+          resources:
+            requests:
+              cpu: "1"
+              memory: 24Gi
+            limits:
+              cpu: "10"
+              memory: 64Gi
+          volumeMounts:
+            - name: checkpoints
+              mountPath: /app/checkpoints
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: app-data
+              mountPath: /app/data
+            - name: runtime-cache
+              mountPath: /app/.cache
+            - name: run-state
+              mountPath: /run/llm-init
+            - name: stage-launcher
+              mountPath: /opt/olares/staged_api.py
+              subPath: staged_api.py
+              readOnly: true
+            - name: stage-launcher
+              mountPath: /opt/olares/music_adapter.py
+              subPath: music_adapter.py
+              readOnly: true
+            - name: stage-launcher
+              mountPath: /opt/olares/lm_quality.py
+              subPath: lm_quality.py
+              readOnly: true
+            - name: stage-launcher
+              mountPath: /opt/olares/lyrics_alignment.py
+              subPath: lyrics_alignment.py
+              readOnly: true
+            - name: stage-launcher
+              mountPath: /opt/olares/lyrics_readability.py
+              subPath: lyrics_readability.py
+              readOnly: true
+      volumes:
+        - name: checkpoints
+          emptyDir: {}
+        - name: hf-cache
+          hostPath:
+            path: {{ printf "%s/huggingface" .Values.userspace.appCommon | quote }}
+            type: DirectoryOrCreate
+        - name: app-data
+          hostPath:
+            path: {{ printf "%s/data" .Values.userspace.appData | quote }}
+            type: DirectoryOrCreate
+        - name: runtime-cache
+          emptyDir: {}
+        - name: run-state
+          hostPath:
+            path: {{ $runStateHostPath | quote }}
+            type: DirectoryOrCreate
+        - name: stage-launcher
+          configMap:
+            name: acestep-stage-launcher
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: music-engine
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector:
+    io.kompose.service: acestepweb
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001

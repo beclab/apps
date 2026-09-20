@@ -1,0 +1,381 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acestep-stage-launcher
+  namespace: {{ .Release.Namespace }}
+data:
+  music_adapter.py: |
+{{ .Files.Get "files/music_adapter.py" | indent 4 }}
+  lm_quality.py: |
+{{ .Files.Get "files/lm_quality.py" | indent 4 }}
+  lyrics_alignment.py: |
+{{ .Files.Get "files/lyrics_alignment.py" | indent 4 }}
+  lyrics_readability.py: |
+{{ .Files.Get "files/lyrics_readability.py" | indent 4 }}
+  staged_api.py: |
+    """Olares 24 GiB stage barrier for the official ACE-Step API."""
+    import atexit
+    import functools
+    import gc
+    import json
+    import os
+    import uuid
+    from lm_quality import assess_audio_codes, retry_seeds
+    from lyrics_alignment import alignment_segments
+
+    import torch
+
+    # nano-vLLM's CUDA graph capture is unstable with the RTX 5090 Blackwell
+    # driver behind Olares' time-sliced GPU runtime. Keep the vLLM backend and
+    # KV cache, but force eager execution so initialization cannot corrupt the
+    # CUDA context.
+    from acestep.llm_inference import LLMHandler
+
+    _initialize_vllm = LLMHandler._initialize_5hz_lm_vllm
+    _unload_lm = LLMHandler.unload
+
+
+    def _initialize_vllm_eager(self, model_path, enforce_eager=False, has_triton=True):
+        print(
+            "[olares-stage] forcing nano-vLLM eager mode (CUDA graph disabled)",
+            flush=True,
+        )
+        return _initialize_vllm(
+            self,
+            model_path,
+            enforce_eager=True,
+            has_triton=has_triton,
+        )
+
+
+    LLMHandler._initialize_5hz_lm_vllm = _initialize_vllm_eager
+
+
+    def _unload_lm_completely(self):
+        """Destroy nano-vLLM's runner so its atexit hook cannot retain VRAM."""
+        engine = self.llm if self.llm_backend == "vllm" else None
+        if engine is not None:
+            exit_method = getattr(engine, "exit", None)
+            try:
+                if exit_method is not None:
+                    atexit.unregister(exit_method)
+                    exit_method()
+                    print(
+                        "[olares-stage] nano-vLLM runner destroyed",
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"[olares-stage] nano-vLLM runner cleanup warning: {exc}",
+                    flush=True,
+                )
+            finally:
+                # Do not let the upstream reset path touch a runner that exit()
+                # has already destroyed. The original unload still clears all
+                # handler state, distributed state, Python objects and caches.
+                self.llm = None
+        _unload_lm(self)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+
+    LLMHandler.unload = _unload_lm_completely
+
+    _generate_with_stop_condition = LLMHandler.generate_with_stop_condition
+
+
+    def _generate_with_audio_code_gate(self, *args, **kwargs):
+        """Reject truncated or collapsed 5 Hz plans before expensive DiT."""
+        max_attempts = max(1, int(os.getenv("LM_CODE_MAX_ATTEMPTS", "2")))
+        current = dict(kwargs)
+        for attempt in range(max_attempts):
+            result = _generate_with_stop_condition(self, *args, **current)
+            assessment = assess_audio_codes(
+                result,
+                current.get("target_duration"),
+            )
+            print(
+                f"[olares-quality] LM audio codes attempt={attempt + 1} "
+                f"accepted={assessment.accepted} {assessment.summary}",
+                flush=True,
+            )
+            if assessment.accepted or not result.get("success", False):
+                return result
+            current["seeds"] = retry_seeds(current.get("seeds"), attempt + 1)
+            current["temperature"] = min(
+                1.0,
+                max(0.85, float(current.get("temperature") or 0.85) + 0.05),
+            )
+        result["success"] = False
+        result["error"] = "LM audio-code quality gate rejected all samples"
+        return result
+
+
+    LLMHandler.generate_with_stop_condition = _generate_with_audio_code_gate
+
+    # The upstream legacy API still defaults every DiT variant to 8 steps and
+    # shift 3.0. Those are correct for XL-Turbo, while XL-SFT is the default
+    # quality profile and requires full base-model sampling.
+    import acestep.api.http.release_task_request_builder as request_builder
+
+    _build_generate_music_request = request_builder.build_generate_music_request
+
+
+    def _build_model_aware_request(*args, **kwargs):
+        parser = kwargs.get("parser")
+        if parser is None and args:
+            parser = args[0]
+        request = _build_generate_music_request(*args, **kwargs)
+        model_name = request.model or os.getenv(
+            "ACESTEP_CONFIG_PATH", "acestep-v15-xl-sft"
+        )
+        is_sft = "sft" in model_name.lower()
+        if is_sft and request.inference_steps < 30:
+            print(
+                "[olares-stage] XL-SFT requires 30+ DiT steps; using 50",
+                flush=True,
+            )
+            request.inference_steps = 50
+        if is_sft and parser is not None and parser.get("shift") is None:
+            request.shift = 1.0
+        return request
+
+
+    request_builder.build_generate_music_request = _build_model_aware_request
+
+    import acestep.inference as inference
+
+
+    _create_sample = inference.create_sample
+
+
+    @functools.wraps(_create_sample)
+    def _stable_create_sample(*args, **kwargs):
+        language = str(kwargs.get("vocal_language") or "").lower()
+        if language not in {"zh", "yue"}:
+            if kwargs.get("top_p") is None:
+                kwargs["top_p"] = 0.9
+            if kwargs.get("repetition_penalty") in (None, 1.0):
+                kwargs["repetition_penalty"] = 1.08
+        return _create_sample(*args, **kwargs)
+
+
+    inference.create_sample = _stable_create_sample
+
+
+    _generate_music = inference.generate_music
+
+    def _write_alignment_sidecars(result, alignment):
+        if alignment is None or not getattr(result, "success", False):
+            return
+        for audio in getattr(result, "audios", []) or []:
+            path = audio.get("path") if isinstance(audio, dict) else None
+            if not path:
+                continue
+            destination = path + ".lyrics-alignment.json"
+            temporary = destination + "." + uuid.uuid4().hex + ".tmp"
+            try:
+                with open(temporary, "x", encoding="utf-8") as handle:
+                    json.dump(alignment, handle, ensure_ascii=False, separators=(",", ":"))
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, destination)
+                print(f"[lyrics-alignment] persisted sidecar={destination}", flush=True)
+            except Exception as exc:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                print(f"[lyrics-alignment] sidecar write failed error={exc}", flush=True)
+
+
+    def _staged_generate_music(*args, **kwargs):
+        dit_handler = kwargs.get("dit_handler")
+        llm_handler = kwargs.get("llm_handler")
+        params = kwargs.get("params")
+        if params is None and len(args) > 2:
+            params = args[2]
+
+        # ace-step-ace-step-1.5:0.1.8 predates upstream PR #1273 and
+        # incorrectly enables Differential Correction in Wavelet domain for
+        # non-distilled SFT models.  On XL-SFT that produces structured noise
+        # even though the weights and the rest of the sampling parameters are
+        # valid.  Keep this explicit until the runtime image contains the
+        # model-aware upstream default; this application only serves XL-SFT.
+        if params is not None:
+            if getattr(params, "dcw_enabled", False):
+                print(
+                    "[olares-quality] disabling DCW for XL-SFT",
+                    flush=True,
+                )
+            params.dcw_enabled = False
+
+        if dit_handler is None or llm_handler is None:
+            return _generate_music(*args, **kwargs)
+
+        original_dit_generate = dit_handler.generate_music
+        captured_alignment = None
+
+        @functools.wraps(original_dit_generate)
+        def _run_dit_after_lm(*dit_args, **dit_kwargs):
+            nonlocal captured_alignment
+            if getattr(llm_handler, "llm_initialized", False):
+                print(
+                    "[olares-stage] LM phase complete; unloading LM before DiT",
+                    flush=True,
+                )
+                llm_handler.unload()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                print("[olares-stage] LM GPU memory released", flush=True)
+            original_builder = getattr(dit_handler, "_build_generate_music_success_payload", None)
+            sung_lyrics = str(dit_kwargs.get("lyrics") or "").strip()
+            if original_builder is None or not sung_lyrics:
+                return original_dit_generate(*dit_args, **dit_kwargs)
+
+            @functools.wraps(original_builder)
+            def _build_with_alignment(*builder_args, **builder_kwargs):
+                nonlocal captured_alignment
+                try:
+                    outputs = builder_kwargs.get("outputs")
+                    pred_latents = builder_kwargs.get("pred_latents_cpu")
+                    lyric_ids = outputs.get("lyric_token_idss") if isinstance(outputs, dict) else None
+                    required = (
+                        pred_latents,
+                        outputs.get("encoder_hidden_states") if isinstance(outputs, dict) else None,
+                        outputs.get("encoder_attention_mask") if isinstance(outputs, dict) else None,
+                        outputs.get("context_latents") if isinstance(outputs, dict) else None,
+                        lyric_ids,
+                    )
+                    if any(value is None for value in required):
+                        raise ValueError("generation did not retain alignment tensors")
+                    duration = float(dit_kwargs.get("audio_duration") or pred_latents.shape[1] / 25.0)
+                    seed = int(builder_kwargs.get("seed_value_for_ui") or 42)
+                    native_alignment = dit_handler.get_lyric_timestamp(
+                        pred_latent=pred_latents[0:1],
+                        encoder_hidden_states=required[1][0:1],
+                        encoder_attention_mask=required[2][0:1],
+                        context_latents=required[3][0:1],
+                        lyric_token_ids=lyric_ids[0:1],
+                        total_duration_seconds=duration,
+                        vocal_language=str(dit_kwargs.get("vocal_language") or "en"),
+                        inference_steps=int(dit_kwargs.get("inference_steps") or 8),
+                        seed=seed,
+                    )
+                    if not native_alignment.get("success"):
+                        raise ValueError(native_alignment.get("error") or "native alignment failed")
+                    captured_alignment = alignment_segments(native_alignment.get("lrc_text"), duration)
+                    print(
+                        f"[lyrics-alignment] generated segments={len(captured_alignment['segments'])}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    captured_alignment = None
+                    print(f"[lyrics-alignment] generation failed error={exc}", flush=True)
+                return original_builder(*builder_args, **builder_kwargs)
+
+            dit_handler._build_generate_music_success_payload = _build_with_alignment
+            try:
+                return original_dit_generate(*dit_args, **dit_kwargs)
+            finally:
+                dit_handler._build_generate_music_success_payload = original_builder
+
+        dit_handler.generate_music = _run_dit_after_lm
+        try:
+            result = _generate_music(*args, **kwargs)
+            _write_alignment_sidecars(result, captured_alignment)
+            return result
+        finally:
+            dit_handler.generate_music = original_dit_generate
+
+
+    inference.generate_music = _staged_generate_music
+
+    import acestep.api.llm_readiness as llm_readiness
+
+    _ensure_llm_ready = llm_readiness.ensure_llm_ready_for_request
+
+
+    def _ensure_llm_ready_after_stage(*args, **kwargs):
+        app_state = kwargs.get("app_state")
+        if app_state is None and args:
+            app_state = args[0]
+        handler = getattr(app_state, "llm_handler", None)
+        if (
+            handler is not None
+            and not getattr(handler, "llm_initialized", False)
+            and (
+                getattr(app_state, "_llm_initialized", False)
+                or getattr(app_state, "_llm_init_error", None) is not None
+            )
+        ):
+            print("[olares-stage] rearming LM for the next model task", flush=True)
+            app_state._llm_initialized = False
+            app_state._llm_init_error = None
+        return _ensure_llm_ready(*args, **kwargs)
+
+
+    llm_readiness.ensure_llm_ready_for_request = _ensure_llm_ready_after_stage
+
+    # This module imports the readiness function by value; replace that binding
+    # before api_server imports the worker and route modules.
+    import acestep.api.job_llm_preparation as job_llm_preparation
+
+    job_llm_preparation.ensure_llm_ready_for_request = _ensure_llm_ready_after_stage
+
+    # Only the generation path is routed through ensure_llm_ready_for_request.
+    # /format_input and /v1/create_sample reach the handler directly, so once a
+    # job has crossed the stage barrier they answer "LLM not initialized" for
+    # the rest of the process lifetime.
+    import acestep.api.route_setup as route_setup
+
+    _register_sample_format_routes = route_setup.register_sample_format_routes
+
+
+    class _TextRouteRequest:
+        """The LM overrides the readiness helper reads off a job request.
+
+        A text-only route has no job, so both are absent and the helper falls
+        back to ACESTEP_LM_MODEL_PATH and ACESTEP_LM_BACKEND.
+        """
+
+        lm_model_path = None
+        lm_backend = None
+
+
+    def _register_sample_format_routes_with_rearm(**kwargs):
+        app = kwargs["app"]
+
+        def _with_rearm(call):
+            @functools.wraps(call)
+            def _wrapped(*call_args, **call_kwargs):
+                handler = getattr(app.state, "llm_handler", None)
+                if handler is not None:
+                    _ensure_llm_ready_after_stage(
+                        app_state=app.state,
+                        llm_handler=handler,
+                        req=_TextRouteRequest(),
+                        get_project_root=kwargs["get_project_root"],
+                        get_model_name=kwargs["get_model_name"],
+                        ensure_model_downloaded=kwargs["ensure_model_downloaded"],
+                        env_bool=kwargs["env_bool"],
+                    )
+                return call(*call_args, **call_kwargs)
+
+            return _wrapped
+
+        kwargs["format_sample"] = _with_rearm(kwargs["format_sample"])
+        kwargs["create_sample_fn"] = _with_rearm(kwargs["create_sample_fn"])
+        return _register_sample_format_routes(**kwargs)
+
+
+    route_setup.register_sample_format_routes = _register_sample_format_routes_with_rearm
+
+    from acestep.api_server import main
+
+    if __name__ == "__main__":
+        main()
