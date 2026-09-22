@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clawdbot-sqlite-migration
+  namespace: '{{ .Release.Namespace }}'
+data:
+  migrate-session-index.cjs: |
+    // OpenClaw 2026.9.1 -> 2026.9.4: schema v19 gained this canonical index.
+    // Run offline, as an initContainer, before any Gateway/CLI writer starts.
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { DatabaseSync, backup } = require('node:sqlite');
+    const state = process.env.OPENCLAW_STATE_DIR || '/home/node/.openclaw';
+    const index = 'idx_agent_session_nodes_active';
+    const sql = `CREATE INDEX ${index} ON session_nodes(session_key) WHERE archived_at IS NULL`;
+    const normalize = value => value.replace(/\s+/g, ' ').trim().replace(/;$/, '');
+    const check = db => {
+      const rows = db.prepare('PRAGMA integrity_check').all();
+      if (rows.length !== 1 || rows[0].integrity_check !== 'ok') throw new Error('SQLite integrity check failed');
+      if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('SQLite foreign key check failed');
+    };
+    async function main() {
+      const agents = path.join(state, 'agents');
+      if (!fs.existsSync(agents)) return console.log('[sqlite-migrate] fresh install; skip');
+      for (const entry of fs.readdirSync(agents, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const file = path.join(agents, entry.name, 'agent', 'openclaw-agent.sqlite');
+        if (!fs.existsSync(file)) continue;
+        const stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.nlink !== 1) throw new Error('Unsafe database file');
+        const db = new DatabaseSync(file);
+        try {
+          const existing = db.prepare('SELECT sql FROM sqlite_master WHERE name=?').get(index);
+          if (existing) {
+            if (normalize(existing.sql) !== normalize(sql)) throw new Error('Unexpected index definition; refusing replacement');
+            console.log(`[sqlite-migrate] ${entry.name}: already current`);
+            continue;
+          }
+          if (db.prepare('PRAGMA user_version').get().user_version !== 19) throw new Error('Unsupported schema version; refusing migration');
+          const columns = db.prepare('PRAGMA table_info(session_nodes)').all().map(row => row.name);
+          if (!['session_key', 'archived_at'].every(name => columns.includes(name))) throw new Error('Missing session_nodes columns');
+          check(db);
+          const dir = path.join(state, 'migration-backups', '2026.9.4-session-index', entry.name);
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const copy = path.join(dir, `${Date.now()}-${process.pid}.sqlite`);
+          await backup(db, copy);
+          fs.chmodSync(copy, 0o600);
+          const saved = new DatabaseSync(copy, { readOnly: true });
+          try { check(saved); } finally { saved.close(); }
+          db.exec('BEGIN IMMEDIATE');
+          try {
+            db.exec(sql);
+            check(db);
+            db.exec('COMMIT');
+          } catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
+          }
+          console.log(`[sqlite-migrate] ${entry.name}: index created; verified backup retained`);
+        } finally { db.close(); }
+      }
+    }
+    main().catch(error => { console.error('[sqlite-migrate]', error.message); process.exitCode = 1; });
+
+  migrate-agent-schema.mjs: |
+    // OpenClaw 2026.9.5 requires schema 21 before opening existing agent stores.
+    // Call the pinned image's own migration under its maintenance lease, offline.
+    // Do not run full doctor --fix: it can change unrelated configuration/skills.
+    import fs from 'node:fs';
+    import path from 'node:path';
+    import { pathToFileURL } from 'node:url';
+    import { DatabaseSync, backup } from 'node:sqlite';
+    const state = process.env.OPENCLAW_STATE_DIR || '/home/node/.openclaw';
+    const targetVersion = 21;
+    function inspect(db) {
+      const integrity = db.prepare('PRAGMA integrity_check').all();
+      if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') throw new Error('SQLite integrity check failed');
+      if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('SQLite foreign key check failed');
+      return db.prepare('PRAGMA user_version').get().user_version;
+    }
+    async function upstream(prefix, name) {
+      const files = fs.readdirSync('/app/dist').filter(f => f.startsWith(prefix) && f.endsWith('.mjs') && fs.readFileSync(path.join('/app/dist', f), 'utf8').includes(`function ${name}(`));
+      if (files.length !== 1) throw new Error(`Expected one upstream module for ${prefix}`);
+      const module = await import(pathToFileURL(path.join('/app/dist', files[0])).href);
+      const fn = Object.values(module).find(value => typeof value === 'function' && value.name === name);
+      if (!fn) throw new Error(`Missing upstream migration function ${name}`);
+      return fn;
+    }
+    async function main() {
+      const agents = path.join(state, 'agents');
+      if (!fs.existsSync(agents)) return console.log('[sqlite-schema] fresh install; skip');
+      const pending = [];
+      for (const entry of fs.readdirSync(agents, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const file = path.join(agents, entry.name, 'agent', 'openclaw-agent.sqlite');
+        if (!fs.existsSync(file)) continue;
+        const stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.nlink !== 1) throw new Error('Unsafe database file');
+        const db = new DatabaseSync(file, { readOnly: true });
+        try {
+          const version = inspect(db);
+          if (version === targetVersion) {
+            console.log(`[sqlite-schema] ${entry.name}: already current`);
+            continue;
+          }
+          if (![19, 20].includes(version)) throw new Error(`Unsupported schema ${version}; refusing migration`);
+          const dir = path.join(state, 'migration-backups', '2026.9.5-schema-21', entry.name);
+          fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+          const copy = path.join(dir, `${Date.now()}-${process.pid}.sqlite`);
+          await backup(db, copy);
+          fs.chmodSync(copy, 0o600);
+          const saved = new DatabaseSync(copy, { readOnly: true });
+          try { if (inspect(saved) !== version) throw new Error('Backup schema mismatch'); }
+          finally { saved.close(); }
+          pending.push({ agentId: entry.name, pathname: file });
+        } finally { db.close(); }
+      }
+      if (!pending.length) return;
+      const configPath = path.join(state, 'openclaw.json');
+      const before = fs.existsSync(configPath) ? fs.readFileSync(configPath) : null;
+      const migrate = await upstream('openclaw-agent-db-maintenance-', 'migrateOpenClawAgentDatabaseForMaintenance');
+      const lease = await upstream('openclaw-agent-db-', 'withAgentDatabaseMaintenanceLease');
+      await lease({ env: process.env }, async maintenance => {
+        for (const entry of pending) {
+          await migrate(entry, maintenance);
+          maintenance.assertOwned();
+          const db = new DatabaseSync(entry.pathname, { readOnly: true });
+          try { if (inspect(db) !== targetVersion) throw new Error('Schema migration incomplete'); }
+          finally { db.close(); }
+          console.log(`[sqlite-schema] ${entry.agentId}: migrated to schema 21; verified backup retained`);
+        }
+      });
+      if (before && !before.equals(fs.readFileSync(configPath))) throw new Error('Configuration changed during database migration');
+    }
+    main().catch(error => { console.error('[sqlite-schema]', error.message); process.exitCode = 1; });
