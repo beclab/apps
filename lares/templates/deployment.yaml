@@ -1,0 +1,232 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Chart.Name }}
+spec:
+  replicas: {{ .Values.workloads.lares.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Chart.Name }}
+      annotations:
+        config.linkerd.io/skip-outbound-ports: "4222"
+    spec:
+      {{- $enableDind := ne (toString (index (.Values.olaresEnv | default dict) "ENABLE_DIND")) "false" }}
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        # The dev overlay exists in every install: hot reload is switched at
+        # runtime by the .hotreload flag inside it, so the chart must not decide
+        # it. Empty and unused until someone turns it on.
+        - name: fix-data-perms
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /appdata/data /appdata/data/lares /appdata/data/workspace /appdata/devsrc
+              chown -R 1000:1000 /appdata/data
+              chown 1000:1000 /appdata/devsrc
+          volumeMounts:
+            - name: app-data
+              mountPath: /appdata
+        {{- if $enableDind }}
+        - name: init-docker-cli
+          image: docker.io/beclab/docker:29.3.0-dind
+          imagePullPolicy: IfNotPresent
+          command:
+            - cp
+            - /usr/local/bin/docker
+            - /docker-cli/docker
+          volumeMounts:
+            - name: docker-cli-bin
+              mountPath: /docker-cli
+        {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: TZ
+              value: {{ .Values.olaresEnv.TIMEZONE | quote }}
+            - name: LARES_WORKSPACE
+              value: /data/workspace
+            - name: LARES_DATA_DIR
+              value: /data/lares
+            # Router's per-user entrance, which mesh-in gives both a caller JWT
+            # and a TLS replica, so https terminates. Its shared entrance is
+            # reachable too but arrives as auth only, so that route is http on
+            # the fixed 3a77b15d.shared.olares.com and not this host under a
+            # different scheme.
+            - name: LLM_GATEWAY_URL
+              value: {{ printf "https://router.%s/v1" .Values.user.zone | quote }}
+            - name: OLARES_APP_ID
+              value: "lares"
+            - name: BFL_USERNAME
+              value: {{ .Values.bfl.username | quote }}
+            - name: LARES_CATALOG_EVENTS_NATS_URL
+              value: {{ printf "nats://nats.user-system-%s:4222" .Values.bfl.username | quote }}
+            - name: LARES_CATALOG_EVENTS_NATS_USER
+              value: {{ printf "%s-lares-catalog" .Release.Namespace | quote }}
+            - name: LARES_CATALOG_EVENTS_NATS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: lares-nats
+                  key: password
+            - name: LARES_CATALOG_EVENTS_SUBJECT
+              value: "router.catalog"
+            # Files is user-scoped. The Host substitutes the authenticated
+            # request user and forwards only that request's browser credential.
+            - name: LARES_FILES_BASE_URL
+              value: {{ printf "https://files.{user}.%s" (.Values.user.zone | splitList "." | rest | join ".") | quote }}
+            # dsh /api fence trusts only loopback Hosts; the entrance host is
+            # randomized per install, so it must come from the render context.
+            # Olares serves the same entrance on the public zone and on the LAN
+            # zone <prefix>.<user>.olares.local; both must be trusted.
+            - name: DSH_TRUSTED_HOSTS
+              value: {{ printf "%s,%s.%s.olares.local" .Values.domain.lares (splitList "." .Values.domain.lares | first) .Values.bfl.username | quote }}
+            # The image entry reads the overlay's .hotreload flag once at boot
+            # to decide between image code and this mount.
+            - name: LARES_DEV_OVERLAY
+              value: /devsrc
+            - name: NODE_ENV
+              value: "production"
+            {{- if $enableDind }}
+            - name: DOCKER_HOST
+              value: "tcp://localhost:2375"
+            {{- end }}
+          # Turning hot reload on seeds the overlay from the image inside this
+          # container, which outlasts the liveness grace period on a slow disk.
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: app-data
+              mountPath: /data
+              subPath: data
+            - name: app-data
+              mountPath: /devsrc
+              subPath: devsrc
+            {{- if $enableDind }}
+            - name: docker-cli-bin
+              mountPath: /usr/local/bin/docker
+              subPath: docker
+              readOnly: true
+            {{- end }}
+        {{- if $enableDind }}
+        - name: docker-dind
+          image: docker.io/beclab/docker:29.3.0-dind
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsGroup: 0
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: ""
+            - name: TZ
+              value: {{ .Values.olaresEnv.TIMEZONE | quote }}
+          command:
+            - dockerd
+            - --host
+            - tcp://0.0.0.0:2375
+            - --host
+            - unix:///var/run/docker.sock
+            - --mtu=1450
+          ports:
+            - containerPort: 2375
+          startupProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - docker
+                - info
+            initialDelaySeconds: 5
+            periodSeconds: 20
+            timeoutSeconds: 15
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: dind-storage
+              mountPath: /var/lib/docker
+            - name: app-data
+              mountPath: /data
+              subPath: data
+        {{- end }}
+      volumes:
+        - name: app-data
+          hostPath:
+            path: {{ .Values.userspace.appData }}
+            type: DirectoryOrCreate
+        {{- if $enableDind }}
+        - name: docker-cli-bin
+          emptyDir: {}
+        - name: dind-storage
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/docker"
+            type: DirectoryOrCreate
+        {{- end }}
