@@ -1,0 +1,107 @@
+apiVersion: v3
+olaresManifest.version: '0.15.0'
+olaresManifest.type: app
+metadata:
+  name: lares
+  appid: lares
+  title: Lares
+  description: Chat on Olares, wired to Router
+  icon: https://app.cdn.olares.com/appstore/lares/icon_new.png
+  version: 0.26.27
+  categories:
+    - agents
+  tags:
+    - framework
+    - personal-assistant
+spec:
+  versionName: "0.26.27"
+  runAsUser: true
+  fullDescription: |
+    Lares is a chat app on Olares.
+    It talks to Olares Router for LLM access.
+
+    **Highlights**
+    - Three-column chat UI with the Lares product profile
+    - Zero-config Router auth via in-cluster app identity (`x-caller-appid`)
+    - Bundled client plugins (voice input, web search) when enabled in the build
+    - Optional Docker-in-Docker sidecar (`ENABLE_DIND`, default on) so the agent can run `docker` against a pod-local daemon
+
+    **Requirements**
+    - Olares >= 1.12.7
+    - Router app installed and running (`router` dependency)
+    - Arch: amd64, arm64
+
+    **Getting started**
+    1. Install Lares from Market (test source: `market.test`).
+    2. Ensure Router is installed.
+    3. Open the Lares entrance and start a chat.
+  upgradeDescription: |
+    **Lares 0.26.27**
+
+    - Hot reload is a runtime switch (flag file + pod restart). The chart no
+      longer carries an install-time hotReload value, so you can turn it on
+      without reinstalling.
+    - FlowStudio file paths still resolve when Router nests outputs under
+      `response`.
+  developer: luolong
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  requiredCpu: 400m
+  limitedCpu: "6"
+  requiredMemory: 768Mi
+  limitedMemory: 12Gi
+  requiredDisk: 2Gi
+  limitedDisk: 50Gi
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  loginOlaresCLI: true
+entrances:
+  - name: lares
+    host: lares-svc
+    port: 8080
+    title: Lares
+    icon: https://app.cdn.olares.com/appstore/lares/icon_new.png
+    authLevel: private
+    openMethod: window
+options:
+  apiTimeout: 0
+  # Brand mark + PWA manifest public so the browser-tab favicon loads before the
+  # private-entrance auth redirect (same pattern Ashia uses for its icon assets).
+  policies:
+    - entranceName: lares
+      description: Brand mark and PWA manifest
+      uriRegex: ^/lares/(mark\.svg|manifest\.webmanifest)$
+      level: public
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+    - name: router
+      version: '>=1.0.0'
+      type: application
+workloadReplicas:
+  lares: 1
+envs:
+  - envName: TIMEZONE
+    required: true
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_USER_TIMEZONE
+    description: "Time zone used by Lares, its agents, and commands (IANA name such as Asia/Shanghai)"
+  - envName: ENABLE_DIND
+    type: bool
+    required: false
+    applyOnChange: true
+    editable: true
+    default: "true"
+    description: "Run a privileged Docker-in-Docker sidecar in the pod. Exposes the docker CLI via DOCKER_HOST=tcp://localhost:2375 (uses extra CPU/RAM/disk under app data). Disable if your environment forbids privileged containers"
