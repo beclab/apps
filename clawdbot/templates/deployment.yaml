@@ -2,7 +2,7 @@
   # 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
   # 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
   # 3) Helm upgrade: init only copies default when file is missing; never overwrites.
-{{- $openclawImage := "beclab/openclaw-openclaw:2026.9.1" -}}
+{{- $openclawImage := "beclab/openclaw-openclaw:2026.9.5" -}}
 {{- $brewBaseImage := "beclab/harveyff-openclaw-brew-base:2026.9.2-cli" -}}
 {{- $brewBinPath := "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin" -}}
 {{- $containerPath := printf "%s:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" $brewBinPath -}}
@@ -234,6 +234,40 @@ spec:
               name: app-data-node
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
+        # Offline, narrowly scoped migration; does not run doctor --fix or edit config.
+        - name: init-sqlite-session-index
+          image: "{{ $openclawImage }}"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["/usr/local/bin/node", "/migration/migrate-session-index.cjs"]
+          env:
+            - name: OPENCLAW_STATE_DIR
+              value: /home/node/.openclaw
+          volumeMounts:
+            - name: app-data-config
+              mountPath: /home/node/.openclaw
+            - name: sqlite-migration
+              mountPath: /migration
+              readOnly: true
+        # Offline migration: complete before any Gateway/CLI writer starts.
+        - name: init-sqlite-agent-schema
+          image: "{{ $openclawImage }}"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["/usr/local/bin/node", "/migration/migrate-agent-schema.mjs"]
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OPENCLAW_STATE_DIR
+              value: /home/node/.openclaw
+          volumeMounts:
+            - name: app-data-config
+              mountPath: /home/node/.openclaw
+            - name: sqlite-migration
+              mountPath: /migration
+              readOnly: true
         - name: init-docker-cli
           image: "docker.io/beclab/docker:29.3.0-dind"
           command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
@@ -529,6 +563,9 @@ spec:
             {{- end }}              
       restartPolicy: Always
       volumes:
+        - name: sqlite-migration
+          configMap:
+            name: clawdbot-sqlite-migration
         - hostPath:
             path: "{{ .Values.userspace.appData }}/config"
             type: DirectoryOrCreate
