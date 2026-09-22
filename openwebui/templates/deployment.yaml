@@ -84,27 +84,24 @@ spec:
               mountPath: /new-data
 {{- if $backupWebuiDbEnabled }}
         - name: backup-webui-db
-          image: 'docker.io/beclab/busybox:1.37'
-          command: ['sh', '-c']
-          args:
-            - |
-              CHART_VER="{{ .Chart.Version }}"
-              BACKUP_DIR=/data/backups
-              DEST="$BACKUP_DIR/webui_chart_${CHART_VER}.db"
-              mkdir -p "$BACKUP_DIR"
-              if [ ! -f /data/webui.db ]; then
-                echo "No webui.db yet, skipping backup."
-                exit 0
-              fi
-              if [ -f "$DEST" ]; then
-                echo "Backup for chart version ${CHART_VER} already exists: $DEST"
-                exit 0
-              fi
-              cp -a /data/webui.db "$DEST" || exit 1
-              echo "Backed up webui.db for chart version ${CHART_VER} -> $DEST"
+          image: 'docker.io/library/python:3.14.6-alpine3.23'
+          command: ['python', '/backup-scripts/backup.py']
+          env:
+            - name: CHART_VERSION
+              value: {{ .Chart.Version | quote }}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
           volumeMounts:
             - name: appdata
               mountPath: /data
+            - name: backup-scripts
+              mountPath: /backup-scripts
+              readOnly: true
 {{- end }}
       containers:
         # Sidecar: fill missing user Settings→Interface keys with false after signup.
@@ -134,7 +131,7 @@ spec:
               mountPath: /scripts
               readOnly: true
         - name: openwebui
-          image: 'docker.io/openwebui/open-webui:0.11.3'
+          image: 'docker.io/openwebui/open-webui:0.11.4'
           ports:
             - containerPort: 8080
 
@@ -185,7 +182,7 @@ spec:
             - name: CORS_ALLOW_ORIGIN
               value: "*"
             - name: USER_AGENT
-              value: "OpenWebUI/0.11.3"
+              value: "OpenWebUI/0.11.4"
             - name: WEBSOCKET_EVENT_CALLER_TIMEOUT
               value: "600"
             - name: RAG_EMBEDDING_ENGINE
@@ -226,6 +223,12 @@ spec:
               mountPath: /app/backend/data
 
       volumes:
+{{- if $backupWebuiDbEnabled }}
+        - name: backup-scripts
+          configMap:
+            name: openwebui-db-backup
+            defaultMode: 0444
+{{- end }}
         - name: seed-scripts
           configMap:
             name: openwebui-seed-scripts
