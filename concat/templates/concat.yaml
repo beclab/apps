@@ -1,0 +1,91 @@
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "concat-api" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: concat-api
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+data:
+  token: {{ if and $existing $existing.data (index $existing.data "token") }}{{ index $existing.data "token" | quote }}{{ else }}{{ randAlphaNum 64 | b64enc | quote }}{{ end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: concat
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.concat.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: concat}
+  template:
+    metadata:
+      labels: {app: concat}
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command: [sh, -c, 'mkdir -p /config /projects && chown 1000:1000 /config /projects']
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: projects, mountPath: /projects}
+      containers:
+        - name: concat
+          image: beclab/harveyff-concat:0.2.2-olares-r9
+          imagePullPolicy: IfNotPresent
+          env:
+            - {name: PUID, value: "1000"}
+            - {name: PGID, value: "1000"}
+            - {name: TZ, value: UTC}
+            - {name: AUTO_GPU, value: "false"}
+            - {name: SLINT_WGPU_CPU, value: "1"}
+            - {name: START_DOCKER, value: "false"}
+            - {name: SELKIES_MANUAL_WIDTH, value: "1280"}
+            - {name: SELKIES_MANUAL_HEIGHT, value: "720"}
+            - {name: SELKIES_SECOND_SCREEN, value: "false"}
+            - name: CONCAT_API_TOKEN
+              valueFrom:
+                secretKeyRef: {name: concat-api, key: token}
+          ports:
+            - {name: http, containerPort: 3000}
+            - {name: api, containerPort: 8080}
+          resources:
+            requests: {cpu: 500m, memory: 2Gi}
+            limits: {cpu: "4", memory: 8Gi}
+          startupProbe:
+            httpGet: {path: /healthz, port: api}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /healthz, port: api}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /config}
+            - {name: projects, mountPath: /config/Projects}
+            - {name: dshm, mountPath: /dev/shm}
+      volumes:
+        - name: config
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/config
+        - name: projects
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}/Documents/Concat
+        - name: dshm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: concat
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: {app: concat}
+  ports:
+    - {name: http, port: 3000, targetPort: http}
+    - {name: api, port: 8080, targetPort: api}
