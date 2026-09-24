@@ -1,0 +1,298 @@
+{{- $gpuObj := .Values.GPU | default dict }}
+{{- $gpuType := .Values.gpu | default ($gpuObj.Type) | default "cpu" }}
+{{- $isIgpuMode := or (eq $gpuType "intel") (eq $gpuType "amd") }}
+{{- $isNvidiaMode := eq $gpuType "nvidia" }}
+{{- $isGpuMode := or $isIgpuMode $isNvidiaMode }}
+{{- $env := .Values.olaresEnv | default dict }}
+{{- $width := $env.STREAM_WIDTH | default "1920" }}
+{{- $height := $env.STREAM_HEIGHT | default "1080" }}
+{{- $maxFps := $env.STREAM_MAX_FPS | default "30" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blender
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: blender
+  {{- if $isGpuMode }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.blender.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: blender
+  template:
+    metadata:
+      labels:
+        io.kompose.service: blender
+    spec:
+      enableServiceLinks: false
+      {{- if $isGpuMode }}
+      securityContext:
+        supplementalGroups:
+          - 44
+          - 994
+      {{- end }}
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              mkdir -p /config /config/mcp-scripts
+              chown 1000:1000 /config /config/mcp-scripts
+              chmod 0777 /mcp-exchange
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: mcp-exchange
+              mountPath: /mcp-exchange
+      containers:
+        - name: blender
+          image: docker.io/linuxserver/blender:5.2.2
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+            - name: TITLE
+              value: Blender
+            - name: START_DOCKER
+              value: "false"
+            # Load blender-mcp in the browser-visible Blender process so the
+            # user and agents operate on the same in-memory scene.
+            - name: BLENDER_USER_SCRIPTS
+              value: /config/mcp-scripts
+            - name: BLENDER_MCP_SAFE_MODE
+              value: "1"
+            - name: DISABLE_TELEMETRY
+              value: "true"
+            - name: BLENDER_MCP_DISABLE_TELEMETRY
+              value: "true"
+            # Zero-copy VAAPI encoding only exists in Wayland mode; X11 GPU
+            # acceleration is no longer maintained upstream.
+            - name: PIXELFLUX_WAYLAND
+              value: "true"
+            # Without a usable VAAPI device the H.264 stream is encoded on the
+            # CPU, so the frame size and rate are the cost drivers. A client's
+            # HiDPI display otherwise negotiates ~4K here.
+            - name: SELKIES_MANUAL_WIDTH
+              value: {{ $width | quote }}
+            - name: SELKIES_MANUAL_HEIGHT
+              value: {{ $height | quote }}
+            - name: SELKIES_FRAMERATE
+              value: "8-{{ $maxFps }}"
+            - name: SELKIES_SECOND_SCREEN
+              value: "false"
+            {{- if $isIgpuMode }}
+            # Match jellyfin: do not hardcode /dev/dri paths. gpu-inject on
+            # Olares 1.12.7+ mounts the Intel render node; AUTO_GPU then
+            # points Selkies at that device for VAAPI.
+            - name: LIBVA_DRIVER_NAME
+              value: iHD
+            {{- else if $isNvidiaMode }}
+            # HAMi injects the NVIDIA device; leave AUTO_GPU on so Selkies
+            # picks NVENC / Zink instead of the Intel render node.
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: all
+            {{- else }}
+            - name: AUTO_GPU
+              value: "false"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+            - containerPort: 3001
+            - containerPort: 8082
+          resources:
+            requests:
+              cpu: "500m"
+              memory: 3Gi
+            limits:
+              cpu: "12"
+              memory: 12Gi
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: userdata
+              mountPath: /config/Home
+            - name: dshm
+              mountPath: /dev/shm
+            - name: blender-mcp-scripts
+              mountPath: /custom-cont-init.d
+              readOnly: true
+            - name: mcp-exchange
+              mountPath: /mcp-exchange
+        - name: blender-mcp
+          image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: HOME
+              value: /tmp
+            - name: UV_CACHE_DIR
+              value: /tmp/uv-cache
+            # get_viewport_screenshot has the MCP server pick a temp path and
+            # the addon write it. Those run in different containers, so the
+            # path has to land on a volume both of them share.
+            - name: TMPDIR
+              value: /mcp-exchange
+            - name: BLENDER_HOST
+              value: "127.0.0.1"
+            - name: BLENDER_PORT
+              value: "9876"
+            - name: BLENDER_MCP_SAFE_MODE
+              value: "1"
+            - name: DISABLE_TELEMETRY
+              value: "true"
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              python3 - <<'PY'
+              import socket, sys, time
+              for _ in range(90):
+                  s = socket.socket()
+                  s.settimeout(1)
+                  try:
+                      s.connect(("127.0.0.1", 9876))
+                      s.close()
+                      break
+                  except OSError:
+                      time.sleep(2)
+              else:
+                  sys.exit("blender MCP socket 127.0.0.1:9876 never came up")
+              PY
+              # --stateless serves /mcp without a server-side session, so a
+              # dropped connection cannot strand a client on a dead session id.
+              # mcp-proxy starts its stdio child with a reduced environment,
+              # so pass security and privacy settings explicitly to the
+              # actual blender-mcp process.
+              exec uvx --with "mcp<2.0.0" mcp-proxy --host 0.0.0.0 --port 8765 --stateless -- \
+                env BLENDER_HOST=127.0.0.1 BLENDER_PORT=9876 \
+                    BLENDER_MCP_SAFE_MODE=1 DISABLE_TELEMETRY=true \
+                    BLENDER_MCP_DISABLE_TELEMETRY=true \
+                    TMPDIR=/mcp-exchange \
+                uvx blender-mcp
+          ports:
+            - name: mcp
+              containerPort: 8765
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "20m"
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+          startupProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 3
+          readinessProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 3
+          volumeMounts:
+            - name: uv-cache
+              mountPath: /tmp
+            - name: mcp-exchange
+              mountPath: /mcp-exchange
+      restartPolicy: Always
+      volumes:
+        - name: config
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.appData }}/config
+        - name: userdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: {{ .Values.userspace.userData }}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: blender-mcp-scripts
+          configMap:
+            name: blender-mcp-scripts
+            defaultMode: 0755
+        - name: uv-cache
+          emptyDir: {}
+        - name: mcp-exchange
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blender
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: blender
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+    - name: https
+      port: 3001
+      targetPort: 3001
+    - name: mcp
+      port: 8765
+      targetPort: 8765
+  selector:
+    io.kompose.service: blender
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: blendermcp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: blender
+spec:
+  type: ClusterIP
+  ports:
+    - name: blendermcp
+      protocol: TCP
+      port: 8765
+      targetPort: 8765
+  selector:
+    io.kompose.service: blender
