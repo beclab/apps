@@ -16,6 +16,8 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        config.linkerd.io/skip-subnets: "172.16.0.0/12"
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: nemoclaw
@@ -109,6 +111,7 @@ spec:
             - -c
             - |
               set -e
+              rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
               export PATH="/home/node/.local/bin:$PATH"
 
               echo "[1/5] Installing system packages..."
@@ -203,6 +206,22 @@ spec:
               # Pin to NemoClaw's MAX_OPENSHELL_VERSION (see scripts/install-openshell.sh in NVIDIA/NemoClaw).
               OPENSHELL_PIN="${NEMOCLAW_OPENSHELL_VERSION:-v0.0.36}"
               OPENSHELL_PIN_NUM="${OPENSHELL_PIN#v}"
+              install_pinned_openshell() {
+                local asset stage arch
+                case "$(_nemoclaw_cpu_arch)" in
+                  amd64) arch=x86_64 ;;
+                  arm64) arch=aarch64 ;;
+                  *) echo "Unsupported OpenShell architecture" >&2; return 1 ;;
+                esac
+                asset="openshell-${arch}-unknown-linux-musl.tar.gz"
+                stage=$(mktemp -d /tmp/nemoclaw-openshell.XXXXXX)
+                curl -fLsS --retry 3 "https://github.com/NVIDIA/OpenShell/releases/download/${OPENSHELL_PIN}/${asset}" -o "$stage/$asset"
+                curl -fLsS --retry 3 "https://github.com/NVIDIA/OpenShell/releases/download/${OPENSHELL_PIN}/openshell-checksums-sha256.txt" -o "$stage/checksums"
+                (cd "$stage" && grep -F "$asset" checksums | sha256sum -c -) || return 1
+                tar -xzf "$stage/$asset" -C "$stage"
+                install -m 755 "$stage/openshell" /home/node/.local/bin/openshell
+                rm -rf "$stage"
+              }
                 install_openshell() {
                 mkdir -p /home/node/.local/bin
                 rm -f /home/node/.local/bin/openshell
@@ -225,8 +244,7 @@ spec:
                   echo "  WARN: curl from $_cli_url failed; falling back to NVIDIA install.sh" >&2
                   rm -f /home/node/.local/bin/openshell.new
                 fi
-                curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh \
-                  | OPENSHELL_VERSION="$OPENSHELL_PIN" OPENSHELL_INSTALL_DIR=/home/node/.local/bin sh
+                install_pinned_openshell
               }
               # With a custom URL the binary's --version may match or drift; pin-based skip only
               if [ -n "${NEMOCLAW_OPENSHELL_CLI_URL:-}" ]; then
@@ -259,12 +277,15 @@ spec:
                 install_openshell
               fi
 
-              # Prefer image-baked /usr/local/bin/openshell (pinned, known-good) when
+              # NemoClaw rejects unversioned custom builds even when they execute.
+              # Replace those in the same PATH location with the pinned upstream CLI.
               if [ -x /home/node/.local/bin/openshell ]; then
                 _os_loc_ver="$(/home/node/.local/bin/openshell --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
                 if [ "$_os_loc_ver" = "0.0.0" ] || [ -z "$_os_loc_ver" ]; then
-                  echo "[openshell] removing broken /home/node/.local/bin/openshell (version '${_os_loc_ver:-empty}')"
-                  rm -f /home/node/.local/bin/openshell
+                  echo "[openshell] replacing unversioned CLI with pinned ${OPENSHELL_PIN}"
+                  install_pinned_openshell
+                  /home/node/.local/bin/openshell --version
+                  sha256sum /home/node/.local/bin/openshell | awk '{print $1}' > /workspace/.nemoclaw-openshell-cli.sha256
                 fi
               fi
               export PATH="/usr/local/bin:/usr/local/sbin:${PATH}"
@@ -286,6 +307,11 @@ spec:
               done
               docker info >/dev/null 2>&1 || { echo "Docker not ready"; exit 1; }
               echo "Docker ready"
+              if [ -n "${NEMOCLAW_ENDPOINT_URL:-}" ]; then
+                python3 /opt/nemoclaw/model-proxy.py > /workspace/.nemoclaw-model-proxy.log 2>&1 &
+                export NEMOCLAW_SANDBOX_ENDPOINT_URL=http://172.17.0.1:18080/v1
+              fi
+              bash /opt/nemoclaw/preload-k3s-images.sh > /workspace/.nemoclaw-k3s-preload.log 2>&1 &
 
               # --- ghcr sandbox-base docker-pull shim (DISABLED) ---
               echo "[4b/5] ghcr sandbox-base docker shim skipped (disabled in chart; upstream pull behaviour)"
@@ -395,6 +421,7 @@ spec:
                 fi
                 if command -v nemoclaw >/dev/null 2>&1 && [ -f "$src/Dockerfile" ]; then
                   _nemoclaw_patch_source_dockerfile "$src" || return 1
+                  python3 /opt/nemoclaw/patch-onboard.py "$src" || return 1
                   printf '%s\n' "$tag" > "$tag_sentinel" 2>/dev/null || true
                   return 0
                 fi
@@ -422,6 +449,7 @@ spec:
                   echo "[5b/5|bootstrap] ERROR: npm link failed" >&2
                   return 1
                 fi
+                python3 /opt/nemoclaw/patch-onboard.py "$src" || return 1
                 if [ -x "$src/scripts/install-openshell.sh" ]; then
                   _bootstrap_os_ver="$(openshell --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
                   if [ "$_bootstrap_os_ver" = "${OPENSHELL_PIN_NUM:-0.0.36}" ]; then
@@ -483,6 +511,7 @@ spec:
 
               (
                 start_placeholder_18790() {
+                  rm -f /tmp/nemoclaw-webui-ready
                   # Readiness/startup probes gate on .nemoclaw-cli-ready (see below).
                   rm -f /workspace/.nemoclaw-cli-ready 2>/dev/null || true
                   rm -f /workspace/.nemoclaw-chat-relay-ready 2>/dev/null || true
@@ -787,6 +816,17 @@ spec:
                     continue
                   fi
                   # Pod Ready (= TUI works + WebUI relay can connect). Anything that takes
+                  if [ ! -f /workspace/.nemoclaw-installed ]; then
+                    sleep 10
+                    continue
+                  fi
+                  if ! _nemoclaw_openclaw_pin_ready; then
+                    rm -f /tmp/nemoclaw-webui-ready
+                    rm -f /workspace/.nemoclaw-cli-ready 2>/dev/null || true
+                    ensure_openclaw_version_in_sandbox || true
+                    sleep 5
+                    continue
+                  fi
                   ensure_brew_in_sandbox
                   if ! gateway_listening; then
                     sh /opt/nemoclaw/sandbox-ensure-gateway.sh 2>&1 | \
@@ -796,28 +836,41 @@ spec:
                       continue
                     fi
                   fi
-                  if [ ! -f /workspace/.nemoclaw-installed ]; then
+                  # Install model-route patches before exposing the application.
+                  ensure_skill_env_installed
+                  if ! sh /opt/nemoclaw/sandbox-ensure-gateway.sh; then
+                    rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
                     sleep 10
                     continue
                   fi
-                  if ! _nemoclaw_openclaw_pin_ready; then
-                    rm -f /workspace/.nemoclaw-cli-ready 2>/dev/null || true
-                    ensure_openclaw_version_in_sandbox || true
+                  if ! python3 /opt/nemoclaw/check-model.py --chat; then
+                    rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
+                    sleep 10
+                    continue
+                  fi
+                  start_relay_18790
+                  if ! python3 /opt/nemoclaw/check-webui.py; then
+                    rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
                     sleep 5
                     continue
                   fi
-                  if [ ! -f /workspace/.nemoclaw-cli-ready ]; then
+                  if [ ! -f /tmp/nemoclaw-webui-ready ]; then
                     mkdir -p /workspace 2>/dev/null || true
                     : > /workspace/.nemoclaw-cli-ready
-                    echo "[chat-ui-bridge] openclaw ${NEMOCLAW_OPENCLAW_VERSION:-runtime} pinned + gateway healthy; Pod Ready"
+                    : > /tmp/nemoclaw-webui-ready
+                    echo "[chat-ui-bridge] OpenClaw version, model route, gateway reply, WebUI page and assets verified; Pod Ready"
                   fi
-                  start_relay_18790
                   start_relay_oauth
-                  ensure_skill_env_installed
                   ensure_gog_shim_in_sandbox || true
                   while pod_running && gateway_listening; do
+                    if ! python3 /opt/nemoclaw/check-model.py >/dev/null; then
+                      rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
+                      break
+                    fi
                     if ! sh /opt/nemoclaw/pin-openclaw-in-sandbox.sh --check-only 2>/dev/null; then
+                      rm -f /tmp/nemoclaw-webui-ready /workspace/.nemoclaw-cli-ready
                       ensure_openclaw_version_in_sandbox || true
+                      break
                     fi
                     sleep 30
                   done
@@ -892,6 +945,11 @@ spec:
               ) &
 
               # Marker lives on hostPath (/workspace) but the real `nemoclaw` / `openshell` binaries
+              if [ -f /workspace/.nemoclaw-installed ] && [ -f /home/node/.nemoclaw/source/bin/nemoclaw.js ] && [ -f /home/node/.nemoclaw/source/dist/nemoclaw.js ]; then
+                ln -sf /home/node/.nemoclaw/source/bin/nemoclaw.js /usr/local/bin/nemoclaw
+                chmod +x /home/node/.nemoclaw/source/bin/nemoclaw.js
+                python3 /opt/nemoclaw/patch-onboard.py /home/node/.nemoclaw/source
+              fi
               if [ -f /workspace/.nemoclaw-installed ] && [ ! -x /usr/local/bin/nemoclaw ]; then
                 echo "[5/5] marker present but /usr/local/bin/nemoclaw missing — container FS was reset; re-running installer"
                 rm -f /workspace/.nemoclaw-installed
@@ -1030,15 +1088,15 @@ spec:
                   echo "[5a/5]   node-base:   $NODE_IMG${NODE_IMG_MIRROR:+ (mirror: $NODE_IMG_MIRROR)}"
                   [ "${NEMOCLAW_PREFER_MIRROR:-0}" = "1" ] && echo "[5a/5]   NEMOCLAW_PREFER_MIRROR=1 (mirror tried first)"
 
-                  # `wait -n` and loses per-job exit status after the first wait. Writing an
-                  _nemoclaw_pull_image "$CLUSTER_IMG" "$CLUSTER_IMG_MIRROR" "5a/5:cluster" "$PLOG_CLUSTER" \
-                    > "$PLOG_DIR/cluster.out" 2>&1; echo $? > "$PLOG_DIR/cluster.rc" &
+                  # Run each pull in its own subshell and record failures under set -e.
+                  ( _rc=0; _nemoclaw_pull_image "$CLUSTER_IMG" "$CLUSTER_IMG_MIRROR" "5a/5:cluster" "$PLOG_CLUSTER" \
+                    > "$PLOG_DIR/cluster.out" 2>&1 || _rc=$?; echo "$_rc" > "$PLOG_DIR/cluster.rc" ) &
                   PID_CLUSTER=$!
-                  _nemoclaw_pull_image "$SANDBOX_IMG" "$SANDBOX_IMG_MIRROR" "5a/5:sandbox" "$PLOG_SANDBOX" \
-                    > "$PLOG_DIR/sandbox.out" 2>&1; echo $? > "$PLOG_DIR/sandbox.rc" &
+                  ( _rc=0; _nemoclaw_pull_image "$SANDBOX_IMG" "$SANDBOX_IMG_MIRROR" "5a/5:sandbox" "$PLOG_SANDBOX" \
+                    > "$PLOG_DIR/sandbox.out" 2>&1 || _rc=$?; echo "$_rc" > "$PLOG_DIR/sandbox.rc" ) &
                   PID_SANDBOX=$!
-                  _nemoclaw_pull_image "$NODE_IMG" "$NODE_IMG_MIRROR" "5a/5:node" "$PLOG_NODE" \
-                    > "$PLOG_DIR/node.out" 2>&1; echo $? > "$PLOG_DIR/node.rc" &
+                  ( _rc=0; _nemoclaw_pull_image "$NODE_IMG" "$NODE_IMG_MIRROR" "5a/5:node" "$PLOG_NODE" \
+                    > "$PLOG_DIR/node.out" 2>&1 || _rc=$?; echo "$_rc" > "$PLOG_DIR/node.rc" ) &
                   PID_NODE=$!
 
                   # Heartbeat so the stream doesn't look hung while all three pulls are silent.
@@ -1091,7 +1149,7 @@ spec:
                       # Build Dockerfile with printf so every line stays within the YAML block
                       # scalar's indent (heredocs that start at column 0 silently terminate the
                       # block scalar and break the entire deployment.yaml parse).
-                      printf 'FROM %s\nCOPY --chown=root:root openshell-sandbox /opt/openshell/bin/openshell-sandbox\nRUN chmod 0755 /opt/openshell/bin/openshell-sandbox\n' \
+                      printf 'FROM %s\nENV IMAGE_PULL_POLICY=IfNotPresent\nCOPY --chown=root:root openshell-sandbox /opt/openshell/bin/openshell-sandbox\nRUN chmod 0755 /opt/openshell/bin/openshell-sandbox\n' \
                         "$CLUSTER_IMG" > "$_sbx_stage/Dockerfile"
                       if docker build -t "$CLUSTER_IMG" "$_sbx_stage" >/dev/null 2>&1; then
                         echo "[5a.5/5] layered custom openshell-sandbox into $CLUSTER_IMG (overwrote tag)"
@@ -1335,7 +1393,7 @@ spec:
                 if [ "$onboard_ok" = "1" ]; then
                 export NEMOCLAW_ONBOARD_OK_THIS_BOOT=1
                 touch /workspace/.nemoclaw-installed
-                echo "[5b/5] onboard complete; upgrading runtime openclaw to ${NEMOCLAW_OPENCLAW_VERSION:-2026.6.9} (parallel with policy-tier / gateway start)"
+                echo "[5b/5] onboard complete; upgrading runtime openclaw to ${NEMOCLAW_OPENCLAW_VERSION:-2026.6.35} (parallel with policy-tier / gateway start)"
                 (
                   for _pin_wait in $(seq 1 90); do
                     docker exec "$CLUSTER_CTR" kubectl -n "$NS" get pod "$SBX" \
@@ -1724,7 +1782,7 @@ spec:
                 if curl -fLsS -o "$_sbx_stage/openshell-sandbox" "$_sbx_url"; then
                   if _nemoclaw_verify_elf_arch "$_sbx_stage/openshell-sandbox" "$(_nemoclaw_cpu_arch)" "openshell-sandbox"; then
                   chmod +x "$_sbx_stage/openshell-sandbox"
-                  printf 'FROM %s\nCOPY --chown=root:root openshell-sandbox /opt/openshell/bin/openshell-sandbox\nRUN chmod 0755 /opt/openshell/bin/openshell-sandbox\n' \
+                  printf 'FROM %s\nENV IMAGE_PULL_POLICY=IfNotPresent\nCOPY --chown=root:root openshell-sandbox /opt/openshell/bin/openshell-sandbox\nRUN chmod 0755 /opt/openshell/bin/openshell-sandbox\n' \
                     "$CLUSTER_IMG" > "$_sbx_stage/Dockerfile"
                   if docker build -t "$CLUSTER_IMG" "$_sbx_stage" >/dev/null 2>&1; then
                     echo "[6/6-pre] layered custom openshell-sandbox into $CLUSTER_IMG"
@@ -1800,7 +1858,7 @@ spec:
                 fi
               fi
               if [ -f /workspace/.nemoclaw-installed ]; then
-                echo "NemoClaw ready (onboard sentinel present; runtime openclaw ${NEMOCLAW_OPENCLAW_VERSION:-<build pin>})."
+                echo "NemoClaw onboarding complete; bridge readiness checks determine when entrances open."
               else
                 echo "WARN: NemoClaw gateway is up but onboard did NOT complete — /workspace/.nemoclaw-installed missing."
                 echo "WARN: Fix the [5b/5] error above, then run: kubectl exec -it deploy/nemoclaw -c nemoclaw -- nemoclaw onboard --resume"
@@ -1860,7 +1918,7 @@ spec:
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_MAX_AGENT_TIMEOUT | default "" }}"
             # Pin OpenClaw inside the sandbox; empty falls back to the NemoClaw-baked version.
             - name: NEMOCLAW_OPENCLAW_VERSION
-              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.6.9" }}"
+              value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_VERSION | default "2026.6.35" }}"
             # Build-time OpenClaw pin (Dockerfile Patch 4 / rcf_patch.py). Not the runtime pin above.
             - name: NEMOCLAW_OPENCLAW_BUILD_VERSION
               value: "{{ .Values.olaresEnv.NEMOCLAW_OPENCLAW_BUILD_VERSION | default "2026.4.24" }}"
@@ -1983,13 +2041,11 @@ spec:
               command:
                 - sh
                 - -c
-                - test -f /workspace/.nemoclaw-cli-ready
-            # Give the very first probe a generous initial delay so we do
-            initialDelaySeconds: 300
-            periodSeconds: 30
-            timeoutSeconds: 5
-            # No success/fail threshold other than 1 — either the sentinel
-            successThreshold: 1
+                - test -f /tmp/nemoclaw-webui-ready && python3 /opt/nemoclaw/check-webui.py
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 15
+            successThreshold: 2
             failureThreshold: 1
           # startupProbe:
           resources:
@@ -2015,6 +2071,26 @@ spec:
             - name: patch-origins-script
               mountPath: /opt/nemoclaw/patch_inference_baseurl.py
               subPath: patch_inference_baseurl.py
+              readOnly: true
+            - name: k3s-preload-script
+              mountPath: /opt/nemoclaw/check-model.py
+              subPath: check-model.py
+              readOnly: true
+            - name: k3s-preload-script
+              mountPath: /opt/nemoclaw/check-webui.py
+              subPath: check-webui.py
+              readOnly: true
+            - name: k3s-preload-script
+              mountPath: /opt/nemoclaw/model-proxy.py
+              subPath: model-proxy.py
+              readOnly: true
+            - name: k3s-preload-script
+              mountPath: /opt/nemoclaw/preload-k3s-images.sh
+              subPath: preload-k3s-images.sh
+              readOnly: true
+            - name: k3s-preload-script
+              mountPath: /opt/nemoclaw/patch-onboard.py
+              subPath: patch-onboard.py
               readOnly: true
             - name: build-patch-script
               mountPath: /opt/nemoclaw/patch-nemoclaw-dockerfile.py
@@ -2075,6 +2151,12 @@ spec:
             - -c
             - |
               rm -f /var/run/docker.pid /var/run/docker/containerd/containerd.pid 2>/dev/null || true
+              # Olares' injector applies skip-subnets only to inbound traffic.
+              # Keep nested Docker gateway CONNECT requests off the outbound proxy.
+              if iptables -t nat -S PROXY_INIT_OUTPUT >/dev/null 2>&1; then
+                iptables -t nat -C PROXY_INIT_OUTPUT -d 172.16.0.0/12 -j RETURN 2>/dev/null ||
+                  iptables -t nat -I PROXY_INIT_OUTPUT 1 -d 172.16.0.0/12 -j RETURN
+              fi
               exec dockerd --host=unix:///var/run/docker.sock
           resources:
             limits:
@@ -2126,6 +2208,9 @@ spec:
                 path: patch_origins.py
               - key: patch_inference_baseurl.py
                 path: patch_inference_baseurl.py
+        - name: k3s-preload-script
+          configMap:
+            name: nemoclaw-k3s-preload
         - name: build-patch-script
           configMap:
             name: nemoclaw-build-patch
