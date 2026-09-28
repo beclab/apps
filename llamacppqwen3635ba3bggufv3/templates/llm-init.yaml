@@ -75,6 +75,30 @@ spec:
         io.kompose.service: llm-init
     spec:
       restartPolicy: Always
+      # llm-init hands common.sh / the sentinel / model-spec.json to the engine
+      # through run-state below, a NODE-LOCAL hostPath (userspace.appCache lives
+      # on /olares/userdata, not on the shared JuiceFS mount), so this Pod has to
+      # land on the engine's node. The engine holds the GPU request and is placed
+      # first by the HAMi scheduler; this Pod follows it.
+      #
+      # NOTE: app.kubernetes.io/instance is set ONLY on the engine Pod template,
+      # never on this one. If this Pod also carried it, it would match its own
+      # affinity term, and kube-scheduler's self-affinity fallback ("first pod in
+      # a series that have affinity to themselves") would let it schedule onto any
+      # node before the engine is bound - silently restoring the split-node bug
+      # this rule exists to prevent.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values:
+                - '{{ .Release.Name }}'
+            namespaces:
+            - {{ .Release.Namespace }}
       volumes:
         - name: hf-cache
           hostPath:
