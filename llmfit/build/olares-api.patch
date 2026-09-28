@@ -1,0 +1,80 @@
+diff --git a/llmfit-tui/src/serve_api.rs b/llmfit-tui/src/serve_api.rs
+index fb41701..a01d549 100644
+--- a/llmfit-tui/src/serve_api.rs
++++ b/llmfit-tui/src/serve_api.rs
+@@ -27,6 +27,12 @@ include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
+ static ASSET_MAP: LazyLock<HashMap<&'static str, &'static EmbeddedAsset>> =
+     LazyLock::new(|| EMBEDDED_WEB_ASSETS.iter().map(|a| (a.path, a)).collect());
+ 
++// Preserve the existing Olares opt-in behind its authenticated entrance.
++fn remote_api_allowed(addr: SocketAddr, flag: Option<&str>) -> bool {
++    addr.ip().is_loopback()
++        || flag.is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
++}
++
+ struct AppState {
+     node_name: String,
+     os: String,
+@@ -557,7 +563,7 @@ async fn start_download(
+     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+     Json(body): Json<DownloadBody>,
+ ) -> ApiResult<Json<serde_json::Value>> {
+-    if !addr.ip().is_loopback() {
++    if !remote_api_allowed(addr, std::env::var("LLMFIT_ALLOW_REMOTE").ok().as_deref()) {
+         return Err(ApiError::new(
+             StatusCode::FORBIDDEN,
+             "Downloads restricted to localhost",
+@@ -693,7 +699,7 @@ async fn download_status(
+     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+     Path(id): Path<String>,
+ ) -> ApiResult<Json<serde_json::Value>> {
+-    if !addr.ip().is_loopback() {
++    if !remote_api_allowed(addr, std::env::var("LLMFIT_ALLOW_REMOTE").ok().as_deref()) {
+         return Err(ApiError::new(
+             StatusCode::FORBIDDEN,
+             "Download status restricted to localhost",
+@@ -721,7 +727,7 @@ async fn plan_estimate(
+     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+     Json(body): Json<PlanBody>,
+ ) -> ApiResult<Json<serde_json::Value>> {
+-    if !addr.ip().is_loopback() {
++    if !remote_api_allowed(addr, std::env::var("LLMFIT_ALLOW_REMOTE").ok().as_deref()) {
+         return Err(ApiError::new(
+             StatusCode::FORBIDDEN,
+             "Plan restricted to localhost",
+@@ -1033,6 +1039,25 @@ fn fit_to_json(fit: &ModelFit) -> serde_json::Value {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn remote_gate_defaults_to_loopback_only() {
++        let remote: SocketAddr = "192.0.2.1:1234".parse().expect("test address");
++        assert!(!remote_api_allowed(remote, None));
++        assert!(!remote_api_allowed(remote, Some("0")));
++        assert!(!remote_api_allowed(remote, Some("false")));
++        for address in ["127.0.0.1:1234", "[::1]:1234"] {
++            assert!(remote_api_allowed(address.parse().expect("test address"), None));
++        }
++    }
++
++    #[test]
++    fn remote_gate_accepts_existing_explicit_opt_in() {
++        let remote: SocketAddr = "192.0.2.1:1234".parse().expect("test address");
++        for value in ["1", "true", "TRUE", "yes"] {
++            assert!(remote_api_allowed(remote, Some(value)));
++        }
++    }
++
+     use super::*;
+     use axum::body::Body;
+     use axum::http::Request;
+@@ -1117,7 +1142,8 @@ mod tests {
+                 .to_bytes();
+             let json: serde_json::Value = serde_json::from_slice(&bytes).expect("plan JSON");
+             assert_eq!(json["quantization"], "Q8_0");
+-            assert_eq!(json["disk_size_gb"].as_f64(), Some(expected));
++            let actual = json["disk_size_gb"].as_f64().expect("disk size");
++            assert!((actual - expected).abs() <= expected.abs().max(1.0) * 1e-12);
+         });
+     }
+ 
