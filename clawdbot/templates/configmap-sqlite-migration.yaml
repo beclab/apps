@@ -63,7 +63,8 @@ data:
     main().catch(error => { console.error('[sqlite-migrate]', error.message); process.exitCode = 1; });
 
   migrate-agent-schema.mjs: |
-    // OpenClaw 2026.9.5 requires schema 21 before opening existing agent stores.
+    // OpenClaw 2026.9.6 uses schema 23; already-current stores must survive restarts.
+    // Keep this target aligned with the pinned image when upgrading OpenClaw.
     // Call the pinned image's own migration under its maintenance lease, offline.
     // Do not run full doctor --fix: it can change unrelated configuration/skills.
     import fs from 'node:fs';
@@ -71,7 +72,7 @@ data:
     import { pathToFileURL } from 'node:url';
     import { DatabaseSync, backup } from 'node:sqlite';
     const state = process.env.OPENCLAW_STATE_DIR || '/home/node/.openclaw';
-    const targetVersion = 21;
+    const targetVersion = 23;
     function inspect(db) {
       const integrity = db.prepare('PRAGMA integrity_check').all();
       if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') throw new Error('SQLite integrity check failed');
@@ -103,8 +104,8 @@ data:
             console.log(`[sqlite-schema] ${entry.name}: already current`);
             continue;
           }
-          if (![19, 20].includes(version)) throw new Error(`Unsupported schema ${version}; refusing migration`);
-          const dir = path.join(state, 'migration-backups', '2026.9.5-schema-21', entry.name);
+          if (![19, 20, 21, 22].includes(version)) throw new Error(`Unsupported schema ${version}; refusing migration`);
+          const dir = path.join(state, 'migration-backups', '2026.9.6-schema-23', entry.name);
           fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
           const copy = path.join(dir, `${Date.now()}-${process.pid}.sqlite`);
           await backup(db, copy);
@@ -127,7 +128,7 @@ data:
           const db = new DatabaseSync(entry.pathname, { readOnly: true });
           try { if (inspect(db) !== targetVersion) throw new Error('Schema migration incomplete'); }
           finally { db.close(); }
-          console.log(`[sqlite-schema] ${entry.agentId}: migrated to schema 21; verified backup retained`);
+          console.log(`[sqlite-schema] ${entry.agentId}: migrated to schema ${targetVersion}; verified backup retained`);
         }
       });
       if (before && !before.equals(fs.readFileSync(configPath))) throw new Error('Configuration changed during database migration');
