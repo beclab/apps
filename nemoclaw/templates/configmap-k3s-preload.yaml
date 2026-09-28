@@ -1,0 +1,251 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemoclaw-k3s-preload
+  namespace: "{{ .Release.Namespace }}"
+data:
+  preload-k3s-images.sh: |
+    #!/bin/bash
+    # Image versions match beclab/harveyff-openshell-cluster:v1.17.
+    # Import through DinD because the nested k3s network cannot reach registries.
+    set -u
+    : "${NEMOCLAW_OPENSHELL_VERSION:=v0.0.36}"
+    cache=/workspace/.nemoclaw-k3s-images
+    mkdir -p "$cache"
+    images=(rancher/mirrored-pause:3.6 rancher/mirrored-coredns-coredns:1.14.2 rancher/klipper-helm:v0.9.14-build20260309 rancher/local-path-provisioner:v0.0.35 rancher/mirrored-metrics-server:v0.8.1 registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.1.0 rancher/mirrored-library-busybox:1.37.0 ghcr.io/nvidia/openshell/gateway:${NEMOCLAW_OPENSHELL_VERSION#v})
+    for img in "${images[@]}"; do
+     ( name=$(echo "$img" | tr '/:' '__'); [ -s "$cache/$name.tar" ] && exit 0; if docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"; then if docker save "$img" -o "$cache/$name.tmp" && mv "$cache/$name.tmp" "$cache/$name.tar"; then echo "SAVED $img"; fi; fi ) &
+    done
+    wait
+    for attempt in $(seq 1 180); do
+     ctr=$(docker ps --format '{{ "{{" }}.Names}}' | grep '^openshell-cluster-' | head -1)
+     if [ -n "$ctr" ] && docker exec "$ctr" test -S /run/k3s/containerd/containerd.sock; then
+       for archive in "$cache"/*.tar; do
+         [ -f "$archive" ] || continue
+         name=$(basename "$archive")
+         marker="$cache/$ctr-$(docker inspect --format '{{ "{{" }}.Id}}' "$ctr")-$name.done"
+         [ -f "$marker" ] && continue
+         if docker exec -i "$ctr" ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import - < "$archive"; then
+           for ref in $(tar -xOf "$archive" manifest.json | python3 -c 'import json,sys; print(" ".join(t for m in json.load(sys.stdin) for t in m.get("RepoTags", [])))'); do
+             case "$ref" in ghcr.io/*|registry.k8s.io/*|docker.io/*) ;; *) ref="docker.io/$ref" ;; esac
+             docker exec "$ctr" ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images label "$ref" io.cri-containerd.pinned=pinned || true
+           done
+           touch "$marker"
+         fi
+       done
+     fi
+     sleep 5
+    done
+
+  patch-onboard.py: |
+    #!/usr/bin/env python3
+    """Adapt the pinned NemoClaw installer to the Olares DinD build network."""
+    import pathlib, sys
+    p = pathlib.Path(sys.argv[1]) / "dist/lib/onboard.js"
+    if not p.exists():
+        raise SystemExit("Build NemoClaw CLI before applying onboarding patch")
+    s = p.read_text()
+    marker = "// olares-chart: host-network build"
+    if marker not in s:
+        anchor = '    const envArgs = [formatEnvAssignment("CHAT_UI_URL", chatUiUrl)];'
+        if s.count(anchor) != 1:
+            raise SystemExit("Unexpected NemoClaw build invocation; refusing patch")
+        s = s.replace(anchor, '''    // olares-chart: host-network build
+        const olaresImage = "nemoclaw-sandbox-olares:" + buildId;
+        const olaresBuild = run(["docker", "build", "--network=host", "-t", olaresImage, buildCtx], { ignoreError: true });
+        if (olaresBuild.status !== 0) {
+            throw new Error("Olares sandbox image build failed");
+        }
+        createArgs[createArgs.indexOf("--from") + 1] = olaresImage;
+    ''' + anchor)
+        anchor2 = 'function pullAndResolveBaseImageDigest() {'
+        if s.count(anchor2) != 1:
+            raise SystemExit("Unexpected NemoClaw base-image resolver; refusing patch")
+        s = s.replace(anchor2, anchor2 + '''
+        // The chart already pulled the configured, versioned base image.
+        const configuredBase = process.env.NEMOCLAW_SANDBOX_IMAGE;
+        if (configuredBase) {
+            const raw = dockerImageInspectFormat("{{ "{{" }}json .RepoDigests}}", configuredBase, { ignoreError: true });
+            const refs = JSON.parse(raw || "[]");
+            const ref = refs.find((item) => item.startsWith(configuredBase.split("@")[0].replace(/:[^/:]+$/, "") + "@sha256:"));
+            if (ref) return { digest: ref.split("@")[1], ref };
+        }
+    ''')
+        p.write_text(s)
+    if "// olares-chart: import built image" not in s:
+        anchor3 = '    createArgs[createArgs.indexOf("--from") + 1] = olaresImage;'
+        if s.count(anchor3) != 1:
+            raise SystemExit("Unexpected prebuilt image handoff")
+        s = s.replace(anchor3, '''    // olares-chart: import built image
+        const olaresCluster = process.env.NEMOCLAW_CLUSTER_CTR || "openshell-cluster-" + (process.env.NEMOCLAW_GATEWAY_NAME || "nemoclaw");
+        const olaresImport = run(["bash", "-o", "pipefail", "-c",
+            "docker save " + shellQuote(olaresImage) + " | docker exec -i " + shellQuote(olaresCluster) +
+            " ctr -a /run/k3s/containerd/containerd.sock -n k8s.io images import -"], { ignoreError: true });
+        if (olaresImport.status !== 0) throw new Error("Olares sandbox image import failed");
+    ''' + anchor3)
+        p.write_text(s)
+    print("Olares onboarding patch ready")
+
+  model-proxy.py: |
+    import os, urllib.request, urllib.error
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlsplit
+    endpoint = os.environ["NEMOCLAW_ENDPOINT_URL"].rstrip("/")
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *args): pass
+        def do_GET(self): self.forward()
+        def do_POST(self): self.forward()
+        def forward(self):
+            if not self.path.startswith("/v1/"):
+                self.send_error(404); return
+            data = self.rfile.read(int(self.headers.get("Content-Length", "0"))) if self.command == "POST" else None
+            headers = {"Content-Type": "application/json", "Authorization": self.headers.get("Authorization", "Bearer " + os.environ.get("COMPATIBLE_API_KEY", "unused"))}
+            req = urllib.request.Request(endpoint + self.path[3:], data=data, headers=headers, method=self.command)
+            try:
+                try: response = urllib.request.urlopen(req, timeout=1200)
+                except urllib.error.HTTPError as error: response = error
+                with response:
+                    self.send_response(response.status)
+                    self.send_header("Content-Type", response.headers.get("Content-Type", "application/json"))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    while True:
+                        chunk = response.read1(65536)
+                        if not chunk: break
+                        self.wfile.write(chunk); self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError): pass
+            except Exception:
+                self.close_connection = True
+            finally:
+                self.close_connection = True
+    ThreadingHTTPServer(("172.17.0.1", 18080), Handler).serve_forever()
+
+
+
+  check-webui.py: |
+    """Readiness check for the real OpenClaw page, assets and gateway health."""
+    import json
+    import sys
+    from html.parser import HTMLParser
+    from urllib.parse import urljoin, urlsplit
+    from urllib.request import ProxyHandler, build_opener
+
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.app = False
+            self.assets = []
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            self.app |= tag == "openclaw-app"
+            if tag == "script" and attrs.get("src"):
+                self.assets.append((attrs["src"], "javascript"))
+            if tag == "link" and attrs.get("rel") == "stylesheet" and attrs.get("href"):
+                self.assets.append((attrs["href"], "css"))
+
+    def check(base):
+        base = base.rstrip("/") + "/"
+        opener = build_opener(ProxyHandler({}))
+        def fetch(path, limit):
+            url = urljoin(base, path)
+            if urlsplit(url).netloc != urlsplit(base).netloc:
+                raise ValueError("UI asset is outside the application")
+            with opener.open(url, timeout=3) as response:
+                if response.status != 200 or response.geturl() != url:
+                    raise ValueError("Unexpected HTTP response")
+                # Drain the response before closing so the socat relay sees a clean EOF.
+                prefix = response.read(limit)
+                while response.read(65536):
+                    pass
+                return prefix, response.headers.get_content_type()
+        health, _ = fetch("health", 4096)
+        if json.loads(health).get("ok") is not True:
+            raise ValueError("Gateway is not healthy")
+        html, content_type = fetch("", 131072)
+        page = Page()
+        page.feed(html.decode("utf-8"))
+        if content_type != "text/html" or not page.app or not page.assets:
+            raise ValueError("OpenClaw UI is not installed")
+        if not any(kind == "javascript" for _, kind in page.assets):
+            raise ValueError("OpenClaw UI script is missing")
+        for path, kind in page.assets:
+            body, content_type = fetch(path, 512)
+            if not body or kind not in content_type or body.lstrip().startswith(b"<"):
+                raise ValueError("OpenClaw UI asset is unavailable")
+
+    if __name__ == "__main__":
+        try:
+            check(sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:18790/")
+        except Exception as error:
+            print("WebUI not ready:", error, file=sys.stderr)
+            raise SystemExit(1)
+
+  check-model.py: |
+    """Verify the sandbox model route; optionally prove a reply through the live gateway."""
+    import json
+    import os
+    import subprocess
+    import sys
+    import uuid
+
+    def check(chat=False):
+        endpoint = os.environ.get("NEMOCLAW_SANDBOX_ENDPOINT_URL") or os.environ.get("NEMOCLAW_ENDPOINT_URL", "")
+        endpoint = endpoint.rstrip("/")
+        if not endpoint.endswith("/v1"):
+            endpoint += "/v1"
+        model = os.environ.get("NEMOCLAW_MODEL", "")
+        if not model or endpoint == "/v1":
+            raise ValueError("Model endpoint and model ID are required")
+        command = ["docker", "exec", os.environ.get("CLUSTER_CTR", "openshell-cluster-nemoclaw"),
+                   "kubectl", "-n", os.environ.get("NS", "openshell"), "exec",
+                   os.environ.get("SBX", "my-assistant"), "-c", "agent", "--"]
+        # Execute in the same agent network namespace used by the default gateway.
+        probe = """
+    import json, sys, urllib.request
+    from urllib.parse import urlsplit
+    expected, model = sys.argv[1:]
+    with open('/sandbox/.openclaw/openclaw.json') as f:
+        config = json.load(f)
+    provider = config.get('models', {}).get('providers', {}).get('inference', {})
+    endpoint = provider.get('baseUrl', '').rstrip('/')
+    if endpoint != expected or urlsplit(endpoint).hostname == 'inference.local':
+        raise SystemExit('Model route is not configured yet')
+    key = provider.get('apiKey', 'unused')
+    if not isinstance(key, str):
+        raise SystemExit('Model credential is not a string')
+    request = urllib.request.Request(endpoint + '/models', headers={'Authorization': 'Bearer ' + key})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            models = json.load(response)
+        if not any(item.get('id') == model for item in models.get('data', [])):
+            raise ValueError('Configured model is absent from the endpoint')
+    except Exception as error:
+        raise SystemExit('Model endpoint check failed: ' + type(error).__name__)
+    print('Model route and model availability verified')
+    """
+        result = subprocess.run(command + ["python3", "-c", probe, endpoint, model],
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise ValueError("Sandbox model route or endpoint check failed")
+        if chat:
+            result = subprocess.run(command + ["runuser", "-u", "sandbox", "--", "env", "HOME=/sandbox",
+                "openclaw", "agent", "--session-id", "readiness-" + str(uuid.uuid4()),
+                "--message", "Reply with only OK. Do not use tools.", "--thinking", "off",
+                "--timeout", "120", "--json"], capture_output=True, text=True, timeout=140)
+            if result.returncode:
+                raise ValueError("Gateway model reply check failed")
+            # Require the gateway envelope, not a local fallback result.
+            output = result.stdout
+            payload = json.loads(output[output.index("{"):])
+            if payload.get("status") != "ok" or not any(
+                    item.get("text", "").strip() for item in payload.get("result", {}).get("payloads", [])):
+                raise ValueError("Gateway did not produce a model reply")
+        print("Model route verified" + ("; gateway reply verified" if chat else ""))
+
+    if __name__ == "__main__":
+        try:
+            check("--chat" in sys.argv)
+        except Exception as error:
+            print("Model not ready:", error, file=sys.stderr)
+            raise SystemExit(1)

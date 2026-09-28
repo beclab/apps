@@ -10,6 +10,15 @@ LOG="${NEMOCLAW_PIN_LOG_PREFIX:-[openclaw-pin]}"
 RESTART_GW="${NEMOCLAW_PIN_RESTART_GATEWAY:-0}"
 VERBOSE="${NEMOCLAW_PIN_VERBOSE:-0}"
 
+# All startup branches share this lock; recheck the live version after acquiring it.
+# Kernel locks are released on process exit, including interrupted installations.
+exec 9>/tmp/nemoclaw-openclaw-install.lock
+if [ "${1:-}" = "--check-only" ]; then
+  flock -s -n 9 || exit 1
+else
+  flock -x -w 600 9 || exit 1
+fi
+
 # Prefix log lines without sed (LOG may contain / | [ ] which break sed s///).
 _pin_log_pipe() {
   _pfx="${1:-}"
@@ -157,7 +166,7 @@ if [ "$RESTART_GW" = "1" ]; then
       pgrep -fa "openclaw[- ]gateway" 2>/dev/null && echo "WARN: gateway still alive after pkill -9" || echo "gateway gone"
     ' 2>&1 | _pin_log_pipe "$LOG"
   echo "${LOG} forcing gateway restart"
-  sh /opt/nemoclaw/sandbox-ensure-gateway.sh 2>&1 | _pin_log_pipe "${LOG} gw:"
+  NEMOCLAW_PIN_LOCK_HELD=1 sh /opt/nemoclaw/sandbox-ensure-gateway.sh 2>&1 | _pin_log_pipe "${LOG} gw:"
 fi
 
 exit 0
