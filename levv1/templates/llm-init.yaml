@@ -1,0 +1,163 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStatePath := include "levv1.runStatePath" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llminit
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: llm-init
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                  - key: app.kubernetes.io/instance
+                    operator: In
+                    values:
+                      - '{{ .Release.Name }}'
+              namespaces:
+                - '{{ .Release.Namespace }}'
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - mkdir -p /run/llm-init && chown 1000:1000 /run/llm-init
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: run-state
+              mountPath: /run/llm-init
+      containers:
+        - name: llm-init
+          image: '{{ include "levv1.llmInitImage" . }}'
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENGINE_KIND
+              value: systemone
+            - name: MODEL_NAME
+              value: '{{ include "levv1.modelName" . }}'
+            - name: MODEL_MODE
+              value: system_one
+            - name: MODEL_SOURCE
+              value: 'hf://{{ include "levv1.adapterRepo" . }} --revision {{ include "levv1.adapterRevision" . }},hf://{{ include "levv1.baseRepo" . }} --revision {{ include "levv1.baseRevision" . }}'
+            - name: SYSTEM_ONE_CONTEXT_SIZE
+              value: "4096"
+            - name: SYSTEM_ONE_MAX_CHOICE_OPTIONS
+              value: "255"
+            - name: SYSTEM_ONE_MAX_SCORE_LEVELS
+              value: "10"
+            - name: SYSTEM_ONE_LANGUAGES
+              value: en
+            - name: SYSTEM_ONE_DEFAULT_ELIGIBLE
+              value: "false"
+            - name: ENGINE_MAX_CONCURRENCY
+              value: "1"
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: '{{ $oe.LOG_LEVEL | default "info" }}'
+            - name: LOG_FORMAT
+              value: json
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: '{{ $hfEndpoint }}'
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: '{{ .Values.userspace.appCommon }}/huggingface'
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: '{{ $runStatePath }}'
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+  type: ClusterIP

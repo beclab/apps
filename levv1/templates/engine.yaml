@@ -1,0 +1,101 @@
+{{- $runStatePath := include "levv1.runStatePath" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: systemone-engine
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: systemone-engine
+spec:
+  replicas: {{ .Values.workloads.levv1.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: systemone-engine
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: systemone-engine
+        app.kubernetes.io/instance: '{{ .Release.Name }}'
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: systemone-engine
+          image: '{{ include "levv1.engineImage" . }}'
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/opt/systemone/start.sh"]
+          env:
+            - name: MODEL_NAME
+              value: '{{ include "levv1.modelName" . }}'
+            - name: SYSTEM_ONE_CONTEXT_SIZE
+              value: "4096"
+            - name: SYSTEM_ONE_MAX_CHOICE_OPTIONS
+              value: "255"
+            - name: SYSTEM_ONE_MAX_SCORE_LEVELS
+              value: "10"
+            - name: SYSTEM_ONE_LANGUAGES
+              value: en
+            - name: SYSTEM_ONE_DEFAULT_ELIGIBLE
+              value: "false"
+            - name: SYSTEM_ONE_MAX_CONCURRENCY
+              value: "1"
+            - name: SYSTEM_ONE_MAX_QUEUE
+              value: "8"
+            - name: PORT
+              value: "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+          resources:
+            requests:
+              cpu: "1"
+              memory: 10Gi
+              nvidia.com/gpumem: "13312"
+            limits:
+              cpu: "7"
+              memory: 22Gi
+              nvidia.com/gpumem: "13312"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrapper
+              mountPath: /opt/systemone
+              readOnly: true
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: '{{ .Values.userspace.appCommon }}/huggingface'
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: '{{ $runStatePath }}'
+            type: DirectoryOrCreate
+        - name: wrapper
+          configMap:
+            name: levv1-wrapper
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: systemone
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  selector:
+    io.kompose.service: systemone-engine
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP

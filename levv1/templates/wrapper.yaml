@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: levv1-wrapper
+  namespace: '{{ .Release.Namespace }}'
+data:
+  start.sh: |
+    #!/bin/sh
+    set -eu
+    sentinel=/run/llm-init/model_path
+    until [ -s "$sentinel" ]; do
+      sleep 1
+    done
+    MODEL_SOURCE="$(sed -n '1p' "$sentinel")"
+    BASE_MODEL_SOURCE="$(sed -n '1p' /run/llm-init/extra_model_path)"
+    test -n "$MODEL_SOURCE"
+    test -n "$BASE_MODEL_SOURCE"
+
+    # Lev's release manifest records the base model by Hub id. Model Console
+    # deliberately downloads the pinned base snapshot as a second source, so
+    # create a tiny local release view whose manifest points at that immutable
+    # directory. The adapter weights stay symlinked from the read-only cache.
+    RUNTIME_SOURCE=/tmp/lev-release
+    rm -rf "$RUNTIME_SOURCE"
+    mkdir -p "$RUNTIME_SOURCE"
+    for file in "$MODEL_SOURCE"/*; do
+      ln -s "$file" "$RUNTIME_SOURCE/$(basename "$file")"
+    done
+    rm -f "$RUNTIME_SOURCE/lev_release.json"
+    export MODEL_SOURCE BASE_MODEL_SOURCE RUNTIME_SOURCE
+    python - <<'PY'
+    import json
+    import os
+    from pathlib import Path
+
+    source = Path(os.environ["MODEL_SOURCE"]) / "lev_release.json"
+    manifest = json.loads(source.read_text())
+    manifest["base_model"] = os.environ["BASE_MODEL_SOURCE"]
+    target = Path(os.environ["RUNTIME_SOURCE"]) / "lev_release.json"
+    target.write_text(json.dumps(manifest, indent=2) + "\n")
+    PY
+    export HF_HOME=/cache/hf
+    export HF_HUB_CACHE=/cache/hf/hub
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+    export LEV_CHECKPOINT="$RUNTIME_SOURCE"
+    export LEV_MODEL_CACHE=/cache/hf/hub
+    exec uvicorn serve:app --host 0.0.0.0 --port "${PORT:-8000}"
