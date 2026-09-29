@@ -1,0 +1,125 @@
+{{- $runStatePath := include "layatypeddecisionsv3.runStatePath" . -}}
+{{- $gpuType := .Values.gpu | default "cpu" -}}
+{{- $isNvidia := eq $gpuType "nvidia" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: systemone-engine
+{{- if $isNvidia }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "systemone-engine"
+{{- end }}
+spec:
+  replicas: {{ .Values.workloads.layatypeddecisionsv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: systemone-engine
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: systemone-engine
+        app.kubernetes.io/instance: '{{ .Release.Name }}'
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: systemone-engine
+          image: '{{ include "layatypeddecisionsv3.engineImage" . }}'
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/opt/systemone/start.sh"]
+          env:
+            - name: SYSTEMONE_BACKEND
+              value: laya
+            - name: MODEL_NAME
+              value: '{{ include "layatypeddecisionsv3.modelName" . }}'
+            - name: MODEL_REVISION
+              value: '{{ include "layatypeddecisionsv3.modelRevision" . }}'
+            - name: DEVICE
+              value: '{{ if $isNvidia }}cuda{{ else }}cpu{{ end }}'
+            - name: SYSTEM_ONE_CONTEXT_SIZE
+              value: "1024"
+            - name: SYSTEM_ONE_MAX_CHOICE_OPTIONS
+              value: "20"
+            - name: SYSTEM_ONE_MAX_SCORE_LEVELS
+              value: "10"
+            - name: SYSTEM_ONE_LANGUAGES
+              value: en
+            - name: SYSTEM_ONE_DEFAULT_ELIGIBLE
+              value: "false"
+            - name: SYSTEM_ONE_MAX_CONCURRENCY
+              value: '{{ if $isNvidia }}100{{ else }}1{{ end }}'
+            - name: SYSTEM_ONE_MAX_QUEUE
+              value: "128"
+            - name: SYSTEM_ONE_BATCH_MAX_REQUESTS
+              value: '{{ if $isNvidia }}64{{ else }}1{{ end }}'
+            - name: SYSTEM_ONE_BATCH_MAX_ITEMS
+              value: '{{ if $isNvidia }}128{{ else }}256{{ end }}'
+            - name: SYSTEM_ONE_BATCH_WAIT_MS
+              value: '{{ if $isNvidia }}1{{ else }}0{{ end }}'
+            - name: PORT
+              value: "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+          # Model readiness belongs to llm-init. This container starts as a
+          # supervisor that waits for llm-init's model_path sentinel, so probing
+          # the engine HTTP port here would incorrectly block app installation
+          # until every model byte is downloaded and loaded.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+{{- if $isNvidia }}
+              nvidia.com/gpumem: 8192
+{{- end }}
+            limits:
+              cpu: "6"
+              memory: 8Gi
+{{- if $isNvidia }}
+              nvidia.com/gpumem: 8192
+{{- end }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrapper
+              mountPath: /opt/systemone
+              readOnly: true
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: '{{ .Values.userspace.appCommon }}/huggingface'
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: '{{ $runStatePath }}'
+            type: DirectoryOrCreate
+        - name: wrapper
+          configMap:
+            name: layatypeddecisionsv3-wrapper
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: systemone
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  selector:
+    io.kompose.service: systemone-engine
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
