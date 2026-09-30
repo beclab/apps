@@ -17,6 +17,45 @@ spec:
       labels:
         io.kompose.service: litellm
     spec:
+      initContainers:
+        - name: backup-postgres-before-upgrade
+          image: docker.io/beclab/postgres:17.5-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              DEST=/backup/backups/chart-1.0.22
+              MARKER="${DEST}/.backup_complete"
+              mkdir -p "$DEST"
+              if [ -f "$MARKER" ]; then
+                echo "[backup] marker present, skip."
+                exit 0
+              fi
+              table=$(psql "$DATABASE_URL" -tAc "SELECT to_regclass('public._prisma_migrations')")
+              if [ -z "$table" ]; then
+                echo "[backup] no _prisma_migrations, skip."
+                exit 0
+              fi
+              pg_dump --dbname="$DATABASE_URL" --format=custom --file="${DEST}/litellm.dump"
+              if [ ! -s "${DEST}/litellm.dump" ]; then
+                echo "[backup] dump missing or empty, stop."
+                exit 1
+              fi
+              pg_restore --list "${DEST}/litellm.dump" >/dev/null
+              echo "backed up" > "$MARKER"
+              echo "[backup] wrote ${DEST}/litellm.dump"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: appdata
+              mountPath: /backup
       containers:
       - args:
           - --port
@@ -24,7 +63,7 @@ spec:
           - --config
           - /app/proxy_config.yaml
         name: litellm
-        image: "beclab/litellm-litellm:v1.83.3-stable"
+        image: "docker.io/beclab/berriai-litellm:v1.103.0"
         ports:
           - containerPort: 4000
             protocol: TCP
@@ -107,6 +146,10 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: "{{ .Values.userspace.appData }}/litellm"
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: "{{ .Values.userspace.appData }}"
         - name: init-config
           configMap:
             name: litellm-config
