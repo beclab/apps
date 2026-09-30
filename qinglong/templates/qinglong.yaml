@@ -92,6 +92,62 @@ spec:
               readOnly: true
             - name: qinglong-data
               mountPath: /new-data
+        - name: backup-data-before-upgrade
+          image: "docker.io/beclab/busybox:1.37"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              SRC=/data
+              DEST=/appdata/backups/chart-0.0.16
+              MARKER="${DEST}/.backup_complete"
+              DB="${SRC}/db/database.sqlite"
+
+              if [ -f "$MARKER" ]; then
+                echo "[backup] marker present, skip."
+                exit 0
+              fi
+
+              if [ ! -f "$DB" ]; then
+                echo "[backup] no database.sqlite, skip."
+                exit 0
+              fi
+
+              if [ ! -s "$DB" ]; then
+                echo "[backup] database.sqlite is empty, stop."
+                exit 1
+              fi
+
+              mkdir -p "$DEST"
+              for path in "$SRC"/* "$SRC"/.[!.]* "$SRC"/..?*; do
+                if [ ! -e "$path" ]; then
+                  continue
+                fi
+                name=$(basename "$path")
+                if [ "$name" = "backups" ]; then
+                  continue
+                fi
+                cp -a "$path" "$DEST"/
+              done
+
+              if [ ! -s "$DEST/db/database.sqlite" ]; then
+                echo "[backup] copied database missing or empty, stop."
+                exit 1
+              fi
+
+              if [ -f "$SRC/db/database.sqlite-wal" ] && [ ! -f "$DEST/db/database.sqlite-wal" ]; then
+                echo "[backup] sqlite wal was not copied, stop."
+                exit 1
+              fi
+
+              echo "backed up at $(date -Iseconds 2>/dev/null || date)" > "$MARKER"
+              echo "[backup] copied data to ${DEST}; original left in place."
+          volumeMounts:
+            - name: qinglong-data
+              mountPath: /data
+            - name: appcache
+              mountPath: /appdata
       containers:
       - name: {{ .Release.Name }}
         env:
@@ -101,7 +157,32 @@ spec:
           value: "/"
         - name: QlPort
           value: "5700"
-        image: "docker.io/beclab/whyour-qinglong:2.18.1"
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            # 2.22 appends "options ndots:0" to the pod-shared resolv.conf.
+            # That disables search domains and the entrance sidecar cannot resolve
+            # cluster service names. Drop the append before the entrypoint runs.
+            # chattr +i is not permitted on this mount.
+            sed '/^[[:space:]]*echo "options ndots:0"/d' /ql/docker/docker-entrypoint.sh > /tmp/docker-entrypoint.sh
+            if grep -q 'echo "options ndots:0"' /tmp/docker-entrypoint.sh; then
+              echo "qinglong entrypoint still appends ndots:0" >&2
+              exit 1
+            fi
+            chmod +x /tmp/docker-entrypoint.sh
+            (
+              i=0
+              while [ "$i" -lt 20 ]; do
+                if grep -q '^options ndots:0$' /etc/resolv.conf 2>/dev/null; then
+                  grep -v '^options ndots:0$' /etc/resolv.conf > /tmp/resolv.conf.fixed
+                  cat /tmp/resolv.conf.fixed > /etc/resolv.conf
+                fi
+                i=$((i + 1))
+                sleep 0.2
+              done
+            ) &
+            exec /tmp/docker-entrypoint.sh
+        image: "docker.io/beclab/whyour-qinglong:2.22.0"
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 5700
