@@ -18,8 +18,40 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: uptimekuma
     spec:
+      initContainers:
+        - name: backup-data-before-upgrade
+          image: docker.io/beclab/busybox:1.37
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              DEST=/backup/backups/chart-1.0.12
+              MARKER="${DEST}/.backup_complete"
+              mkdir -p "$DEST"
+              if [ -f "$MARKER" ]; then
+                echo "[backup] marker present, skip."
+                exit 0
+              fi
+              if [ ! -f /data/kuma.db ]; then
+                echo "[backup] no kuma.db, skip."
+                exit 0
+              fi
+              mkdir -p "${DEST}/data"
+              cp -a /data/. "${DEST}/data/"
+              if [ ! -s "${DEST}/data/kuma.db" ]; then
+                echo "[backup] copy missing or empty, stop."
+                exit 1
+              fi
+              echo "backed up" > "$MARKER"
+              echo "[backup] copied data to ${DEST}/data"
+          volumeMounts:
+            - name: uptime-kuma-data
+              mountPath: /data
+            - name: appdata
+              mountPath: /backup
       containers:
-        - image: docker.io/beclab/louislam-uptime-kuma:1
+        - image: docker.io/beclab/louislam-uptime-kuma:2.5.5
           name: uptimekuma
           ports:
             - containerPort: 3001
@@ -48,6 +80,10 @@ spec:
           hostPath:
             type: DirectoryOrCreate
             path: '{{ .Values.userspace.appData }}/{{ .Release.Name }}'
+        - name: appdata
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
       restartPolicy: Always
 
 ---
