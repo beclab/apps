@@ -1,4 +1,16 @@
-﻿{{- $image := "docker.io/beclab/steam-headless:v0.1.19" -}}
+﻿{{- $image := "docker.io/beclab/steam-headless:v0.1.21" -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $mode := lower (toString (index $oe "RUNNING_MODE")) -}}
+{{- if not (or (eq $mode "primary") (eq $mode "secondary")) -}}
+{{- $mode = "primary" -}}
+{{- end -}}
+{{- $olares_desktop := (lookup "v1" "ConfigMap" "os-framework" "olares-desktop-config") -}}
+{{- if and $olares_desktop $olares_desktop.data }}
+{{- $enabled := index $olares_desktop.data "enabled" | default "false" -}}
+{{- if eq (lower $enabled) "true" -}}
+{{- $mode = "secondary" -}}
+{{- end -}}
+{{- end -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -59,6 +71,8 @@ spec:
                   echo "$d already uid 1000"
                 fi
               done
+              rm -rf /chown-home/.Xauthority || true
+              ln -s /run/olares-desktop/xauth/Xauthority /chown-home/.Xauthority
           volumeMounts:
             - name: steam-headless-claim0
               mountPath: /chown-home
@@ -73,7 +87,11 @@ spec:
             - name: USER_LOCALES
               value: en_US.UTF-8 UTF-8
             - name: DISPLAY
+        {{- if eq $mode "primary" }}
               value: ':55'
+        {{- else }}
+              value: ':0'
+        {{- end }}
             - name: SHM_SIZE
               value: 2G
             - name: DOCKER_RUNTIME
@@ -87,7 +105,7 @@ spec:
             - name: USER_PASSWORD
               value: password
             - name: MODE
-              value: primary
+              value: {{ $mode }}
             - name: WEB_UI_MODE
               value: vnc
             - name: ENABLE_VNC_AUDIO
@@ -102,7 +120,7 @@ spec:
             - name: ENABLE_SUNSHINE
               value: 'true'
             - name: SUNSHINE_USER
-              value: {{ .Values.olaresEnv.SUNSHINE_USER }}
+              value: "{{ .Values.olaresEnv.SUNSHINE_USER }}"
             - name: SUNSHINE_PASS
               valueFrom:
                 secretKeyRef:
@@ -218,6 +236,7 @@ spec:
               mountPath: /dev/input/
             - name: dshm
               mountPath: /dev/shm
+        {{- if eq $mode "primary" }}      
             - name: flatpak-system-app
               mountPath: /var/lib/flatpak/app
             - name: flatpak-system-exports
@@ -230,9 +249,19 @@ spec:
             - name: supervisor-extras
               mountPath: /etc/supervisor.d/polkitd.ini
               subPath: polkitd.ini
+        {{- end }}
         {{- if and .Values.deviceName (eq .Values.deviceName "Olares One") }}
             - name: snd
               mountPath: /dev/snd
+        {{- end }}
+        {{- if eq $mode "secondary" }}
+            - name: host-dbus
+              readOnly: true
+              mountPath: /run/dbus
+            - name: x11-unix
+              mountPath: /tmp/.X11-unix
+            - name: xauth
+              mountPath: /run/olares-desktop/xauth
         {{- end }}
       restartPolicy: Always
       volumes:
@@ -272,6 +301,20 @@ spec:
             path: /dev/snd
             type: ''
     {{- end }}
+    {{- if eq $mode "secondary" }}
+        - name: host-dbus
+          hostPath:
+            path: /run/dbus
+            type: Directory
+        - name: x11-unix
+          hostPath:
+            path: /tmp/.X11-unix
+            type: ''
+        - name: xauth
+          hostPath:
+            path: /run/olares-desktop/xauth
+            type: ''
+    {{- end}}
       securityContext:
         runAsUser: 0
 
