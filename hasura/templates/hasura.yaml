@@ -9,7 +9,7 @@ metadata:
     helm.sh/chart: hasura-2.10.0
     app.kubernetes.io/name: hasura
     app.kubernetes.io/instance: hasura
-    app.kubernetes.io/version: "v2.48.4-ce"
+    app.kubernetes.io/version: "v2.51.0-ce"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: hasura/templates/secret.yaml
@@ -22,7 +22,7 @@ metadata:
     helm.sh/chart: hasura-2.10.0
     app.kubernetes.io/name: hasura
     app.kubernetes.io/instance: hasura
-    app.kubernetes.io/version: "v2.48.4-ce"
+    app.kubernetes.io/version: "v2.51.0-ce"
     app.kubernetes.io/managed-by: Helm
 type: Opaque
 stringData:
@@ -38,7 +38,7 @@ metadata:
     helm.sh/chart: hasura-2.10.0
     app.kubernetes.io/name: hasura
     app.kubernetes.io/instance: hasura
-    app.kubernetes.io/version: "v2.48.4-ce"
+    app.kubernetes.io/version: "v2.51.0-ce"
     app.kubernetes.io/managed-by: Helm
 data:
   HASURA_GRAPHQL_SERVER_HOST: "*"
@@ -81,7 +81,7 @@ metadata:
     helm.sh/chart: hasura-2.10.0
     app.kubernetes.io/name: hasura
     app.kubernetes.io/instance: hasura
-    app.kubernetes.io/version: "v2.48.4-ce"
+    app.kubernetes.io/version: "v2.51.0-ce"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -104,10 +104,12 @@ metadata:
     helm.sh/chart: hasura-2.10.0
     app.kubernetes.io/name: hasura
     app.kubernetes.io/instance: hasura
-    app.kubernetes.io/version: "v2.48.4-ce"
+    app.kubernetes.io/version: "v2.51.0-ce"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: {{ .Values.workloads.hasura.replicaCount }}
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: hasura
@@ -124,11 +126,56 @@ spec:
       serviceAccountName: hasura
       securityContext:
         {}
+      initContainers:
+        - name: backup-postgres-before-upgrade
+          image: docker.io/beclab/postgres:17.5-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              DEST=/backup/backups/chart-1.0.18
+              MARKER="${DEST}/.backup_complete"
+              mkdir -p "$DEST"
+              if [ -f "$MARKER" ]; then
+                echo "[backup] marker present, skip."
+                exit 0
+              fi
+              table=$(psql "$HASURA_GRAPHQL_DATABASE_URL" -tAc "SELECT to_regclass('hdb_catalog.hdb_version')")
+              if [ -z "$table" ]; then
+                echo "[backup] no hdb_catalog.hdb_version, skip."
+                exit 0
+              fi
+              pg_dump --dbname="$HASURA_GRAPHQL_DATABASE_URL" --format=custom --file="${DEST}/hasura.dump"
+              if [ ! -s "${DEST}/hasura.dump" ]; then
+                echo "[backup] dump missing or empty, stop."
+                exit 1
+              fi
+              pg_restore --list "${DEST}/hasura.dump" >/dev/null
+              echo "backed up" > "$MARKER"
+              echo "[backup] wrote ${DEST}/hasura.dump"
+          env:
+            - name: POSTGRESQL_HOST
+              value: "{{ .Values.postgres.host }}"
+            - name: POSTGRESQL_PORT
+              value: "{{ .Values.postgres.port }}"
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: POSTGRESQL_PASSWORD
+            - name: HASURA_GRAPHQL_DATABASE_URL
+              value: "postgres://{{ .Values.postgres.username }}:$(POSTGRESQL_PASSWORD)@$(POSTGRESQL_HOST):$(POSTGRESQL_PORT)/{{ .Values.postgres.databases.hasura }}"
+          volumeMounts:
+            - name: appdata
+              mountPath: /backup
       containers:
         - name: hasura
           securityContext:
             {}
-          image: "docker.io/beclab/hasura-graphql-engine:v2.48.4-ce"
+          image: "docker.io/beclab/hasura-graphql-engine:v2.51.0-ce"
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:
@@ -172,3 +219,8 @@ spec:
             limits:
               cpu: 2000m
               memory: 1Gi
+      volumes:
+        - name: appdata
+          hostPath:
+            path: {{ .Values.userspace.appData }}
+            type: DirectoryOrCreate
