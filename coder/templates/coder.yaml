@@ -20,6 +20,45 @@ spec:
       labels:
         io.kompose.service: coder
     spec:
+      initContainers:
+        - name: backup-postgres-before-upgrade
+          image: docker.io/beclab/postgres:17.5-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -e
+              DEST=/backup/backups/chart-1.0.23
+              MARKER="${DEST}/.backup_complete"
+              mkdir -p "$DEST"
+              if [ -f "$MARKER" ]; then
+                echo "[backup] marker present, skip."
+                exit 0
+              fi
+              table=$(psql "$CODER_PG_CONNECTION_URL" -tAc "SELECT to_regclass('public.schema_migrations')")
+              if [ -z "$table" ]; then
+                echo "[backup] no schema_migrations, skip."
+                exit 0
+              fi
+              pg_dump --dbname="$CODER_PG_CONNECTION_URL" --format=custom --file="${DEST}/coder.dump"
+              if [ ! -s "${DEST}/coder.dump" ]; then
+                echo "[backup] dump missing or empty, stop."
+                exit 1
+              fi
+              pg_restore --list "${DEST}/coder.dump" >/dev/null
+              echo "backed up" > "$MARKER"
+              echo "[backup] wrote ${DEST}/coder.dump"
+          env:
+            - name: CODER_PG_CONNECTION_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: CODER_PG_CONNECTION_URL
+          volumeMounts:
+            - name: coder-data
+              mountPath: /backup
       containers:
         - name: docker-dind
           image: "docker.io/beclab/docker:29.3.0-dind"
@@ -48,7 +87,7 @@ spec:
               cpu: 1000m
               memory: 1Gi
         - name: coder
-          image: "docker.io/beclab/coder-coder:v2.31.9"
+          image: "docker.io/beclab/coder-coder:v2.36.6"
           env:
             - name: DOCKER_HOST
               value: "tcp://localhost:2375"
@@ -87,10 +126,10 @@ spec:
             httpGet:
               path: /
               port: 7080
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 15
           readinessProbe:
             httpGet:
               path: /
