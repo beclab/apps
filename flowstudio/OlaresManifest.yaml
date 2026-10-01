@@ -1,0 +1,172 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: v3
+
+metadata:
+  name: flowstudio
+  appid: flowstudio
+  title: FlowStudio
+  description: The all-in-one AI workflow production app for Olares
+  icon: https://app.cdn.olares.com/appstore/flowstudio/icon.png
+  version: 0.3.87
+  categories:
+  - Creativity
+  - AI
+  - workspace
+  - models
+
+entrances:
+- name: flowstudio
+  host: flowstudio-svc
+  port: 8080
+  title: FlowStudio
+  icon: https://app.cdn.olares.com/appstore/flowstudio/icon.png
+  authLevel: private
+  openMethod: window
+
+sharedEntrances:
+- name: flowstudio-api
+  host: flowstudio-svc
+  port: 8080
+  title: FlowStudio API
+  invisible: true
+  authLevel: internal
+
+spec:
+  versionName: "0.3.87"
+  onlyAdmin: true
+  runAsUser: true
+  fullDescription: |
+    FlowStudio turns a ComfyUI workflow into a reusable production project on
+    Olares. Import a workflow JSON or start from a recommended template, and
+    FlowStudio resolves its models and custom nodes, downloads what is missing,
+    runs it on a dedicated GPU-backed engine, and hands you a parameter form on
+    both PC and mobile. Admins own workflows and the environment; everyone else
+    just picks a project and generates.
+
+    **Highlights**
+    - **Workflow to product**: Import a ComfyUI Save JSON or a recommended template and get a parse report of nodes, models, VRAM, and custom-node risks before you commit.
+    - **Dependencies resolved for you**: Model weights download, custom nodes install, and engine images pre-pull during initialization, with actionable recovery steps when a source fails.
+    - **A dedicated engine per project**: Every project gets its own ComfyUI engine and NVIDIA GPU allocation; business and engine ship as separate images and talk only over HTTP/WS.
+    - **Dual-end workspace**: The same projects, parameters, jobs, and history on PC and mobile — tune and generate from either side.
+    - **Shared model library**: Weights land in a node-level shared library reused across projects, and uninstall keeps them by default.
+    - **One admin console**: Download sources, GPU detection and engine lock, download center, and model library in one place, with per-owner data isolation.
+    - **Router and OpenAI APIs**: Registers with Olares Router as an image-generation provider, and exposes an OpenAI-style `/v1/models` and `/v1/images/generations` alongside a workflow catalogue and generation API.
+
+    **Requirements**
+    - Olares >= 1.12.7 on `amd64`
+    - An NVIDIA GPU, bound when installing or resuming the app
+    - Free VRAM >= 6 GiB for lite image templates
+  upgradeDescription: |
+    **FlowStudio 0.3.87**
+
+    - The Olares Router catalog lists every workflow input. Pass the prompt and each media slot in params; media is a Files path under that user's Home/FlowStudio.
+    - Newly installed Qwen image-edit templates follow the uploaded image's aspect ratio, and the ratio control stays hidden.
+  developer: Olares
+  website: https://github.com/beclab/flowstudio
+  sourceCode: https://github.com/beclab/flowstudio
+  submitter: Olares
+  locale:
+  - en-US
+  - zh-CN
+  - fr-FR
+  - de-DE
+  - ja-JP
+  - it-IT
+  - es-ES
+  # accelerator mutually exclusive with flat requiredCpu; envelope must cover api+engine.
+  # Do not use gpumem-percentage — app writes gpumem from detect/lock caps.
+  supportArch:
+  - amd64
+  accelerator:
+  - mode: nvidia
+    supportMultiCard: false
+    supportMultiNodes: false
+    # api(≤4)+engine(≤8); aligned with templates / ENGINE_CPU_LIMIT.
+    requiredCpu: "2"
+    limitedCpu: "12"
+    requiredMemory: 4Gi
+    # api(≤6Gi)+engine(≤80Gi)+sidecars。
+    limitedMemory: 96Gi
+    requiredDisk: 2Gi
+    limitedDisk: 10Gi
+    requiredGPUMemory: 6Gi
+    limitedGPUMemory: 24Gi
+
+permission:
+  appData: true
+  appCommon: true
+
+middleware:
+  postgres:
+    username: flowstudio
+    password: flowstudio
+    databases:
+    - name: flowstudio
+
+options:
+  shared: true
+  # 0: long-running init / model download must not be cut by gateway default.
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  # PWA assets public; pages and API stay private.
+  policies:
+  - entranceName: flowstudio
+    description: PWA service worker
+    uriRegex: ^/sw\.js$
+    level: public
+  # PC assets at site root; UniApp under /static/ — both path shapes.
+  - entranceName: flowstudio
+    description: PWA web app manifest
+    uriRegex: ^/(static/)?site\.webmanifest$
+    level: public
+  - entranceName: flowstudio
+    description: PWA icons and touch assets
+    uriRegex: ^/(static/)?(icon-(192|256|512)\.png|apple-touch-icon\.png|favicon\.ico|logo(-mark)?\.(svg|png))$
+    level: public
+  # postgres is middleware only — listing it as a dependency makes Market reject install.
+  dependencies:
+  - name: olares
+    version: '>=1.12.7-0'
+    type: system
+
+# flowstudioengine is 0 on purpose: the Deployment exists so its image joins
+# the install-time pre-pull, while the engines themselves are created per
+# project by EngineManager.
+workloadReplicas:
+  flowstudio: 1
+  flowstudioengine: 0
+
+# MODEL_*：Market / Router 能力声明（模板不读）。
+# HF_*：valueFrom 系统 Hugging Face，deployment 注入 .Values.olaresEnv。
+envs:
+- envName: MODEL_MODE
+  required: true
+  type: string
+  editable: false
+  applyOnChange: false
+  default: "image_generation"
+  options:
+  - title: Image Generation
+    value: image_generation
+# Empty: Router's supports_* whitelist has no image-generation key.
+- envName: MODEL_SUPPORTS
+  required: false
+  type: string
+  editable: false
+  applyOnChange: false
+  default: ""
+  multiSelect: true
+  splitter: ","
+# Same mapping as llama.cpp Model Console: cluster Hugging Face proxy/token
+# → HF_ENDPOINT / HF_TOKEN. Templates must inject .Values.olaresEnv themselves.
+- envName: HF_ENDPOINT
+  required: false
+  applyOnChange: true
+  valueFrom:
+    envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+- envName: HF_TOKEN
+  required: false
+  applyOnChange: true
+  valueFrom:
+    envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN

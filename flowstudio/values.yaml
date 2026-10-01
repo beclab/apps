@@ -1,0 +1,62 @@
+# App-owned overrides only — do not duplicate system-injected
+# postgres / userspace / user / domain.
+# Upgrade reuses values: bump appImage (templates prefer it over image).
+
+# Keep the docker.io/ prefix: app-service rewrites every chart image ref to this
+# image's registry, and OPA only trusts docker.io/beclab for the root init containers.
+appImage: docker.io/beclab/flowstudio:0.3.87
+image: docker.io/beclab/flowstudio:0.3.87
+imagePullPolicy: IfNotPresent
+
+# ComfyUI engine images by Olares accelerator mode, resolved through
+# flowstudio.engineImage. Empty amdGpu = AMD unavailable (never fall back to
+# CUDA silently); OlaresManifest declares nvidia only, so amdGpu is reachable
+# only by overriding GPU.Type.
+engine:
+  images:
+    nvidia: docker.io/beclab/flowstudio:engine-1.0.8
+    amdGpu: docker.io/beclab/flowstudio:engine-1.0.6-rocm
+engineImagePullPolicy: IfNotPresent
+
+# exclusiveGpu: absolute gpumem only — never gpumem-percentage.
+dynamicEngine:
+  enabled: true
+  serviceAccountName: flowstudio-engine-orchestrator
+  exclusiveGpu: true
+  gpuMemMiB: 6144
+  memLimit: 80Gi
+  idleTtlSeconds: 900
+  gpuVendor: auto
+  # Empty → probe default app-service compute-resources URL.
+  gpuApiUrl: ""
+
+# Defaults only; admin network probe may persist overrides later.
+network:
+  region: global
+  githubMirror: ""
+  pipIndexUrl: ""
+
+# HF_ENDPOINT / HF_TOKEN come from olaresEnv (OLARES_SYSTEM_HUGGINGFACE_*).
+# hfToken is only a local-chart fallback when olaresEnv.HF_TOKEN is empty.
+modelDownload:
+  enabled: true
+  requireAllResolved: true
+  hfToken: ""
+  civitaiToken: ""
+
+nodeInstall:
+  enabled: true
+
+workloads:
+  flowstudio:
+    replicaCount: 1
+  # 0 under dynamicEngine: the Deployment exists only so its image joins the
+  # install-time pre-pull. Override to 1 together with dynamicEngine.enabled=false.
+  flowstudioengine:
+    replicaCount: 0
+
+# Shared with lares (its SREF_KEY): lares encrypts the logged-in user into the
+# generation body, Router carries it in params, FlowStudio decrypts it to pick the
+# job owner. Must match lares; override both together for a private key.
+routerIdentity:
+  key: "gBH4rLCE9by5QfqvIr9Jm2pFtJDxwE5kxlvaJ/0goeg="

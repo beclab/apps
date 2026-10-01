@@ -1,0 +1,236 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowstudio
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.flowstudio.replicaCount }}
+  # hostPath volumes cannot roll safely.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flowstudio
+  template:
+    metadata:
+      labels:
+        app: flowstudio
+    spec:
+      enableServiceLinks: false
+      {{- if ne (toString (default dict .Values.dynamicEngine).enabled) "false" }}
+      # preStop 应用停止收尾（≤100s）与 SIGTERM 后的正常退出共用这段预算。
+      terminationGracePeriodSeconds: 120
+      serviceAccountName: {{ (default dict .Values.dynamicEngine).serviceAccountName | default "flowstudio-engine-orchestrator" }}
+      {{- end }}
+      initContainers:
+      # appData is root-owned; uid 1000 needs chown (OPA allows only beclab busybox as root).
+      # OPA strips only the docker.io/ prefix before matching beclab/, and app-service
+      # rewrites these refs to .Values.appImage's registry — so appImage must stay docker.io/.
+      - name: fix-userdata-perms
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          mkdir -p /appdata/userData /appdata/devsrc
+          chown 1000:1000 /appdata/userData /appdata/devsrc
+        volumeMounts:
+        - name: app-data
+          mountPath: /appdata
+      # MODELS_DIR 在 appCommon。平台只非递归准备 comfyui 保留目录，
+      # 其下 model/ 常被别的应用或 kubelet 建成 root:root，uid 1000 写不进去。
+      # 禁止 chown -R：已有 uid 1000 子目录上会 Operation not permitted，把 Pod 卡在 Initializing。
+      - name: fix-models-perms
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          root=/data/appCommon/comfyui/model
+          mkdir -p "$root" && chown 1000:1000 "$root"
+          for d in checkpoints loras vae clip clip_vision diffusion_models controlnet \
+                   upscale_models latent_upscale_models style_models gligen embeddings \
+                   hypernetworks photomaker audio_encoders model_patches geometry_estimation \
+                   vae_approx configs manager; do
+            mkdir -p "$root/$d" && chown 1000:1000 "$root/$d"
+          done
+        volumeMounts:
+        - name: app-common
+          mountPath: /data/appCommon
+      containers:
+      - name: flowstudio
+        image: {{ coalesce .Values.appImage .Values.image }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "4"
+            memory: 6Gi
+        env:
+        - name: STATIC_DIR
+          value: /app/static
+        - name: ENGINE_MODE
+          value: comfyui
+        - name: ENGINE_BASE_URL
+          value: http://flowstudio-engine-svc:8188
+        - name: ENGINE_WS_URL
+          value: ws://flowstudio-engine-svc:8188/ws
+        {{- if ne (toString (default dict .Values.dynamicEngine).enabled) "false" }}
+        - name: DYNAMIC_ENGINE
+          value: "true"
+        - name: ENGINE_IMAGE
+          value: {{ include "flowstudio.engineImage" . | quote }}
+        - name: ENGINE_IMAGE_PULL_POLICY
+          value: {{ .Values.engineImagePullPolicy | default "IfNotPresent" | quote }}
+        - name: ENGINE_GPU_VENDOR
+          value: {{ (default dict .Values.dynamicEngine).gpuVendor | default "auto" | quote }}
+        - name: ENGINE_IMAGE_AMD
+          value: {{ ((.Values.engine | default dict).images | default dict).amdGpu | default "" | quote }}
+        - name: OLARES_APP_NAME
+          value: "flowstudio"
+        - name: OLARES_GPU_API_URL
+          value: {{ (default dict .Values.dynamicEngine).gpuApiUrl | default "" | quote }}
+        {{- if .Values.GPU }}
+        - name: OLARES_GPU_VENDOR
+          value: {{ .Values.GPU.Type | default .Values.gpu | default "" | quote }}
+        {{- end }}
+        # Absolute gpumem only — never gpumem-percentage.
+        - name: ENGINE_GPU_MEM_MIB
+          value: {{ (default dict .Values.dynamicEngine).gpuMemMiB | default 6144 | quote }}
+        - name: ENGINE_MEM_LIMIT
+          value: {{ (default dict .Values.dynamicEngine).memLimit | default "80Gi" | quote }}
+        - name: ENGINE_IDLE_TTL
+          value: {{ (default dict .Values.dynamicEngine).idleTtlSeconds | default 900 | quote }}
+        - name: ENGINE_STARTUP_REAP
+          value: {{ (default dict .Values.dynamicEngine).startupReap | default "preserve_active" | quote }}
+        - name: ENGINE_OWNER_DEPLOYMENT_NAME
+          value: flowstudio
+        - name: SHOW_TEST_WORKFLOW_TEMPLATES
+          value: "false"
+        - name: APP_COMMON_HOST_PATH
+          value: {{ .Values.userspace.appCommon | quote }}
+        - name: APP_DATA_HOST_PATH
+          value: {{ .Values.userspace.appData | quote }}
+        - name: NODE_AUTO_INSTALL
+          value: {{ (default dict .Values.nodeInstall).enabled | default false | quote }}
+        {{- end }}
+        # Private entrance: owner fallback when gateway headers are missing.
+        - name: ALLOW_DEV_FAKE_AUTH
+          value: "true"
+        - name: DEV_FAKE_OWNER_ID
+          value: "{{ .Values.bfl.username }}"
+        - name: DEV_FAKE_IS_ADMIN
+          value: "{{ if eq .Values.bfl.username .Values.admin }}true{{ else }}false{{ end }}"
+        # 与 lares 共用：解 Router 转来的 params.sref（终端用户）。
+        - name: SREF_KEY
+          value: {{ (default dict .Values.routerIdentity).key | quote }}
+        - name: DB_AUTO_CREATE
+          value: "true"
+        - name: DATABASE_URL
+          value: "postgresql+asyncpg://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ .Values.postgres.databases.flowstudio }}"
+        - name: MODEL_DOWNLOAD_ENABLED
+          value: {{ (default dict .Values.modelDownload).enabled | default true | quote }}
+        - name: MODEL_REQUIRE_ALL_RESOLVED
+          value: {{ (default dict .Values.modelDownload).requireAllResolved | default true | quote }}
+        {{- $oe := .Values.olaresEnv | default dict }}
+        {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" }}
+        {{- if $hfEndpoint }}
+        - name: HF_ENDPOINT
+          value: {{ $hfEndpoint | quote }}
+        {{- end }}
+        {{- $hfToken := $oe.HF_TOKEN | default ((default dict .Values.modelDownload).hfToken | default "") }}
+        {{- if $hfToken }}
+        - name: HF_TOKEN
+          value: {{ $hfToken | quote }}
+        {{- end }}
+        - name: CIVITAI_TOKEN
+          value: {{ (default dict .Values.modelDownload).civitaiToken | default "" | quote }}
+        - name: NETWORK_REGION
+          value: {{ (default dict .Values.network).region | default "global" | quote }}
+        - name: GITHUB_MIRROR_PREFIX
+          value: {{ (default dict .Values.network).githubMirror | default "" | quote }}
+        - name: NODE_PIP_INDEX_URL
+          value: {{ (default dict .Values.network).pipIndexUrl | default "" | quote }}
+        - name: USER_DATA_DIR
+          value: /data/appData/userData
+        - name: USERSPACE_ROOT
+          value: /userspaces
+        - name: MODELS_DIR
+          value: /data/appCommon/comfyui/model
+        - name: PUBLIC_BASE_URL
+          value: "https://{{ .Values.domain.flowstudio }}"
+        - name: CORS_ORIGINS
+          value: "https://{{ .Values.domain.flowstudio }}"
+        - name: FLOWSTUDIO_DEV_OVERLAY
+          value: /devsrc
+        volumeMounts:
+        - name: app-data
+          mountPath: /data/appData
+        - name: app-common
+          mountPath: /data/appCommon
+        - name: userspaces
+          mountPath: /userspaces
+        - name: app-data
+          mountPath: /devsrc
+          subPath: devsrc
+        # Mesh intercepts podIP:8080 (Linkerd inbound 100ms). TCP to the
+        # Service port is a false Ready. Probe loopback so Ready = uvicorn.
+        startupProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2)
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2)
+          periodSeconds: 5
+          timeoutSeconds: 3
+        livenessProbe:
+          exec:
+            command:
+            - python
+            - -c
+            - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2)
+          periodSeconds: 20
+          timeoutSeconds: 3
+          failureThreshold: 3
+        {{- if ne (toString (default dict .Values.dynamicEngine).enabled) "false" }}
+        # Olares 暂停只缩 chart 内 Deployment；fs-eng-* 的 owner 是本 Deployment，
+        # 暂停时它仍在，GC 不会回收引擎。preStop 让 API 判定 owner 是否为停止态
+        # （replicas=0 / 删除中），是则取消任务、中止初始化、暂停下载、回收引擎；
+        # 重启 / 驱逐 / 升级时不回收。uvicorn 热重载不触发 preStop。
+        lifecycle:
+          preStop:
+            exec:
+              command: ["python", "-m", "app.runtime.pod_stop_hook"]
+        {{- end }}
+      volumes:
+      - name: app-data
+        hostPath:
+          path: {{ .Values.userspace.appData }}
+          type: DirectoryOrCreate
+      - name: app-common
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}
+          type: DirectoryOrCreate
+      # 每个用户的 Home 在各自的 userspace PVC 下。shared app 的 appData
+      # 只挂集群所有者的 Data，写不出子用户的 Files。
+      - name: userspaces
+        hostPath:
+          path: {{ (.Values.rootPath | default "/olares") }}/rootfs/userspace
+          type: Directory

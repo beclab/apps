@@ -1,0 +1,110 @@
+{{- $static := eq (toString (default dict .Values.dynamicEngine).enabled) "false" -}}
+# Always rendered, but replicas is 0 under the default dynamicEngine.enabled=true:
+# app-service builds the install-time pre-pull list from a helm dry-run of the
+# Deployments and StatefulSets, so an engine that only exists at runtime (created
+# by EngineManager as fs-eng-*) would download outside the app's install progress.
+# With dynamicEngine.enabled=false this is the static engine and needs
+# workloads.flowstudioengine.replicaCount overridden back to 1.
+#
+# The GPU and memory envelope below is claimed only in static mode. A dynamic
+# engine's real spec comes from EngineManager, and OlaresManifest's
+# requiredMemory covers the API alone, so a never-scheduled Pod must not book
+# 80Gi against it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flowstudioengine
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.flowstudioengine.replicaCount }}
+  # hostPath volumes cannot roll safely.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: flowstudioengine
+  template:
+    metadata:
+      labels:
+        app: flowstudioengine
+      {{- if $static }}
+      annotations:
+        # Absolute gpumem only — never percentage (dynamic path uses EngineManager).
+        applications.app.bytetrade.io/gpu-inject: "engine"
+      {{- end }}
+    spec:
+      enableServiceLinks: false
+      {{- if $static }}
+      runtimeClassName: nvidia
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: engine
+        image: {{ include "flowstudio.engineImage" . }}
+        imagePullPolicy: {{ .Values.engineImagePullPolicy | default "IfNotPresent" }}
+        securityContext:
+          runAsUser: 1000
+        workingDir: /opt/ComfyUI
+        # /opt/ComfyUI is root-owned → writable dirs on emptyDir.
+        # Keep the static fallback aligned with the dynamic NVIDIA backend.
+        command:
+        - sh
+        - -c
+        - >-
+          mkdir -p /run/comfyui/output /run/comfyui/input /run/comfyui/temp /run/comfyui/user
+          && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDA_DEVICE_GPU_MODE_0=0 CUDA_DEVICE_MEMORY_LIMIT_0="${CUDA_DEVICE_REAL_MEMORY_LIMIT_0:-${CUDA_DEVICE_MEMORY_LIMIT_0}}" exec python3 main.py --listen 0.0.0.0 --port 8188 --disable-auto-launch
+          --disable-dynamic-vram --disable-pinned-memory --disable-cuda-malloc
+          --use-ck-attention --disable-smart-memory --cache-none --reserve-vram 1
+          --extra-model-paths-config /opt/ComfyUI/extra_model_paths.yaml
+          --output-directory /run/comfyui/output --input-directory /run/comfyui/input
+          --temp-directory /run/comfyui/temp --user-directory /run/comfyui/user
+        env:
+        - name: HOME
+          value: /run/comfyui
+        # Image has no uid1000 passwd entry; required for getpass.getuser().
+        - name: USER
+          value: comfyui
+        - name: LOGNAME
+          value: comfyui
+        ports:
+        - containerPort: 8188
+        resources:
+        {{- if $static }}
+          requests:
+            cpu: "1"
+            memory: 80Gi
+          limits:
+            cpu: "8"
+            memory: 80Gi
+            nvidia.com/gpu: "1"
+            nvidia.com/gpumem: {{ (default dict .Values.dynamicEngine).gpuMemMiB | default 6144 | quote }}
+        {{- else }}
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        {{- end }}
+        volumeMounts:
+        - name: app-common
+          mountPath: /data/appCommon
+        - name: engine-run
+          mountPath: /run/comfyui
+        readinessProbe:
+          tcpSocket:
+            port: 8188
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        livenessProbe:
+          tcpSocket:
+            port: 8188
+          initialDelaySeconds: 60
+          periodSeconds: 20
+      volumes:
+      - name: app-common
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}
+          type: DirectoryOrCreate
+      - name: engine-run
+        emptyDir: {}
