@@ -1,0 +1,46 @@
+{{- $de := (default dict .Values.dynamicEngine) }}
+{{- if ne (toString $de.enabled) "false" }}
+{{- $sa := ($de.serviceAccountName | default "flowstudio-engine-orchestrator") }}
+# pre-delete: Helm/Olares only removes chart-owned objects. Drain runtime
+# engines, prepull Jobs/Pods, and this instance's GPUBindings so the
+# namespace can terminate. Never touches appCommon / model weights.
+# Do not set ttlSecondsAfterFinished — Helm must observe hook success.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flowstudio-predelete-engines
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded,hook-failed
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app: flowstudio-predelete-engines
+        # One-shot Job must not get mesh-in-agent (never exits → Job stuck).
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        # Shared ns injects linkerd; Pod annotation overrides. Sidecar never exits.
+        linkerd.io/inject: disabled
+    spec:
+      enableServiceLinks: false
+      restartPolicy: Never
+      serviceAccountName: {{ $sa }}
+      containers:
+      - name: cleanup
+        image: {{ coalesce .Values.appImage .Values.image }}
+        imagePullPolicy: {{ .Values.imagePullPolicy | default "IfNotPresent" }}
+        env:
+        - name: OLARES_APP_NAME
+          value: "flowstudio"
+        - name: OLARES_OWNER
+          value: {{ .Values.bfl.username | quote }}
+        command: ["python3", "-c"]
+        args:
+        - |
+{{ .Files.Get "scripts/runtime_drain.py" | indent 10 }}
+{{- end }}
