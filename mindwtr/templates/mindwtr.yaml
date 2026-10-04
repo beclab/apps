@@ -1,0 +1,162 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mindwtr-nginx-conf
+  namespace: {{ .Release.Namespace }}
+data:
+  default.conf: |
+    server {
+        listen 5173;
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+
+        location /v1/ {
+            proxy_pass http://127.0.0.1:8787/v1/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            client_max_body_size 50M;
+        }
+
+        location /health {
+            proxy_pass http://127.0.0.1:8787/health;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /ready {
+            proxy_pass http://127.0.0.1:8787/ready;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+
+        location /assets/ {
+            add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+            add_header X-Frame-Options "SAMEORIGIN" always;
+            add_header Cache-Control "public, max-age=31536000, immutable" always;
+            try_files $uri =404;
+        }
+
+        location / {
+            add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
+            add_header X-Content-Type-Options "nosniff" always;
+            add_header Referrer-Policy "no-referrer" always;
+            add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+            add_header X-Frame-Options "SAMEORIGIN" always;
+            add_header Cache-Control "no-cache" always;
+            try_files $uri /index.html;
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindwtr
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mindwtr
+spec:
+  replicas: {{ .Values.workloads.mindwtr.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: mindwtr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: mindwtr
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: mindwtr-app
+          image: "{{ .Values.image.app.repository }}:{{ .Values.image.app.tag }}"
+          imagePullPolicy: {{ .Values.image.app.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 5173
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+        - name: mindwtr-cloud
+          image: "{{ .Values.image.cloud.repository }}:{{ .Values.image.cloud.tag }}"
+          imagePullPolicy: {{ .Values.image.cloud.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: MINDWTR_CLOUD_DATA_DIR
+              value: "/app/cloud_data"
+            - name: MINDWTR_CLOUD_CORS_ORIGIN
+              value: "http://localhost:5173"
+            - name: MINDWTR_CLOUD_ALLOW_ANY_TOKEN
+              value: {{ .Values.cloud.allowAnyToken | default "true" | quote }}
+            {{- if .Values.cloud.authTokens }}
+            - name: MINDWTR_CLOUD_AUTH_TOKENS
+              value: {{ .Values.cloud.authTokens | quote }}
+            {{- end }}
+          ports:
+            - name: cloud
+              containerPort: 8787
+              protocol: TCP
+          volumeMounts:
+            - name: mindwtr-data
+              mountPath: /app/cloud_data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+      restartPolicy: Always
+      volumes:
+        - name: nginx-conf
+          configMap:
+            name: mindwtr-nginx-conf
+        - name: mindwtr-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/mindwtr'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mindwtr-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: mindwtr
+spec:
+  ports:
+    - name: http
+      port: 5173
+      targetPort: 5173
+      protocol: TCP
+    - name: cloud
+      port: 8787
+      targetPort: 8787
+      protocol: TCP
+  selector:
+    io.kompose.service: mindwtr
