@@ -16,6 +16,7 @@
 {{- end -}}
 {{- $emailUrl := (.Values.olaresEnv | default dict).NEODB_EMAIL_URL | default "" -}}
 {{- $emailFrom := (.Values.olaresEnv | default dict).NEODB_EMAIL_FROM | default "" -}}
+{{- $adminHandles := (.Values.olaresEnv | default dict).NEODB_ADMIN_HANDLES | default "" -}}
 {{- if and (not $emailUrl) (.Values.olaresEnv | default dict).SMTP_SERVER -}}
   {{- $oe := .Values.olaresEnv -}}
   {{- $smtpUser := $oe.SMTP_LOGIN | default "" | urlquery -}}
@@ -45,7 +46,7 @@ data:
 
     class PostImportFinder:
         def find_spec(self, fullname, path, target=None):
-            if fullname == "boofilsic.settings":
+            if fullname in ("boofilsic.settings", "mastodon.auth"):
                 for finder in sys.meta_path:
                     if finder is self:
                         continue
@@ -58,25 +59,119 @@ data:
                                     return orig_loader.create_module(s)
                                 def exec_module(self, m):
                                     orig_loader.exec_module(m)
-                                    r_url = os.environ.get("NEODB_REDIS_URL", "")
-                                    r_pass = os.environ.get("REDIS_PASSWORD", "")
-                                    if not r_pass and r_url:
-                                        try:
-                                            parsed = urllib.parse.urlparse(r_url)
-                                            r_pass = parsed.password
-                                        except Exception:
-                                            pass
-                                    if hasattr(m, "RQ_QUEUES"):
-                                        for q in m.RQ_QUEUES.values():
-                                            if r_pass:
-                                                q["PASSWORD"] = r_pass
-                                            if r_url:
-                                                q["URL"] = r_url
+                                    if fullname == "boofilsic.settings":
+                                        r_url = os.environ.get("NEODB_REDIS_URL", "")
+                                        r_pass = os.environ.get("REDIS_PASSWORD", "")
+                                        if not r_pass and r_url:
+                                            try:
+                                                parsed = urllib.parse.urlparse(r_url)
+                                                r_pass = parsed.password
+                                            except Exception:
+                                                pass
+                                        if hasattr(m, "RQ_QUEUES"):
+                                            for q in m.RQ_QUEUES.values():
+                                                if r_pass:
+                                                    q["PASSWORD"] = r_pass
+                                                if r_url:
+                                                    q["URL"] = r_url
+                                        if hasattr(m, "AUTHENTICATION_BACKENDS"):
+                                            if "django.contrib.auth.backends.ModelBackend" not in m.AUTHENTICATION_BACKENDS:
+                                                m.AUTHENTICATION_BACKENDS.append("django.contrib.auth.backends.ModelBackend")
+                                    elif fullname == "mastodon.auth":
+                                        orig_auth = getattr(m.OAuth2Backend, "authenticate", None)
+                                        if orig_auth:
+                                            def patched_authenticate(self, request, username=None, password=None, **kwargs):
+                                                user = orig_auth(self, request, username=username, password=password, **kwargs)
+                                                if user:
+                                                    account = kwargs.get("social_account")
+                                                    if account:
+                                                        from django.conf import settings
+                                                        admin_handles = getattr(settings, "ADMIN_HANDLES", [])
+                                                        account_handle = f"{account.platform}:{account.handle}"
+                                                        if any(account_handle.lower() == h.strip().lower() for h in admin_handles):
+                                                            if not user.is_superuser or not user.is_staff:
+                                                                user.is_superuser = True
+                                                                user.is_staff = True
+                                                                user.save(update_fields=["is_superuser", "is_staff"])
+                                                            from takahe.models import User as TakaheUser
+                                                            tu = TakaheUser.objects.filter(pk=user.pk).first()
+                                                            if tu and not tu.admin:
+                                                                tu.admin = True
+                                                                tu.save(update_fields=["admin"])
+                                                return user
+                                            m.OAuth2Backend.authenticate = patched_authenticate
                             spec.loader = LoaderWrapper()
                             return spec
             return None
 
     sys.meta_path.insert(0, PostImportFinder())
+  init_admin.py: |
+    import os
+    import django
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "boofilsic.settings")
+    django.setup()
+
+    from django.contrib.auth import get_user_model
+    from users.models import APIdentity, Preference
+    from takahe.models import User as TakaheUser
+    from takahe.utils import Takahe
+
+    User = get_user_model()
+    username = os.environ.get("ADMIN_USERNAME", "admin").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+
+    if username and password:
+        email = f"{username}@local.host"
+        u = User.objects.filter(username=username).first()
+        created = False
+        if not u:
+            u = User(username=username, email=email)
+            created = True
+        u.set_password(password)
+        u.is_staff = True
+        u.is_superuser = True
+        u.save()
+
+        # Ensure preference
+        Preference.objects.get_or_create(user=u)
+
+        # Ensure takahe identity
+        try:
+            Takahe.init_identity_for_local_user(u)
+        except Exception as e:
+            print(f">>> Note: init_identity_for_local_user: {e}")
+
+        tu = TakaheUser.objects.filter(pk=u.pk).first()
+        if tu:
+            tu.admin = True
+            tu.save()
+
+        print("=" * 60)
+        if created:
+            print(f">>> NeoDB Admin account created: {username}")
+        else:
+            print(f">>> NeoDB Admin password updated: {username}")
+        print(f">>> Password: {password}")
+        print("=" * 60)
+
+    admin_handles = [h.strip() for h in os.environ.get("NEODB_ADMIN_HANDLES", "").split(",") if h.strip()]
+    if admin_handles:
+        from mastodon.models.common import SocialAccount
+        for ah in admin_handles:
+            if ":" in ah:
+                platform, handle = ah.split(":", 1)
+                accounts = SocialAccount.objects.filter(platform__iexact=platform, handle__iexact=handle)
+                for sa in accounts:
+                    if sa.user and (not sa.user.is_superuser or not sa.user.is_staff):
+                        sa.user.is_superuser = True
+                        sa.user.is_staff = True
+                        sa.user.save(update_fields=["is_superuser", "is_staff"])
+                        tu = TakaheUser.objects.filter(pk=sa.user.pk).first()
+                        if tu and not tu.admin:
+                            tu.admin = True
+                            tu.save(update_fields=["admin"])
+                        print(f">>> Promoted existing account {sa.user.username} ({ah}) to admin")
 ---
 apiVersion: v1
 kind: Secret
@@ -90,6 +185,7 @@ stringData:
   PYTHONPATH: "/neodb-patch"
   ADMIN_USERNAME: {{ $adminUsername | quote }}
   ADMIN_PASSWORD: {{ $adminPassword | quote }}
+  NEODB_ADMIN_HANDLES: {{ $adminHandles | quote }}
   NEODB_EMAIL_URL: {{ $emailUrl | quote }}
   NEODB_EMAIL_FROM: {{ $emailFrom | quote }}
   REDIS_PASSWORD: {{ .Values.redis.password | default "" | quote }}
@@ -176,28 +272,9 @@ spec:
               echo "Running NeoDB migrations..."
               neodb-manage migrate --noinput || exit 1
               echo "Migrations complete."
-              if [ -n "$ADMIN_PASSWORD" ]; then
+              if [ -n "$ADMIN_PASSWORD" ] || [ -n "$NEODB_ADMIN_HANDLES" ]; then
                 echo "Initializing/updating administrator account..."
-                neodb-manage shell -c 'import os, textwrap; exec(textwrap.dedent("""
-                  from django.contrib.auth import get_user_model
-                  User = get_user_model()
-                  username = os.environ.get("ADMIN_USERNAME", "admin")
-                  password = os.environ.get("ADMIN_PASSWORD", "")
-                  if username and password:
-                      email = f"{username}@local.host"
-                      u, created = User.objects.get_or_create(username=username, defaults={"email": email})
-                      u.set_password(password)
-                      u.is_staff = True
-                      u.is_superuser = True
-                      u.save()
-                      print("=" * 60)
-                      if created:
-                          print(f">>> NeoDB Admin account created: {username}")
-                      else:
-                          print(f">>> NeoDB Admin password updated: {username}")
-                      print(f">>> Password: {password}")
-                      print("=" * 60)
-                """))' || echo "Admin user initialization finished."
+                /neodb-venv/bin/python /neodb-patch/init_admin.py || echo "Admin user initialization finished."
               fi
           volumeMounts:
             - name: neodb-patch
