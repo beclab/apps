@@ -14,6 +14,21 @@
     {{- $adminPassword = randAlphaNum 16 -}}
   {{- end -}}
 {{- end -}}
+{{- $emailUrl := (.Values.olaresEnv | default dict).NEODB_EMAIL_URL | default "" -}}
+{{- $emailFrom := (.Values.olaresEnv | default dict).NEODB_EMAIL_FROM | default "" -}}
+{{- if and (not $emailUrl) (.Values.olaresEnv | default dict).SMTP_SERVER -}}
+  {{- $oe := .Values.olaresEnv -}}
+  {{- $smtpUser := $oe.SMTP_LOGIN | default "" | urlquery -}}
+  {{- $smtpPass := $oe.SMTP_PASSWORD | default "" | urlquery -}}
+  {{- $auth := "" -}}
+  {{- if or $smtpUser $smtpPass -}}
+    {{- $auth = printf "%s:%s@" $smtpUser $smtpPass -}}
+  {{- end -}}
+  {{- $emailUrl = printf "smtp://%s%s:%s" $auth $oe.SMTP_SERVER ($oe.SMTP_PORT | default "465") -}}
+  {{- if not $emailFrom -}}
+    {{- $emailFrom = $oe.SMTP_FROM_ADDRESS | default "" -}}
+  {{- end -}}
+{{- end -}}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -75,6 +90,8 @@ stringData:
   PYTHONPATH: "/neodb-patch"
   ADMIN_USERNAME: {{ $adminUsername | quote }}
   ADMIN_PASSWORD: {{ $adminPassword | quote }}
+  NEODB_EMAIL_URL: {{ $emailUrl | quote }}
+  NEODB_EMAIL_FROM: {{ $emailFrom | quote }}
   REDIS_PASSWORD: {{ .Values.redis.password | default "" | quote }}
   NEODB_DEBUG: "False"
   NEODB_SECRET_KEY: {{ .Values.appSecret | quote }}
