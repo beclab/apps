@@ -2,8 +2,56 @@
 {{- $appDomain := index $appDomainENV "_0" -}}
 {{- $redisAuth := "" -}}
 {{- if .Values.redis.password -}}
-  {{- $redisAuth = printf ":%s@" .Values.redis.password -}}
+  {{- $redisAuth = printf ":%s@" (urlquery .Values.redis.password) -}}
 {{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neodb-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+data:
+  sitecustomize.py: |
+    import sys
+    import os
+    import urllib.parse
+
+    class PostImportFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == "boofilsic.settings":
+                for finder in sys.meta_path:
+                    if finder is self:
+                        continue
+                    if hasattr(finder, "find_spec"):
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec is not None and spec.loader is not None:
+                            orig_loader = spec.loader
+                            class LoaderWrapper:
+                                def create_module(self, s):
+                                    return orig_loader.create_module(s)
+                                def exec_module(self, m):
+                                    orig_loader.exec_module(m)
+                                    r_url = os.environ.get("NEODB_REDIS_URL", "")
+                                    r_pass = os.environ.get("REDIS_PASSWORD", "")
+                                    if not r_pass and r_url:
+                                        try:
+                                            parsed = urllib.parse.urlparse(r_url)
+                                            r_pass = parsed.password
+                                        except Exception:
+                                            pass
+                                    if hasattr(m, "RQ_QUEUES"):
+                                        for q in m.RQ_QUEUES.values():
+                                            if r_pass:
+                                                q["PASSWORD"] = r_pass
+                                            if r_url:
+                                                q["URL"] = r_url
+                            spec.loader = LoaderWrapper()
+                            return spec
+            return None
+
+    sys.meta_path.insert(0, PostImportFinder())
 ---
 apiVersion: v1
 kind: Secret
@@ -14,6 +62,8 @@ metadata:
     io.kompose.service: neodb
 type: Opaque
 stringData:
+  PYTHONPATH: "/neodb-patch"
+  REDIS_PASSWORD: {{ .Values.redis.password | default "" | quote }}
   NEODB_DEBUG: "False"
   NEODB_SECRET_KEY: {{ .Values.appSecret | quote }}
   NEODB_SITE_NAME: {{ .Values.siteName | quote }}
@@ -98,6 +148,8 @@ spec:
               neodb-manage migrate --noinput || exit 1
               echo "Migrations complete."
           volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
             - name: neodb-data
               mountPath: /www/m
               subPath: m
@@ -164,6 +216,8 @@ spec:
             - -b
             - "127.0.0.1:8001"
           volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
             - name: neodb-data
               mountPath: /www/m
               subPath: m
@@ -195,6 +249,8 @@ spec:
             - -b
             - "127.0.0.1:8002"
           volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
             - name: neodb-data
               mountPath: /www/m
               subPath: m
@@ -225,6 +281,8 @@ spec:
             - cron
             - webhook
           volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
             - name: neodb-data
               mountPath: /www/m
               subPath: m
@@ -245,6 +303,8 @@ spec:
           args:
             - runstator
           volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
             - name: neodb-data
               mountPath: /www/m
               subPath: m
@@ -277,6 +337,9 @@ spec:
 
       restartPolicy: Always
       volumes:
+        - name: neodb-patch
+          configMap:
+            name: neodb-patch
         - name: neodb-data
           hostPath:
             type: DirectoryOrCreate
