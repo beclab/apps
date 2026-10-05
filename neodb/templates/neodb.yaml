@@ -1,0 +1,299 @@
+{{- $appDomainENV := split "," (.Values.domain.neodb | default "localhost") -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $redisAuth := "" -}}
+{{- if .Values.redis.password -}}
+  {{- $redisAuth = printf ":%s@" .Values.redis.password -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neodb-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+type: Opaque
+stringData:
+  NEODB_DEBUG: "False"
+  NEODB_SECRET_KEY: {{ .Values.appSecret | quote }}
+  NEODB_SITE_NAME: {{ .Values.siteName | quote }}
+  NEODB_SITE_DOMAIN: {{ $appDomain | quote }}
+  NEODB_SITE_LOGO: "/s/img/logo.svg"
+  NEODB_SITE_ICON: "/s/img/icon.png"
+  NEODB_USER_ICON: "/s/img/avatar.png"
+  NEODB_SITE_COLOR: "azure"
+  NEODB_DB_URL: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "neodb" | default "neodb" }}"
+  TAKAHE_DB_URL: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "takahe" | default "takahe" }}"
+  NEODB_REDIS_URL: "redis://{{ $redisAuth }}{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  NEODB_SEARCH_URL: "typesense://user:{{ .Values.typesenseApiKey }}@127.0.0.1:8108/catalog"
+  NEODB_MEDIA_ROOT: "/www/m"
+  NEODB_MEDIA_URL: "/m/"
+  NEODB_VENV: "/neodb-venv"
+  TAKAHE_ENVIRONMENT: "production"
+  TAKAHE_SECRET_KEY: {{ .Values.appSecret | quote }}
+  TAKAHE_MAIN_DOMAIN: {{ $appDomain | quote }}
+  TAKAHE_DATABASE_SERVER: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "takahe" | default "takahe" }}"
+  TAKAHE_CACHES_DEFAULT: "redis://{{ $redisAuth }}{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  TAKAHE_MEDIA_BACKEND: "local://"
+  TAKAHE_MEDIA_ROOT: "/www/media"
+  TAKAHE_MEDIA_URL: "https://{{ $appDomain }}/media/"
+  TAKAHE_USE_PROXY_HEADERS: "true"
+  TAKAHE_STATOR_CONCURRENCY: "2"
+  TAKAHE_STATOR_CONCURRENCY_PER_MODEL: "1"
+  TAKAHE_DEBUG: "False"
+  TAKAHE_VENV: "/neodb-venv"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neodb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+spec:
+  replicas: {{ .Values.workloads.neodb.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: neodb
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: neodb
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: "{{ .Values.image.busybox.repository }}:{{ .Values.image.busybox.tag }}"
+          imagePullPolicy: {{ .Values.image.busybox.pullPolicy | default "IfNotPresent" }}
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              mkdir -p /data/m /data/media /data/cache /data/root /data/typesense
+              chown -R 1000:1000 /data
+              chmod -R 775 /data
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+        - name: migration
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              echo "Running Takahē migrations..."
+              takahe-manage migrate --noinput || exit 1
+              echo "Running NeoDB migrations..."
+              neodb-manage migrate --noinput || exit 1
+              echo "Migrations complete."
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+      containers:
+        - name: neodb-nginx
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              envsubst '${NEODB_WEB_SERVER} ${NEODB_API_SERVER} ${NEODB_MCP_SERVER} ${TAKAHE_WEB_SERVER}' < $NGINX_CONF > /etc/nginx/conf.d/neodb.conf
+              exec nginx -g 'daemon off;'
+          env:
+            - name: NEODB_WEB_SERVER
+              value: "127.0.0.1:8001"
+            - name: NEODB_API_SERVER
+              value: "127.0.0.1:8001"
+            - name: TAKAHE_WEB_SERVER
+              value: "127.0.0.1:8002"
+            - name: NGINX_CONF
+              value: "/neodb/misc/nginx.conf.d/neodb.conf"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+            - name: neodb-data
+              mountPath: /www/cache
+              subPath: cache
+            - name: neodb-data
+              mountPath: /www/root
+              subPath: root
+          resources:
+            {{- toYaml .Values.resources.nginx | nindent 12 }}
+
+        - name: neodb-web
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - /neodb-venv/bin/gunicorn
+          args:
+            - boofilsic.wsgi
+            - -w
+            - "2"
+            - --preload
+            - --max-requests
+            - "2000"
+            - --timeout
+            - "60"
+            - -b
+            - "127.0.0.1:8001"
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.web | nindent 12 }}
+
+        - name: takahe-web
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - /neodb-venv/bin/gunicorn
+          args:
+            - --chdir
+            - /takahe
+            - takahe.wsgi
+            - -w
+            - "2"
+            - --preload
+            - --max-requests
+            - "2000"
+            - --timeout
+            - "60"
+            - -b
+            - "127.0.0.1:8002"
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.takahe | nindent 12 }}
+
+        - name: neodb-worker
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - neodb-manage
+          args:
+            - rqworker-pool
+            - --num-workers
+            - "2"
+            - mastodon
+            - fetch
+            - ap
+            - crawl
+            - import
+            - export
+            - cron
+            - webhook
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+
+        - name: takahe-stator
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - takahe-manage
+          args:
+            - runstator
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.stator | nindent 12 }}
+
+        - name: typesense
+          image: "{{ .Values.image.typesense.repository }}:{{ .Values.image.typesense.tag }}"
+          imagePullPolicy: {{ .Values.image.typesense.pullPolicy | default "IfNotPresent" }}
+          command:
+            - /opt/typesense-server
+          args:
+            - --data-dir=/data
+            - --api-key={{ .Values.typesenseApiKey }}
+            - --listen-port=8108
+            - --enable-cors=true
+          ports:
+            - name: typesense
+              containerPort: 8108
+              protocol: TCP
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /data
+              subPath: typesense
+          resources:
+            {{- toYaml .Values.resources.typesense | nindent 12 }}
+
+      restartPolicy: Always
+      volumes:
+        - name: neodb-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/neodb'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neodb-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    io.kompose.service: neodb
