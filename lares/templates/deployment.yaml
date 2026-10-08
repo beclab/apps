@@ -41,9 +41,13 @@ spec:
               mkdir -p /appdata/data /appdata/data/lares /appdata/data/workspace /appdata/devsrc
               chown -R 1000:1000 /appdata/data
               chown 1000:1000 /appdata/devsrc
+              mkdir -p /flowstudio-files/uploads
+              chown 1000:1000 /flowstudio-files/uploads
           volumeMounts:
             - name: app-data
               mountPath: /appdata
+            - name: flowstudio-files
+              mountPath: /flowstudio-files
         {{- if $enableDind }}
         - name: init-docker-cli
           image: docker.io/beclab/docker:29.3.0-dind
@@ -79,6 +83,8 @@ spec:
               value: {{ .Values.olaresEnv.TIMEZONE | quote }}
             - name: LARES_WORKSPACE
               value: /data/workspace
+            - name: LARES_FLOWSTUDIO_FILES_DIR
+              value: /flowstudio-files
             - name: LARES_DATA_DIR
               value: /data/lares
             # Router's per-user entrance, which mesh-in gives both a caller JWT
@@ -92,6 +98,9 @@ spec:
               value: "lares"
             - name: BFL_USERNAME
               value: {{ .Values.bfl.username | quote }}
+            # Shared with FlowStudio: encrypts the logged-in user for Router generations.
+            - name: SREF_KEY
+              value: {{ (default dict .Values.routerIdentity).key | quote }}
             - name: LARES_CATALOG_EVENTS_NATS_URL
               value: {{ printf "nats://nats.user-system-%s:4222" .Values.bfl.username | quote }}
             - name: LARES_CATALOG_EVENTS_NATS_USER
@@ -160,6 +169,9 @@ spec:
             - name: app-data
               mountPath: /devsrc
               subPath: devsrc
+            # Home/FlowStudio: the Files folder Lares and FlowStudio share.
+            - name: flowstudio-files
+              mountPath: /flowstudio-files
             {{- if $enableDind }}
             - name: docker-cli-bin
               mountPath: /usr/local/bin/docker
@@ -224,6 +236,10 @@ spec:
         - name: app-data
           hostPath:
             path: {{ .Values.userspace.appData }}
+            type: DirectoryOrCreate
+        - name: flowstudio-files
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/FlowStudio"
             type: DirectoryOrCreate
         {{- if $enableDind }}
         - name: docker-cli-bin
