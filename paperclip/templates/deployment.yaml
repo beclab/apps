@@ -1,5 +1,7 @@
 {{- $paperclipDomainENV := split  ","  .Values.domain.paperclip -}}
 {{- $paperclipDomain := index $paperclipDomainENV "_0" -}}
+{{- $paperclipImage := "ghcr.io/paperclipai/paperclip:2026.1005.0" -}}
+{{- $brewBaseImage := "beclab/harveyff-openclaw-brew-base:2026.9.2-cli" -}}
 
 ---
 apiVersion: apps/v1
@@ -41,7 +43,7 @@ spec:
               /paperclip/instances/default/secrets
             printf '%s\n' '#!/bin/sh' 'cd /app && exec pnpm paperclipai "$@"' > /paperclip/.local/bin/paperclipai
             chmod 755 /paperclip/.local/bin/paperclipai
-            PATH_MARKER="# paperclip: brew-path"
+            PATH_MARKER="# paperclip: brew-path-v2"
             for rc in /paperclip/.bashrc /paperclip/.profile; do
               if ! grep -qF "$PATH_MARKER" "$rc" 2>/dev/null; then
                 {
@@ -50,18 +52,24 @@ spec:
                   echo 'export HOMEBREW_PREFIX="${HOMEBREW_PREFIX:-/home/linuxbrew/.linuxbrew}"'
                   echo 'export HOMEBREW_NO_AUTO_UPDATE="${HOMEBREW_NO_AUTO_UPDATE:-1}"'
                   echo 'export NPM_CONFIG_PREFIX="${NPM_CONFIG_PREFIX:-/paperclip/.npm-global}"'
-                  echo 'export PATH="/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+                  echo 'export PATH="/usr/local/bin:/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"'
                 } >> "$rc"
               fi
             done
             fix_dir() {
               for d in "$@"; do
                 [ -e "$d" ] || continue
-                chown -R 1000:1000 "$d" 2>/dev/null || true
-                chmod -R u+rwX,g+rwX "$d" 2>/dev/null || true
+                chown 1000:1000 "$d"
+                chmod u+rwX,g+rwX "$d"
               done
             }
-            fix_dir /paperclip /tmp
+            fix_dir /paperclip /tmp /paperclip/.local /paperclip/.local/bin \
+              /paperclip/.npm-global /paperclip/.npm-global/bin /paperclip/.config \
+              /paperclip/.local/share /paperclip/.cache /paperclip/instances \
+              /paperclip/instances/default /paperclip/instances/default/logs \
+              /paperclip/instances/default/data /paperclip/instances/default/data/storage \
+              /paperclip/instances/default/secrets /paperclip/.local/bin/paperclipai \
+              /paperclip/.bashrc /paperclip/.profile
             echo "[init-permissions] /paperclip and /tmp ready (owner=1000:1000)"
         volumeMounts:
           - name: data
@@ -71,7 +79,7 @@ spec:
         securityContext:
           runAsUser: 0
       - name: init-install-dev
-        image: "beclab/harveyff-openclaw-brew-base:2026.5.29-cli"
+        image: "{{ $brewBaseImage }}"
         imagePullPolicy: IfNotPresent
         securityContext:
           runAsUser: 0
@@ -92,7 +100,12 @@ spec:
               echo "[init-install-dev] materializing brew base to appData..."
               cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
             fi
-            chown -R 1000:1000 /home/linuxbrew || true
+            # The staged tree already belongs to UID/GID 1000; fix mount roots only.
+            chown 1000:1000 /home/linuxbrew /home/linuxbrew/.linuxbrew
+            su linuxbrew -s /bin/bash -c \
+              'export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:$PATH"; \
+               export HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew HOMEBREW_NO_AUTO_UPDATE=1; \
+               brew trust steipete/tap 2>/dev/null || true'
             echo "[init-install-dev] done"
         volumeMounts:
           - name: brew-volume
@@ -106,13 +119,9 @@ spec:
         imagePullPolicy: IfNotPresent
       containers:
         - name: paperclip
-          image: beclab/paperclipai-paperclip:sha-a0f7d3d
+          image: "{{ $paperclipImage }}"
           imagePullPolicy: IfNotPresent
-          command:
-            - node
-            - --import
-            - ./server/node_modules/tsx/dist/loader.mjs
-            - server/dist/index.js
+          # Use the official tini/entrypoint and server CMD with UID 1000.
           ports:
             - containerPort: 3100
           env:
@@ -139,7 +148,7 @@ spec:
             - name: NPM_CONFIG_PREFIX
               value: "/paperclip/.npm-global"
             - name: PATH
-              value: "/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/usr/local/bin:/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: PAPERCLIP_DEPLOYMENT_MODE
               value: "authenticated"
             - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
@@ -206,6 +215,12 @@ spec:
               name: brew-volume
             - mountPath: /tmp
               name: tmp-volume
+          startupProbe:
+            tcpSocket:
+              port: 3100
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 180
           readinessProbe:
             tcpSocket:
               port: 3100
@@ -221,11 +236,9 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 3
         - name: paperclip-cli
-          image: beclab/paperclipai-paperclip:sha-a0f7d3d
+          image: "{{ $paperclipImage }}"
           imagePullPolicy: IfNotPresent
-          command:
-            - sleep
-            - infinity
+          args: ["sleep", "infinity"]
           startupProbe:
             exec:
               command:
@@ -255,7 +268,7 @@ spec:
             - name: NPM_CONFIG_PREFIX
               value: "/paperclip/.npm-global"
             - name: PATH
-              value: "/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+              value: "/usr/local/bin:/app/node_modules/.bin:/opt/venvs/hermes/bin:/paperclip/.local/bin:/paperclip/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
             - name: PAPERCLIP_DEPLOYMENT_MODE
               value: "authenticated"
             - name: PAPERCLIP_DEPLOYMENT_EXPOSURE
