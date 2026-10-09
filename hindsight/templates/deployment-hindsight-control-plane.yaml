@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hindsight-control-plane
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: hindsight-control-plane
+spec:
+  replicas: {{ (index .Values.workloads "hindsight-control-plane").replicaCount }}
+  selector:
+    matchLabels:
+      app: hindsight-control-plane
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hindsight-control-plane
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: hindsight-control-plane
+        image: docker.io/beclab/vectorize-io-hindsight-control-plane:0.10.2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 9999
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          value: production
+        - name: HINDSIGHT_CP_HOSTNAME
+          value: 0.0.0.0
+        - name: HINDSIGHT_CP_PORT
+          value: "9999"
+        - name: HINDSIGHT_CP_DATAPLANE_API_URL
+          value: http://hindsight.{{ .Release.Namespace }}.svc.cluster.local:8888
+        startupProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 5
+          failureThreshold: 24
+        readinessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      restartPolicy: Always

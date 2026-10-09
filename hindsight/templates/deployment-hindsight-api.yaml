@@ -1,0 +1,90 @@
+{{- $oe := .Values.olaresEnv | default dict }}
+{{- $apiKey := index $oe "HINDSIGHT_API_LLM_API_KEY" | default "not-required" }}
+{{- $base := index $oe "HINDSIGHT_API_LLM_BASE_URL" | default (printf "https://router.%s/v1" .Values.user.zone) }}
+{{- $model := index $oe "HINDSIGHT_API_LLM_MODEL" | default "default-chat" }}
+{{- $embed := index $oe "HINDSIGHT_API_EMBEDDINGS_MODEL" | default "default-embedding" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hindsight
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: hindsight-api
+    io.kompose.service: hindsight
+spec:
+  replicas: {{ .Values.workloads.hindsight.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: hindsight
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hindsight-api
+        io.kompose.service: hindsight
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: hindsight-api
+        image: docker.io/beclab/vectorize-io-hindsight-api:0.10.2-slim
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: api
+          containerPort: 8888
+          protocol: TCP
+        env:
+        - name: HINDSIGHT_API_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: hindsight-secrets
+              key: DATABASE_URL
+        - name: HINDSIGHT_API_WORKER_ID
+          value: hindsight-api
+        - name: HINDSIGHT_API_LLM_PROVIDER
+          value: openai
+        - name: HINDSIGHT_API_LLM_BASE_URL
+          value: {{ $base | quote }}
+        - name: HINDSIGHT_API_LLM_MODEL
+          value: {{ $model | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_PROVIDER
+          value: openai
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL
+          value: {{ $base | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL
+          value: {{ $embed | quote }}
+        # The current embedding endpoint accepts one text per request.
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE
+          value: "1"
+        - name: HINDSIGHT_API_RERANKER_PROVIDER
+          value: rrf
+        {{- if $apiKey }}
+        - name: HINDSIGHT_API_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: hindsight-secrets
+              key: HINDSIGHT_API_LLM_API_KEY
+        {{- end }}
+        startupProbe:
+          httpGet:
+            path: /health
+            port: api
+          periodSeconds: 10
+          failureThreshold: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: api
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: "1"
+            memory: 2Gi
+      restartPolicy: Always
