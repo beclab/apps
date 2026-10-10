@@ -4,29 +4,28 @@ metadata:
 
 spec:
   upgradeDescription: |
-    将 vLLM 从 v0.27.1 升级至 v0.29.0。Chart 1.2.30。
+    将 vLLM 从 v0.29.0 升级至 v0.31.0。Chart 1.2.31。
 
     **更新内容**（与 Olares 相关）
 
+    v0.31.0
+    - 新增 `vllm preload`：权重缓存守护进程将量化后的权重常驻显存，引擎重启时无需再从磁盘加载
+    - Model Runner V2 支持草稿模型推测解码与自定义 logits processor；显存分析时计入 MoE 占用，避免 OOM
+    - 新增调度控制：`--max-num-active-seqs` 独立于 `max_num_seqs` 限制 RUNNING 准入；等待队列优先调度已持有 KV block 的请求
+    - 大幅优化 DeepSeek-V4.1-Flash、GLM-5.3-Flash、Qwen3.8-Flash-Next、Kimi K3 与 MiniMax-M3 的性能
+    - 安全性：未设置 `--trust-request-mm-kwargs` 时拒绝请求级 `mm_processor_kwargs` 与 `media_io_kwargs`；prefix cache key 按来源区分，LoRA 名称与 `cache_salt` 不会再冲突
+    - 破坏性变更：移除 `tokenizer_mode="slow"`；在线量化 `quantization="fp8"` 改为 `fp8_per_tensor`；移除 AllSpark INT8 W8A16 后端；`--enforce-eager` 现在同时禁用 JIT 内核预热
+
+    v0.30.0
+    - Fast Start：每 GPU 的权重缓存守护进程将量化后、按 TP 切分的权重常驻显存，重启的引擎可用 `--load-format ipc_cache` 通过 CUDA IPC 直接映射
+    - Model Runner V2 新增双批次重叠、流水线并行下的推测解码，启动显著加快（H200 上图捕获 12 秒降至 2 秒，引擎初始化 28.9 秒降至 8.2 秒）
+    - HiSparse 在显存紧张时将 sparse-MLA 的 KV page 落到锁页主机内存，并由 GPU 热缓冲区处理 top-k miss
+    - 新增模型：DeepSeek-V4.1-Flash、DeepSeek-V4-Flash-Vision-Exp、GLM-5.3-Flash、K2-Horizon、Cohere Compass、Bailing V3 VL、Nanbeige4.2
+    - 量化：支持通过 `quantization_config.targets` 定向在线量化，SM100/103 上默认使用 FlashInfer CuTeDSL NVFP4 W4A16，CUDA 上支持 AutoRound 2-7 bit
+    - 破坏性变更：scale-out 端点需显式 `--enable-scale-out`；移除 GPTQ 激活重排（`g_idx`）；移除 0.29 标记弃用的项；`vllm serve --grpc` 取代 `python -m vllm.entrypoints.grpc_server`；YaRN 与 Transformers 对齐，厂商别名不再二次缩放 `max_model_len`
+
     v0.29.0
-    - Model Runner V2 成为所有模型的默认运行器；新增 CUDA graph 显存分析、prompt embeds、分片采样和更完整的推测解码支持
-    - 新增 Hy4-preview、Qwen3.8-Flash-Next、GraniteSWA/MoeSWA、NemotronH Omni Reasoning V3、Kimi K3 NVFP4、DeepSeek backbone embedding 和 FP8 ModernBERT
-    - 优化 Kimi K3、DeepSeek V4、Mamba prefix caching、多模态/视频输入、LoRA 和 RL 权重同步
-    - FlashInfer all-reduce 默认启用；prefix cache 哈希改为确定性；新增请求队列准入控制
-    - 破坏性变更：移除十个弃用的模型架构和 PyAV 后端；弃用 Python API server 模块并推荐 `vllm serve`；Model Runner V1 进入弃用阶段
-
-    v0.28.0
-    - 优化 Kimi K3、DeepSeek V4 内核、推测解码，以及 Model Runner V2 的 E/P/D 解耦
-    - 新增支持磁盘和可插拔二级 tier 的分层 KV offloading，以及 Rust 前端 gRPC 控制
-    - `max_num_batched_tokens` 默认值提升至 16384，Mamba prefix caching 默认启用
-    - 增强 ROCm gfx11/gfx950、Intel XPU、CPU MLA 和 Blackwell 支持
-    - 破坏性变更：bitsandbytes 移至独立插件；要求 Transformers 5.15.0
-
-    v0.27.1
-    - 补丁版本：支持量化 DSpark Markov heads
-
-    v0.27.0
-    - 主要改进包括 Kimi K3、Qwen3.5、DeepSeek V4、Model Runner V2、SM100 FlashAttention 4、KV offloading 和 Rust 前端，并升级至 PyTorch 2.13.0
+    - Model Runner V2 成为所有模型的默认运行器，并默认启用 FlashInfer all-reduce、确定性 prefix cache 哈希与请求队列准入控制
 
     详细发布说明请访问：
     https://github.com/vllm-project/vllm/releases
