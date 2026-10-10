@@ -1,4 +1,4 @@
-﻿{{- $nextcloudDomainENV := split "," .Values.domain.nextcloud -}}
+{{- $nextcloudDomainENV := split "," .Values.domain.nextcloud -}}
 {{- $nextcloudDomain := index $nextcloudDomainENV "_0" -}}
 {{- $entrancePrefix := index (splitList "." $nextcloudDomain) 0 -}}
 {{- $localDomain := printf "%s.%s.olares.local" $entrancePrefix .Values.bfl.username -}}
@@ -23,13 +23,16 @@ spec:
         app: nextcloud
       annotations:
         checksum/olares-config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/upgrade-config: {{ include (print $.Template.BasePath "/upgrade-configmap.yaml") . | sha256sum }}
+        checksum/office-config: {{ include (print $.Template.BasePath "/office-configmap.yaml") . | sha256sum }}
     spec:
       securityContext:
-        runAsUser: 0
+        runAsUser: 1000
+        runAsGroup: 1000
       initContainers:
         # subPath file mount creates config/ as root; www-data must own it to write config.php
         - name: init-config-permissions
-          image: "docker.io/beclab/harveyff-nextcloud:31.0.14.1"
+          image: "docker.io/beclab/harveyff-nextcloud:31.0.14.3"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
@@ -50,8 +53,18 @@ spec:
             - -c
             - |
               set -eu
+              if [ -f /var/www/html/version.php ]; then
+                major=$(php -r 'require "/var/www/html/version.php"; echo $OC_Version[0];')
+                if [ "$major" -lt 31 ]; then
+                  echo 'This package supports installed Nextcloud 31 or newer' >&2
+                  exit 1
+                fi
+              fi
               mkdir -p /var/www/html/config /var/www/html/data
-              chown 1000:1000 /var/www/html/config /var/www/html/data
+              chown 1000:1000 /var/www/html /var/www/html/config /var/www/html/data
+              if [ -f /var/www/html/nextcloud-init-sync.lock ]; then
+                chown 1000:1000 /var/www/html/nextcloud-init-sync.lock
+              fi
               if [ ! -f /var/www/html/config/config.php ]; then
                 table_count="$(php -r '
                   $dsn = "pgsql:host=" . getenv("POSTGRES_HOST") . ";dbname=" . getenv("POSTGRES_DB");
@@ -98,10 +111,67 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/www/html
+        - name: migrate-nextcloud-31
+          image: "docker.io/beclab/harveyff-nextcloud:31.0.14-bridge.2"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: MIGRATION_STAGE
+              value: "31"
+          command: ["/bin/sh", "/olares/migrate.sh"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1.5Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+            - name: external-storage
+              mountPath: /external_storage
+            - name: home-storage
+              mountPath: /home_storage
+            - name: upgrade
+              mountPath: /olares
+        - name: migrate-nextcloud-32
+          image: "docker.io/beclab/harveyff-nextcloud:32.0.14-olares.3"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          env:
+            - name: MIGRATION_STAGE
+              value: "32"
+          command: ["/bin/sh", "/olares/migrate.sh"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1.5Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/www/html
+            - name: external-storage
+              mountPath: /external_storage
+            - name: home-storage
+              mountPath: /home_storage
+            - name: upgrade
+              mountPath: /olares
       containers:
         - name: nextcloud
-          image: "docker.io/beclab/harveyff-nextcloud:31.0.14.1"
+          image: "docker.io/beclab/harveyff-nextcloud:33.0.9-office.3"
           env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: nextcloud-office
+                  key: JWT_SECRET
+            - name: OFFICE_PUBLIC_URL
+              value: "https://{{ $nextcloudDomain }}/office/"
             - name: PUID
               value: "1000"
             - name: PGID
@@ -153,7 +223,8 @@ spec:
             - name: NEXTCLOUD_MOUNT_HOME_STORAGE_PATH
               value: "/home_storage"
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           resources:
             requests:
               cpu: 500m
@@ -162,18 +233,45 @@ spec:
               cpu: 1000m
               memory: 1.5Gi
           ports:
-            - containerPort: 80
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /status.php
+              port: 8080
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/www/html
             - name: config-env
               mountPath: /var/www/html/config/zz-olares.config.php
               subPath: zz-olares.config.php
+            - name: office-configure
+              mountPath: /docker-entrypoint-hooks.d/post-installation/office.sh
+              subPath: configure-nextcloud.sh
+            - name: office-configure
+              mountPath: /docker-entrypoint-hooks.d/post-upgrade/office.sh
+              subPath: configure-nextcloud.sh
+            - name: office-configure
+              mountPath: /docker-entrypoint-hooks.d/before-starting/office.sh
+              subPath: configure-nextcloud.sh
             - name: external-storage
               mountPath: /external_storage
             - name: home-storage
               mountPath: /home_storage
       volumes:
+        - name: upgrade
+          configMap:
+            name: {{ .Release.Name }}-upgrade
+            defaultMode: 0555
+        - name: office-configure
+          configMap:
+            name: nextcloud-office-runtime
+            defaultMode: 0555
         - name: config-env
           configMap:
             name: nextcloud-config
@@ -211,4 +309,4 @@ spec:
   ports:
     - protocol: TCP
       port: 80
-      targetPort: 80
+      targetPort: 8080
