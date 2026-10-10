@@ -12,7 +12,7 @@ metadata:
   title: Minecraft
   description: Minecraft Java Edition dedicated server.
   icon: https://cdn.olares.com/images/2026/08/115f197fbf485c4afaf008ed273e83bd.png
-  version: 0.1.14
+  version: 0.1.22
   categories:
   - Fun
   - homelab
@@ -33,28 +33,23 @@ ports:
   host: minecraft
   port: 25565
   protocol: tcp
-  exposePort: 25565
+  exposePort: 0
+  addToTailscaleAcl: true
 
 overlayGateway:
   enable: true
   entrances:
   - title: Minecraft Java
-    workload: minecraft
+    workload: minecraft-server
     port: 25565
     protocol: tcp
     description: Join with Minecraft Java Edition (TCP 25565)
-
-tailscale:
-  acls:
-  - proto: tcp
-    dst:
-    - "*:25565"
 
 permission:
   appData: true
 
 spec:
-  versionName: "26.2"
+  versionName: "configurable"
   developer: itzg
   website: https://www.minecraft.net/
   sourceCode: https://github.com/itzg/docker-minecraft-server
@@ -62,6 +57,11 @@ spec:
   locale:
   - en-US
   - zh-CN
+  - de-DE
+  - es-ES
+  - it-IT
+  - fr-FR
+  - ja-JP
   doc: https://docker-minecraft-server.readthedocs.io/
   license:
   - text: Minecraft EULA
@@ -82,22 +82,112 @@ spec:
   - https://cdn.olares.com/images/2026/08/d3735a1d2ba194b7a76a6d5b619383e5.png
   - https://cdn.olares.com/images/2026/08/221e51b61d2bd779f6c774c378dbaacb.png
   fullDescription: |
-    A vanilla Minecraft Java Edition dedicated server. There is no web UI — open the console terminal from the desktop, and join from the official Minecraft Java client.
+    A Minecraft Java Edition dedicated server with Vanilla, Forge, and Fabric options. Open the console terminal from the desktop and connect with a compatible Java client.
 
     First start downloads the official server jar (a few minutes). World data is stored in this app's data directory.
 
     On the same LAN, open Settings → Network → Overlay gateway, turn on the gateway and enable Overlay for this app, then join using the LAN IP and port shown there (TCP 25565).
 
-    Overlay and VPN can be used at the same time. For VPN — including when players are on a different network — join at `<olares-id>.olares.com:25565` (for example olarestest001.olares.com:25565).
+    Overlay and VPN can be used together. For VPN connections, use the address and external port shown for this instance in Settings → Apps → Minecraft → Ports. Each new instance receives its own external port.
 
-    The Java client version must match the server. Online mode is on, so a genuine Microsoft account is required.
+    Clone creates an independent server instance with its own configuration and data directory. It does not copy an existing world. Use Data/<instance-name>/data/mods for that instance’s server-side mods.
+
+    Select the server type and Minecraft version during installation. Java is selected automatically. Use a fixed Minecraft version supported by your chosen loader and mods; not every combination is supported upstream. LATEST may update on restart. Pin the loader version to match your modpack. Stop the server before uploading server-side mods and dependencies to Data/<instance-name>/data/mods, then restart. Fabric API must be installed separately when required by a mod. Clients must use compatible game, loader, and mod versions. Back up your world before changing server types.
+
+    Online mode (account verification) is enabled by default and can be changed in the app's environment settings. Disabling it also disables secure profile enforcement. Offline mode does not verify player identities; use it only with trusted players. Switching modes changes player UUIDs and can affect inventories and permissions. Back up world data before changing modes or reinstalling with a different version; do not downgrade an existing world.
+
+    Cheat commands are off by default. Turn on Allow cheats in the app environment settings to let every player who joins use commands such as /give and /gamemode. That setting also enables command blocks. It does not grant server-stop commands; those stay on the console. Turning it off clears the player operator list and restarts the server. Use it only with trusted players.
+
+    The player limit defaults to 8 and can be changed in the app environment settings. Allowed values are 1 to 100. Changing it restarts the server. Higher limits use more memory.
 
   upgradeDescription: |
-    Pin the game server pod to control-plane (master) via nodeAffinity for overlay gateway LAN access.
+    Fix the duplicate game and console Deployment names during installation; retain Clone support and Overlay access.
 
 options:
+  allowMultipleInstall: true
   apiTimeout: 0
   dependencies:
   - name: olares
     type: system
     version: '>=1.12.6-0'
+
+envs:
+  - envName: TYPE
+    type: string
+    required: true
+    editable: false
+    default: "VANILLA"
+    description: "Server type. Choose the loader required by your mods. Back up your world before reinstalling with a different type."
+    options:
+      - title: "Vanilla"
+        value: "VANILLA"
+      - title: "Forge"
+        value: "FORGE"
+      - title: "Fabric"
+        value: "FABRIC"
+  - envName: FORGE_VERSION
+    type: string
+    required: false
+    editable: false
+    default: "recommended"
+    description: "Forge only: use recommended, latest, or an exact Forge version matching your Minecraft version and modpack. Ignored for other server types."
+  - envName: FABRIC_LOADER_VERSION
+    type: string
+    required: false
+    editable: false
+    default: "latest"
+    description: "Fabric only: use latest or an exact Fabric Loader version required by your modpack. Fabric API is a separate mod. Ignored for other server types."
+  - envName: VERSION
+    type: string
+    required: true
+    editable: false
+    description: "Minecraft version (client must match). 1.12.2 does not support Fabric. Back up world data before reinstalling; do not downgrade an existing world."
+    options:
+      - title: "1.12.2 (Java 8)"
+        value: "1.12.2"
+      - title: "1.16.5 (Java 8)"
+        value: "1.16.5"
+      - title: "1.18.2 (Java 17)"
+        value: "1.18.2"
+      - title: "1.19.2 (Java 17)"
+        value: "1.19.2"
+      - title: "1.20.1 (Java 17)"
+        value: "1.20.1"
+      - title: "1.21.1 (Java 21)"
+        value: "1.21.1"
+      - title: "26.2 (Java 25)"
+        value: "26.2"
+      - title: "Latest release (may update on restart)"
+        value: "LATEST"
+  - envName: ONLINE_MODE
+    type: string
+    required: true
+    editable: true
+    applyOnChange: true
+    default: "true"
+    description: "Verify player accounts. Changing this restarts the server and can affect player inventories and permissions."
+    options:
+      - title: "Enabled (recommended)"
+        value: "true"
+      - title: "Disabled (trusted players only)"
+        value: "false"
+  - envName: ALLOW_CHEATS
+    type: string
+    required: true
+    editable: true
+    applyOnChange: true
+    default: "false"
+    description: "Allow cheat commands such as /give and /gamemode. Off by default. When on, every player who joins can use those commands, and command blocks are enabled. Turning it off clears the player operator list and restarts the server. Use only with trusted players."
+    options:
+      - title: "Disabled (default)"
+        value: "false"
+      - title: "Enabled (trusted players)"
+        value: "true"
+  - envName: MAX_PLAYERS
+    type: int
+    required: true
+    editable: true
+    applyOnChange: true
+    default: "8"
+    regex: '^([1-9]|[1-9][0-9]|100)$'
+    description: "Maximum players online at once. Default is 8. Allowed range is 1 to 100. Higher values use more memory. Changing this restarts the server."
