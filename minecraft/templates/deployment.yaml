@@ -1,7 +1,37 @@
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $version := get $env "VERSION" | default "LATEST" -}}
+{{- $serverType := get $env "TYPE" | default "VANILLA" -}}
+{{- $java := "java25" -}}
+{{- if or (eq $version "1.12.2") (eq $version "1.16.5") -}}
+  {{- $java = "java8" -}}
+{{- else if or (eq $version "1.18.2") (eq $version "1.19.2") (eq $version "1.20.1") -}}
+  {{- $java = "java17" -}}
+{{- else if eq $version "1.21.1" -}}
+  {{- $java = "java21" -}}
+{{- end -}}
+{{- $onlineMode := "true" -}}
+{{- if hasKey $env "ONLINE_MODE" -}}
+  {{- $onlineMode = (get $env "ONLINE_MODE" | toString | lower) -}}
+{{- end -}}
+{{- $allowCheats := "false" -}}
+{{- if hasKey $env "ALLOW_CHEATS" -}}
+  {{- $allowCheats = (get $env "ALLOW_CHEATS" | toString | lower) -}}
+{{- end -}}
+{{- $opPermissionLevel := "4" -}}
+{{- if eq $allowCheats "true" -}}
+  {{- $opPermissionLevel = "2" -}}
+{{- end -}}
+{{- $maxPlayers := "8" -}}
+{{- if hasKey $env "MAX_PLAYERS" -}}
+  {{- $rawMaxPlayers := get $env "MAX_PLAYERS" | toString -}}
+  {{- if regexMatch "^([1-9]|[1-9][0-9]|100)$" $rawMaxPlayers -}}
+    {{- $maxPlayers = $rawMaxPlayers -}}
+  {{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: minecraft
+  name: minecraft-server
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: minecraft
@@ -42,7 +72,20 @@ spec:
             - |
               set -e
               mkdir -p /data
+              # Marker means a previous start granted cheat-command access.
+              # Turning the setting off clears those operators once, and leaves
+              # operators created while the setting stayed off untouched.
+              if [ "$ALLOW_CHEATS" = "true" ]; then
+                touch /data/.olares-allow-cheats
+              elif [ -f /data/.olares-allow-cheats ]; then
+                printf '%s\n' '[]' > /data/ops.json
+                chown 1000:1000 /data/ops.json
+                rm -f /data/.olares-allow-cheats
+              fi
               chown 1000:1000 /data
+          env:
+            - name: ALLOW_CHEATS
+              value: {{ $allowCheats | quote }}
           securityContext:
             runAsUser: 0
           resources:
@@ -57,7 +100,7 @@ spec:
               mountPath: /data
       containers:
         - name: minecraft
-          image: docker.io/itzg/minecraft-server:java25
+          image: docker.io/itzg/minecraft-server:{{ $java }}
           imagePullPolicy: IfNotPresent
           stdin: true
           tty: true
@@ -71,9 +114,16 @@ spec:
             - name: EULA
               value: "TRUE"
             - name: TYPE
-              value: VANILLA
+              value: {{ $serverType | quote }}
+            {{- if eq $serverType "FORGE" }}
+            - name: FORGE_VERSION
+              value: {{ get $env "FORGE_VERSION" | default "recommended" | quote }}
+            {{- else if eq $serverType "FABRIC" }}
+            - name: FABRIC_LOADER_VERSION
+              value: {{ get $env "FABRIC_LOADER_VERSION" | default "latest" | quote }}
+            {{- end }}
             - name: VERSION
-              value: LATEST
+              value: {{ $version | quote }}
             - name: MEMORY
               value: 4G
             - name: UID
@@ -85,7 +135,21 @@ spec:
             - name: SKIP_SUDO
               value: "true"
             - name: ONLINE_MODE
-              value: "TRUE"
+              value: {{ $onlineMode | quote }}
+            - name: ENFORCE_SECURE_PROFILE
+              value: {{ $onlineMode | quote }}
+            - name: ENABLE_COMMAND_BLOCK
+              value: {{ $allowCheats | quote }}
+            - name: OP_PERMISSION_LEVEL
+              value: {{ $opPermissionLevel | quote }}
+            {{- if eq $allowCheats "true" }}
+            - name: RCON_CMDS_ON_CONNECT
+              value: "op @a"
+            {{- if or (eq $version "26.2") (eq $version "LATEST") }}
+            - name: RCON_CMDS_STARTUP
+              value: "gamerule command_blocks_work true"
+            {{- end }}
+            {{- end }}
             - name: MOTD
               value: Olares Minecraft
             - name: DIFFICULTY
@@ -93,7 +157,7 @@ spec:
             - name: MODE
               value: survival
             - name: MAX_PLAYERS
-              value: "8"
+              value: {{ $maxPlayers | quote }}
             - name: VIEW_DISTANCE
               value: "10"
             - name: USE_AIKAR_FLAGS
