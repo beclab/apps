@@ -7,7 +7,7 @@ metadata:
   description: "Generic llama.cpp engine base. Pick any GGUF model at install via env."
   appid: llamacppllmbasev3
   title: llama.cpp Engine Base
-  version: '1.2.38'
+  version: '1.2.39'
   categories:
     - AI
     - models
@@ -36,29 +36,32 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: 'b10969'
+  versionName: 'b11515'
   upgradeDescription: |
-    Chart 1.2.38 — Upgrade llama.cpp from `server-cuda12-b10588` to `server-cuda12-b10969`.
+    Chart 1.2.39 — Upgrade llama.cpp from `server-cuda12-b10969` to `server-cuda12-b11515` (546 upstream commits).
 
     **Model compatibility**
-    - Add Qwen3.8-Flash-Next (`qwen4exp`) text/vision architecture support ([#27742](https://github.com/ggml-org/llama.cpp/pull/27742)), with subsequent recurrent-state rollback and inference fixes.
-    - Add NVIDIA Nemotron-3-Puzzle-75B-A9B ([#25444](https://github.com/ggml-org/llama.cpp/pull/25444)) and Tencent Hy 4 preview architecture support ([#28127](https://github.com/ggml-org/llama.cpp/pull/28127)). These require matching model weights and sufficient resources.
+    - Add K2 Horizon dense and MoVA ([#29535](https://github.com/ggml-org/llama.cpp/pull/29535)), Ling 3.0 VL ([#29151](https://github.com/ggml-org/llama.cpp/pull/29151)), MiMo-V2.6 ([#29257](https://github.com/ggml-org/llama.cpp/pull/29257)), the Gemma4 DSpark draft backbone ([#29226](https://github.com/ggml-org/llama.cpp/pull/29226)), Cohere2 vision ([#30062](https://github.com/ggml-org/llama.cpp/pull/30062)), and the LFM2.5 encoder models ([#29862](https://github.com/ggml-org/llama.cpp/pull/29862)). These require matching model weights and sufficient resources.
+    - Add embeddinggemma2 with text, vision, and audio ([#30054](https://github.com/ggml-org/llama.cpp/pull/30054)) and Qwen3.5 embedding conversion ([#27920](https://github.com/ggml-org/llama.cpp/pull/27920)); rerankers gain `classifier_pooling` ([#29627](https://github.com/ggml-org/llama.cpp/pull/29627)) and `classifier_activation` ([#29692](https://github.com/ggml-org/llama.cpp/pull/29692)).
+    - Add the decision-model family: nimble ([#29844](https://github.com/ggml-org/llama.cpp/pull/29844)), clef text-only ([#29831](https://github.com/ggml-org/llama.cpp/pull/29831)) with server-side vision input ([#29969](https://github.com/ggml-org/llama.cpp/pull/29969)), pplx-decider ([#30044](https://github.com/ggml-org/llama.cpp/pull/30044)), and LiquidAI d1-3B / d1-omni-600M ([#30110](https://github.com/ggml-org/llama.cpp/pull/30110), [#30114](https://github.com/ggml-org/llama.cpp/pull/30114)).
 
-    **Speculative decoding and CUDA**
-    - Add DFlash2 draft-model support ([#27342](https://github.com/ggml-org/llama.cpp/pull/27342)); requires a compatible draft checkpoint. Upstream notes that DFlash2 GGUF files converted before August 27, 2026 need reconversion for vision correctness.
-    - Add CUDA sparse Flash Attention for DeepSeek-V4/GLM ([#27970](https://github.com/ggml-org/llama.cpp/pull/27970)), extend MoE fusion to speculative decoding ([#27621](https://github.com/ggml-org/llama.cpp/pull/27621)), and optimize Q4_K/Q5_K decoding with DGX Spark prefetch improvements ([#26705](https://github.com/ggml-org/llama.cpp/pull/26705)). Gains depend on model and hardware.
+    **CUDA and performance**
+    - Add a GPU cache for MoE experts kept in host memory ([#29887](https://github.com/ggml-org/llama.cpp/pull/29887)), extended across multiple GPUs ([#30112](https://github.com/ggml-org/llama.cpp/pull/30112)). This helps MoE models that do not fit entirely in VRAM.
+    - Enable sparse Flash Attention for qwen4 ([#28770](https://github.com/ggml-org/llama.cpp/pull/28770)) and DeepSeek-V4 prefill ([#29298](https://github.com/ggml-org/llama.cpp/pull/29298)), tune Flash Attention for Gemma 4 on Ampere and newer ([#29152](https://github.com/ggml-org/llama.cpp/pull/29152)), and prefer whole-tile FA scheduling for two-stage kernels ([#29435](https://github.com/ggml-org/llama.cpp/pull/29435)).
+    - Fuse RMS_NORM with SCALE ([#29393](https://github.com/ggml-org/llama.cpp/pull/29393)) and shared experts into MMVQ ([#29184](https://github.com/ggml-org/llama.cpp/pull/29184)), use MMVF for thin f16/bf16 matmuls at small batch sizes ([#29633](https://github.com/ggml-org/llama.cpp/pull/29633)), optimize NVFP4 accumulation in MMQ ([#29857](https://github.com/ggml-org/llama.cpp/pull/29857)), and speed up model loading ([#29598](https://github.com/ggml-org/llama.cpp/pull/29598)). Gains depend on model and hardware.
 
     **Server and chat behavior**
-    - Add `--kv-unified-per-slot` to cap each request slot when using a unified KV cache; `-c` controls the total pool ([#24124](https://github.com/ggml-org/llama.cpp/pull/24124)). This update does not change the configured context size automatically.
-    - Enable `preserve_reasoning` by default for chat templates that support it; use `--no-reasoning-preserve` to disable ([#28174](https://github.com/ggml-org/llama.cpp/pull/28174)).
-    - Accept `data:` URLs in `input_audio` and `input_video` requests, fixing media decoding errors ([#27735](https://github.com/ggml-org/llama.cpp/pull/27735)); requires a compatible multimodal model and client.
+    - `GET /models` now reports each model's input and output modalities ([#29987](https://github.com/ggml-org/llama.cpp/pull/29987)), and the server can bind to multiple addresses ([#28690](https://github.com/ggml-org/llama.cpp/pull/28690)).
+    - `/v1/embeddings` accepts typed vision/audio/video content ([#29556](https://github.com/ggml-org/llama.cpp/pull/29556)), invalid embedding requests return HTTP 400 ([#29060](https://github.com/ggml-org/llama.cpp/pull/29060)), and RANK pooling allows batch splitting for causal rerankers such as Qwen3 and Qwen3-VL ([#28876](https://github.com/ggml-org/llama.cpp/pull/28876)).
+    - Context checkpoints are preserved across slot save/restore ([#26004](https://github.com/ggml-org/llama.cpp/pull/26004)), and temperature, top-p, min-p, and penalties can now be set through env vars ([#27380](https://github.com/ggml-org/llama.cpp/pull/27380)) alongside the existing `LLAMA_ARG_*` style.
 
     **Stability and memory**
-    - Reduce peak RAM during model loading when tensor repacking is enabled ([#27483](https://github.com/ggml-org/llama.cpp/pull/27483)).
-    - Fix the model-router LRU hang with concurrent requests ([#28539](https://github.com/ggml-org/llama.cpp/pull/28539)), speculative decoding after image input ([#28715](https://github.com/ggml-org/llama.cpp/pull/28715)), and CUDA Flash Attention synchronization ([#27870](https://github.com/ggml-org/llama.cpp/pull/27870)).
+    - Fix a CUDA MMQ memory fault when `n_expert` greatly exceeds `n_ubatch` ([#29941](https://github.com/ggml-org/llama.cpp/pull/29941)), two broken Volta Flash Attention cases ([#29803](https://github.com/ggml-org/llama.cpp/pull/29803)), CUB argsort corruption ([#28389](https://github.com/ggml-org/llama.cpp/pull/28389)), and a transposed-copy path corrupting non-contiguous destinations ([#27663](https://github.com/ggml-org/llama.cpp/pull/27663)).
+    - Fix a server crash in the token-counting API during sleep ([#29309](https://github.com/ggml-org/llama.cpp/pull/29309)), router eviction races with the request queue ([#29217](https://github.com/ggml-org/llama.cpp/pull/29217)), and an abort caused by `n_batch` exceeding `n_ubatch` ([#29903](https://github.com/ggml-org/llama.cpp/pull/29903)).
+    - Fix restoring a mismatched KV cache rotation by saving exact rotation metadata ([#28498](https://github.com/ggml-org/llama.cpp/pull/28498)).
 
     These are upstream engine changes; model-specific capabilities are not all validated by this chart update. llm-init remains at `v1.5.0`.
-    Full upstream changes: https://github.com/ggml-org/llama.cpp/compare/b10588...b10969
+    Full upstream changes: https://github.com/ggml-org/llama.cpp/compare/b10969...b11515
 
   fullDescription: |
     **IMPORTANT NOTE**  
