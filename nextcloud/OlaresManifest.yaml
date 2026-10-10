@@ -5,12 +5,13 @@ apiVersion: 'v3'
 workloadReplicas:
   nextcloudweb: 1
   nextcloud: 1
+  nextcloudoffice: 1
 metadata:
   name: nextcloud
   description: The productivity platform that keeps you in control
   icon: https://app.cdn.olares.com/appstore/nextcloud/icon2.png
   appid: nextcloud
-  version: '1.0.28'
+  version: '1.0.32'
   title: Nextcloud
   categories:
   - Productivity_v112
@@ -26,7 +27,7 @@ permission:
   - Home
   externalData: true
 spec:
-  versionName: '31.0.14'
+  versionName: '33.0.9'
   featuredImage: https://app.cdn.olares.com/appstore/nextcloud/1.webp
   promoteImage:
   - https://app.cdn.olares.com/appstore/nextcloud/1.webp
@@ -45,28 +46,13 @@ spec:
     - Security with our encryption mechanisms, HackerOne bounty program and two-factor authentication.
 
   upgradeDescription: |
-    Run the OpenResty entrance as uid/gid 1000 and move its PID, logs, and
-    temporary request paths to writable locations.
+    Nextcloud 33.0.9 with Euro-Office connector 11.0.6 and an integrated document server. Includes amd64 and arm64 images.
 
-    Upgrade Nextcloud from 31.0.4 to 31.0.14 (same major; existing installs run `occ upgrade` in place). User files on appData and the Postgres middleware are preserved. Do not skip Nextcloud majors on a running volume.
+    This is a major version update. Existing Nextcloud 31 installations are automatically upgraded through 31.0.14 and 32.0.14. The upgrade backs up the database and configuration without copying user files, preserves existing external mounts, and skips external storage during migration indexing.
 
-    Replace the app image `beclab/aboveos-zhangdangfang-nextcloud:31.0.4.2` with `beclab/harveyff-nextcloud:31.0.14.1` (official `nextcloud:31.0.14-apache`, `www-data` remapped to uid/gid 1000 for Olares hostPath). Multi-arch: amd64 and arm64.
+    Upgrading may take longer than usual, depending on your data volume, device performance, and network conditions. Migration logs show the current stage, elapsed time, and approximate remaining time when available.
 
-    Raise the OpenResty reverse-proxy upload limit from the default 1MB to 512MB (`client_max_body_size`), matching the image `PHP_UPLOAD_LIMIT`. Recreate the proxy Deployment when the nginx ConfigMap changes (`checksum/nginx-config`).
-
-    Always trust the LAN hosts-file domain `<entrance>.<user>.olares.local` (the official image only applies `NEXTCLOUD_TRUSTED_DOMAINS` on first install). Mount `zz-olares.config.php` so trusted domains and overwrite settings apply on every start.
-
-    Use HTTP `overwriteprotocol` for `*.olares.local` so login session cookies work over LAN HTTP; keep HTTPS for the public entrance. Expand `TRUSTED_PROXIES` to cluster CIDRs (`10.0.0.0/8`, `172.16.0.0/12`, `127.0.0.1`).
-
-    Switch the reverse-proxy image from Bitnami OpenResty (`beclab/aboveos-bitnami-openresty:1.25.3-2`) to the official OpenResty image `openresty/openresty:1.29.2.5-bookworm-fat`.
-
-    Align nginx config mounts and log paths with the official image layout (`/etc/nginx/conf.d/default.conf`, `/usr/local/openresty/nginx/logs/...`), and drop Bitnami-specific `OPENRESTY_CONF_FILE` wiring.
-
-    Fix update (v1.0.14)
-
-    What's Fixed
-    - Fix Calendar, Contacts, and other CalDAV/CardDAV features stuck loading or failing with errors such as `findAllCalendars` / `_extractAdvertisedDavFeatures`
-    - The reverse proxy no longer short-circuits OPTIONS requests for `/remote.php/dav/` and related API paths; DAV headers are now passed through from Nextcloud correctly
+    Although dozens of simulated upgrades completed without an upgrade failure, failures are still possible in other environments. If your upgrade fails, please report it promptly through the Ticket system and include the upgrade logs and your Olares version.
 
   developer: Nextcloud GmbH
   submitter: Olares
@@ -78,12 +64,12 @@ spec:
   - it-IT
   - fr-FR
   - ja-JP
-  requiredMemory: 1Gi
-  limitedMemory: 2.5Gi
-  requiredDisk: 128Mi
+  requiredMemory: 3Gi
+  limitedMemory: 6.5Gi
+  requiredDisk: 6Gi
   limitedDisk: 20Gi
-  requiredCpu: 0.75
-  limitedCpu: 2
+  requiredCpu: 1.25
+  limitedCpu: 4
   doc: https://nextcloud.com/support/
   website: https://nextcloud.com/
   sourceCode: https://github.com/nextcloud/server
@@ -103,6 +89,7 @@ spec:
   supportArch:
   - amd64
   - arm64
+
   runAsUser: true
 middleware:
   postgres:
@@ -111,9 +98,15 @@ middleware:
     databases:
     - name: nextcloud
       distributed: true
+    - name: eurooffice
+  rabbitmq:
+    username: eurooffice
+    vhosts:
+    - name: eurooffice
   redis:
     namespace: nextcloud
 options:
+  apiTimeout: 0
   allowedOutboundPorts:
   - 465
   - 587
@@ -121,6 +114,10 @@ options:
   - name: olares
     version: '>=1.12.6-0'
     type: system
+  - name: rabbitmq
+    version: '>=4.0.0-0'
+    type: middleware
+    mandatory: true
   policies:
   - uriRegex: ^/(/login)(/.*)?(\?.*)?$
     level: one_factor
