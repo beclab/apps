@@ -4,16 +4,31 @@ metadata:
 
 spec:
   upgradeDescription: |
-    将 SGLang 从 v0.5.17-cu130 升级至 v0.5.18-cu130。Chart 1.2.32。
+    将 SGLang 从 v0.5.18-cu130 升级至 v0.5.21-cu130。Chart 1.2.33。
 
-    **更新内容**（v0.5.17 → v0.5.18）
-    - 新增模型支持：Muse Glimmer、Intern-S2-Mobius、SANA-Video、LingBot-Video-MoE、LTX-2.5、Cosmos3 Edge & Distilled、LongCat-Image，并新增 Qwen3.8、Ling-3.0、Nemotron 3.5 Lightning、Dots3-Note、DeepSeek-V4-Pro-0813 的使用示例
-    - 启动加速：权重加载与 CUDA Graph 捕获重叠执行（`--startup-weight-load-mode overlap`），在 Qwen3-32B / H100 上最高比默认方式快 2.38 倍
-    - 并行优化：纯 DP dp-attention 下 TP LMHead 改用 all-to-all、FlashInfer MNNVL 纯 allreduce（DeepSeek-V3/V3.2/V4 自动启用）、DSV4 支持 CP V2 及多项 DCP 优化
-    - 投机解码：DSpark 与 DFlash 支持 logprobs、DP attention 下 DSpark 支持 MegaMoE、降低 ngram 主机端开销
-    - 运行时与缓存：所有编译内核缓存统一收敛到 `SGLANG_CACHE_DIR`、HiCache 支持 packed/sidecar draft cache、预热后冻结 GC
-    - 依赖升级：torch 2.13.0 + triton 3.7.1、FlashInfer 0.6.17、CuTeDSL 4.6.2、sgl-kernel 0.4.6.post1、DeepEP 改用发布版 wheel 安装
-    - 破坏性变更：移除 torchao 集成（`--torchao-config`）；升级后首次启动会重新编译一次内核；远程媒体下载默认限制 64 MiB；MoE deferred finalize 与 DSV4 fused MHC post+pre 默认开启
+    **更新内容**（v0.5.18 → v0.5.21）
+
+    v0.5.21
+    - 新增模型支持：DeepSeek-V4.1 Flash、GigaChat 3.5、IQuest-Q1、MiMo-V2.6 / V2.6-Pro、Ling-3.0-flash-VL，以及 DiffusionGemma、Qwen-Image 2.1、Anima Base v1.0、Ming-Image 0.1、FLUX 3 Action 等扩散模型
+    - 前缀缓存默认改用 Rust 内核实现，不支持的配置会自动回退到 Python 实现（可用 `SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python` 强制旧实现）
+    - 新增 Decisions API（`/v1/decisions`），可将 LLM/VLM 用作低延迟分类与打分器；Score API（`/v1/score`）支持一次请求对所有候选项打分
+    - DeepSeek-V4.1 长提示词首 token 速度提升 22%，Kimi K3 在 PD 部署下 prefill 吞吐提升 20.6%
+    - 破坏性变更：除非启动时带 `--trust-request-chat-template`，否则拒绝请求自带的 `chat_template`；移除已废弃端点（`/model_info` 取代 `/get_weight_version`，`/v1/loads` 取代 `/get_load`）；`--kv-cache-dtype fp4_e2m1` 改名为 `fp4_mx_block16`；出于数值精度考虑，FlashInfer MoE fused finalize 默认关闭；移除旧的 radix cache 实现
+
+    v0.5.20
+    - 新增模型支持：GLM-5.3-Flash、Hy4-Preview、Qwen3.8-Flash-Next、K2 Horizon、Nanbeige4.2 及多个扩散模型
+    - 统一 radix tree 支持 SWA 分叉点缓存：DeepSeek-V4-Flash 共享系统提示词场景下，token 命中率从 43.8% 提升到 60.8%，平均 TTFT 从 1.57 秒降至 1.07 秒
+    - `return_sampling_mask` 可返回每个解码步的精确候选集合，用于 RL rollout 回放，容量由 `--sampling-mask-max-tokens` 控制（默认 4096）
+    - Blackwell 上的 DeepSeek-V4：TRT-LLM attention 覆盖 SM100/SM103 的 CSA 与 HCA 层（相比 FlashMLA 约 1.2 倍 prefill、1.45 倍 decode）
+    - 32 GB 显卡上 decode CUDA Graph 上限从 24 提升到 48（TP >= 4 时为 160），chunked prefill 从 2K 提升到 4K
+    - 破坏性变更：CUDA 12 产线下线（本 Chart 已使用 CUDA 13 镜像）；`/v1/responses` 的结果存储需显式 `--enable-response-store`；移除 prefill 上下文并行 v1；移除 17 个已废弃命令行参数；删除 `cutlass_mla` attention 后端、非 Marlin 的 `gptq` 路径和 Dual Chunk Flash Attention；SWA 内存池过小时改为启动即报错，不再在预热阶段卡住
+
+    v0.5.19
+    - 新增模型支持：Qwen3.8（2.4T-A95B）、Qwen3.8-27B、dots3.note、Ling-3.0-flash 与 Ling-3.0-tiny、Spark2.5、MiniCPM-SALA、Granite 4.2
+    - 支持 beam search，通过 `beam_width` 使用；暂不能与投机解码、PD 分离、DP attention、HiCache 同时使用
+    - `--enable-layernorm-sp` 让 Qwen3-8B 的 prefill 在 H100 上快 3.5%、B200 上快 5.6%，TP 规模越大收益越明显
+    - 可通过 `--moe-a2a-backend deepep_v2` 使用 DeepEP v2 ElasticBuffer，跨节点场景下 decode 仍可运行在 CUDA Graph 中
+    - 破坏性变更：统一 radix tree 成为所有配置的默认缓存；要求 FlashInfer 0.6.18；Spark 2.5 的 tool-call parser 由 `spark` 改名为 `spark25`；单个请求最多 32 个 stop 字符串和 32 条 stop 正则，且每条不超过 256 字节
 
     详细发布说明请访问：
     https://github.com/sgl-project/sglang/releases
