@@ -1,0 +1,124 @@
+{{- $udctlDomainENV := split "," (.Values.domain.udctl | default "") -}}
+{{- $udctlDomain := index $udctlDomainENV "_0" | default "" -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: udctl
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: udctl
+spec:
+  replicas: {{ .Values.workloads.udctl.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: udctl
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: udctl
+    spec:
+      initContainers:
+        - name: init-data
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              mkdir -p /app/data
+              chmod 777 /app/data
+          volumeMounts:
+            - name: udctl-data
+              mountPath: /app/data
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: udctl
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOST_DOMAIN
+              value: {{ if .Values.config.hostDomain }}{{ .Values.config.hostDomain | quote }}{{ else if $udctlDomain }}{{ printf "https://%s" $udctlDomain | quote }}{{ else }}"http://localhost:8080"{{ end }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: udctl-secret
+                  key: JWT_SECRET
+            - name: UD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: udctl-secret
+                  key: UD_ENCRYPTION_KEY
+            - name: PERSONAL_TIER_PASSWORD
+              value: {{ (index $oe "PERSONAL_TIER_PASSWORD") | default .Values.config.personalTierPassword | default "personal123" | quote }}
+            - name: REGISTRATION_ENABLED
+              value: {{ (index $oe "REGISTRATION_ENABLED") | default .Values.config.registrationEnabled | default "false" | quote }}
+            - name: CRON_ENABLED
+              value: {{ .Values.config.cronEnabled | default "true" | quote }}
+            {{- $adminEmail := (index $oe "ADMIN_EMAIL") | default .Values.config.adminEmail -}}
+            {{- if $adminEmail }}
+            - name: ADMIN_EMAIL
+              value: {{ $adminEmail | quote }}
+            {{- end }}
+            {{- $adminPassword := (index $oe "ADMIN_PASSWORD") | default .Values.config.adminPassword -}}
+            {{- if $adminPassword }}
+            - name: ADMIN_PASSWORD
+              value: {{ $adminPassword | quote }}
+            {{- end }}
+            {{- $licenseToken := (index $oe "LICENSE_TOKEN") -}}
+            {{- if $licenseToken }}
+            - name: LICENSE_TOKEN
+              value: {{ $licenseToken | quote }}
+            {{- end }}
+            {{- $licenseHostSecret := (index $oe "LICENSE_HOST_SECRET") -}}
+            {{- if $licenseHostSecret }}
+            - name: LICENSE_HOST_SECRET
+              value: {{ $licenseHostSecret | quote }}
+            {{- end }}
+            {{- $migrate := (index $oe "MIGRATE_FROM_PERSONAL") | default .Values.config.migrateFromPersonal -}}
+            {{- if and $migrate (or (eq (printf "%v" $migrate) "true") (eq (printf "%v" $migrate) "1")) }}
+            - name: MIGRATE_FROM_PERSONAL
+              value: "true"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: udctl-data
+              mountPath: /app/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+      restartPolicy: Always
+      volumes:
+        - name: udctl-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/udctl'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: udctl-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: udctl
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    io.kompose.service: udctl
