@@ -2,10 +2,10 @@
   # 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
   # 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
   # 3) Helm upgrade: init only copies default when file is missing; never overwrites.
-{{- $openclawImage := "beclab/openclaw-openclaw:2026.9.6" -}}
+{{- $openclawImage := "openclaw/openclaw:2026.10.1" -}}
 {{- $brewBaseImage := "beclab/harveyff-openclaw-brew-base:2026.9.2-cli" -}}
 {{- $brewBinPath := "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin" -}}
-{{- $containerPath := printf "%s:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" $brewBinPath -}}
+{{- $containerPath := printf "/opt/olares/bin:%s:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" $brewBinPath -}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -23,11 +23,16 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        checksum/gateway-ipc: {{ include (print $.Template.BasePath "/configmap-gateway-ipc.yaml") . | sha256sum }}
+        checksum/openclaw-bin: {{ include (print $.Template.BasePath "/configmap-openclaw-bin.yaml") . | sha256sum }}
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: clawdbot
         bytetrade.io/terminal: clawdbot
     spec:
+      # Allow the Gateway's 85s drain/flush budget to finish before kubelet kills it.
+      terminationGracePeriodSeconds: 120
       # Recommended: make mounted volumes writable/readable for UID/GID 1000 more reliably
       securityContext:
         fsGroup: 1000
@@ -162,112 +167,64 @@ spec:
               name: app-data-config
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
-        # 8.2 refuses to boot when leftover 7.x workspace/session files exist.
-        # Do not run `openclaw doctor --fix` here: in a container it cannot
-        # finish service maintenance, and --fix also disables unused skills
-        # (including the Olares skill pack). Clearing the existence-gate
-        # leftovers is enough for Gateway to reach Ready.
-        - name: init-migrate-workspace
+        # Use the image's supported repair flow before Gateway/CLI writers start.
+        # Doctor owns schema discovery, backups, maintenance leases and resumption.
+        - name: init-openclaw-state
           image: "{{ $openclawImage }}"
-          imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
             runAsGroup: 1000
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set +e
-              state="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
-              need=0
-              for f in \
-                "$state/workspace/openclaw-workspace-state.json" \
-                "$state/workspace/.openclaw-workspace-state.json" \
-                "$state/exec-approvals.json"
-              do
-                if [ -e "$f" ]; then
-                  echo "[init-migrate] leftover: $f"
-                  need=1
-                fi
-              done
-              for f in "$state"/agents/*/sessions/sessions.json; do
-                if [ -f "$f" ]; then
-                  echo "[init-migrate] leftover: $f"
-                  need=1
-                fi
-              done
-              for f in "$state"/workspace-attestations/*.attested; do
-                if [ -f "$f" ]; then
-                  echo "[init-migrate] leftover: $f"
-                  need=1
-                fi
-              done
-              if [ "$need" = "0" ]; then
-                echo "[init-migrate] no leftover 7.x setup files; skip"
-                exit 0
-              fi
-              rm -f "$state/workspace/openclaw-workspace-state.json" \
-                    "$state/workspace/.openclaw-workspace-state.json" \
-                    "$state/exec-approvals.json"
-              rm -f "$state"/workspace-attestations/*.attested 2>/dev/null || true
-              for f in "$state"/agents/*/sessions/sessions.json; do
-                if [ -f "$f" ]; then
-                  mv -f "$f" "${f}.pre-8.2"
-                  echo "[init-migrate] renamed leftover $f -> ${f}.pre-8.2 so Gateway can start"
-                fi
-              done
-              echo "[init-migrate] cleared leftover 7.x setup files (no doctor --fix)"
-              exit 0
+          workingDir: /app
+          command: ["/usr/local/bin/node", "/app/openclaw.mjs", "doctor", "--fix", "--non-interactive"]
           env:
             - name: HOME
               value: /home/node
+            - name: NPM_CONFIG_PREFIX
+              value: /home/node/.npm-global
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=3072"
+            - name: CUSTOM_API_KEY
+              value: "YOUR_CUSTOM_API_KEY"
+            - name: OLLAMA_API_KEY
+              value: "YOUR_OLLAMA_API_KEY"
+            - name: GOG_KEYRING_BACKEND
+              value: "file"
+            - name: GOG_KEYRING_PASSWORD
+              value: {{ index (.Values.olaresEnv | default dict) "GOG_KEYRING_PASSWORD" | default "olares" | quote }}
             - name: OPENCLAW_HOME
               value: /home/node
             - name: OPENCLAW_STATE_DIR
               value: /home/node/.openclaw
             - name: OPENCLAW_WORKSPACE_DIR
               value: /home/node/.openclaw/workspace
-          resources: {}
-          volumeMounts:
-            - mountPath: /home/node/.openclaw
-              name: app-data-config
-            - mountPath: /home/node
-              name: app-data-node
-          terminationMessagePath: /dev/termination-log
-          terminationMessagePolicy: File
-        # Offline, narrowly scoped migration; does not run doctor --fix or edit config.
-        - name: init-sqlite-session-index
-          image: "{{ $openclawImage }}"
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-          command: ["/usr/local/bin/node", "/migration/migrate-session-index.cjs"]
-          env:
-            - name: OPENCLAW_STATE_DIR
-              value: /home/node/.openclaw
+            - name: PATH
+              value: "{{ $containerPath }}"
+          resources:
+            requests:
+              cpu: 300m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
           volumeMounts:
             - name: app-data-config
               mountPath: /home/node/.openclaw
-            - name: sqlite-migration
-              mountPath: /migration
+            - name: app-data-node
+              mountPath: /home/node
+            - name: brew-volume
+              mountPath: /home/linuxbrew
+            - name: openclaw-bin
+              mountPath: /opt/olares/bin
               readOnly: true
-        # Offline migration: complete before any Gateway/CLI writer starts.
-        - name: init-sqlite-agent-schema
-          image: "{{ $openclawImage }}"
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-          command: ["/usr/local/bin/node", "/migration/migrate-agent-schema.mjs"]
-          env:
-            - name: HOME
-              value: /home/node
-            - name: OPENCLAW_STATE_DIR
-              value: /home/node/.openclaw
-          volumeMounts:
-            - name: app-data-config
-              mountPath: /home/node/.openclaw
-            - name: sqlite-migration
-              mountPath: /migration
-              readOnly: true
+            {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
+            - name: olares-home-dir
+              mountPath: /home/userdata/home/
+            {{ end }}
+            {{- if eq (toString .Values.olaresEnv.ALLOW_EXTERNAL_DIR_ACCESS) "true" }}
+            - name: olares-external-dir
+              mountPath: /home/userdata/external/
+            {{- end }}
+          terminationMessagePolicy: FallbackToLogsOnError
         - name: init-docker-cli
           image: "docker.io/beclab/docker:29.3.0-dind"
           command: ["cp", "/usr/local/bin/docker", "/docker-cli/docker"]
@@ -346,14 +303,13 @@ spec:
               cpu: 300m
               memory: 256Mi
           volumeMounts:
+            - mountPath: /opt/olares/bin
+              name: openclaw-bin
+              readOnly: true
             - mountPath: /home/node/.openclaw
               name: app-data-config
             - mountPath: /home/node/
               name: app-data-node
-            - mountPath: /usr/local/bin/openclaw
-              name: openclaw-bin
-              subPath: openclaw
-              readOnly: true
             # Helper script: `restart-gateway` writes a sentinel into the
             # shared volume below to trigger gateway-only restart.
             - mountPath: /usr/local/bin/restart-gateway
@@ -452,7 +408,7 @@ spec:
               command:
                 - /usr/local/bin/node
                 - -e
-                - const fs=require("fs"); let token=""; try { const cfg=JSON.parse(fs.readFileSync("/home/node/.openclaw/openclaw.json","utf8")); token=cfg?.gateway?.auth?.token||""; } catch {} fetch("http://127.0.0.1:18789/readyz",{headers:token?{Authorization:"Bearer "+token}:{}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1));
+                - const fs=require("fs"); try { const pid=Number(fs.readFileSync("/tmp/openclaw-gateway.pid","utf8")); if(!Number.isInteger(pid)||pid<2) process.exit(1); process.kill(pid,0); } catch { process.exit(1); } let token=""; try { const cfg=JSON.parse(fs.readFileSync("/home/node/.openclaw/openclaw.json","utf8")); token=cfg?.gateway?.auth?.token||""; } catch {} fetch("http://127.0.0.1:18789/readyz",{headers:token?{Authorization:"Bearer "+token}:{}}).then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1));
             initialDelaySeconds: 10
             periodSeconds: 15
             timeoutSeconds: 5
@@ -465,6 +421,9 @@ spec:
               cpu: 700m
               memory: 768Mi
           volumeMounts:
+            - mountPath: /opt/olares/bin
+              name: openclaw-bin
+              readOnly: true
             - mountPath: /home/node/.openclaw
               name: app-data-config
             - mountPath: /home/node/
@@ -514,7 +473,13 @@ spec:
             - |
               dockerd --host tcp://0.0.0.0:2375 --host unix:///var/run/docker.sock &
               DOCKERD_PID=$!
-              until docker info >/dev/null 2>&1; do sleep 1; done
+              # Forward shutdown and wait for dockerd to release its persistent store.
+              trap 'kill -TERM "$DOCKERD_PID" 2>/dev/null || true; wait "$DOCKERD_PID" 2>/dev/null || true; exit 0' TERM INT
+              until docker info >/dev/null 2>&1; do
+                # Let Kubernetes retry if dockerd exits during startup.
+                kill -0 "$DOCKERD_PID" 2>/dev/null || { wait "$DOCKERD_PID"; exit 1; }
+                sleep 1
+              done
               echo "[dind] dockerd ready, pre-pulling sandbox image..."
               docker pull beclab/harveyff-openclaw-sandbox-common:2026.7.29 && echo "[dind] sandbox image ready" || echo "[dind] sandbox image pull failed" &
               wait $DOCKERD_PID
@@ -563,9 +528,6 @@ spec:
             {{- end }}              
       restartPolicy: Always
       volumes:
-        - name: sqlite-migration
-          configMap:
-            name: clawdbot-sqlite-migration
         - hostPath:
             path: "{{ .Values.userspace.appData }}/config"
             type: DirectoryOrCreate
