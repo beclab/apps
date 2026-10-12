@@ -1,0 +1,229 @@
+{{- $freetokenclientDomainENV := split "," .Values.domain.freetokenclient -}}
+{{- $freetokenclientDomain := index $freetokenclientDomainENV "_0" -}}
+{{- /* Clone-configurable surface via olaresEnv. FreeToken loads a Hugging Face
+       checkpoint directory, so MODEL_SOURCE is a bare `hf://<repo>` (whole repo,
+       no --include) and llm-init writes the snapshot dir to model_path, which
+       wrappers/freetoken.sh passes to `ft serve --model`. MODEL_NAME is only the
+       served model id. ENGINE_ARGS is a string of raw `ft serve` flags. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "" -}}
+{{- /* MODEL_SUPPORTS is a multi-select of coarse capability GROUPS (vision /
+       tools / thinking). Expand each group one-to-many into the supports_*
+       keys llm-init validates against its gateway AllSupports mirror, then
+       re-join into the CSV the container env expects. "none" is the
+       required-field fallback (no extra capabilities); the legacy "embedding"
+       token is kept as an alias for it. Unknown tokens pass through verbatim
+       so a raw supports_* key still works. */ -}}
+{{- $supportsGroups := dict
+      "vision" "supports_vision"
+      "tools" "supports_function_calling,supports_parallel_function_calling,supports_tool_choice"
+      "thinking" "supports_reasoning,supports_reasoning_effort"
+      "none" ""
+      "embedding" "" -}}
+{{- $modelSupports := $oe.MODEL_SUPPORTS | default "" -}}
+{{- $expandedSupports := list -}}
+{{- range $tok := splitList "," $modelSupports -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- if hasKey $supportsGroups $tok -}}
+{{- $mapped := index $supportsGroups $tok -}}
+{{- if $mapped -}}
+{{- $expandedSupports = append $expandedSupports $mapped -}}
+{{- end -}}
+{{- else -}}
+{{- $expandedSupports = append $expandedSupports $tok -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $modelSupports = join "," $expandedSupports -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+# llm-init Pod (no GPU). Downloads the checkpoint, writes sentinel + model_path,
+# serves progress UI + OpenAI /v1/* proxy on :8090, and reverse-proxies the
+# engine at the URL it derives from ENGINE_KIND.
+#
+# ENGINE_KIND=sglang is a compatibility shim: llm-init v1.7.21 has no
+# `freetoken` kind, and sglang is the closest of the four it does have —
+# derived URL http://sglang:30000 (matching the Service in freetoken.yaml) and
+# a flag table whose --max-running-requests / --context-length keys the wrapper
+# can honour. The engine really is FreeToken.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Static name — engine Deployment uses {{ .Release.Name }} for allowMultipleInstall.
+  name: llminit
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      # llm-init hands common.sh / the sentinel / model-spec.json to the engine
+      # through run-state below, a NODE-LOCAL hostPath (userspace.appCache lives
+      # on /olares/userdata, not on the shared JuiceFS mount), so this Pod has to
+      # land on the engine's node. The engine holds the GPU request and is placed
+      # first by the HAMi scheduler; this Pod follows it.
+      #
+      # NOTE: app.kubernetes.io/instance is set ONLY on the engine Pod template,
+      # never on this one. If this Pod also carried it, it would match its own
+      # affinity term, and kube-scheduler's self-affinity fallback ("first pod in
+      # a series that have affinity to themselves") would let it schedule onto any
+      # node before the engine is bound - silently restoring the split-node bug
+      # this rule exists to prevent.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values:
+                - '{{ .Release.Name }}'
+            namespaces:
+            - {{ .Release.Namespace }}
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+      initContainers:
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - "mkdir -p /cache/hf/hub/.locks /cache/hf/hub/freetoken-cache && chown 1000:1000 /cache/hf/hub /cache/hf/hub/.locks /cache/hf/hub/freetoken-cache /run/llm-init"
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          image: docker.io/beclab/llm-init:v1.7.24
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ENGINE_KIND
+              value: sglang
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+{{- if $modelSupports }}
+            - name: MODEL_SUPPORTS
+              value: "{{ $modelSupports }}"
+{{- end }}
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: "{{ $logLevel }}"
+            - name: LOG_FORMAT
+              value: json
+            - name: APP_URL
+              value: "https://{{ $freetokenclientDomain }}"
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # The safetensors shards stream to disk with a bounded footprint,
+              # but `hf download` still runs a python subprocess in this cgroup;
+              # 2Gi gives the huggingface_hub CLI headroom on a 3-shard repo.
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+  type: ClusterIP
