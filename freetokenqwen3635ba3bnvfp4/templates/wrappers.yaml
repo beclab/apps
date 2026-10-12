@@ -1,0 +1,314 @@
+# Engine wrapper script, mounted into the FreeToken container at
+# /llm-init/wrappers. Sources the helpers llm-init publishes into RUN_DIR and
+# runs `ft serve` under supervise_engine, so Model Console can relaunch the
+# engine with updated model-card engine_args without restarting the Pod.
+# The healthcheck and FTW preparation helpers are embedded here as well.
+#
+# FreeToken loads the downloaded Hugging Face checkpoint DIRECTORY, so the
+# sentinel's model_path is what --model gets (unlike the llama.cpp preset,
+# which re-resolves the repo with -hf).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freetoken
+data:
+  freetoken-healthcheck.py: |
+    #!/opt/venv/bin/python
+    """FreeToken /health also returns HTTP 200 while loading or after an error."""
+
+    import json
+    import os
+    import sys
+    import urllib.error
+    import urllib.request
+
+    # The port the engine was told to listen on. `ft serve --port` and both
+    # launch paths (image CMD, deploy/wrappers/freetoken.sh) read the same
+    # FREETOKEN_PORT, so a probe that ignored it would check the wrong socket.
+    PORT = os.environ.get("FREETOKEN_PORT") or "1919"
+
+
+    def healthy(state, *, live=False):
+        if not isinstance(state, dict):
+            return False
+        if live:
+            # FreeToken reports status=ok even when a failed cache rebuild has
+            # latched maintenance=failed; generation then requires a restart.
+            return state.get("status") in ("loading", "ok") and state.get("maintenance") != "failed"
+        return state.get("status") == "ok" and state.get("maintenance", "serving") == "serving"
+
+
+    def main():
+        try:
+            # Ignore HTTP_PROXY for a probe of the local engine.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(f"http://127.0.0.1:{PORT}/health", timeout=3) as response:
+                state = json.load(response)
+            live = "--live" in sys.argv[1:]
+            if healthy(state, live=live):
+                return 0
+            if isinstance(state, dict):
+                detail = " ".join(f"{key}={state.get(key, 'unset')}" for key in ("status", "maintenance", "phase"))
+            else:
+                detail = "health response is not a JSON object"
+            print(f"FreeToken {'liveness' if live else 'readiness'} failed: {detail}", file=sys.stderr)
+            return 1
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"FreeToken health request failed: {exc}", file=sys.stderr)
+            return 1
+
+
+    if __name__ == "__main__":
+        sys.exit(main())
+
+  prepare-ftw.py: |
+    #!/opt/venv/bin/python
+    """Prepare a persistent FTW checkpoint, then replace this process with ft serve."""
+
+    import argparse
+    import fcntl
+    import hashlib
+    import importlib.metadata
+    import json
+    import os
+    from pathlib import Path
+    import shutil
+    import signal
+    import subprocess
+    import sys
+    import time
+
+
+    def log(message):
+        print(f"[ftw] {message}", file=sys.stderr, flush=True)
+
+
+    def valid_checkpoint(path):
+        """Reject interrupted conversions and missing/truncated shards, without reading GBs."""
+        try:
+            index = json.loads((path / "freetoken_weight.json").read_text())
+            return (
+                (path / "config.json").is_file()
+                and bool(index["tensors"])
+                and bool(index["shards"])
+                and all(
+                    Path(shard["file"]).name == shard["file"]
+                    and (path / shard["file"]).stat().st_size == shard["nbytes"]
+                    for shard in index["shards"]
+                )
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+
+    def prepare(source, cache, identity, convert):
+        """Publish only complete conversions; serialize conversion across engine relaunches."""
+        key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+        cache.mkdir(parents=True, exist_ok=True)
+        target = cache / key
+        stage = cache / f"{key}.partial"
+        with (cache / ".conversion.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if (target / ".complete").is_file() and valid_checkpoint(target):
+                log(f"reusing {target}")
+                return target
+            # These are only this helper's derived files, never the shared HF source.
+            for stale in (stage, target):
+                if stale.exists():
+                    shutil.rmtree(stale)
+            # This NVFP4 preset remains packed in FTW. Reserve source size + 2 GiB
+            # for alignment/metadata; do not start a conversion on an already full disk.
+            required = sum(p.stat().st_size for p in source.glob("*.safetensors")) + (2 << 30)
+            if shutil.disk_usage(cache).free < required:
+                raise RuntimeError(f"FTW conversion needs at least {required / (1 << 30):.1f} GiB free in {cache}")
+            started = time.monotonic()
+            log(f"converting {source} -> {stage}")
+            try:
+                convert(stage)
+                if not valid_checkpoint(stage):
+                    raise RuntimeError("ft checkpoint returned an incomplete FTW checkpoint")
+                # Persist the files before publishing the completion marker and directory.
+                for path in stage.rglob("*"):
+                    if path.is_file():
+                        with path.open("rb") as data:
+                            os.fsync(data.fileno())
+                with (stage / ".complete").open("w") as marker:
+                    json.dump(identity, marker, sort_keys=True)
+                    marker.flush()
+                    os.fsync(marker.fileno())
+                stage.rename(target)
+            except BaseException:
+                shutil.rmtree(stage, ignore_errors=True)
+                raise
+            log(f"conversion completed in {time.monotonic() - started:.1f}s: {target}")
+            return target
+
+
+    def main():
+        ft_bin, model_path, *serve_args = sys.argv[1:]
+        source = Path(model_path).resolve()
+        model = source
+        parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        parser.add_argument("--dtype", default="bfloat16")
+        parser.add_argument("--quant-backend")
+        parser.add_argument("--moe-strategy", default="auto")
+        options, _ = parser.parse_known_args(serve_args)
+        enabled = os.environ.get("FREETOKEN_FTW_ENABLED", "true").lower() == "true"
+        if enabled and options.moe_strategy in ("auto", "offload", "hybrid"):
+            import torch
+            import freetoken
+
+            # Source snapshot, relevant converter/runtime implementation, dtype, kernel
+            # selection and GPU capability define compatibility. Context/KV settings do not.
+            package = Path(freetoken.__file__).parent
+            code_hash = hashlib.sha256()
+            for relative in ("checkpoint", "models", "layers/quantization", "moe"):
+                for path in sorted((package / relative).rglob("*.py")):
+                    code_hash.update(str(path.relative_to(package)).encode())
+                    code_hash.update(path.read_bytes())
+            identity = {
+                "schema": 1,
+                "source": str(source),
+                "files": [(str(p.relative_to(source)), p.stat().st_size, p.stat().st_mtime_ns)
+                          for p in sorted(source.rglob("*")) if p.is_file()],
+                "freetoken": importlib.metadata.version("freetoken"),
+                "implementation": code_hash.hexdigest(),
+                "capability": torch.cuda.get_device_capability(),
+                "dtype": options.dtype,
+                "quant_backend": options.quant_backend,
+            }
+
+            def convert(stage):
+                command = [ft_bin, "checkpoint", "--model", str(source), "--out", str(stage),
+                           "--dtype", options.dtype, "--moe-backend", "offload"]
+                if options.quant_backend:
+                    command += ["--quant-backend", options.quant_backend]
+                # A converter must not survive Model Console stopping this engine PID.
+                child = subprocess.Popen(command)
+
+                def stop(signum, _frame):
+                    child.terminate()
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+                    raise SystemExit(128 + signum)
+
+                old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+                try:
+                    if child.wait() != 0:
+                        raise RuntimeError("ft checkpoint failed; refusing to serve a partial checkpoint")
+                finally:
+                    for sig, handler in old.items():
+                        signal.signal(sig, handler)
+
+            model = prepare(source, Path(os.environ["FREETOKEN_FTW_CACHE"]), identity, convert)
+        elif enabled:
+            log(f"moe-strategy={options.moe_strategy}: using original checkpoint")
+        os.execv(ft_bin, [ft_bin, "serve", "--model", str(model), *serve_args])
+
+
+    if __name__ == "__main__":
+        main()
+
+  freetoken.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=freetoken
+    # Source the shared helpers llm-init publishes into RUN_DIR. That copy can
+    # arrive late - the two containers are separate Deployments with no ordering
+    # between them - so waiting here is the normal path.
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+
+    FT_BIN="${FT_BIN:-}"
+    if [ -z "$FT_BIN" ]; then
+        FT_BIN="$(command -v ft 2>/dev/null || true)"
+    fi
+    if [ -z "$FT_BIN" ] && [ -x /opt/venv/bin/ft ]; then
+        FT_BIN=/opt/venv/bin/ft
+    fi
+    if [ -z "$FT_BIN" ] || [ ! -x "$FT_BIN" ]; then
+        log "ft binary not found"
+        exit 127
+    fi
+
+    run_freetoken() {
+        # Preserve container CMD extras before ENGINE_ARGS word-splitting.
+        extra_argv="$*"
+        load_engine_args_from_handoff
+
+        # This preset writes FreeToken's own --max-seq-len-override, and that
+        # always wins. SGLang's --context-length is accepted as an alias for
+        # the same number because it is the one key llm-init (running under
+        # ENGINE_KIND=sglang) can read a context window from: naming BOTH is
+        # how a card ends up declaring the window the engine actually got.
+        # Either way --context-length is consumed here, never handed to an
+        # engine that would reject it.
+        ARGV=""
+        ctx=""
+        native_ctx=0
+        case " ${ENGINE_ARGS:-} " in
+            *" --max-seq-len-override "*|*" --max-seq-len-override="*) native_ctx=1 ;;
+        esac
+        # shellcheck disable=SC2086
+        set -- ${ENGINE_ARGS:-}
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --context-length)
+                    ctx="${2:-}"
+                    shift
+                    if [ "$#" -gt 0 ]; then
+                        shift
+                    fi
+                    continue
+                    ;;
+                --context-length=*)
+                    ctx="${1#*=}"
+                    ;;
+                *)
+                    ARGV="$ARGV $1"
+                    ;;
+            esac
+            shift
+        done
+        if [ -n "$ctx" ]; then
+            if [ "$native_ctx" -eq 1 ]; then
+                log "engine_args: --max-seq-len-override present; dropping --context-length $ctx"
+            else
+                ARGV="$ARGV --max-seq-len-override $ctx"
+                log "engine_args: --context-length $ctx -> --max-seq-len-override $ctx"
+            fi
+        fi
+
+        log "starting FreeToken with model=$MODEL_PATH name=${MODEL_NAME:-unset} argv=${ARGV:-<empty>} (bin=$FT_BIN)"
+        # FreeToken publishes no Prometheus /metrics; llm-init reads capacity
+        # from the model card instead (its sglang /server_info probe will log a
+        # fallback warning, which is expected here).
+        # shellcheck disable=SC2086
+        exec /opt/venv/bin/python /llm-init/wrappers/prepare-ftw.py "$FT_BIN" "$MODEL_PATH" \
+            --served-model-name "${MODEL_NAME:-llm-init-model}" \
+            --host 0.0.0.0 \
+            --port "${FREETOKEN_PORT:-30000}" \
+            $ARGV \
+            $extra_argv
+    }
+
+    supervise_engine run_freetoken "$@"

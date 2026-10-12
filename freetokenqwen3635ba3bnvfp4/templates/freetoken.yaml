@@ -1,0 +1,225 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $cpuRequest := trim ($oe.FREETOKEN_CPU_REQUEST | default "500m") -}}
+{{- $memRequest := trim ($oe.FREETOKEN_MEMORY_REQUEST | default "24Gi") -}}
+{{- $cpuLimit := trim ($oe.FREETOKEN_CPU_LIMIT | default "8") -}}
+{{- $memLimit := trim ($oe.FREETOKEN_MEMORY_LIMIT | default "32Gi") -}}
+{{- /* nvidia.com/gpumem needs a BARE MiB int. This chart has one accelerator
+       mode (nvidia): the FreeToken image is amd64 CUDA-13 only, so there is no
+       gb10 unified-memory branch and no CPU branch — FreeToken requires a GPU. */ -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.FREETOKEN_REQUIRED_GPU_MEMORY | default "23552") -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+---
+# FreeToken engine Deployment. wrappers/freetoken.sh blocks on the sentinel
+# (download ready), prepares/reuses FTW, then starts `ft serve`.
+#
+# SERVICE NAME: llm-init derives the engine URL from ITS OWN ENGINE_KIND and
+# has no `freetoken` kind yet (v1.7.21 knows ollama/vllm/llamacpp/sglang/...),
+# so llm-init.yaml sets ENGINE_KIND=sglang and its derived URL is
+# http://sglang:30000 — the Service below MUST stay named "sglang" on port
+# 30000, and the engine binds that port. The sglang flag table is also the
+# closest fit: --max-running-requests is spelled identically in both engines,
+# and --context-length is accepted by the wrapper as an alias for FreeToken's
+# --max-seq-len-override (see wrappers.yaml). This container's own ENGINE_KIND
+# below stays `freetoken`: it is what wrappers/freetoken.sh reports, and it is
+# never used to derive a URL.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Primary workload: named after the release (== appid freetokenqwen3635ba3bnvfp4)
+  # for v3 allowMultipleInstall. Label/selector stays io.kompose.service: freetoken.
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: freetoken
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "freetoken"
+spec:
+  replicas: {{ .Values.workloads.freetokenqwen3635ba3bnvfp4.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: freetoken
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        checksum/wrappers: {{ include (print $.Template.BasePath "/wrappers.yaml") . | sha256sum }}
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: freetoken
+        # Target of the llm-init Pod's podAffinity (it must run on this Pod's
+        # node to hand over run-state). Keep this label OFF the llm-init Pod
+        # template - see the note there.
+        app.kubernetes.io/instance: '{{ .Release.Name }}'
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: ftw-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/freetoken-ftw"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      initContainers:
+        - name: init-ftw-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command: ["sh", "-ec", "chown 1000:1000 /cache/freetoken-ftw"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: ftw-cache
+              mountPath: /cache/freetoken-ftw
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: freetoken
+          image: docker.io/beclab/leamon2code-freetoken:0.1.3-cu132
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/llm-init/wrappers/freetoken.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: freetoken
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            # Must match the Service port below (== llm-init's derived
+            # http://sglang:30000).
+            - name: FREETOKEN_PORT
+              value: "30000"
+            - name: WAIT_TIMEOUT
+              value: "86400"
+            - name: WRAPPER_COMMON_WAIT
+              value: "86400"
+            # The node exposes 24 CPUs but this container has an 8-core quota.
+            # Large PyTorch thread pools make small per-expert copies much slower.
+            - name: OMP_NUM_THREADS
+              value: {{ .Values.freetoken.cpuThreads | quote }}
+            - name: MKL_NUM_THREADS
+              value: {{ .Values.freetoken.cpuThreads | quote }}
+            - name: FREETOKEN_FTW_ENABLED
+              value: {{ .Values.freetoken.ftw.enabled | quote }}
+            - name: FREETOKEN_FTW_CACHE
+              value: /cache/freetoken-ftw
+            - name: FREETOKEN_CONVERT_PROGRESS
+              value: "1"
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          ports:
+            - name: freetoken
+              containerPort: 30000
+          # /health returns HTTP 200 even while loading or after an error.
+          # The chart carries the script so fixes do not require an image rebuild.
+          # Initial downloads/conversion may be long: only gate traffic until ready.
+          startupProbe:
+            exec:
+              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 8640
+          readinessProbe:
+            exec:
+              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py"]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 1
+          livenessProbe:
+            exec:
+              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py", "--live"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            # Allow a Model Console relaunch to prepare a different FTW layout.
+            failureThreshold: 10
+          volumeMounts:
+            - name: ftw-cache
+              mountPath: /cache/freetoken-ftw
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+              readOnly: true
+            # FreeToken compiles CUDA/Triton kernels on first use and writes
+            # them under $XDG_CACHE_HOME, which the image sets to
+            # /home/freetoken/.cache; `ft bench bw` writes its profile there
+            # too. Left on the container's overlay layer both are lost on every
+            # restart. This is a writable subdir of the same appCommon store the
+            # models live in (sibling to models--*), so llm-init's init-chown
+            # creates it and owns it 1000:1000 -- no init container of our own.
+            - name: hf-cache
+              mountPath: /home/freetoken/.cache
+              subPath: freetoken-cache
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /llm-init/wrappers
+              readOnly: true
+          resources:
+            # nvidia.com/gpumem is the per-instance GPU memory quota read by the
+            # Olares gpu-inject webhook (accelerator is -1/auto, can't carry it).
+            # It's a non-overcommittable extended resource, so it must be in BOTH
+            # requests and limits with the same value.
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+              nvidia.com/gpumem: {{ $gpuMiB }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+              nvidia.com/gpumem: {{ $gpuMiB }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # Named "sglang" on purpose — see the Deployment comment above. Renaming it
+  # silently breaks llm-init's reverse proxy.
+  name: sglang
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: freetoken
+spec:
+  selector:
+    io.kompose.service: freetoken
+  ports:
+    - name: freetoken
+      port: 30000
+      targetPort: 30000
+  type: ClusterIP
