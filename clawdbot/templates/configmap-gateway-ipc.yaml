@@ -89,7 +89,12 @@ data:
     cleanup() {
       echo "[gateway-wrapper] SIGTERM received, exiting"
       [ -n "${watcher:-}" ] && kill -TERM "$watcher" 2>/dev/null || true
-      [ -n "${child:-}"   ] && kill -TERM "$child"   2>/dev/null || true
+      if [ -n "${child:-}" ]; then
+        kill -TERM "$child" 2>/dev/null || true
+        # Keep PID 1 alive while Gateway flushes SQLite and releases its lease.
+        wait "$child" 2>/dev/null || true
+      fi
+      rm -f /tmp/openclaw-gateway.pid
       exit 0
     }
     trap cleanup TERM INT
@@ -104,6 +109,7 @@ data:
       # may still contain loopback and are intentionally not overwritten.
       /usr/local/bin/node dist/index.js gateway --bind lan --port 18789 &
       child=$!
+      printf '%s\n' "$child" > /tmp/openclaw-gateway.pid
 
       # Background watcher: polls the sentinel; on touch, kills the child
       # and records WHY (so the main loop picks the short delay).
@@ -123,6 +129,7 @@ data:
 
       wait "$child"
       rc=$?
+      rm -f /tmp/openclaw-gateway.pid
 
       kill "$watcher" 2>/dev/null || true
       wait "$watcher" 2>/dev/null || true

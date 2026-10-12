@@ -1,6 +1,6 @@
 # Wrapper so users can run `openclaw` directly in the container terminal.
-# Uses the same entry as upstream: node dist/index.js (see openclaw docker-compose
-# entrypoint and our gateway command). No pnpm or scripts/run-node.mjs needed.
+# Uses the pinned image entrypoint, ahead of persistent npm-global executables.
+# No runtime core installation or independent update lifecycle.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -12,4 +12,15 @@ metadata:
 data:
   openclaw: |
     #!/bin/sh
-    cd /app && exec /usr/local/bin/node dist/index.js "$@"
+    # This installation is managed by the Marketplace image. Keep read-only
+    # update inspection available, but do not install another core into the PVC.
+    if [ "${1:-}" = "update" ]; then
+      case "${2:-}" in
+        status|--help|-h) ;;
+        *)
+          echo "OpenClaw is managed by Olares Marketplace. Upgrade the app chart; use the bundled 'openclaw doctor --fix' for state repair after stopping Gateway writers." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    cd /app && exec /usr/local/bin/node /app/openclaw.mjs "$@"
