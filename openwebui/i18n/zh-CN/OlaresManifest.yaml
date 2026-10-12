@@ -24,71 +24,13 @@ spec:
     - **持续更新**：通过定期更新和社区贡献持续改进。
 
   upgradeDescription: |
-    Chart **1.0.46** — Open WebUI **v0.11.4**.
-    - 升级至 Open WebUI v0.11.4，继续使用标准镜像。自定义工具或函数若使用已移除的预装 Python 包（包括 langchain-community），需在其依赖配置中显式声明。
-    - 数据库备份改用 SQLite 一致性快照，包含已提交的 WAL 数据，校验完整性后原子保存；已有备份损坏时停止启动。
-    - https://github.com/open-webui/open-webui/releases/tag/v0.11.4
-
-    Chart **1.0.45** — Open WebUI **v0.11.3**。
-    - **镜像：** `docker.io/openwebui/open-webui:0.11.3`
-    - **启动参数 / 环境变量：** 无需改 chart。镜像仍监听 **8080**，入口仍是 `bash start.sh`，数据目录仍是 `/app/backend/data`。现有调优项（`ENABLE_ORJSON`、`THREAD_POOL_SIZE`、`ENABLE_BASE_MODELS_CACHE`、`MODELS_CACHE_TTL`、SQLite WAL / `busy_timeout`、流式分块、WebSocket 心跳、`WEBUI_SECRET_KEY_FILE`、Hugging Face、数据库备份）继续有效。`USER_AGENT` 更新为 `OpenWebUI/0.11.3`。未新增安装时环境变量，可编辑的 Olares 环境变量名称未变。
-    - **升级路径：** 紧接线上已发布的 **1.0.43 / v0.11.1**。也可从 **v0.10.x** 直接升上来；Alembic 现会完整跑完。
-
-    **本 Chart 打包说明（Olares）**
-    - **升级前数据库备份（默认开启）：** **`ENABLE_WEBUI_DB_BACKUP`** 默认 **`true`**。每个新 Chart 版本首次启动前，若存在 `webui.db` 且尚无 `data/backups/webui_chart_<chart 版本>.db`，init 容器会复制一份。若需跳过，请在升级前于 **设置 → 应用 → 环境变量** 设为 **`false`**。
-    - **持久化会话密钥（默认开启）：** **`ENABLE_WEBUI_SECRET_KEY_PERSIST`** 保持 **`true`**（`data/.webui_secret_key`）。
-    - **已有数据：** appData 中的数据库会保留；Open WebUI 启动时自动完成库结构升级。
-
-    **Open WebUI v0.11.1 → v0.11.3 要点**
-    - 数据库升级失败会停在真实迁移错误，不再半更新后启动（上游 v0.11.2 的 `chat.timer_at` / 缺表问题）。
-    - 对话分支在刷新后保持连接；已损坏的会话打开时会修复。
-    - 终端产出的 Word / 幻灯片预览更接近成品，侧边可点缩略图跳页。
-    - 未配置 Pipelines（默认）时每条消息开销更小；多 worker 下模型列表刷新更轻。
-    - 新增 filter 钩子 `request`（每次模型调用前，含 tool 之后的跟进调用）；原有 `inlet` / `stream` / `outlet` 不变。
-    - 界面可自选本机字体；「高对比度」改名为 **无障碍模式**（开关位置不变），菜单与模型选择器对比度增强。
-    - 修复：对话中途回复断裂、推理模型流式卡住、tool 后思考内容漏进正文、Redis 多实例无法停止、关闭的模型消失、日历 / 自动化日程错误等。
-    - 含安全与访问控制修复，建议生产环境尽快升级。
-    - **行为变更：** 日历事件重复间隔不能短于一天。
-    - 完整说明：https://github.com/open-webui/open-webui/releases/tag/v0.11.2 与 https://github.com/open-webui/open-webui/releases/tag/v0.11.3
-
-    Chart **1.0.43** — Open WebUI **v0.11.1**。
-    - **镜像：** `docker.io/beclab/open-webui-open-webui:v0.11.1`
-    - 流式回复改为只推新增文本，不再每次重发整段消息（长回复时减轻浏览器主线程压力）。
-    - `ENABLE_ORJSON=true`、`THREAD_POOL_SIZE=256`、`ENABLE_BASE_MODELS_CACHE=true`、`MODELS_CACHE_TTL=300`。
-    - 在线状态写入节流（`DATABASE_USER_ACTIVE_STATUS_UPDATE_INTERVAL=300`），WebSocket 心跳改为 60 秒（`WEBSOCKET_HEARTBEAT_INTERVAL=60`）。
-    - 流式 token 批量推送（`CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE=7`），避免每个 token 都重绘界面。
-    - CPU 上限由 2 核提到 4 核，避免文档入库和网页服务互相饿死。
-
-    Chart **1.0.42**（Open WebUI **v0.11.0**）。
-    - SQLite `busy_timeout` 提到 30 秒，知识库写入占用锁时 WebSocket 心跳会等待，而不是立刻报 `database is locked`。
-    - 种子 sidecar 由每 10 秒改为 60 秒轮询（空闲 300 秒），并使用相同的 WAL / busy_timeout。
-
-    **Open WebUI v0.11.0 → v0.11.1 要点**
-    - 增量流式输出、减少无效日志、模型列表 / 权限 / JSON 路径更快，知识库检索不再卡住其他对话。
-    - 含安全与访问控制修复，建议生产环境尽快升级。
-    - 完整说明：https://github.com/open-webui/open-webui/releases/tag/v0.11.1
-
-    **Open WebUI v0.10.2 → v0.11.0 要点**
-
-    **重大功能**
-    - **全面 UI 重设计**（聊天、管理端、菜单与设置）。
-    - **Sub-agents：** 模型可将任务交给后台辅助 agent（`ENABLE_SUBAGENTS` 等）。
-    - **文件夹专页、会话定时器、通知目标 / 助手通知、** 公开链接分享（管理员权限，默认关闭）。
-    - **会话/用户变量、LDAP 组同步、共享文件夹协作、fork / compact / 预览、可自定义快捷键。**
-    - **Files 能力**（按语义或全文检索附件）；笔记完整聊天与附件；OpenSERP / SearXNG 客户端证书搜索等。
-    - **个人用量面板、设置中的记忆管理、笔记/自动化导入、Anthropic 透传与推理增强。**
-
-    **安全**
-    - 含多项安全与访问控制修复（终端 HTML 预览隔离、数学公式 XSS、上传解析、会话归属校验、Ollama 版本接口鉴权等），建议尽快升级生产部署。
-    - 详见 https://github.com/open-webui/open-webui/security
-
-    **行为变更**
-    - 管理设置并入设置窗口；归档会话移至 Settings；自动标题更短且默认无 emoji（可改提示词）。
-    - Usage：`prompt_tokens` / `completion_tokens` 为最近一次调用；累计请用 `input_tokens` / `output_tokens` / `total_tokens`。
-    - 镜像不再捆绑 `python-jose` 与 GCS storage emulator。
-
-    **性能**
-    - 聊天搜索、流式响应、Redis、模型列表、知识库、网页解析与过滤器等路径全面加速。
-
-    完整发布说明：https://github.com/open-webui/open-webui/releases/tag/v0.11.0
-
+    Chart **1.0.47** — Open WebUI **v0.12.0**.
+    - 新增实时语音通话与动态 3D 形象，需配置 OpenAI Realtime 服务。
+    - 支持验证器应用双因素登录及恢复码。
+    - 共享聊天可允许其他成员回复，显示消息作者和实时输入状态。
+    - 技能支持多文件和 URL 导入；技能、模型、工具和函数支持版本历史。
+    - 知识库新增文件浏览视图，可预览原文件并编辑提取的文本。
+    - 新增自定义模型控件、嵌套用户组及按组设置默认模型。
+    - 实验性 Tool Search 可按需加载工具定义，需使用原生函数调用。
+    - 修复安全、访问控制和稳定性问题。
+    - https://github.com/open-webui/open-webui/releases/tag/v0.12.0
