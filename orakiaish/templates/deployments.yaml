@@ -1,0 +1,205 @@
+{{- $updates := default (dict) .Values.updates -}}
+{{- $updateManifestURL := default (index .Chart.Annotations "oraki.io/update-manifest-url") $updates.manifestUrl -}}
+{{- $updateAgentURL := default (index .Chart.Annotations "oraki.io/update-agent-url") $updates.agentUrl -}}
+{{- $audioImage := default (dict "repository" "docker.io/beclab/oraki-audio" "pullPolicy" "IfNotPresent") (index .Values.images "audio") -}}
+{{- $voiceImage := default (dict "repository" "docker.io/beclab/oraki-voice" "pullPolicy" "IfNotPresent") (index .Values.images "voice") -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ .Release.Name }} }
+spec:
+  replicas: {{ .Values.workloads.oraki.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: web } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: web } }
+    spec:
+      containers:
+        - name: web
+          image: {{ printf "%s:%s" .Values.images.web.repository .Chart.AppVersion | quote }}
+          imagePullPolicy: {{ .Values.images.web.pullPolicy }}
+          env:
+            - name: ORAKI_HUB_HOST
+              value: {{ include "oraki.fullname" . }}-hub
+            - name: ORAKI_UPDATE_ENABLED
+              value: {{ $updates.enabled | quote }}
+            - name: ORAKI_UPDATE_MANIFEST_URL
+              value: {{ default "" $updateManifestURL | quote }}
+            - name: ORAKI_UPDATE_AGENT_URL
+              value: {{ default "" $updateAgentURL | quote }}
+            - name: ORAKI_LOCAL_AI_URL
+              value: {{ printf "http://oraki-llm.orakillm-%s.svc.cluster.local:8080/v1" (trimPrefix "oraki-" .Release.Namespace) | quote }}
+          ports: [{ name: web, containerPort: 8080 }]
+          readinessProbe: { httpGet: { path: /health, port: web } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "oraki.fullname" . }}-voice }
+spec:
+  strategy: { type: Recreate }
+  replicas: {{ .Values.workloads.voice.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: voice } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: voice } }
+    spec:
+      containers:
+        - name: voice
+          image: {{ printf "%s:%s" $voiceImage.repository .Chart.AppVersion | quote }}
+          imagePullPolicy: {{ $voiceImage.pullPolicy }}
+          env:
+            - name: PULSE_SERVER
+              value: {{ if .Values.audio.hostBluetooth }}"unix:/run/pulse/native"{{ else }}"tcp:{{ include "oraki.fullname" . }}-audio:4713"{{ end }}
+            - { name: ORAKI_AUDIO_SINK, value: "" }
+          ports: [{ name: voice, containerPort: 4318 }]
+          volumeMounts:
+            - { name: host-pulse, mountPath: /run/pulse }
+          readinessProbe: { httpGet: { path: /health, port: voice } }
+      volumes:
+        - { name: host-pulse, hostPath: { path: /run/pulse, type: DirectoryOrCreate } }
+      
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "oraki.fullname" . }}-hub }
+spec:
+  strategy:
+    type: Recreate
+  replicas: {{ .Values.workloads.hub.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: hub } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: hub } }
+    spec:
+      containers:
+        - name: hub
+          image: {{ printf "%s:%s" .Values.images.hub.repository .Chart.AppVersion | quote }}
+          imagePullPolicy: {{ .Values.images.hub.pullPolicy }}
+          ports:
+            - { name: hub, containerPort: 8787 }
+            - { name: satellite, containerPort: {{ .Values.satellite.port }} }
+          env:
+            - { name: PORT, value: "8787" }
+            - { name: ORAKI_SATELLITE_PORT, value: {{ .Values.satellite.port | quote }} }
+            - { name: ORAKI_SATELLITE_EXPOSED_PORT, value: {{ .Values.satellite.exposePort | quote }} }
+            - { name: ORAKI_SATELLITE_ADDRESS, value: {{ default "" .Values.satellite.address | quote }} }
+            - name: ORAKI_NODE_IP
+              valueFrom: { fieldRef: { fieldPath: status.hostIP } }
+            - { name: TZ, valueFrom: { configMapKeyRef: { name: {{ include "oraki.fullname" . }}-config, key: TZ } } }
+            - { name: ORAKI_DATA_PATH, value: /app/data }
+            - { name: ORAKI_VOICE_MODEL, value: /opt/oraki/models/ggml-tiny.en.bin }
+            - { name: ORAKI_WHISPER_BINARY, value: /usr/local/bin/whisper-cli }
+            - name: ORAKI_DEVICE_ENGINE_URL
+              value: {{ default (printf "http://%s-ha:%v" (include "oraki.fullname" .) .Values.service.haPort) .Values.deviceEngine.externalUrl | quote }}
+            - name: ORAKI_DEVICE_ENGINE_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ include "oraki.fullname" . }}-secrets, key: device-engine-token } }
+            - name: ORAKI_VOICE_SERVICE_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "oraki.fullname" . }}-secrets, key: voice-service-key } }
+            - name: ORAKI_UPDATE_MANIFEST_URL
+              value: {{ default "" $updateManifestURL | quote }}
+            - name: ORAKI_UPDATE_AGENT_URL
+              value: {{ default "" $updateAgentURL | quote }}
+            - { name: PULSE_SERVER, value: tcp:{{ include "oraki.fullname" . }}-audio:4713 }
+            - { name: ORAKI_AUDIO_SERVICE_URL, value: http://{{ include "oraki.fullname" . }}-audio:8080 }
+            {{- with .Values.hostVoice.url }}
+            - { name: ORAKI_HOST_VOICE_URL, value: {{ . | quote }} }
+            {{- end }}
+            - { name: ORAKI_VOICE_AGENT_URL, value: http://{{ include "oraki.fullname" . }}-voice:4318 }
+          volumeMounts:
+            - { name: data, mountPath: /app/data }
+          readinessProbe: { httpGet: { path: /health, port: hub } }
+      volumes:
+        - { name: data, persistentVolumeClaim: { claimName: {{ include "oraki.fullname" . }}-data } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "oraki.fullname" . }}-audio }
+spec:
+  strategy: { type: Recreate }
+  replicas: {{ .Values.workloads.audio.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: audio } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: audio } }
+    spec:
+      containers:
+        - name: audio
+          image: {{ printf "%s:%s" $audioImage.repository .Chart.AppVersion | quote }}
+          imagePullPolicy: {{ $audioImage.pullPolicy }}
+          env:
+            - name: ORAKI_HOST_BLUETOOTH
+              value: {{ .Values.audio.hostBluetooth | quote }}
+            - name: ORAKI_PULSE_CONFIG
+              value: {{ if .Values.audio.hostBluetooth }}"/etc/pulse/oraki-host.pa"{{ else }}"/etc/pulse/oraki.pa"{{ end }}
+          ports:
+            - { name: api, containerPort: 8080 }
+            - { name: pulse, containerPort: 4713 }
+          securityContext: { privileged: true }
+          volumeMounts:
+            - { name: dbus, mountPath: /run/dbus }
+            - { name: snd, mountPath: /dev/snd }
+            - { name: host-pulse, mountPath: /run/pulse }
+          readinessProbe: { httpGet: { path: /health, port: api }, initialDelaySeconds: 3, periodSeconds: 5 }
+      volumes:
+        - { name: dbus, hostPath: { path: /run/dbus, type: Directory } }
+        - { name: snd, hostPath: { path: /dev/snd, type: Directory } }
+        - { name: host-pulse, hostPath: { path: /run/pulse, type: DirectoryOrCreate } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "oraki.fullname" . }}-ha }
+spec:
+  strategy:
+    type: Recreate
+  replicas: {{ .Values.workloads.ha.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: ha } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: ha } }
+    spec:
+      {{- if eq (index .Chart.Annotations "oraki.io/ha-host-network") "true" }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      containers:
+        - name: ha
+          image: {{ printf "%s:%s" .Values.images.ha.repository .Chart.AppVersion | quote }}
+          imagePullPolicy: {{ .Values.images.ha.pullPolicy }}
+          {{- if .Values.hardware.enabled }}
+          securityContext:
+            privileged: true
+          {{- end }}
+          ports: [{ name: ha, containerPort: 8123 }]
+          env: [{ name: TZ, value: {{ .Values.timezone | quote }} }]
+          volumeMounts:
+            - { name: ha, mountPath: /config }
+            - { name: ha-config, mountPath: /config/configuration.yaml, subPath: configuration.yaml }
+            {{- if and .Values.hardware.enabled .Values.hardware.zigbeeDevice }}
+            - { name: zigbee, mountPath: /dev/oraki-zigbee }
+            {{- else if .Values.hardware.enabled }}
+            - { name: host-dev, mountPath: /host/dev }
+            {{- end }}
+      volumes:
+        - { name: ha, persistentVolumeClaim: { claimName: {{ include "oraki.fullname" . }}-ha } }
+        - { name: ha-config, configMap: { name: {{ include "oraki.fullname" . }}-ha-config } }
+        {{- if and .Values.hardware.enabled .Values.hardware.zigbeeDevice }}
+        - { name: zigbee, hostPath: { path: {{ .Values.hardware.zigbeeDevice | quote }}, type: CharDevice } }
+        {{- else if .Values.hardware.enabled }}
+        - { name: host-dev, hostPath: { path: /dev, type: Directory } }
+        {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: {{ include "oraki.fullname" . }}-matter }
+spec:
+  replicas: {{ .Values.workloads.matter.replicaCount }}
+  selector: { matchLabels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: matter } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: matter } }
+    spec:
+      {{- if .Values.hardware.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      containers:
+        - name: matter
+          image: {{ include "oraki.image" .Values.images.matter | quote }}
+          imagePullPolicy: {{ .Values.images.matter.pullPolicy }}
+          args: ["--storage-path", "/data", "--listen-address", "0.0.0.0"]
+          ports: [{ name: matter, containerPort: 5580 }]
+          volumeMounts: [{ name: matter, mountPath: /data }]
+      volumes: [{ name: matter, persistentVolumeClaim: { claimName: {{ include "oraki.fullname" . }}-matter } }]
