@@ -1,0 +1,61 @@
+apiVersion: v1
+data:
+  launch.yaml: "\"processors\":\n- \"class\": \"trustgraph.chunking.recursive.Processor\"\
+    \n  \"params\":\n    \"id\": \"chunker\"\n    \"pubsub_backend\": \"pulsar\"\n\
+    \    \"pulsar_host\": \"pulsar://pulsar:6650\"\n- \"class\": \"trustgraph.extract.kg.definitions.Processor\"\
+    \n  \"params\":\n    \"concurrency\": 1\n    \"id\": \"kg-extract-definitions\"\
+    \n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.extract.kg.ontology.Processor\"\n  \"params\":\n \
+    \   \"concurrency\": 1\n    \"id\": \"kg-extract-ontology\"\n    \"pubsub_backend\"\
+    : \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\n- \"class\": \"trustgraph.extract.kg.relationships.Processor\"\
+    \n  \"params\":\n    \"concurrency\": 1\n    \"id\": \"kg-extract-relationships\"\
+    \n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.extract.kg.rows.Processor\"\n  \"params\":\n    \"\
+    concurrency\": 1\n    \"id\": \"kg-extract-rows\"\n    \"pubsub_backend\": \"\
+    pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\n- \"class\": \"trustgraph.prompt.template.Processor\"\
+    \n  \"params\":\n    \"concurrency\": 1\n    \"id\": \"prompt\"\n    \"pubsub_backend\"\
+    : \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\""
+  structured_definitions_patch.py: "\"\"\"Bound structured extraction inputs and retry\
+    \ parse failures with smaller text.\"\"\"\nfrom functools import wraps\nimport\
+    \ json\nimport logging\n\nMAX_INPUT_CHARS = 2000\nMIN_RETRY_CHARS = 256\nMAX_RETRY_DEPTH\
+    \ = 4\nFIELDS = {'extract-definitions': 'entities', 'extract-relationships': 'relationships'}\n\
+    logger = logging.getLogger(__name__)\n\ndef split_text(text):\n    middle = len(text)\
+    \ // 2\n    cut = middle\n    for separator in ['\\n', '. ', ' ']:\n        candidate\
+    \ = text.rfind(separator, middle // 2, middle + 1)\n        if candidate >= middle\
+    \ // 2:\n            cut = candidate + len(separator)\n            break\n   \
+    \ overlap = min(80, len(text) // 8)\n    left, right = text[:cut + overlap], text[max(0,\
+    \ cut - overlap):]\n    heading_end = text.find('\\n')\n    if 0 < heading_end\
+    \ <= 160 and text[:heading_end].rstrip().endswith(':'):\n        heading = text[:heading_end\
+    \ + 1]\n        if not right.startswith(heading) and len(heading) + len(right)\
+    \ < len(text):\n            right = heading + right\n    return left, right\n\n\
+    def merge(rows):\n    seen = set()\n    out = []\n    for row in rows:\n     \
+    \   key = json.dumps(row, sort_keys=True, ensure_ascii=False)\n        if key\
+    \ not in seen:\n            seen.add(key)\n            out.append(row)\n    return\
+    \ out\n\ndef install():\n    from trustgraph.template.prompt_manager import PromptManager\n\
+    \    if getattr(PromptManager, '_olares_definitions_patch', False):\n        return\n\
+    \    original = PromptManager.invoke\n    async def extract(self, id, input, llm,\
+    \ depth=0):\n        text = input.get('text') if isinstance(input, dict) else\
+    \ None\n        if isinstance(text, str) and len(text) > MAX_INPUT_CHARS:\n  \
+    \          left, right = split_text(text)\n            rows = await extract(self,\
+    \ id, {**input, 'text': left}, llm, depth)\n            rows += await extract(self,\
+    \ id, {**input, 'text': right}, llm, depth)\n            return merge(rows)\n\
+    \        try:\n            result = await original(self, id, input, llm)\n   \
+    \     except RuntimeError as error:\n            retryable = str(error).startswith(('JSON\
+    \ parse fail', 'Schema validation fail'))\n            if not retryable or not\
+    \ isinstance(text, str) or len(text) <= MIN_RETRY_CHARS or depth >= MAX_RETRY_DEPTH:\n\
+    \                raise\n            logger.warning('Structured extraction retry:\
+    \ id=%s chars=%d depth=%d', id, len(text), depth + 1)\n            left, right\
+    \ = split_text(text)\n            rows = await extract(self, id, {**input, 'text':\
+    \ left}, llm, depth + 1)\n            rows += await extract(self, id, {**input,\
+    \ 'text': right}, llm, depth + 1)\n            return merge(rows)\n        if\
+    \ isinstance(result, dict):\n            result = result.get(FIELDS[id])\n   \
+    \     if not isinstance(result, list):\n            raise RuntimeError('Structured\
+    \ extraction response must contain an array')\n        return result\n\n    @wraps(original)\n\
+    \    async def invoke(self, id, input, llm):\n        if id in FIELDS:\n     \
+    \       return await extract(self, id, input, llm)\n        return await original(self,\
+    \ id, input, llm)\n    PromptManager.invoke = invoke\n    PromptManager._olares_definitions_patch\
+    \ = True\n"
+kind: ConfigMap
+metadata:
+  name: ingest-launch-cfg
+  namespace: '{{ .Release.Namespace }}'

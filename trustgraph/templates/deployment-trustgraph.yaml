@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: trustgraph-ui
+  name: trustgraph
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "trustgraph").replicaCount }}
+  selector:
+    matchLabels:
+      app: trustgraph-ui
+  template:
+    metadata:
+      labels:
+        app: trustgraph-ui
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.26'
+    spec:
+      containers:
+      - command:
+        - python
+        - -c
+        - "import aiohttp\nfrom aiohttp import web\nfrom trustgraph_ui.api import\
+          \ Api\nasync def auth_proxy(self, request):\n    url = self.gateway + request.path.lstrip('/')\n\
+          \    if request.query_string:\n        url += '?' + request.query_string\n\
+          \    headers = {k:v for k,v in request.headers.items() if k.lower() not\
+          \ in ('host','content-length','connection','transfer-encoding')}\n    try:\n\
+          \        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))\
+          \ as session:\n            async with session.request(request.method, url,\
+          \ headers=headers, data=await request.read(), allow_redirects=False) as\
+          \ response:\n                body = await response.read()\n            \
+          \    return web.Response(status=response.status, body=body, headers={k:v\
+          \ for k,v in response.headers.items() if k.lower() not in ('content-length','content-encoding','transfer-encoding','connection')})\n\
+          \    except (aiohttp.ClientError, TimeoutError):\n        return web.json_response({'error':'authentication\
+          \ service unavailable'}, status=502)\nApi.auth = auth_proxy\nfrom trustgraph_ui.service\
+          \ import run\nrun()\n"
+        - --proxy
+        - /demo-data=https://datasets.app.trustgraph.ai
+        image: docker.io/trustgraph/trustgraph-ui:2.3.2
+        name: trustgraph-ui
+        ports:
+        - containerPort: 8888
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256M
+          requests:
+            cpu: '0.1'
+            memory: 96Mi
+        volumeMounts:
+        - mountPath: /usr/lib/python3.12/site-packages/trustgraph_ui/ui/config/
+          name: ui-plugin-cfg
+        - mountPath: /usr/lib/python3.12/site-packages/trustgraph_ui/ui/config/tabs/
+          name: ui-tabs-cfg
+        - mountPath: /usr/lib/python3.12/site-packages/trustgraph_ui/ui/bundle/
+          name: ui-bundle-cfg
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: ui-plugin-cfg
+        name: ui-plugin-cfg
+      - configMap:
+          name: ui-tabs-cfg
+        name: ui-tabs-cfg
+      - configMap:
+          name: ui-bundle-cfg
+        name: ui-bundle-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

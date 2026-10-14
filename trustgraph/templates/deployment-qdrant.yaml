@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: qdrant
+  name: qdrant
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "qdrant").replicaCount }}
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.26'
+    spec:
+      containers:
+      - image: docker.io/qdrant/qdrant:v1.18.0
+        name: qdrant
+        ports:
+        - containerPort: 6333
+        - containerPort: 6334
+        resources:
+          limits:
+            cpu: '1.0'
+            memory: 1024M
+          requests:
+            cpu: '0.5'
+            memory: 384Mi
+        volumeMounts:
+        - mountPath: /qdrant/storage
+          name: qdrant
+        env:
+        - name: HOME
+          value: /tmp
+        - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+          value: /qdrant/storage/snapshots
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+      - name: qdrant
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/qdrant'
+          type: DirectoryOrCreate
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - set -e; for d in /mnt/qdrant; do mkdir -p "$d"; chown 1000:1000 "$d"; done
+        volumeMounts:
+        - name: qdrant
+          mountPath: /mnt/qdrant
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  strategy:
+    type: Recreate

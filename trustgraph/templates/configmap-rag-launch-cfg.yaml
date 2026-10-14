@@ -1,0 +1,56 @@
+apiVersion: v1
+data:
+  launch.yaml: "processors:\n- class: trustgraph.agent.orchestrator.Processor\n  params:\n\
+    \    concurrency: 1\n    id: agent-manager\n    pubsub_backend: pulsar\n    pulsar_host:\
+    \ pulsar://pulsar:6650\n- class: trustgraph.retrieval.graph_rag.Processor\n  params:\n\
+    \    concurrency: 1\n    edge_limit: 60\n    edge_score_limit: 10\n    entity_limit:\
+    \ 50\n    id: graph-rag\n    max_path_length: 2\n    max_subgraph_size: 300\n\
+    \    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n    triple_limit:\
+    \ 60\n- class: trustgraph.retrieval.document_rag.Processor\n  params:\n    concurrency:\
+    \ 1\n    doc_limit: 20\n    fetch_limit: 40\n    id: document-rag\n    pubsub_backend:\
+    \ pulsar\n    pulsar_host: pulsar://pulsar:6650\n    retrieval_mode: vector\n\
+    - class: trustgraph.retrieval.nlp_query.Processor\n  params:\n    concurrency:\
+    \ 1\n    id: nlp-query\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.retrieval.structured_query.Processor\n  params:\n    concurrency:\
+    \ 1\n    id: structured-query\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.retrieval.structured_diag.Processor\n  params:\n    concurrency:\
+    \ 1\n    id: structured-diag\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.query.sparql.Processor\n  params:\n    concurrency: 1\n  \
+    \  id: sparql-query\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.prompt.template.Processor\n  params:\n    concurrency: 1\n\
+    \    id: prompt-rag\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.agent.mcp_tool.Service\n  params:\n    concurrency: 1\n  \
+    \  id: mcp-tool\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n"
+  agent_collection_patch.py: "\"\"\"Carry the request collection into knowledge-query,\
+    \ isolated per async task.\"\"\"\nfrom contextvars import ContextVar\nfrom functools\
+    \ import wraps\nimport re\n\n_collection = ContextVar('trustgraph_request_collection',\
+    \ default=None)\n\ndef install():\n    from trustgraph.agent.orchestrator.service\
+    \ import Processor\n    from trustgraph.agent.react.tools import KnowledgeQueryImpl\n\
+    \    from trustgraph.agent.react.agent_manager import AgentManager\n    if getattr(Processor,\
+    \ '_olares_collection_patch', False):\n        return\n    original_request =\
+    \ Processor.agent_request\n    original_init = KnowledgeQueryImpl.__init__\n \
+    \   original_reason = AgentManager.reason\n\n    @wraps(original_request)\n  \
+    \  async def agent_request(self, request, *args, **kwargs):\n        token = _collection.set(getattr(request,\
+    \ 'collection', None) or 'default')\n        try:\n            return await original_request(self,\
+    \ request, *args, **kwargs)\n        finally:\n            _collection.reset(token)\n\
+    \n    @wraps(original_init)\n    def tool_init(self, context, collection=None):\n\
+    \        # Explicitly pinned non-default tools retain their configured target.\n\
+    \        effective = collection\n        if not collection or collection == 'default':\n\
+    \            effective = _collection.get() or collection or 'default'\n      \
+    \  original_init(self, context, collection=effective)\n\n    @wraps(original_reason)\n\
+    \    async def reason(self, *args, **kwargs):\n        action = await original_reason(self,\
+    \ *args, **kwargs)\n        name = getattr(action, 'name', None)\n        if hasattr(action,\
+    \ 'name') and name not in self.tools and name != '__parse_error__':\n        \
+    \    def canonical(value):\n                return re.sub(r'[\\s_]+', '-', value.strip().strip('`\\\
+    \"\\'').casefold())\n            matches = [key for key in self.tools if isinstance(name,\
+    \ str) and canonical(key) == canonical(name)]\n            if len(matches) ==\
+    \ 1:\n                action.name = matches[0]\n            else:\n          \
+    \      action.name = '__parse_error__'\n                action.tool_error = 'Tool\
+    \ name did not match configured tools. Choose exactly one of: ' + ', '.join(self.tools)\n\
+    \        return action\n\n    Processor.agent_request = agent_request\n    KnowledgeQueryImpl.__init__\
+    \ = tool_init\n    AgentManager.reason = reason\n    Processor._olares_collection_patch\
+    \ = True\n"
+kind: ConfigMap
+metadata:
+  name: rag-launch-cfg
+  namespace: '{{ .Release.Namespace }}'

@@ -1,0 +1,154 @@
+apiVersion: v1
+data:
+  launch.yaml: "\"processors\":\n- \"class\": \"trustgraph.librarian.Processor\"\n\
+    \  \"params\":\n    \"cassandra_replication_factor\": 1\n    \"id\": \"librarian\"\
+    \n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.config.service.Processor\"\n  \"params\":\n    \"\
+    cassandra_replication_factor\": 1\n    \"id\": \"config-svc\"\n    \"pubsub_backend\"\
+    : \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\n- \"class\": \"trustgraph.flow.service.Processor\"\
+    \n  \"params\":\n    \"id\": \"flow-svc\"\n    \"pubsub_backend\": \"pulsar\"\n\
+    \    \"pulsar_admin_url\": \"http://pulsar:8080\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.cores.service.Processor\"\n  \"params\":\n    \"cassandra_replication_factor\"\
+    : 1\n    \"id\": \"knowledge\"\n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\"\
+    : \"pulsar://pulsar:6650\"\n- \"class\": \"trustgraph.storage.knowledge.store.Processor\"\
+    \n  \"params\":\n    \"cassandra_replication_factor\": 1\n    \"id\": \"kg-store\"\
+    \n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.metering.Processor\"\n  \"params\":\n    \"id\": \"\
+    metering\"\n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.metering.Processor\"\n  \"params\":\n    \"id\": \"\
+    metering-rag\"\n    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.iam.service.Processor\"\n  \"params\":\n    \"bootstrap_mode\"\
+    : \"token\"\n    \"cassandra_replication_factor\": 1\n    \"id\": \"iam-svc\"\n\
+    \    \"pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\"\
+    \n- \"class\": \"trustgraph.bootstrap.bootstrapper.Processor\"\n  \"params\":\n\
+    \    \"id\": \"bootstrap\"\n    \"initialisers\":\n    - \"class\": \"trustgraph.bootstrap.initialisers.PulsarTopology\"\
+    \n      \"flag\": \"v1\"\n      \"name\": \"pulsar-topology\"\n      \"params\"\
+    :\n        \"admin_url\": \"http://pulsar:8080\"\n    - \"class\": \"trustgraph.bootstrap.initialisers.TemplateSeed\"\
+    \n      \"flag\": \"v1\"\n      \"name\": \"template-seed\"\n      \"params\"\
+    :\n        \"config_file\": \"/etc/trustgraph/template/config.json\"\n       \
+    \ \"overwrite\": false\n    - \"class\": \"trustgraph.bootstrap.initialisers.WorkspaceInit\"\
+    \n      \"flag\": \"v1\"\n      \"name\": \"default-workspace\"\n      \"params\"\
+    :\n        \"overwrite\": false\n        \"source\": \"template\"\n        \"\
+    workspace\": \"default\"\n    - \"class\": \"trustgraph.bootstrap.initialisers.DefaultFlowStart\"\
+    \n      \"flag\": \"v1\"\n      \"name\": \"default-flow\"\n      \"params\":\n\
+    \        \"blueprint\": \"everything\"\n        \"description\": \"Default\"\n\
+    \        \"flow_id\": \"default\"\n        \"workspace\": \"default\"\n    \"\
+    pubsub_backend\": \"pulsar\"\n    \"pulsar_host\": \"pulsar://pulsar:6650\""
+  multipart_patch.py: "\"\"\"Keep small transport chunks while streaming compliant\
+    \ S3 multipart writes.\"\"\"\nimport base64\nimport io\nimport json\nimport logging\n\
+    import uuid\n\nlogger = logging.getLogger('olares-multipart')\nPREFIX = 'olares-stage-'\n\
+    S3_PART_SIZE = 5 * 1024 * 1024\n\ndef part_key(upload_id, part_number):\n    return\
+    \ f'uploads/{upload_id}/{part_number:08d}'\n\nclass PartsReader:\n    \"\"\"Read\
+    \ one staged object at a time, with bounded read buffers.\"\"\"\n    def __init__(self,\
+    \ client, bucket, keys):\n        self.client, self.bucket = client, bucket\n\
+    \        self.keys = iter(keys)\n        self.response = None\n\n    def close_current(self):\n\
+    \        if self.response is not None:\n            try:\n                self.response.close()\n\
+    \            finally:\n                self.response.release_conn()\n        \
+    \        self.response = None\n\n    def read(self, size):\n        if size <\
+    \ 0:\n            raise ValueError('Unbounded staged-object reads are not supported')\n\
+    \        data = bytearray()\n        while len(data) < size:\n            if self.response\
+    \ is None:\n                try:\n                    key = next(self.keys)\n\
+    \                except StopIteration:\n                    break\n          \
+    \      self.response = self.client.get_object(self.bucket, key)\n            block\
+    \ = self.response.read(size - len(data))\n            if block:\n            \
+    \    data.extend(block)\n            else:\n                self.close_current()\n\
+    \        return bytes(data)\n\n    def close(self):\n        self.close_current()\n\
+    \ndef install(blob_class=None, librarian_class=None):\n    if blob_class is None:\n\
+    \        from trustgraph.librarian.blob_store import BlobStore\n        from trustgraph.librarian.librarian\
+    \ import Librarian\n        blob_class, librarian_class = BlobStore, Librarian\n\
+    \    if getattr(blob_class, '_olares_multipart_installed', False):\n        return\n\
+    \    original_create = blob_class.create_multipart_upload\n    original_part =\
+    \ blob_class.upload_part\n    original_complete = blob_class.complete_multipart_upload\n\
+    \    original_abort = blob_class.abort_multipart_upload\n    original_upload_chunk\
+    \ = librarian_class.upload_chunk\n    original_complete_upload = librarian_class.complete_upload\n\
+    \    original_abort_upload = librarian_class.abort_upload\n\n    async def create(self,\
+    \ object_id, kind):\n        # Cassandra remains the durable owner of the session\
+    \ and metadata.\n        upload_id = PREFIX + str(uuid.uuid4())\n        data\
+    \ = json.dumps({'kind': kind}).encode()\n        def write_manifest():\n     \
+    \       self.client.put_object(self.bucket_name, part_key(upload_id, 0),\n   \
+    \                                io.BytesIO(data), len(data))\n        await self._with_retry(write_manifest)\n\
+    \        return upload_id\n\n    async def upload_part(self, object_id, upload_id,\
+    \ part_number, data):\n        if not upload_id.startswith(PREFIX):\n        \
+    \    return await original_part(self, object_id, upload_id, part_number, data)\n\
+    \        def write():\n            # A retry must get a fresh reader, since put_object\
+    \ consumes it.\n            return self.client.put_object(\n                self.bucket_name,\
+    \ part_key(upload_id, part_number),\n                io.BytesIO(data), len(data),\
+    \ num_parallel_uploads=1)\n        result = await self._with_retry(write)\n  \
+    \      return result.etag\n\n    async def complete(self, object_id, upload_id,\
+    \ parts):\n        if not upload_id.startswith(PREFIX):\n            return await\
+    \ original_complete(self, object_id, upload_id, parts)\n        keys = [part_key(upload_id,\
+    \ number) for number, _ in sorted(parts)]\n        def write():\n            length\
+    \ = sum(self.client.stat_object(self.bucket_name, key).size\n                \
+    \         for key in keys)\n            manifest = self.client.get_object(self.bucket_name,\
+    \ part_key(upload_id, 0))\n            try:\n                kind = json.loads(manifest.read())['kind']\n\
+    \            finally:\n                manifest.close()\n                manifest.release_conn()\n\
+    \            reader = PartsReader(self.client, self.bucket_name, keys)\n     \
+    \       try:\n                self.client.put_object(\n                    self.bucket_name,\
+    \ 'doc/' + str(object_id), reader, length,\n                    part_size=S3_PART_SIZE,\
+    \ num_parallel_uploads=1,\n                    content_type=kind,\n          \
+    \          metadata={'trustgraph-upload-id': upload_id})\n            finally:\n\
+    \                reader.close()\n        # Staged objects survive retries and\
+    \ a failure to commit metadata.\n        await self._with_retry(write)\n\n   \
+    \ async def abort(self, object_id, upload_id):\n        if not upload_id.startswith(PREFIX):\n\
+    \            return await original_abort(self, object_id, upload_id)\n       \
+    \ # Actual staged parts are removed by the session wrapper below.\n\n    async\
+    \ def cleanup(self, session):\n        if not session or not session['s3_upload_id'].startswith(PREFIX):\n\
+    \            return\n        numbers = [0] + [index + 1 for index in session['chunks_received']]\n\
+    \        for number in numbers:\n            try:\n                await self.blob_store._with_retry(\n\
+    \                    self.blob_store.client.remove_object,\n                 \
+    \   self.blob_store.bucket_name,\n                    part_key(session['s3_upload_id'],\
+    \ number))\n            except Exception:\n                # The committed document\
+    \ must remain successful even when\n                # temporary-object cleanup\
+    \ needs operational follow-up.\n                logger.warning('Staged chunk cleanup\
+    \ failed for %s/%s',\n                               session['s3_upload_id'],\
+    \ number, exc_info=True)\n\n    async def upload_chunk(self, request, workspace):\n\
+    \        session = await self.table_store.get_upload_session(request.upload_id)\n\
+    \        if session and session['s3_upload_id'].startswith(PREFIX):\n        \
+    \    if session['workspace'] != workspace:\n                raise ValueError('Not\
+    \ authorized to upload to this session')\n            index = request.chunk_index\n\
+    \            if not 0 <= index < session['total_chunks']:\n                raise\
+    \ ValueError('Invalid upload chunk index')\n            expected = min(session['chunk_size'],\n\
+    \                           session['total_size'] - index * session['chunk_size'])\n\
+    \            if len(base64.b64decode(request.content, validate=True)) != expected:\n\
+    \                raise ValueError('Upload chunk size does not match session metadata')\n\
+    \        result = await original_upload_chunk(self, request, workspace)\n    \
+    \    if session and session['s3_upload_id'].startswith(PREFIX):\n            current\
+    \ = await self.table_store.get_upload_session(request.upload_id)\n           \
+    \ received = current['chunks_received']\n            result.chunks_received =\
+    \ len(received)\n            result.bytes_received = sum(\n                min(current['chunk_size'],\
+    \ current['total_size'] - i * current['chunk_size'])\n                for i in\
+    \ received)\n        return result\n\n    async def complete_upload(self, request,\
+    \ workspace):\n        session = await self.table_store.get_upload_session(request.upload_id)\n\
+    \        result = await original_complete_upload(self, request, workspace)\n \
+    \       # Only clean up after the document row was committed successfully.\n \
+    \       await cleanup(self, session)\n        return result\n\n    async def abort_upload(self,\
+    \ request, workspace):\n        session = await self.table_store.get_upload_session(request.upload_id)\n\
+    \        result = await original_abort_upload(self, request, workspace)\n    \
+    \    await cleanup(self, session)\n        return result\n\n    blob_class.create_multipart_upload\
+    \ = create\n    blob_class.upload_part = upload_part\n    blob_class.complete_multipart_upload\
+    \ = complete\n    blob_class.abort_multipart_upload = abort\n    librarian_class.upload_chunk\
+    \ = upload_chunk\n    librarian_class.complete_upload = complete_upload\n    librarian_class.abort_upload\
+    \ = abort_upload\n    blob_class._olares_multipart_installed = True\n    logger.info('Olares\
+    \ staged multipart adapter enabled; transport chunks remain unchanged')\n"
+  install_password.py: "\"\"\"Use the install password during creation of a new IAM\
+    \ administrator only.\"\"\"\nimport os\nfrom trustgraph.iam.service.iam import\
+    \ IamService, _hash_password\n\ndef install():\n    if getattr(IamService, '_olares_install_password',\
+    \ False):\n        return\n    original_seed = IamService._seed_tables\n\n   \
+    \ async def seed(self, api_key_plaintext):\n        # Never overwrite an existing\
+    \ identity, including a partial bootstrap.\n        if await self.table_store.get_user_id_by_username('admin'):\n\
+    \            raise RuntimeError('IAM administrator already exists; refusing to\
+    \ reinitialize credentials')\n        password = os.environ.get('ADMIN_PASSWORD',\
+    \ '')\n        if not 12 <= len(password) <= 128 or '\\n' in password or '\\r'\
+    \ in password:\n            raise RuntimeError('Set ADMIN_PASSWORD to 12-128 characters\
+    \ during installation')\n        original_put = self.table_store.put_user\n\n\
+    \        async def put_user(*args, **kwargs):\n            if kwargs.get('username')\
+    \ == 'admin':\n                kwargs['password_hash'] = _hash_password(password)\n\
+    \                kwargs['must_change_password'] = False\n            return await\
+    \ original_put(*args, **kwargs)\n\n        self.table_store.put_user = put_user\n\
+    \        try:\n            return await original_seed(self, api_key_plaintext)\n\
+    \        finally:\n            self.table_store.put_user = original_put\n\n  \
+    \  IamService._seed_tables = seed\n    IamService._olares_install_password = True\n"
+kind: ConfigMap
+metadata:
+  name: control-launch-cfg
+  namespace: '{{ .Release.Namespace }}'
