@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: pulsar
+  name: pulsar
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "pulsar").replicaCount }}
+  selector:
+    matchLabels:
+      app: pulsar
+  template:
+    metadata:
+      labels:
+        app: pulsar
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.26'
+    spec:
+      containers:
+      - command:
+        - bash
+        - -c
+        - printf '\nallowEphemeralPorts=true\n' >> conf/standalone.conf; bin/apply-config-from-env.py
+          conf/standalone.conf && exec bin/pulsar standalone --no-functions-worker
+          --no-stream-storage --bookkeeper-port 3181 --bookkeeper-dir data/bookkeeper-v2
+          --metadata-dir data/metadata-v2
+        env:
+        - name: PULSAR_MEM
+          value: -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m
+        - name: advertisedAddress
+          value: pulsar
+        - name: HOME
+          value: /tmp
+        - name: allowEphemeralPorts
+          value: 'true'
+        image: docker.io/apachepulsar/pulsar:4.2.1
+        name: pulsar
+        ports:
+        - containerPort: 6650
+        - containerPort: 8080
+        - containerPort: 3181
+          name: bookkeeper
+        resources:
+          requests:
+            cpu: 250m
+            memory: 768Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        volumeMounts:
+        - name: pulsar-data
+          mountPath: /pulsar/data
+        - name: pulsar-config
+          mountPath: /pulsar/conf
+        - name: pulsar-logs
+          mountPath: /pulsar/logs
+      enableServiceLinks: false
+      volumes:
+      - name: pulsar-data
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/pulsar'
+          type: DirectoryOrCreate
+      - name: pulsar-config
+        emptyDir: {}
+      - name: pulsar-logs
+        emptyDir: {}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - set -e; for d in /mnt/pulsar-data; do mkdir -p "$d"; chown 1000:1000 "$d";
+          done
+        volumeMounts:
+        - name: pulsar-data
+          mountPath: /mnt/pulsar-data
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+      - name: copy-pulsar-config
+        image: docker.io/apachepulsar/pulsar:4.2.1
+        command:
+        - sh
+        - -c
+        - cp -r /pulsar/conf/. /config/
+        volumeMounts:
+        - name: pulsar-config
+          mountPath: /config
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  strategy:
+    type: Recreate
