@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: triples
+  name: triples
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "triples").replicaCount }}
+  selector:
+    matchLabels:
+      app: triples
+  template:
+    metadata:
+      labels:
+        app: triples
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.25'
+    spec:
+      containers:
+      - command:
+        - processor-group
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: triples
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 512M
+          requests:
+            cpu: '0.1'
+            memory: 96Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: triples-launch-cfg
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: triples-launch-cfg
+        name: triples-launch-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

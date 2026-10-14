@@ -1,0 +1,51 @@
+apiVersion: v1
+data:
+  launch.yaml: "processors:\n- class: router_adapter.Embeddings\n  params:\n    concurrency:\
+    \ 1\n    id: embeddings\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.embeddings.document_embeddings.Processor\n  params:\n    id:\
+    \ document-embeddings\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.embeddings.graph_embeddings.Processor\n  params:\n    id:\
+    \ graph-embeddings\n    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n\
+    - class: trustgraph.embeddings.row_embeddings.Processor\n  params:\n    id: row-embeddings\n\
+    \    pubsub_backend: pulsar\n    pulsar_host: pulsar://pulsar:6650\n- class: router_adapter.Reranker\n\
+    \  params:\n    concurrency: 1\n    id: reranker\n    pubsub_backend: pulsar\n\
+    \    pulsar_host: pulsar://pulsar:6650\n"
+  router_adapter.py: "\"\"\"Olares Router adapters, with explicit legacy-model compatibility.\"\
+    \"\"\nimport asyncio\nimport json\nimport math\nimport os\nimport urllib.request\n\
+    from trustgraph.embeddings.fastembed import Processor as FastEmbed\nfrom trustgraph.reranker.flashrank\
+    \ import Processor as FlashRank\nfrom trustgraph.schema import RerankerResult\n\
+    \ndef post(path, payload):\n    request = urllib.request.Request(\n        os.environ['OPENAI_BASE_URL'].rstrip('/')\
+    \ + path,\n        data=json.dumps(payload).encode(),\n        headers={'Authorization':\
+    \ 'Bearer ' + os.environ['OPENAI_TOKEN'],\n                 'Content-Type': 'application/json'})\n\
+    \    with urllib.request.urlopen(request, timeout=45) as response:\n        return\
+    \ json.load(response)\n\nclass Embeddings(FastEmbed):\n    async def on_embeddings(self,\
+    \ texts, model=None):\n        if model == 'sentence-transformers/all-MiniLM-L6-v2':\n\
+    \            return await super().on_embeddings(texts, model=model)\n        model\
+    \ = model or 'Olares/embeddinggemma-300m'\n        vectors = []\n        for text\
+    \ in texts:\n            response = await asyncio.to_thread(post, '/embeddings',\n\
+    \                                              {'model': model, 'input': text})\n\
+    \            vector = response['data'][0]['embedding']\n            if not vector\
+    \ or not all(math.isfinite(v) for v in vector):\n                raise ValueError('Router\
+    \ returned an invalid embedding')\n            if vectors and len(vector) != len(vectors[0]):\n\
+    \                raise ValueError('Router returned inconsistent embedding dimensions')\n\
+    \            vectors.append(vector)\n        return vectors\n\nclass Reranker(FlashRank):\n\
+    \    async def on_rerank(self, queries, documents, limit, model=None):\n     \
+    \   if model == 'ms-marco-MiniLM-L-12-v2':\n            return await super().on_rerank(queries,\
+    \ documents, limit, model=model)\n        if not queries or not documents or limit\
+    \ <= 0:\n            return []\n        scores = {}\n        for query in queries:\n\
+    \            response = await asyncio.to_thread(post, '/rerank', {\n         \
+    \       'model': model or 'default-rerank', 'query': query.query_text,\n     \
+    \           'documents': [d.document_text for d in documents],\n             \
+    \   'top_n': len(documents)})\n            for result in response['results']:\n\
+    \                document = documents[result['index']]\n                score\
+    \ = float(result['relevance_score'])\n                if not math.isfinite(score):\n\
+    \                    raise ValueError('Router returned a non-finite rerank score')\n\
+    \                if document.document_id not in scores or score > scores[document.document_id][1]:\n\
+    \                    scores[document.document_id] = (query.query_id, score)\n\
+    \        return [RerankerResult(document_id=docid, query_id=queryid, score=score)\n\
+    \                for docid, (queryid, score) in\n                sorted(scores.items(),\
+    \ key=lambda x: x[1][1], reverse=True)[:limit]]\n"
+kind: ConfigMap
+metadata:
+  name: embeddings-launch-cfg
+  namespace: '{{ .Release.Namespace }}'

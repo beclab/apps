@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rows
+  name: rows
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "rows").replicaCount }}
+  selector:
+    matchLabels:
+      app: rows
+  template:
+    metadata:
+      labels:
+        app: rows
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.25'
+    spec:
+      containers:
+      - command:
+        - processor-group
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: rows
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 768M
+          requests:
+            cpu: '0.1'
+            memory: 96Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: rows-launch-cfg
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: rows-launch-cfg
+        name: rows-launch-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate
