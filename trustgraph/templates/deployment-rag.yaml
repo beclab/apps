@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rag
+  name: rag
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "rag").replicaCount }}
+  selector:
+    matchLabels:
+      app: rag
+  template:
+    metadata:
+      labels:
+        app: rag
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+        checksum/rag-config: {{ include (print $.Template.BasePath "/configmap-rag-launch-cfg.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - command:
+        - python
+        - -c
+        - import sys; sys.path.insert(0,"/etc/trustgraph"); import agent_collection_patch; agent_collection_patch.install(); from trustgraph.base.processor_group import run; run()
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: rag
+        resources:
+          limits:
+            cpu: '1'
+            memory: 2Gi
+          requests:
+            cpu: '0.1'
+            memory: 192Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: rag-launch-cfg
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: rag-launch-cfg
+        name: rag-launch-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

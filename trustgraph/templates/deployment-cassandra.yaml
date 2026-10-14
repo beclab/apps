@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: cassandra
+  name: cassandra
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "cassandra").replicaCount }}
+  selector:
+    matchLabels:
+      app: cassandra
+  template:
+    metadata:
+      labels:
+        app: cassandra
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+    spec:
+      containers:
+      - env:
+        - name: JVM_OPTS
+          value: -Xms700M -Xmx700M -Dcassandra.skip_wait_for_gossip_to_settle=0
+        - name: HOME
+          value: /tmp
+        - name: CASSANDRA_LOG_DIR
+          value: /tmp
+        image: docker.io/cassandra:5.0.8
+        name: cassandra
+        ports:
+        - containerPort: 9042
+        resources:
+          limits:
+            cpu: '1.0'
+            memory: 2Gi
+          requests:
+            cpu: '0.5'
+            memory: 1280Mi
+        volumeMounts:
+        - mountPath: /var/lib/cassandra
+          name: cassandra
+        - name: cassandra-config
+          mountPath: /etc/cassandra
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+      - name: cassandra
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/cassandra'
+          type: DirectoryOrCreate
+      - name: cassandra-config
+        emptyDir: {}
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - set -e; for d in /mnt/cassandra /mnt/cassandra/data /mnt/cassandra/commitlog
+          /mnt/cassandra/saved_caches /mnt/cassandra/hints; do mkdir -p "$d"; chown
+          1000:1000 "$d"; done
+        volumeMounts:
+        - name: cassandra
+          mountPath: /mnt/cassandra
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+      - name: copy-cassandra-config
+        image: docker.io/cassandra:5.0.8
+        command:
+        - sh
+        - -c
+        - cp -r /etc/cassandra/. /config/
+        volumeMounts:
+        - name: cassandra-config
+          mountPath: /config
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  strategy:
+    type: Recreate

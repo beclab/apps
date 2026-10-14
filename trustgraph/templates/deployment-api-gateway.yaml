@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: api-gateway
+  name: api-gateway
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "api-gateway").replicaCount }}
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+    spec:
+      containers:
+      - command:
+        - python
+        - -c
+        - "from trustgraph.messaging.translators.iam import IamResponseTranslator\noriginal_encode = IamResponseTranslator.encode\ndef encode_with_error(self, response):\n    result = original_encode(self, response)\n    if response.error:\n        result['error'] = {'type': response.error.type, 'message': response.error.message}\n    return result\nIamResponseTranslator.encode = encode_with_error\nfrom trustgraph.messaging.translators.retrieval import GraphRagRequestTranslator\noriginal_graph_decode = GraphRagRequestTranslator.decode\ndef graph_decode_with_service_defaults(self, data):\n    values = dict(data)\n    for key in ('entity-limit', 'triple-limit', 'max-subgraph-size', 'max-path-length', 'edge-limit', 'max-reranker-input'):\n        if values.get(key) is None:\n            values[key] = 0\n    return original_graph_decode(self, values)\nGraphRagRequestTranslator.decode = graph_decode_with_service_defaults\nfrom trustgraph.gateway.service import run\nrun()\n"
+        - --pubsub-backend
+        - pulsar
+        - --pulsar-host
+        - pulsar://pulsar:6650
+        - --timeout
+        - '600'
+        - --port
+        - '8088'
+        - --log-level
+        - INFO
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: api-gateway
+        ports:
+        - containerPort: 8088
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 512M
+          requests:
+            cpu: '0.1'
+            memory: 96Mi
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes: []
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

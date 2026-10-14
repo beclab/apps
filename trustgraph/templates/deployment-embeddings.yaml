@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: embeddings
+  name: embeddings
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "embeddings").replicaCount }}
+  selector:
+    matchLabels:
+      app: embeddings
+  template:
+    metadata:
+      labels:
+        app: embeddings
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+    spec:
+      containers:
+      - command:
+        - processor-group
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: embeddings
+        resources:
+          limits:
+            cpu: '4.0'
+            memory: 1500M
+          requests:
+            cpu: '0.5'
+            memory: 512Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: embeddings-launch-cfg
+        - name: model-cache
+          mountPath: /cache
+        env:
+        - name: PYTHONPATH
+          value: /etc/trustgraph
+        - name: OPENAI_BASE_URL
+          value: {{ include "trustgraph.llmBaseURL" . | quote }}
+        - name: OPENAI_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: trustgraph-credentials
+              key: openai-token
+        - name: HOME
+          value: /tmp
+        - name: FASTEMBED_CACHE_PATH
+          value: /cache/fastembed
+        - name: HF_HOME
+          value: /cache/huggingface
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: embeddings-launch-cfg
+        name: embeddings-launch-cfg
+      - name: model-cache
+        hostPath:
+          path: '{{ .Values.userspace.appCache }}/models'
+          type: DirectoryOrCreate
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - set -e; for d in /mnt/model-cache; do mkdir -p "$d"; chown 1000:1000 "$d";
+          done
+        volumeMounts:
+        - name: model-cache
+          mountPath: /mnt/model-cache
+        resources:
+          limits:
+            cpu: 100m
+            memory: 128Mi
+  strategy:
+    type: Recreate

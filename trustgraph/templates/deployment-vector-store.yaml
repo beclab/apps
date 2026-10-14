@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: vector-store
+  name: vector-store
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "vector-store").replicaCount }}
+  selector:
+    matchLabels:
+      app: vector-store
+  template:
+    metadata:
+      labels:
+        app: vector-store
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+    spec:
+      containers:
+      - command:
+        - processor-group
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: vector-store
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 256M
+          requests:
+            cpu: '0.1'
+            memory: 192Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: vector-store-cfg
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: vector-store-cfg
+        name: vector-store-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

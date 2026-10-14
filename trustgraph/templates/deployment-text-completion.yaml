@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: text-completion
+  name: text-completion
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "text-completion").replicaCount }}
+  selector:
+    matchLabels:
+      app: text-completion
+  template:
+    metadata:
+      labels:
+        app: text-completion
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+        checksum/launch-config: {{ include (print $.Template.BasePath "/configmap-text-completion-launch-cfg.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - command:
+        - processor-group
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch.yaml
+        - --no-loki-enabled
+        env:
+        - name: OPENAI_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: trustgraph-credentials
+              key: openai-token
+        - name: OPENAI_BASE_URL
+          value: {{ include "trustgraph.llmBaseURL" . | quote }}
+        - name: HOME
+          value: /tmp
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: text-completion
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 128M
+          requests:
+            cpu: '0.1'
+            memory: 96Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/
+          name: text-completion-launch-cfg
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: text-completion-launch-cfg
+        name: text-completion-launch-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

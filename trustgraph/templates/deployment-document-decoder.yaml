@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: document-decoder
+  name: document-decoder
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "document-decoder").replicaCount }}
+  selector:
+    matchLabels:
+      app: document-decoder
+  template:
+    metadata:
+      labels:
+        app: document-decoder
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+    spec:
+      containers:
+      - command:
+        - docling-decoder
+        - --pubsub-backend
+        - pulsar
+        - --pulsar-host
+        - pulsar://pulsar:6650
+        - --log-level
+        - INFO
+        - --no-loki-enabled
+        image: docker.io/trustgraph/trustgraph-docling:2.10.10
+        name: document-decoder
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 2Gi
+          requests:
+            cpu: '0.1'
+            memory: 1280Mi
+        env:
+        - name: HOME
+          value: /tmp
+      enableServiceLinks: false
+      volumes: []
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate

@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: control
+  name: control
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ (index .Values.workloads "control").replicaCount }}
+  selector:
+    matchLabels:
+      app: control
+  template:
+    metadata:
+      labels:
+        app: control
+      annotations:
+        trustgraph.olares.com/chart-version: '0.1.24'
+        checksum/template-config: {{ include (print $.Template.BasePath "/configmap-template-cfg.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - command:
+        - python
+        - -c
+        - import os,sys; sys.path.insert(0,"/etc/trustgraph/launch"); import multipart_patch; multipart_patch.install(); import install_password; install_password.install(); import trustgraph.librarian.service as lib; lib.bucket_name=os.environ["OBJECT_STORE_BUCKET"];
+          from trustgraph.base.processor_group import run; run()
+        - --log-level
+        - INFO
+        - -c
+        - /etc/trustgraph/launch/launch.yaml
+        - --no-loki-enabled
+        env:
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: trustgraph-credentials
+              key: admin-password
+              optional: true
+        - name: IAM_BOOTSTRAP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: iam-bootstrap-token
+        - name: OBJECT_STORE_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: access-key
+              name: object-store
+        - name: OBJECT_STORE_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              key: endpoint
+              name: object-store
+        - name: OBJECT_STORE_REGION
+          valueFrom:
+            secretKeyRef:
+              key: region
+              name: object-store
+        - name: OBJECT_STORE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret-key
+              name: object-store
+        - name: OBJECT_STORE_USE_SSL
+          valueFrom:
+            secretKeyRef:
+              key: use-ssl
+              name: object-store
+        - name: HOME
+          value: /tmp
+        - name: OBJECT_STORE_BUCKET
+          value: '{{ .Values.minio.buckets.trustgraph }}'
+        image: docker.io/trustgraph/trustgraph-flow:2.10.10
+        name: control
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+          requests:
+            cpu: '0.1'
+            memory: 128Mi
+        volumeMounts:
+        - mountPath: /etc/trustgraph/launch/
+          name: control-launch-cfg
+        - mountPath: /etc/trustgraph/template/
+          name: template-cfg
+      enableServiceLinks: false
+      volumes:
+      - configMap:
+          name: control-launch-cfg
+        name: control-launch-cfg
+      - configMap:
+          name: template-cfg
+        name: template-cfg
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+  strategy:
+    type: Recreate
