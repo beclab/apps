@@ -1,0 +1,208 @@
+{{- /* Run before Helm replaces the old Deployment: its /app database may live
+only in the container layer. Keep hook permissions confined to this namespace. */ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ .Release.Name | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-migration
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-migration
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 240
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        linkerd.io/inject: disabled
+    spec:
+      serviceAccountName: {{ .Release.Name }}-migration
+      restartPolicy: Never
+      initContainers:
+        - name: prepare-storage
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command: [sh, -c, 'chown 1000:1000 /state /upgrade-backups']
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: backups
+              mountPath: /upgrade-backups
+      containers:
+        - name: backup
+          image: docker.io/beclab/bitnami-kubectl:1.0.0
+          securityContext:
+            runAsUser: 1000
+          env:
+            - name: RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              if [ -f /state/records.db ]; then
+                echo 'Persistent database already exists; no legacy migration needed.'
+                exit 0
+              fi
+              # Olares also performs a Helm upgrade while launching a fresh
+              # installation whose Deployments initially have zero replicas.
+              db_url=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE" -o jsonpath='{.spec.template.spec.containers[?(@.name=="whisperservice")].env[?(@.name=="DB_URL")].value}')
+              if [ "$db_url" = 'sqlite:////state/records.db' ]; then
+                echo 'Engine already uses persistent storage; no container-only database to export.'
+                exit 0
+              fi
+              pods=$(kubectl -n "$NAMESPACE" get pods -l app=whisperservice --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+              set -- $pods
+              [ "$#" -eq 1 ] || { echo 'Expected one running legacy engine; stopping upgrade to protect history.' >&2; exit 1; }
+              pod=$1
+              # Transport only a consistent snapshot; never copy the live SQLite file.
+              kubectl -n "$NAMESPACE" exec -i "$pod" -c whisperservice -- /app/.venv/bin/python - <<'PY' > /upgrade-backups/records.db.pending.b64
+              import base64, hashlib, os, pathlib, signal, sqlite3, subprocess, sys, tempfile, time
+              source = pathlib.Path('/app/records.db')
+              if not source.is_file():
+                  raise RuntimeError('Legacy database missing; refusing to discard task history')
+              connection = sqlite3.connect(str(source), timeout=10)
+              paused = []
+              success = False
+              try:
+                  deadline = time.monotonic() + 150
+                  while True:
+                      connection.execute('BEGIN IMMEDIATE')
+                      active = connection.execute("SELECT count(*) FROM tasks WHERE status NOT IN ('completed', 'failed')").fetchone()[0]
+                      if not active:
+                          break
+                      connection.rollback()
+                      if time.monotonic() >= deadline:
+                          raise RuntimeError('Tasks still active; upgrade stopped without replacing the old engine')
+                      time.sleep(2)
+                  # Pause request acceptance while exporting. A detached watchdog
+                  # resumes the old processes if a later Helm operation fails.
+                  workers = []
+                  for entry in pathlib.Path('/proc').iterdir():
+                      if entry.name.isdigit():
+                          try:
+                              command = (entry / 'cmdline').read_bytes()
+                              if b'gunicorn' in command and int(entry.name) != os.getpid():
+                                  workers.append(int(entry.name))
+                          except (FileNotFoundError, PermissionError):
+                              pass
+                  if not workers:
+                      raise RuntimeError('Could not identify legacy server processes')
+                  watchdog = 'import os,signal,time; time.sleep(180)\nfor p in ' + repr(workers) + ':\n try: os.kill(p,signal.SIGCONT)\n except ProcessLookupError: pass\n'
+                  subprocess.Popen([sys.executable, '-c', watchdog], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                  for pid in workers:
+                      os.kill(pid, signal.SIGSTOP)
+                      paused.append(pid)
+                  with tempfile.TemporaryDirectory(prefix='history-migration-', dir='/app') as directory:
+                      snapshot = pathlib.Path(directory) / 'records.db'
+                      original = sqlite3.connect('file:' + str(source) + '?mode=ro', uri=True)
+                      target = sqlite3.connect(snapshot)
+                      try:
+                          original.backup(target)
+                          if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                              raise RuntimeError('Legacy snapshot integrity check failed')
+                      finally:
+                          target.close()
+                          original.close()
+                      print(hashlib.sha256(snapshot.read_bytes()).hexdigest(), flush=True)
+                      with snapshot.open('rb') as stream:
+                          while chunk := stream.read(61440):
+                              sys.stdout.buffer.write(base64.b64encode(chunk) + b'\n')
+                      sys.stdout.buffer.flush()
+                  success = True
+              finally:
+                  connection.rollback()
+                  connection.close()
+                  if not success:
+                      for pid in paused:
+                          try:
+                              os.kill(pid, signal.SIGCONT)
+                          except ProcessLookupError:
+                              pass
+              PY
+              expected=$(head -n 1 /upgrade-backups/records.db.pending.b64)
+              tail -n +2 /upgrade-backups/records.db.pending.b64 | base64 -d > /upgrade-backups/records.db.pending
+              actual=$(sha256sum /upgrade-backups/records.db.pending)
+              [ "${actual%% *}" = "$expected" ]
+              test -s /upgrade-backups/records.db.pending
+              mv /upgrade-backups/records.db.pending /upgrade-backups/records.db
+              rm /upgrade-backups/records.db.pending.b64
+              echo 'Legacy task history backed up automatically; ready to replace the engine.'
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: state
+              mountPath: /state
+              readOnly: true
+            - name: backups
+              mountPath: /upgrade-backups
+      volumes:
+        - name: state
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/state"
+            type: DirectoryOrCreate
+        - name: backups
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/upgrade-backups"
+            type: DirectoryOrCreate
