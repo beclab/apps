@@ -25,13 +25,42 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        checksum/audio-retention: {{ include (print $.Template.BasePath "/retention-configmap.yaml") . | sha256sum }}
+        checksum/api-proxy: {{ include (print $.Template.BasePath "/api-proxy-configmap.yaml") . | sha256sum }}
+        checksum/audio-secrets: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         app: whisperwebui
         bytetrade.io/terminal: whisperwebui
     spec:
       initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /models/Whisper/faster-whisper /models/Diarization /outputs /configs /requests
+              chown 1000:1000 /models /models/Whisper /models/Whisper/faster-whisper /models/Diarization /outputs /configs /requests
+              for file in /configs/*.yaml; do
+                [ ! -f "$file" ] || chown 1000:1000 "$file"
+              done
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: outputs
+              mountPath: /outputs
+            - name: configs
+              mountPath: /configs
+            - name: requests
+              mountPath: /requests
         - name: init-configs
-          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.8-olares2"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
             - sh
             - -c
@@ -42,12 +71,25 @@ spec:
               else
                 echo "configs directory already has content, skipping copy."
               fi
+              python - <<'PY'
+              import pathlib
+              import yaml
+              current = pathlib.Path('/Whisper-WebUI/configs/translation.yaml')
+              defaults = pathlib.Path('/Whisper-WebUI/configs_default/translation.yaml')
+              existing = yaml.safe_load(current.read_text()) or {}
+              bundled = yaml.safe_load(defaults.read_text()) or {}
+              missing = {key: value for key, value in bundled.items() if key not in existing}
+              if missing:
+                  existing.update(missing)
+                  current.write_text(yaml.safe_dump(existing, allow_unicode=True, sort_keys=False))
+                  print('Added translation languages:', ', '.join(missing))
+              PY
           volumeMounts:
             - name: configs
               mountPath: /Whisper-WebUI/configs
       containers:
         - name: whisperwebui
-          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.7"
+          image: "docker.io/beclab/harveyff-whisper-webui:v1.0.8-olares2"
           envFrom:
             - configMapRef:
                 name: whisperwebui-config
@@ -91,14 +133,36 @@ spec:
               link_repo "pyannote/speaker-diarization-3.1" "$DIA_DIR"
               link_repo "pyannote/segmentation-3.0" "$DIA_DIR"
 
-              pip install audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
-              pip install --quiet --upgrade pytubefix 2>&1 | tail -3
+              pip install --user audiofile dora-search einops hydra-colorlog hydra-core julius lameenc librosa ml-collections museval onnx onnx2pytorch openunmix soundfile submitit treetable --quiet 2>&1 | tail -3
+              pip install --user --quiet --upgrade pytubefix 2>&1 | tail -3
               echo "Starting Whisper-WebUI..."
               exec python /Whisper-WebUI/whisper_openai_api.py --server_port 7860 --server_name 0.0.0.0 --whisper_type "$whisper_type"
           ports:
             - containerPort: 7860
             - containerPort: 8000
           env:
+            # Match CUDA base-image defaults for legacy CPU-recorded installations.
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: AUDIO_REQUEST_DIR
+              value: /request-data
+            - name: GRADIO_TEMP_DIR
+              value: /tmp/gradio
+            - name: PYTHONPATH
+              value: /opt/olares-runtime:/Whisper-WebUI
+            - name: AUTO_DELETE_SOURCE_AUDIO
+              value: {{ ternary (get $oe "AUTO_DELETE_SOURCE_AUDIO") "true" (hasKey $oe "AUTO_DELETE_SOURCE_AUDIO") | quote }}
+            - name: AUTO_CLEANUP_SOURCE_AUDIO
+              value: {{ ternary (get $oe "AUTO_CLEANUP_SOURCE_AUDIO") "true" (hasKey $oe "AUTO_CLEANUP_SOURCE_AUDIO") | quote }}
+            - name: SOURCE_AUDIO_RETENTION_HOURS
+              value: {{ $oe.SOURCE_AUDIO_RETENTION_HOURS | default "24" | quote }}
+            - name: AUDIO_CLEANUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: AUDIO_CLEANUP_TOKEN
             - name: TZ
               value: Etc/UTC
             - name: HF_ENDPOINT
@@ -130,12 +194,30 @@ spec:
               mountPath: /Whisper-WebUI/outputs
             - name: configs
               mountPath: /Whisper-WebUI/configs
+            - name: requests
+              mountPath: /request-data
+            - name: tmp
+              mountPath: /tmp
+            - name: retention-code
+              mountPath: /opt/olares-runtime
+              readOnly: true
             - name: api-proxy-script
               mountPath: /Whisper-WebUI/whisper_openai_api.py
               subPath: whisper_openai_api.py
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
       volumes:
+        - name: requests
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/requests"
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: retention-code
+          configMap:
+            name: whisper-audio-retention
         - name: api-proxy-script
           configMap:
             name: whisper-openai-api
@@ -207,7 +289,7 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/beclab/llm-init:v1.7.12
+          image: docker.io/beclab/llm-init:v1.7.21
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
