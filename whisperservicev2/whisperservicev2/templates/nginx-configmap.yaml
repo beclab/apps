@@ -1,0 +1,83 @@
+﻿---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}
+data:
+  nginx.conf: |
+    upstream whisperapi_backend {
+      server whisperservice-svc.whisperservicev2server-shared:8000 max_fails=1 fail_timeout=2s;
+      server download-svc.whisperservicev2server-shared:8090 backup;
+    }
+
+    server {
+
+      # Applies to the entire upload request, including multipart form fields.
+      client_max_body_size 500m;
+      client_body_timeout 600s;
+
+      client_body_temp_path /tmp/client_body;
+
+      proxy_temp_path /tmp/proxy;
+
+      fastcgi_temp_path /tmp/fastcgi;
+
+      uwsgi_temp_path /tmp/uwsgi;
+
+      scgi_temp_path /tmp/scgi;
+      listen 8080;
+      access_log /dev/stdout;
+      error_log /dev/stderr;
+
+      location /config {
+        proxy_pass http://whisperservice-svc.whisperservicev2server-shared:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+
+      location / {
+        proxy_pass http://whisperapi_backend;
+        proxy_next_upstream error timeout http_500 http_502 http_503 http_504;
+        proxy_connect_timeout 600s;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_hide_header Access-Control-Allow-Origin;
+        proxy_hide_header Access-Control-Allow-Methods;
+        proxy_hide_header Access-Control-Allow-Headers;
+        add_header Access-Control-Allow-Origin *;
+        add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+        add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+
+        if ($request_method = 'OPTIONS') {
+          add_header Access-Control-Allow-Origin *;
+          add_header Access-Control-Allow-Methods "GET, POST, PUT, DELETE, OPTIONS, HEAD";
+          add_header Access-Control-Allow-Headers "deviceType,token,authorization,content-type,x-csrftoken";
+          return 204;
+        }
+      }
+    }
