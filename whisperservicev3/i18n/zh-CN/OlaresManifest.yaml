@@ -46,7 +46,31 @@ spec:
     - 活跃度探测 (/health/live)：验证应用程序是否正在运行
     - 就绪度探测 (/health/ready)：检查应用程序是否已准备好接受请求（包括数据库连接检查）
 
+    **任务历史**
+
+    升级时会自动迁移任务历史并持久保存，无需手动备份数据库。
+
+    **音频文件自动删除与留存设置**
+
+    清理范围仅包括本版本为 API 请求创建的文件夹：上传的音频/视频副本、从 URL 下载的文件，以及视频转换产生的音频。保留用户设备上的原文件、转录结果、任务记录、模型文件和旧版 data 文件夹中的历史文件。
+
+    - **AUTO_DELETE_SOURCE_AUDIO**：默认 true。音频解码到内存后即可删除文件，请求处理结束或失败时删除剩余请求文件。此行为不以转录成功为条件。设为 false 可保留请求文件；希望持续保留时，还需将 AUTO_CLEANUP_SOURCE_AUDIO 设为 false。更改配置无法恢复已删除的文件。
+    - **AUTO_CLEANUP_SOURCE_AUDIO**：默认 true。每小时检查一次，按 SOURCE_AUDIO_RETENTION_HOURS 清理过期请求文件夹，包括保留的上传副本、URL 下载文件、转换音频和异常退出遗留文件。跳过仍在处理的请求。设为 false 关闭定时清理，但不影响第一个开关的即时删除，也不禁止管理员手动清理。重新开启后，已超过留存时间的文件可能在下一次检查时被删除。
+    - **SOURCE_AUDIO_RETENTION_HOURS**：默认 24，支持 1–8760 的整数，单位为小时。仅在定时清理开启时生效。已结束的请求从结束时间计算；异常退出的请求从文件夹创建时间计算。到期后在下一次每小时检查时清理，不会延迟第一个开关的即时删除。
+    - **AUDIO_CLEANUP_TOKEN**：可选管理员令牌。留空时关闭存储查看和手动清理接口。配置后，调用 GET /storage/audio 或 POST /storage/audio/cleanup 时需发送 Authorization: Bearer <token>。手动清理默认仅预览（dry_run=true），明确设置 dry_run=false 才执行删除；即使自动清理关闭，管理员仍可手动清理。请妥善保管令牌，持有者可以删除符合条件的请求文件。
+
+    **常用配置**
+    - 处理后删除（默认）：两个开关均为 true。24 小时留存期用于回收异常遗留文件。
+    - 保留 7 天：AUTO_DELETE_SOURCE_AUDIO=false，AUTO_CLEANUP_SOURCE_AUDIO=true，SOURCE_AUDIO_RETENTION_HOURS=168。
+    - 持续保留：两个开关均为 false，留存小时数不生效。管理员仍可手动清理。
+
   upgradeDescription: |
+    v1.1.25：优化升级兼容性，将升级备份与历史音频分开保存。
+
+    v1.1.24: 自动删除请求产生的音频副本，新增可配置的文件留存和受保护的清理接口，持久保存任务结果。保留已有历史文件。
+
+    v1.1.23: Model Console（llm-init）版本更新为 v1.7.21。
+
     将反向代理镜像从 Bitnami OpenResty（`beclab/aboveos-bitnami-openresty:1.25.3-2`）切换为官方 OpenResty 镜像 `openresty/openresty:1.29.2.5-bookworm-fat`。
 
     同步调整 nginx 配置挂载与日志路径以匹配官方镜像布局（`/etc/nginx/conf.d/default.conf`、`/usr/local/openresty/nginx/logs/...`），并移除 Bitnami 专用的 `OPENRESTY_CONF_FILE` 配置。

@@ -28,9 +28,23 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        checksum/audio-retention: {{ include (print $.Template.BasePath "/retention-configmap.yaml") . | sha256sum }}
+        checksum/audio-secrets: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         app: whisperservice
     spec:
+      initContainers:
+        - name: prepare-storage
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command: [sh, -c, 'mkdir -p /state /request-data; chown 1000:1000 /state /request-data']
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: requests
+              mountPath: /request-data
       containers:
         - name: whisperservice
           image: "docker.io/beclab/pavelzbornik-whisperx-fastapi:0.8.0"
@@ -40,6 +54,23 @@ spec:
           env:
             - name: TZ
               value: Etc/UTC
+            - name: DB_URL
+              value: sqlite:////state/records.db
+            - name: AUDIO_REQUEST_DIR
+              value: /request-data
+            - name: PYTHONPATH
+              value: /opt/olares-runtime:/app
+            - name: AUTO_DELETE_SOURCE_AUDIO
+              value: {{ ternary (get $oe "AUTO_DELETE_SOURCE_AUDIO") "true" (hasKey $oe "AUTO_DELETE_SOURCE_AUDIO") | quote }}
+            - name: AUTO_CLEANUP_SOURCE_AUDIO
+              value: {{ ternary (get $oe "AUTO_CLEANUP_SOURCE_AUDIO") "true" (hasKey $oe "AUTO_CLEANUP_SOURCE_AUDIO") | quote }}
+            - name: SOURCE_AUDIO_RETENTION_HOURS
+              value: {{ $oe.SOURCE_AUDIO_RETENTION_HOURS | default "24" | quote }}
+            - name: AUDIO_CLEANUP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: AUDIO_CLEANUP_TOKEN
             - name: HF_ENDPOINT
               value: "{{ .Values.olaresEnv.HF_ENDPOINT }}"
             - name: HF_TOKEN
@@ -64,6 +95,37 @@ spec:
           args:
             - |
               set -e
+              # Keep legacy GPU visibility on upgrade; fall back only without CUDA.
+              if uv run --no-sync python -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)'; then
+                export DEVICE=cuda COMPUTE_TYPE=float16
+              else
+                export DEVICE=cpu COMPUTE_TYPE=int8
+              fi
+              uv run --no-sync python - <<'PY'
+              import pathlib
+              import sqlite3
+              destination = pathlib.Path('/state/records.db')
+              candidates = [pathlib.Path('/upgrade-backups/records.db'),
+                            pathlib.Path('/legacy-data/records.db'),
+                            pathlib.Path('/legacy-data/.upgrade-backups/records.db')]
+              source = next((path for path in candidates if path.is_file()), None)
+              if source is not None and not destination.exists():
+                  # Restore into a temporary file and publish only a complete database.
+                  pending = destination.with_suffix('.pending')
+                  original = sqlite3.connect('file:' + str(source) + '?mode=ro', uri=True)
+                  target = sqlite3.connect(pending)
+                  try:
+                      original.backup(target)
+                      if target.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                          raise RuntimeError('Legacy task database integrity check failed')
+                  finally:
+                      target.close()
+                      original.close()
+                  pending.replace(destination)
+                  print('Legacy task database restored; source preserved')
+              else:
+                  print('Persistent task database ready')
+              PY
               READYZ="http://download-svc.{{ .Release.Namespace }}.svc.cluster.local:8090/readyz"
               echo "[wait] Waiting for llm-init downloader (/readyz)..."
               until curl -sf "$READYZ" >/dev/null 2>&1; do
@@ -71,7 +133,7 @@ spec:
                 sleep 10
               done
               echo "[wait] models ready; starting whisperX-FastAPI."
-              exec uv run --no-sync gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 0 app.main:app -k uvicorn.workers.UvicornWorker
+              exec uv run --no-sync gunicorn --config /opt/olares-runtime/gunicorn_conf.py --bind 0.0.0.0:8000 --workers 1 --timeout 0 app.main:app -k uvicorn.workers.UvicornWorker
           resources:
             requests:
               cpu: "500m"
@@ -87,8 +149,21 @@ spec:
             # English alignment weight (and any other torch hub assets).
             - name: cache
               mountPath: /root/.cache
-            - name: data
+            - name: tmp
               mountPath: /tmp
+            - name: data
+              mountPath: /legacy-data
+              readOnly: true
+            - name: upgrade-backups
+              mountPath: /upgrade-backups
+              readOnly: true
+            - name: state
+              mountPath: /state
+            - name: requests
+              mountPath: /request-data
+            - name: retention-code
+              mountPath: /opt/olares-runtime
+              readOnly: true
       volumes:
         - name: hf-cache
           hostPath:
@@ -102,6 +177,24 @@ spec:
           hostPath:
             path: "{{ .Values.userspace.appData }}/data"
             type: DirectoryOrCreate
+        - name: upgrade-backups
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/upgrade-backups"
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: state
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/state"
+            type: DirectoryOrCreate
+        - name: requests
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/requests"
+            type: DirectoryOrCreate
+        - name: retention-code
+          configMap:
+            name: whisper-audio-retention
 
 ---
 {{/* llm-init in download-only mode (ENGINE_KIND empty): pure HF downloader.
@@ -153,7 +246,7 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/beclab/llm-init:v1.7.12
+          image: docker.io/beclab/llm-init:v1.7.21
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
