@@ -1,0 +1,100 @@
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $cpuText := get $env "CPU_CORES" | default "2" | toString -}}
+{{- $memoryText := get $env "MEMORY_GB" | default "2" | toString -}}
+{{- $diskText := get $env "DISK_SIZE_GB" | default "32" | toString -}}
+{{- if not (regexMatch "^[1-8]$" $cpuText) -}}{{ fail "CPU_CORES must be an integer from 1 to 8" }}{{- end -}}
+{{- if not (regexMatch "^([1-9]|[12][0-9]|3[0-2])$" $memoryText) -}}{{ fail "MEMORY_GB must be an integer from 1 to 32" }}{{- end -}}
+{{- if not (regexMatch "^(1[6-9]|[2-9][0-9]|[1-4][0-9]{2}|50[0-9]|51[0-2])$" $diskText) -}}{{ fail "DISK_SIZE_GB must be an integer from 16 to 512" }}{{- end -}}
+{{- $cpu := int $cpuText -}}
+{{- $memory := int $memoryText -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linuxvm
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.linuxvm.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app: qemu-vm}
+  template:
+    metadata:
+      labels:
+        app: qemu-vm
+        applications.app.bytetrade.io/name: {{ .Release.Name | quote }}
+        applications.app.bytetrade.io/owner: {{ get (.Values.bfl | default dict) "username" | default "user" | quote }}
+        applications.app.bytetrade.io/macvlan-init: 'true'
+      annotations:
+        checksum/start: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        supplementalGroups: [{{ .Values.kvmGroup }}]
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: [sh, -ec, 'mkdir -p /storage; chown 1000:1000 /storage; stat -c "KVM mode=%a uid=%u gid=%g" /dev/kvm']
+          securityContext: {runAsUser: 0}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: storage, mountPath: /storage}
+            - {name: kvm, mountPath: /dev/kvm}
+      containers:
+        - name: qemu
+          image: {{ .Values.image | quote }}
+          command: [/usr/bin/tini, '-s', '--', /bin/bash, /opt/olares/start.sh]
+          securityContext:
+            runAsNonRoot: true
+            privileged: true
+          env:
+            - name: CDN_HOST
+              value: {{ .Values.olaresEnv.SYSTEM_CDN_SERVICE | default .Values.downloadCdnURL | default "https://cdn.olares.com" | trimSuffix "/" | quote }}
+            - name: CPU_CORES
+              value: {{ $cpuText | quote }}
+            - name: MEMORY_GB
+              value: {{ $memoryText | quote }}
+            - name: DISK_SIZE_GB
+              value: {{ $diskText | quote }}
+            - name: DISTRIBUTION
+              value: {{ .Values.olaresEnv.DISTRIBUTION | default "ubuntu2404" | quote }}
+            - name: VM_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: qemu-login, key: password}
+            - {name: HOME, value: /tmp}
+          resources:
+            requests:
+              cpu: '1'
+              memory: {{ printf "%dGi" (add $memory 1) | quote }}
+            limits:
+              cpu: {{ add $cpu 1 | quote }}
+              memory: {{ printf "%dGi" (add $memory 1) | quote }}
+          ports:
+            - {name: http, containerPort: 8006}
+            - {name: sshdefault, containerPort: 22}
+            - {name: ssh, containerPort: 2222}
+          readinessProbe:
+            httpGet: {port: 8006, path: /}
+            periodSeconds: 10
+          volumeMounts:
+            - {name: storage, mountPath: /storage}
+            - {name: kvm, mountPath: /dev/kvm}
+            - {name: start, mountPath: /opt/olares, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: storage
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/storage'
+            type: DirectoryOrCreate
+        - name: kvm
+          hostPath: {path: /dev/kvm, type: CharDevice}
+        - name: start
+          configMap: {name: qemu-start}
+        - name: tmp
+          emptyDir: {}
