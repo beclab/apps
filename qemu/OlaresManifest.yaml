@@ -1,0 +1,164 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: v3
+metadata:
+  name: qemu
+  appid: qemu
+  title: QEMU Server
+  description: Linux Server virtual machine with SSH, Overlay access, and browser console.
+  icon: https://cdn.olares.com/images/2026/10/664bfda62566cfe7e74203c4cfba9218.png
+  version: 0.0.27
+  categories: [Utilities_v112, workspace, developer]
+  tags: [virtual-machine]
+entrances:
+  - name: qemu
+    host: qemu-web
+    port: 8006
+    title: QEMU Server
+    icon: https://cdn.olares.com/images/2026/10/664bfda62566cfe7e74203c4cfba9218.png
+    authLevel: private
+    openMethod: window
+ports:
+  - name: ssh
+    host: qemu
+    port: 2222
+    exposePort: 0
+    protocol: tcp
+    addToTailscaleAcl: true
+overlayGateway:
+  enable: true
+  entrances:
+    - title: Linux Server SSH
+      workload: linuxvm
+      port: 22
+      protocol: tcp
+      description: Connect with SSH using the address shown here. Uses the default SSH port 22.
+spec:
+  versionName: experimental
+  submitter: Olares
+  developer: qemus
+  website: https://github.com/qemus/qemu
+  sourceCode: https://github.com/qemus/qemu
+  doc: https://github.com/qemus/qemu#readme
+  locale: [en-US, zh-CN, de-DE, fr-FR, es-ES, it-IT, ja-JP]
+  featuredImage: https://cdn.olares.com/images/2026/10/e59f19d19107067a488ffc283a3c2785.png
+  promoteImage:
+    - https://cdn.olares.com/images/2026/10/e59f19d19107067a488ffc283a3c2785.png
+    - https://cdn.olares.com/images/2026/10/c6a7f2ac312db6180f5550a33594114a.png
+  license:
+    - text: MIT
+      url: https://github.com/qemus/qemu/blob/master/license.md
+  fullDescription: |
+    Run a Linux server virtual machine on Olares with QEMU and KVM acceleration.
+    Choose Ubuntu, Debian, Rocky Linux or Fedora during installation, then connect
+    with SSH or use the browser console.
+
+    Features
+    - Choose Ubuntu 24.04/26.04, Debian 12/13, Rocky Linux 9/10 or Fedora 43/44.
+    - Set 1-8 virtual CPU cores, 1-32 GiB of RAM and a 16-512 GiB virtual disk.
+    - Set your own initial SSH password during installation.
+    - Track image download and initialization progress on the application page.
+    - Keep the system disk and ARM UEFI variables in persistent Olares App Data.
+    - Create independent installations with separate disks and Overlay addresses.
+
+    Getting started
+    1. Select a distribution, CPU cores, memory, disk size and initial password.
+    2. Open the application and wait for the system image download and initialization.
+    3. For access on the same network, enable this app in Settings > Network >
+       Overlay gateway and connect to its assigned address with SSH on port 22.
+    4. Away from Olares, connect with LarePass VPN and use the Olares device address
+       and the external SSH port shown in Settings > Applications > QEMU Server > Ports.
+
+    Ubuntu uses the username ubuntu; Debian uses debian; Rocky Linux uses rocky;
+    Fedora uses fedora. The application page also provides a browser console.
+    Its language follows the browser preference: Chinese or English.
+
+    Requirements and storage
+    An amd64 or ARM64 host with usable KVM virtualization and /dev/kvm is required.
+    Guests match the host architecture; x86 system disks cannot be moved to ARM.
+    This experimental app uses a privileged VM container with access to /dev/kvm
+    and its own application storage. Allow an additional 1 GiB of RAM for QEMU.
+    System images download from the Olares CDN and are checked against pinned hashes.
+
+    CPU and memory settings can be changed after installation. Changes restart the
+    VM and disconnect active sessions. Disks can be expanded, but cannot be shrunk.
+    Back up important data before resizing. Changing the installed distribution
+    requires a separate installation. Uninstalling with data deletion removes the VM disk.
+  runAsUser: true
+  supportArch: [amd64, arm64]
+  requiredCpu: 1
+  limitedCpu: 10
+  requiredMemory: 3Gi
+  limitedMemory: 34Gi
+  requiredDisk: 16Gi
+  limitedDisk: 520Gi
+permission:
+  appData: true
+options:
+  allowMultipleInstall: true
+  apiTimeout: 0
+  dependencies:
+    - name: olares
+      type: system
+      version: '>=1.12.6-0'
+workloadReplicas:
+  qemu: 1
+  linuxvm: 1
+envs:
+  - envName: DISTRIBUTION
+    type: string
+    required: true
+    editable: false
+    description: Choose the Linux distribution for a new virtual machine. Existing system disks are preserved. To use a different distribution, back up your data and create a new installation with a new disk.
+    options:
+      - title: Ubuntu 24.04 LTS
+        value: ubuntu2404
+      - title: Ubuntu 26.04 LTS
+        value: ubuntu2604
+      - title: Debian 12
+        value: debian12
+      - title: Debian 13
+        value: debian13
+      - title: Rocky Linux 9
+        value: rocky9
+      - title: Rocky Linux 10
+        value: rocky10
+      - title: Fedora 43
+        value: fedora43
+      - title: Fedora 44
+        value: fedora44
+  - envName: CPU_CORES
+    type: int
+    required: true
+    editable: true
+    applyOnChange: true
+    regex: '^[1-8]$'
+    description: Virtual CPU cores, from 1 to 8. Changes restart the VM and interrupt connections. These are virtual cores, not dedicated physical cores.
+  - envName: MEMORY_GB
+    type: int
+    required: true
+    editable: true
+    applyOnChange: true
+    regex: '^([1-9]|[12][0-9]|3[0-2])$'
+    description: VM memory in GiB, from 1 to 32. An additional 1 GiB is reserved for QEMU. Changes restart the VM and interrupt connections.
+  - envName: DISK_SIZE_GB
+    type: int
+    required: true
+    editable: true
+    applyOnChange: true
+    regex: '^(1[6-9]|[2-9][0-9]|[1-4][0-9]{2}|50[0-9]|51[0-2])$'
+    description: Virtual disk capacity in GiB, from 16 to 512. Increase to expand the disk and supported guest filesystems on restart. Shrinking is not supported; smaller values retain the existing disk and display a warning. Changes interrupt connections. Back up important data before expansion.
+  - envName: SYSTEM_CDN_SERVICE
+    type: url
+    editable: true
+    applyOnChange: false
+    required: false
+    description: Optional CDN base URL for system image downloads. Leave blank to use the Olares system CDN setting or the Olares CDN.
+    valueFrom:
+      envName: OLARES_SYSTEM_CDN_SERVICE
+  - envName: INITIAL_PASSWORD
+    type: password
+    required: true
+    editable: false
+    regex: '^.{8,128}$'
+    description: Set the initial SSH password (8–128 characters) for a new VM. Existing disks keep their current password. After installation, use passwd inside the VM to change it.

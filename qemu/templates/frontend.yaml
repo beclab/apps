@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.qemu.replicaCount }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: qemu}
+  template:
+    metadata:
+      labels:
+        app: qemu
+        applications.app.bytetrade.io/macvlan-init: 'false'
+      annotations:
+        checksum/frontend: {{ include "qemu.runtime.frontend.conf" . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      containers:
+        - name: web
+          image: {{ .Values.image | quote }}
+          command: [nginx, '-c', /opt/olares/frontend.conf, '-g', 'daemon off;']
+          securityContext: {runAsNonRoot: true, allowPrivilegeEscalation: false}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          ports: [{name: http, containerPort: 8006}]
+          readinessProbe:
+            httpGet: {port: 8006, path: /}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: config, mountPath: /opt/olares, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: qemu-start}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qemu-web
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: {app: qemu}
+  ports: [{name: http, port: 8006, targetPort: 8006}]
