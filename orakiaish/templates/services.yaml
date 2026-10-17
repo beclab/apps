@@ -1,0 +1,33 @@
+{{- range $component, $port := dict "web" .Values.service.webPort "hub" .Values.service.hubPort "ha" .Values.service.haPort "matter" .Values.service.matterPort }}
+apiVersion: v1
+kind: Service
+metadata: { name: {{ if eq $component "web" }}oraki-web{{ else }}{{ include "oraki.fullname" $ }}-{{ $component }}{{ end }} }
+spec:
+  type: {{ if eq $component "web" }}{{ $.Values.service.type }}{{ else }}ClusterIP{{ end }}
+  selector: { app.kubernetes.io/name: {{ include "oraki.name" $ }}, app.kubernetes.io/component: {{ $component }} }
+  ports: [{ name: {{ $component }}, port: {{ $port }}, targetPort: {{ $component }} }]
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata: { name: {{ include "oraki.fullname" . }}-voice }
+spec:
+  selector: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: voice }
+  ports: [{ name: voice, port: 4318, targetPort: voice }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: {{ include "oraki.fullname" . }}-audio }
+spec:
+  selector: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: audio }
+  ports:
+    - { name: api, port: 8080, targetPort: 8080 }
+    - { name: pulse, port: 4713, targetPort: 4713 }
+---
+# Fixed name so OlaresManifest `ports` can expose it to the LAN for voice satellites.
+apiVersion: v1
+kind: Service
+metadata: { name: oraki-satellite }
+spec:
+  selector: { app.kubernetes.io/name: {{ include "oraki.name" . }}, app.kubernetes.io/component: hub }
+  ports: [{ name: satellite, port: {{ .Values.satellite.port }}, targetPort: satellite }]
