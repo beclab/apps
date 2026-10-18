@@ -147,36 +147,38 @@ main{max-width:560px;margin:0 auto;padding:28px 18px 48px}h1{font-size:22px;marg
 .step{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin:12px 0}
 .step h2{font-size:16px;margin:0 0 8px;display:flex;gap:8px;align-items:center}.dot{width:10px;height:10px;border-radius:50%;background:var(--line);flex:none}
 .done .dot{background:var(--acc)}.now{border-color:var(--acc)}textarea,input{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:10px;background:#faf9f5;color:var(--ink)}
-textarea{height:86px;resize:vertical}button{margin-top:10px;font:inherit;font-weight:700;border:0;border-radius:10px;padding:10px 16px;background:var(--ink);color:var(--bg);cursor:pointer}
+.buyrow{display:flex;justify-content:flex-end;margin-top:12px}.buy{padding:10px 16px;border-radius:10px;background:var(--ink);color:var(--bg);text-decoration:none}.guide{display:block;width:100%;max-height:100px;margin:10px 0}textarea{height:86px;resize:vertical}button{margin-top:10px;font:inherit;font-weight:700;border:0;border-radius:10px;padding:10px 16px;background:var(--ink);color:var(--bg);cursor:pointer}
 button:disabled{opacity:.5}.msg{white-space:pre-wrap;margin-top:10px;font-size:14px}.bad{color:var(--bad)}.ok{color:var(--acc)}a{color:var(--ink);text-decoration-color:#71bbde}
 .mute{color:var(--mute);font-size:14px}ol{margin:6px 0 0;padding-left:20px}code{background:var(--soft);padding:1px 5px;border-radius:5px}
 </style></head><body><main>
 <h1>Agent J</h1><p class="sub" data-t="sub"></p>
 <div class="step" id="s1"><h2><span class="dot"></span><span data-t="s1"></span></h2><div class="mute" id="s1d"></div></div>
 <div class="step" id="s2"><h2><span class="dot"></span><span data-t="s2"></span></h2><div id="s2d">
-<p class="mute" data-t="s2h"></p><textarea id="code" autocomplete="off" spellcheck="false"></textarea>
+<p class="mute" data-t="s2h"></p><p><a href="https://agentj.app/account" target="_blank" rel="noopener noreferrer">https://agentj.app/account</a></p><svg class="guide" role="img" aria-labelledby="guide-title" viewBox="0 0 480 80"><title id="guide-title"></title><rect x="1" y="1" width="478" height="78" rx="10" fill="#dbf5ec"/><text x="18" y="32" data-t="guide1" font-size="14"></text><text x="18" y="60" data-t="guide2" font-size="14"></text></svg><textarea id="code" autocomplete="off" spellcheck="false"></textarea>
 <p class="mute" data-t="nameh" style="margin:10px 0 4px"></p><input id="name" maxlength="32" autocomplete="off">
-<button id="go" data-t="go"></button><div class="msg" id="m2"></div></div></div>
+<button id="go" data-t="go"></button><div class="msg" id="m2"></div><p class="mute" data-t="buyh"></p><div class="buyrow"><a class="buy" href="https://agentj.app/account?source=olares&amp;utm_source=olares&amp;utm_medium=setup" target="_blank" rel="noopener noreferrer" data-t="buy"></a></div></div></div>
 <div class="step" id="s3"><h2><span class="dot"></span><span data-t="s3"></span></h2><div id="s3d" class="mute"></div></div>
 <p class="mute" data-t="foot"></p>
 </main><script>
 const zh=(new URLSearchParams(location.search).get('lang')||navigator.language||'').toLowerCase().startsWith('zh');
 const T=zh?{sub:'在你的 Olares 上运行的 Agent J：用手机指挥这台机器上的 AI Agent。',s1:'安装 Agent J',s2:'绑定你的席位',
-s2h:'在 agentj.app/account 的空席位卡上点「复制安装提示词」，把整段粘贴到这里（会自动只取出设置码，不会显示、不会保存）。',
-nameh:'给这个 Agent 起个名字（可不填）',go:'绑定',s3:'添加手机遥控器',foot:'这个页面只在你的 Olares 登录后可见。设置码只用一次，用完即删。',
+s2h:'在下方账户页的空席位卡上点「复制安装提示词」。整段粘贴就行，不用挑出代码；设置码不会显示或保存。',
+placeholder:'把复制的整段安装提示粘贴到这里',guide1:'① 空席位卡 → 复制安装提示词',guide2:'② 整段粘贴到下方 → 绑定',buyh:'还没有席位？先注册并购买一个，再回来粘贴。',buy:'购买席位',nameh:'给这个 Agent 起个名字（可不填）',go:'绑定',s3:'添加手机遥控器',foot:'这个页面只在你的 Olares 登录后可见。设置码只用一次，用完即删。',
 ph:{starting:'正在启动…','error-image':'应用镜像不完整，已停止（请重新安装或联系我们）',ready:'已安装',serving:'已安装，正在运行'},
-pair:a=>`<ol><li>手机打开 <a href="${a}" target="_blank" rel="noopener">${a}</a> 登录</li><li>找到这台电脑「${N}」的席位卡，点「添加遥控器」</li><li>用通行密钥确认，按页面提示完成</li></ol>`,
+pair:a=>`<ol><li>手机打开 <a href="${a}" target="_blank" rel="noopener">${a}</a> 登录</li><li>找到这台 Agent J 主机「${N}」的席位卡，点「添加遥控器」</li><li>用通行密钥确认，按页面提示完成</li></ol>`,
 paired:'手机已配对 ✓ 现在可以在手机上和 Agent 说话了。',model:m=>`模型：Olares Router 上的 ${m}（OpenCode）`,
 no_code:'没找到设置码：请粘贴 ajt_ 或 AJI- 开头的码，或整段安装提示词。',already_bound:'这台 Olares 已经绑定了席位。要换席位，先在 Agent J Terminal 里运行 agentj unlink。',not_ready:'Agent J 还没准备好，请稍等再试。',wait:'正在绑定…',bound:'已绑定'}
 :{sub:'Agent J on your Olares: direct the AI agent on this machine from your phone.',s1:'Install Agent J',s2:'Bind your seat',
-s2h:'On an empty seat card at agentj.app/account press “Copy installation prompt” and paste all of it here (only the setup code is taken; it is never shown or kept).',
-nameh:'Name this Agent (optional)',go:'Bind',s3:'Add your phone as a remote',foot:'Only visible after you sign in to your Olares. The code is used once and deleted.',
+s2h:'On the account page below, press “Copy installation prompt” on an empty seat card. Paste the entire prompt here; no need to pick out the code. The setup code is never shown or kept.',
+placeholder:'Paste the entire copied installation prompt here',guide1:'1. Empty seat card → Copy installation prompt',guide2:'2. Paste all of it below → Bind',buyh:'No seat yet? Register and buy one, then come back to paste.',buy:'Buy a seat',nameh:'Name this Agent (optional)',go:'Bind',s3:'Add your phone as a remote',foot:'Only visible after you sign in to your Olares. The code is used once and deleted.',
 ph:{starting:'Starting…','error-image':'The app image is incomplete; stopped (reinstall, or contact us)',ready:'Installed',serving:'Installed and running'},
 pair:a=>`<ol><li>On your phone open <a href="${a}" target="_blank" rel="noopener">${a}</a> and sign in</li><li>On the seat card of “${N}” choose Add a remote</li><li>Confirm with your passkey and follow the page</li></ol>`,
 paired:'Phone paired ✓ You can talk to the Agent from your phone now.',model:m=>`Model: ${m} on Olares Router (OpenCode)`,
 no_code:'No setup code found: paste the code starting with ajt_ or AJI-, or the whole installation prompt.',already_bound:'This Olares is already bound to a seat. To change it, run agentj unlink in Agent J Terminal first.',not_ready:'Agent J is not ready yet; try again in a moment.',wait:'Binding…',bound:'Bound'};
 let N='';const $=i=>document.getElementById(i);
+document.documentElement.lang=zh?'zh-CN':'en';
 document.querySelectorAll('[data-t]').forEach(e=>e.textContent=T[e.dataset.t]);
+$('code').placeholder=T.placeholder;$('guide-title').textContent=T.guide1+'; '+T.guide2;
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function mark(id,state){$(id).classList.toggle('done',state==='done');$(id).classList.toggle('now',state==='now')}
 async function tick(){let s;try{s=await (await fetch('api/status',{cache:'no-store'})).json()}catch{return}
