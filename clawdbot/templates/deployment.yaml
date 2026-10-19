@@ -1,8 +1,8 @@
 # openclaw.json lifecycle:
-  # 1) First deploy: init-chmod-data creates .openclaw dir, copies openclaw.json from ConfigMap when missing, sets ownership.
+  # 1) init-permissions prepares named roots; UID 1000 seeds missing defaults.
   # 2) Runtime: app reads/writes openclaw.json on app-data-config; changes persist across restarts.
   # 3) Helm upgrade: init only copies default when file is missing; never overwrites.
-{{- $openclawImage := "openclaw/openclaw:2026.10.1" -}}
+{{- $openclawImage := "openclaw/openclaw:2026.10.5" -}}
 {{- $brewBaseImage := "beclab/harveyff-openclaw-brew-base:2026.9.2-cli" -}}
 {{- $brewBinPath := "/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/linuxbrew/.linuxbrew/opt/unzip/bin" -}}
 {{- $containerPath := printf "/opt/olares/bin:%s:/home/node/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" $brewBinPath -}}
@@ -31,6 +31,9 @@ spec:
         io.kompose.service: clawdbot
         bytetrade.io/terminal: clawdbot
     spec:
+      # Shared state ownership requires CLI and Gateway to see the same processes.
+      # Keep the recovery shell separate so it survives Gateway child restarts.
+      shareProcessNamespace: true
       # Allow the Gateway's 85s drain/flush budget to finish before kubelet kills it.
       terminationGracePeriodSeconds: 120
       # Recommended: make mounted volumes writable/readable for UID/GID 1000 more reliably
@@ -38,32 +41,71 @@ spec:
         fsGroup: 1000
 
       initContainers:
+        - name: init-permissions
+          image: "beclab/aboveos-busybox:1.37.0"
+          securityContext:
+            runAsUser: 0
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              for d in /home/node /home/node/.openclaw /home/node/.npm-global \
+                       /home/node/.npm-global/bin /home/node/.config \
+                       /home/node/.config/letsencrypt /home/node/letsencrypt \
+                       /home/node/letsencrypt/config /home/node/letsencrypt/work \
+                       /home/node/letsencrypt/logs /home/node/.openclaw/skills \
+                       /home/linuxbrew /home/linuxbrew/.linuxbrew; do
+                if [ -L "$d" ]; then
+                  echo "[init-permissions] refusing symlink at managed directory: $d" >&2
+                  exit 1
+                fi
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+              chmod 700 /home/node /home/node/.openclaw
+              echo "[init-permissions] prepared fixed directory roots; no recursive traversal"
+          volumeMounts:
+            - name: app-data-config
+              mountPath: /home/node/.openclaw
+            - name: app-data-node
+              mountPath: /home/node
+            - name: brew-volume
+              mountPath: /home/linuxbrew
         - name: init-install-brew
           image: "{{ $brewBaseImage }}"
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           command: ["/bin/bash", "-c"]
           args:
             - |
               set -euo pipefail
-              if cmp -s /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build 2>/dev/null; then
+              if [ -x /home/linuxbrew/.linuxbrew/bin/brew ] && \
+                 cmp -s /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build 2>/dev/null; then
                 echo "[init-brew] brew base up to date, skip"
               else
                 echo "[init-brew] updating brew base on volume..."
-                cp -a /brew-staging/.linuxbrew/. /home/linuxbrew/.linuxbrew/
+                # Copy the managed base, then commit its marker last. A killed
+                # copy must never make the next initialization skip an incomplete base.
+                for entry in /brew-staging/.linuxbrew/* \
+                             /brew-staging/.linuxbrew/.[!.]* \
+                             /brew-staging/.linuxbrew/..?*; do
+                  [ -e "$entry" ] || [ -L "$entry" ] || continue
+                  [ "$(basename "$entry")" != ".brew-base-build" ] || continue
+                  # Homebrew bottles contain read-only files (0444/0555).
+                  # Replace those managed files through their writable parent.
+                  cp -af "$entry" /home/linuxbrew/.linuxbrew/
+                done
+                cp /brew-staging/.linuxbrew/.brew-base-build /home/linuxbrew/.linuxbrew/.brew-base-build.pending
+                mv -f /home/linuxbrew/.linuxbrew/.brew-base-build.pending /home/linuxbrew/.linuxbrew/.brew-base-build
                 echo "[init-brew] done"
               fi
-              chown -R 1000:1000 /home/linuxbrew
               # Homebrew 4.x tap trust: upstream skills (camsnap, nano-pdf, …) use steipete/tap.
               export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"
               export HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew
               export HOMEBREW_NO_AUTO_UPDATE=1
               if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
-                su linuxbrew -s /bin/bash -c \
-                  'export PATH="/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:${PATH}"; \
-                   export HOMEBREW_PREFIX=/home/linuxbrew/.linuxbrew; \
-                   export HOMEBREW_NO_AUTO_UPDATE=1; \
-                   brew trust steipete/tap 2>/dev/null || true'
+                brew trust steipete/tap 2>/dev/null || true
                 echo "[init-brew] steipete/tap trust seeded (idempotent)"
               fi
           resources: {}
@@ -75,50 +117,37 @@ spec:
           imagePullPolicy: IfNotPresent
         - name: init-chmod-data
           image: "beclab/aboveos-busybox:1.37.0"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
             - sh
             - "-c"
             - |
-              OPENCLAW_UID=1000
-              OPENCLAW_GID=1000
-              if [ ! -d /home/node/.openclaw ]; then
-                mkdir -p /home/node/.openclaw
-                echo "Created directory: /home/node/.openclaw"
-              else
-                echo "Directory already exists: /home/node/.openclaw"
-              fi
-              if [ ! -d /home/node/.npm-global ]; then
-                mkdir -p /home/node/.npm-global/bin
-                echo "Created directory: /home/node/.npm-global"
-              else
-                echo "Directory already exists: /home/node/.npm-global"
-              fi
+              set -eu
+              umask 077
               if [ ! -f /home/node/.openclaw/openclaw.json ]; then
-                cp /default-openclaw/openclaw.json /home/node/.openclaw/openclaw.json
-                echo "Created openclaw.json from default config"
-              else
-                echo "openclaw.json already exists, skipping (upgrade-safe)"
+                config_tmp="$(mktemp /home/node/.openclaw/.openclaw.json.init.XXXXXX)"
+                cp /default-openclaw/openclaw.json "$config_tmp"
+                chmod 600 "$config_tmp"
+                mv "$config_tmp" /home/node/.openclaw/openclaw.json
               fi
-              # certbot (brew-base): non-root defaults under $HOME=/home/node; Olares TLS needs RSA.
-              mkdir -p /home/node/.config/letsencrypt \
-                       /home/node/letsencrypt/config \
-                       /home/node/letsencrypt/work \
-                       /home/node/letsencrypt/logs
+              if [ ! -r /home/node/.openclaw/openclaw.json ] || [ ! -w /home/node/.openclaw/openclaw.json ]; then
+                echo "[init-data] openclaw.json is not readable/writable by UID 1000; repair its ownership/permissions explicitly before resuming." >&2
+                exit 1
+              fi
               if [ ! -f /home/node/.config/letsencrypt/cli.ini ]; then
+                certbot_tmp="$(mktemp /home/node/.config/letsencrypt/.cli.ini.init.XXXXXX)"
                 printf '%s\n' \
                   '# Olares clawdbot: certbot paths for non-root use.' \
                   'config-dir = /home/node/letsencrypt/config' \
                   'work-dir = /home/node/letsencrypt/work' \
                   'logs-dir = /home/node/letsencrypt/logs' \
                   'key-type = rsa' \
-                  > /home/node/.config/letsencrypt/cli.ini
-                echo "[init-chmod-data] seeded certbot cli.ini under /home/node/.config/letsencrypt"
+                  > "$certbot_tmp"
+                mv "$certbot_tmp" /home/node/.config/letsencrypt/cli.ini
               fi
-              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node/.openclaw || true
-              chown -R ${OPENCLAW_UID}:${OPENCLAW_GID} /home/node || true
-              chmod -R 700 /home/node/.openclaw || true
-              chmod -R 700 /home/node || true
-              echo "Directory permissions set for UID ${OPENCLAW_UID} (upgrade-safe from root)"
+              echo "[init-data] configuration ready; existing user files preserved"
           resources: {}
           volumeMounts:
             - mountPath: /home/node/.openclaw
@@ -131,23 +160,22 @@ spec:
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsUser: 0
         # Flatten the olares-* skills baked into the brew-base image
         # (/skills-staging) into OpenClaw's managed skills dir
         # (~/.openclaw/skills = /home/node/.openclaw/skills). Runs after
-        # init-chmod-data (dir exists + owned 1000). Per-dir refresh so any
+        # init-permissions (dir exists + owned 1000). Per-dir refresh so any
         # user/bundled skills are never touched; skipped if the image has no
         # /skills-staging.
         - name: init-skills
           image: "{{ $brewBaseImage }}"
           imagePullPolicy: IfNotPresent
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           command: ["/bin/sh", "-c"]
           args:
             - |
-              set -u
+              set -eu
               if [ ! -d /skills-staging ]; then
                 echo "[init-skills] /skills-staging not in image; skipping"
                 exit 0
@@ -157,7 +185,6 @@ spec:
                 name="$(basename "$d")"
                 rm -rf "/home/node/.openclaw/skills/$name"
                 cp -a "$d" "/home/node/.openclaw/skills/$name"
-                chown -R 1000:1000 "/home/node/.openclaw/skills/$name"
               done
               echo "[init-skills] Olares skills flattened into /home/node/.openclaw/skills:"
               ls -1 /skills-staging
