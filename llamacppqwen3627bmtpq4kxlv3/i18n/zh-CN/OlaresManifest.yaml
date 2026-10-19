@@ -1,9 +1,11 @@
 metadata:
-  description: "使用 llama.cpp 运行 Qwen3.6-27B MTP UD-Q4_K_XL 模型。"
+  description: "使用 llama.cpp 运行 Qwen3.6-27B MTP UD-Q4_K_XL 模型。 修复多节点启动问题：将 llm-init 与推理引擎调度到同一节点，确保共享本地运行状态目录。"
   title: Qwen3.6-27B MTP (llama.cpp)
 
 spec:
   upgradeDescription: |
+    v1.0.25: 新增 Intel 独显模式，使用 server-intel-b11718；NVIDIA/Spark CUDA 镜像升级为 server-cuda13-b11718。默认 MTP 深度调整为 3，保留 128K 上下文；迁移完整匹配的旧默认参数，保留其他自定义配置。Intel 在 Model Console 下载权重后离线加载。
+
     v1.0.23: Model Console（llm-init）版本更新为 v1.7.21。
 
     v1.0.22: Model Console 升级到 llm-init v1.7.19。
@@ -26,6 +28,11 @@ spec:
     v1.0.4: bump llm-init to v1.3.1.
     v1.0.4: align nvidia requiredMemory=12Gi and LLAMACPP_MEMORY_REQUEST=11Gi (qwopus pattern).
   fullDescription: |
+    **Intel 加速**
+    - `intel-gpu`：Intel 独显，预留 26Gi 显存和 6Gi 系统内存，系统内存上限 40Gi。
+    - 引擎镜像：`beclab/ggml-org-llama.cpp:server-intel-b11718`。
+    - Intel 预设：`-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3 -b 512 -ub 256 --offline`。保留用户自定义的完整引擎参数。
+
     **模型简介**
     Qwen3.6-27B MTP 是阿里巴巴 Qwen 系列带内置 Multi-Token Prediction (MTP) 草稿头的文本模型变体。MTP 草稿解码每步预测多个 token，提升生成吞吐。支持思考与工具调用。本应用通过 llama.cpp 运行 `unsloth/Qwen3.6-27B-MTP-GGUF` 的 `UD-Q4_K_XL` GGUF 量化版本（纯文本预设，不含视觉/mmproj）。
 
@@ -34,8 +41,8 @@ spec:
     **预设配置**
     - 模型：`unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
     - 能力：思考、工具
-    - 引擎参数：`-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2`（98K 上下文、MTP draft-2、全量 GPU 卸载、q8_0 KV 缓存）
-    - MTP 增加少量显存占用；如果全 98K 上下文时 OOM，减少 `-c`（例如 `-c 65536`）。
+    - 引擎参数：`-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3`（128K 上下文、MTP draft-3、全量 GPU 卸载、q8_0 KV 缓存）
+    - MTP 增加少量显存占用；如果全 128K 上下文时 OOM，减少 `-c`（例如 `-c 65536`）。
     - 所需显存：`23Gi`
 
     **加速器模式**
