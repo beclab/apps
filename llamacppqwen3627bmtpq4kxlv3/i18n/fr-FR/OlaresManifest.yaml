@@ -1,9 +1,11 @@
 metadata:
-  description: "Qwen3.6-27B MTP UD-Q4_K_XL servi avec llama.cpp"
+  description: "Qwen3.6-27B MTP UD-Q4_K_XL servi avec llama.cpp. Correction du démarrage sur plusieurs nœuds en plaçant llm-init et le moteur d’inférence sur le même nœud pour partager l’état d’exécution local."
   title: Qwen3.6-27B MTP (llama.cpp)
 
 spec:
   upgradeDescription: |
+    v1.0.25: Ajout du mode GPU dédié Intel avec server-intel-b11718 ; mise à jour de l’image CUDA NVIDIA/Spark vers server-cuda13-b11718. La profondeur MTP par défaut passe à 3, avec un contexte de 128K. Migration des arguments correspondant exactement aux anciens paramètres par défaut ; les autres arguments personnalisés sont conservés. Intel charge les poids hors ligne après leur téléchargement.
+
     v1.0.23: Model Console (llm-init) a été mis à jour vers la version v1.7.21.
 
     v1.0.22 : Model Console passe à llm-init v1.7.19.
@@ -24,6 +26,11 @@ spec:
     v1.0.4 : monter llm-init à v1.3.1.
     v1.0.4 : aligner nvidia requiredMemory=12Gi et LLAMACPP_MEMORY_REQUEST=11Gi (motif qwopus).
   fullDescription: |
+    **Intel acceleration**
+    - `intel-gpu`: Intel discrete GPU, 26Gi VRAM and 6Gi system-memory reservation (40Gi limit).
+    - Engine image: `beclab/ggml-org-llama.cpp:server-intel-b11718`.
+    - Intel preset: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3 -b 512 -ub 256 --offline`. Custom engine arguments are preserved.
+
     **Model Overview**
     Qwen3.6-27B MTP est une variante de modèle texte avec têtes Multi-Token Prediction (MTP) intégrées de la série Qwen (Alibaba). Le draft decoding MTP prédit plusieurs tokens par étape pour un débit de génération plus élevé. Il prend en charge thinking et tool calling. Cette app sert le build GGUF `UD-Q4_K_XL` de `unsloth/Qwen3.6-27B-MTP-GGUF` via llama.cpp (preset texte seul, sans vision/mmproj).
 
@@ -32,8 +39,8 @@ spec:
     **Preset Configuration**
     - Model : `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
     - Capabilities : thinking, tools
-    - Engine args : `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (contexte 98K, MTP draft-2, offload GPU complet, cache KV q8_0)
-    - MTP ajoute un overhead VRAM modeste ; en cas d’OOM à contexte 98K plein, réduisez `-c` (p. ex. `-c 65536`).
+    - Engine args : `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3` (contexte 128K, MTP draft-3, offload GPU complet, cache KV q8_0)
+    - MTP ajoute un overhead VRAM modeste ; en cas d’OOM à contexte 128K plein, réduisez `-c` (p. ex. `-c 65536`).
     - Required GPU memory : `23Gi`
 
     **Accelerator modes**

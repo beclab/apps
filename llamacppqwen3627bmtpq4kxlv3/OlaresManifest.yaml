@@ -4,10 +4,10 @@ apiVersion: 'v3'
 metadata:
   name: llamacppqwen3627bmtpq4kxlv3
   icon: https://app.cdn.olares.com/appstore/llm/llamacpp/qwen.png
-  description: "Qwen3.6-27B MTP UD-Q4_K_XL served with llama.cpp."
+  description: "Qwen3.6-27B MTP UD-Q4_K_XL served with llama.cpp. Fixed multi-node startup by scheduling llm-init and the inference engine on the same node to share local run-state."
   appid: llamacppqwen3627bmtpq4kxlv3
   title: Qwen3.6-27B MTP (llama.cpp)
-  version: '1.0.23'
+  version: '1.0.26'
   categories:
   - AI
   - models
@@ -38,6 +38,8 @@ spec:
   onlyAdmin: true
   versionName: 'unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL'
   upgradeDescription: |
+    v1.0.25: Add Intel discrete GPU mode using server-intel-b11718. Upgrade the NVIDIA/Spark CUDA image to server-cuda13-b11718. Set the default MTP depth to 3 while retaining the 128K context; migrate exact previous presets and preserve other custom arguments. Intel loads offline after Model Console downloads the weights.
+
     v1.0.23: Model Console (llm-init) updated to v1.7.21.
 
     v1.0.22: Model Console upgrades to llm-init v1.7.19.
@@ -68,8 +70,8 @@ spec:
     **Preset Configuration**
     - Model: `unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q4_K_XL`
     - Capabilities: thinking, tools
-    - Engine args: `-c 100352 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2` (98K context, MTP draft-2, full GPU offload, q8_0 KV cache)
-    - MTP adds modest VRAM overhead; if OOM at full 98K context, reduce `-c` (e.g. `-c 65536`).
+    - Engine args: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3` (128K context, MTP draft-3, full GPU offload, q8_0 KV cache)
+    - MTP adds modest VRAM overhead; if OOM at full 128K context, reduce `-c` (e.g. `-c 65536`).
     - Required GPU memory: `23Gi`
 
     **Accelerator modes**
@@ -78,11 +80,16 @@ spec:
     | `nvidia`       | GPU (CUDA)        | Uses `23Gi` GPU memory; `-ngl all` for full GPU  |
     | `nvidia-gb10`  | GPU (Spark)       | Like above, but memory is managed by the pod     |
     
+    **Intel acceleration**
+    - `intel-gpu`: Intel discrete GPU, 26Gi VRAM and 6Gi system-memory reservation (40Gi limit).
+    - Engine image: `beclab/ggml-org-llama.cpp:server-intel-b11718`.
+    - Intel preset: `-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3 -b 512 -ub 256 --offline`. Custom engine arguments are preserved.
+
     **How It Works**
     First, Model Console downloads the model and gets it ready, then `llama.cpp` starts serving when ready. MTP (`--spec-type draft-mtp`) uses the model's built-in draft head to predict multiple tokens per step for higher decode throughput.
 
     **Stack**
-    - **llama.cpp** (`server-cuda12-b10068`): Runs the model and serves API requests (port 8081)
+    - **llama.cpp** (`server-cuda13-b11718`): Runs the model and serves API requests (port 8081)
     - **Model Console**: Downloads the model, shows progress, and provides the OpenAI API on port 8090, proxying to `llamacpp`
 
     **Model Storage**
@@ -129,6 +136,16 @@ spec:
       limitedMemory: "48Gi"
       requiredMemory: "32Gi"
 
+    - mode: intel-gpu
+      limitedCpu: "15360m"
+      requiredCpu: "1100m"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      requiredMemory: "6Gi"
+      limitedMemory: "40Gi"
+      requiredGPUMemory: "26Gi"
+      limitedGPUMemory: "26Gi"
+
   supportArch:
     - amd64
     - arm64
@@ -143,7 +160,7 @@ options:
   templateOnly: false
   dependencies:
     - name: olares
-      version: '>=1.12.6-0'
+      version: '>=1.12.7-0'
       type: system
 envs:
   # Model is preset for this app; these values are fixed and not user-editable.
@@ -193,7 +210,7 @@ envs:
     description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
   - envName: ENGINE_ARGS         # example: -c 8192 -ngl all -fa on
     required: true
-    default: "-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 2"
+    default: "-c 131072 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 --spec-type draft-mtp --spec-draft-n-max 3"
     type: string
     editable: true
     applyOnChange: true
