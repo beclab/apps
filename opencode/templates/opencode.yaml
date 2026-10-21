@@ -49,10 +49,14 @@ spec:
         # Multi-node userspace is JuiceFS (FUSE); the kernel refuses OverlayFS
         # and Docker overlay2 there with "Not supported". appCache is the
         # node-local disk. Home and the Code workspace stay on shared storage.
+        # The session database is SQLite WAL. JuiceFS returns disk I/O errors
+        # for that journal, so it moves to appCache as well. A single-node
+        # ext4 home does not hit this, which is why chat works there.
         #
         # migrate-node-local: one-time copy from the old appData location when
         # that location is a real filesystem (single-node). A FUSE copy cannot
         # be a valid overlay upper, so it is left behind and the cache starts fresh.
+        # The session database is copied from either filesystem.
         - name: migrate-node-local
           image: "{{ $image }}"
           command:
@@ -152,6 +156,28 @@ spec:
                 echo "no legacy docker graph"
               fi
               {{- end }}
+              # Sessions live in SQLite WAL files. Copy them off appData even
+              # when that disk is JuiceFS: the bytes are fine, only the live
+              # journal is not. cp without preserving timestamps, because
+              # JuiceFS can fail the utime that cp -a and shutil.copy2 issue.
+              mkdir -p /new-state
+              if has_files /new-state; then
+                echo "node-local session database already present"
+              elif has_files /legacy/.local/share/opencode; then
+                echo "copying session database onto node-local cache"
+                find /legacy/.local/share/opencode -type d -print0 | while IFS= read -r -d '' dir; do
+                  rel="${dir#/legacy/.local/share/opencode}"
+                  mkdir -p "/new-state${rel}"
+                done
+                find /legacy/.local/share/opencode -type f -print0 | while IFS= read -r -d '' file; do
+                  rel="${file#/legacy/.local/share/opencode}"
+                  mkdir -p "$(dirname "/new-state${rel}")"
+                  cp "$file" "/new-state${rel}"
+                done
+              else
+                echo "no legacy session database; starting on node-local cache"
+              fi
+              chown -R 1000:1000 /new-state
           resources:
             requests:
               cpu: 50m
@@ -162,6 +188,8 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /legacy
+            - name: opencode-state
+              mountPath: /new-state
             - name: pkg-overlay
               mountPath: /new-overlay
               mountPropagation: Bidirectional
@@ -412,6 +440,8 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: opencode-state
+              mountPath: /home/opencode/.local/share/opencode
             - name: pkg-overlay
               mountPath: /home/opencode/.pkg-overlay
             - name: apk-cache
@@ -697,6 +727,13 @@ spec:
         - name: apk-cache
           hostPath:
             path: "{{ .Values.userspace.appCache }}/.apk-cache"
+            type: DirectoryOrCreate
+        # Session database (SQLite WAL). JuiceFS fails the journal with
+        # "disk I/O error", so this directory is node-local ext4. The pod is
+        # already pinned to one node for the overlay upper.
+        - name: opencode-state
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/.opencode-state"
             type: DirectoryOrCreate
         # Merged overlay views (image lower + user upper), populated by init-overlay.
         - name: pkg-bin
