@@ -30,16 +30,154 @@ spec:
         io.kompose.service: opencode
         bytetrade.io/terminal: opencode
     spec:
+      # appCache is node-local. Pin here so the overlay upper and docker graph
+      # stay on the same disk across restarts. schedule.nodeName is set when the
+      # chart requests storage permissions.
+      {{- if .Values.schedule.nodeName }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - {{ .Values.schedule.nodeName | quote }}
+      {{- end }}
       initContainers:
-        # All init logic is baked into the image at /opt/olares-bake/lib; the
-        # chart only execs it and passes the few dynamic values via env. Both
-        # init steps below are STRICTLY OFFLINE (no network on new install /
-        # restart / upgrade): everything is baked into the image, user packages
-        # persist in the OverlayFS upper and are never reinstalled.
+        # Package overlay + docker graph must live on a real block filesystem.
+        # Multi-node userspace is JuiceFS (FUSE); the kernel refuses OverlayFS
+        # and Docker overlay2 there with "Not supported". appCache is the
+        # node-local disk. Home and the Code workspace stay on shared storage.
         #
+        # migrate-node-local: one-time copy from the old appData location when
+        # that location is a real filesystem (single-node). A FUSE copy cannot
+        # be a valid overlay upper, so it is left behind and the cache starts fresh.
+        - name: migrate-node-local
+          image: "{{ $image }}"
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              # df -T wraps a long device name onto the next line, so field 2 is
+              # empty on /dev/mapper/olares--vg-data. -P keeps one line; /proc/mounts
+              # is the fallback. Docker 29 stores layers in the containerd overlayfs
+              # snapshotter, not in docker/overlay2.
+              fstype() {
+                local t p="$1"
+                t="$(df -PT "$p" 2>/dev/null | awk 'NR==2 { print $2 }' || true)"
+                if [ -n "${t}" ] && [ "${t}" != "Type" ]; then
+                  printf '%s\n' "${t}"
+                  return 0
+                fi
+                awk -v p="$p" '
+                  function unesc(s) { gsub(/\\040/, " ", s); return s }
+                  BEGIN { best = 0 }
+                  {
+                    mp = unesc($2)
+                    if (index(p "/", mp "/") == 1 && length(mp) > best) { best = length(mp); t = $3 }
+                  }
+                  END { if (t != "") print t }
+                ' /proc/mounts || true
+              }
+              usable() { [ -n "$1" ] && [[ "$1" != *fuse* ]]; }
+              has_files() {
+                [ -d "$1" ] || return 1
+                find "$1" -type f -print -quit 2>/dev/null | grep -q .
+              }
+              copy_tree() {
+                local src="$1" dst="$2"
+                mkdir -p "$dst"
+                tar --xattrs --xattrs-include='*' -C "$src" -cf - . | tar --xattrs --xattrs-include='*' -C "$dst" -xf -
+              }
+              # The previous pod's overlay mounts stay on the host (Bidirectional)
+              # and the kernel refuses to rmdir those directories until they are
+              # unmounted. Do that before swapping in the copied tree.
+              unmount_merged() {
+                local dst="$1" d
+                [ -d "$dst/merged" ] || return 0
+                for d in "$dst"/merged/*; do
+                  [ -d "$d" ] || continue
+                  umount "$d" 2>/dev/null || umount -l "$d" 2>/dev/null || true
+                done
+              }
+              # Stage beside the destination, then swap. A failed copy leaves no
+              # partial tree that the next start would treat as already migrated.
+              replace_tree() {
+                local src="$1" dst="$2"
+                rm -rf "$dst/.incoming"
+                mkdir -p "$dst/.incoming"
+                copy_tree "$src" "$dst/.incoming"
+                unmount_merged "$dst"
+                find "$dst" -mindepth 1 -maxdepth 1 ! -name .incoming -exec rm -rf {} +
+                find "$dst/.incoming" -mindepth 1 -maxdepth 1 -exec mv {} "$dst"/ \;
+                rm -rf "$dst/.incoming"
+              }
+              if [ -d /legacy/.pkg-overlay/upper ]; then
+                src_fs="$(fstype /legacy/.pkg-overlay || true)"
+                echo "legacy pkg-overlay fstype=${src_fs:-unknown}"
+                if ! usable "${src_fs}"; then
+                  echo "legacy pkg-overlay is not a usable OverlayFS upper; starting on node-local cache"
+                elif has_files /new-overlay/upper; then
+                  echo "node-local pkg-overlay already present"
+                elif has_files /legacy/.pkg-overlay/upper; then
+                  echo "copying pkg-overlay onto node-local cache"
+                  replace_tree /legacy/.pkg-overlay /new-overlay
+                  rm -rf /legacy/.pkg-overlay
+                else
+                  echo "legacy pkg-overlay upper is empty; starting on node-local cache"
+                fi
+              else
+                echo "no legacy pkg-overlay upper"
+              fi
+              {{- if $enableDind }}
+              legacy_snaps=/legacy/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots
+              new_snaps=/new-docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots
+              if [ -d /legacy/docker/overlay2 ] || [ -d "${legacy_snaps}" ]; then
+                src_fs="$(fstype /legacy/docker || true)"
+                echo "legacy docker fstype=${src_fs:-unknown}"
+                if ! usable "${src_fs}"; then
+                  echo "legacy docker graph is not a usable image store; starting on node-local cache"
+                elif has_files /new-docker/overlay2 || has_files "${new_snaps}"; then
+                  echo "node-local docker graph already present"
+                elif has_files /legacy/docker/overlay2 || has_files "${legacy_snaps}"; then
+                  echo "copying docker graph onto node-local cache"
+                  replace_tree /legacy/docker /new-docker
+                  rm -rf /legacy/docker
+                else
+                  echo "legacy docker graph has no layers; starting on node-local cache"
+                fi
+              else
+                echo "no legacy docker graph"
+              fi
+              {{- end }}
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: opencode-home
+              mountPath: /legacy
+            - name: pkg-overlay
+              mountPath: /new-overlay
+              mountPropagation: Bidirectional
+            {{- if $enableDind }}
+            - name: dind-storage
+              mountPath: /new-docker
+            {{- end }}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            privileged: true
+
         # init-home: lay down the $HOME-side config + seeds (opencode.json,
-        # skills, OMO cache, /etc bits, venv). Runs init-setup then init-packages
-        # (merged into one container -- neither needs the overlay mounts).
+        # skills, OMO cache, /etc bits, venv). init-packages.sh hardcodes
+        # PKG=/home/opencode/.pkg-overlay, so that path is a nested mount of the
+        # node-local volume. The merged overlay mounts come later.
         - name: init-home
           image: "{{ $image }}"
           command:
@@ -47,7 +185,66 @@ spec:
             - "-c"
             - |
               set -e
+              # apk leaves *.tmp.* index files under $HOME/.apk-cache. On JuiceFS
+              # they can disappear while init-setup's find|chown walks the tree,
+              # and that non-zero chown aborts every later start.
+              find /home/opencode/.apk-cache -name '*.tmp.*' -delete 2>/dev/null || true
               /opt/olares-bake/lib/init-setup.sh
+              # Add Olares Router only when the user has not configured a provider.
+              # init-setup rewrites opencode.json and keeps unknown keys, so this
+              # runs after it. A non-empty provider object is left untouched.
+              python3 - <<'PY'
+              import json
+              import os
+              from pathlib import Path
+
+              path = Path("/home/opencode/.config/opencode/opencode.json")
+
+              def router_base():
+                  raw = os.environ.get("OLARES_ROUTER_BASE_URL", "").strip().rstrip("/")
+                  host = raw[len("https://"):-len("/v1")] if raw.startswith("https://") and raw.endswith("/v1") else ""
+                  if host.startswith("router.") and host.count(".") >= 2 and "<" not in host:
+                      return raw
+                  domain = os.environ.get("OLARES_OC_DOMAIN", "").split(",")[0].strip()
+                  domain = domain.split("://")[-1].split("/")[0].split(":")[0]
+                  labels = [part for part in domain.split(".") if part]
+                  if len(labels) < 3:
+                      return ""
+                  return "https://router." + ".".join(labels[1:]) + "/v1"
+
+              cfg = {}
+              if path.is_file():
+                  try:
+                      cfg = json.loads(path.read_text(encoding="utf-8"))
+                  except json.JSONDecodeError:
+                      print("router provider: skipped, opencode.json is not valid JSON")
+                      raise SystemExit(0)
+              if not isinstance(cfg, dict):
+                  print("router provider: skipped, opencode.json is not an object")
+                  raise SystemExit(0)
+              providers = cfg.get("provider")
+              if isinstance(providers, dict) and providers:
+                  print("router provider: existing provider config kept")
+                  raise SystemExit(0)
+              base = router_base()
+              if not base:
+                  print("router provider: skipped, Router URL unknown")
+                  raise SystemExit(0)
+              cfg["provider"] = {
+                  "olares": {
+                      "npm": "@ai-sdk/openai-compatible",
+                      "name": "Olares Router",
+                      "options": {"baseURL": base},
+                      "models": {"default-chat": {"name": "default-chat"}},
+                  }
+              }
+              if not cfg.get("model"):
+                  cfg["model"] = "olares/default-chat"
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+              os.chown(path, 1000, 1000)
+              print("router provider: added Olares Router at " + base)
+              PY
               /opt/olares-bake/lib/init-packages.sh
               mkdir -p /home/opencode/.local/bin
               cp /opt/certbot-wrapper/certbot /home/opencode/.local/bin/certbot
@@ -56,6 +253,8 @@ spec:
           env:
             - name: OLARES_OC_DOMAIN
               value: "{{ $opencodeDomain }}"
+            - name: OLARES_ROUTER_BASE_URL
+              value: "https://router.{{ .Values.user.zone }}/v1"
             - name: OLARES_ENABLE_OMO
               value: "{{ if $enableOMO }}1{{ else }}0{{ end }}"
             - name: OLARES_OMO_VERSION
@@ -63,6 +262,10 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: pkg-overlay
+              mountPath: /home/opencode/.pkg-overlay
+            - name: apk-cache
+              mountPath: /home/opencode/.apk-cache
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
             - name: certbot-wrapper
@@ -85,9 +288,10 @@ spec:
           # Privileged: mounts an OverlayFS so the baked image rootfs (/usr /bin
           # /sbin /lib /lib64) is the read-only lower layer (ZERO copy) and only
           # user-installed package deltas live in a small persistent upper layer.
-          # The upper is NEVER reset, so user packages persist across upgrades
-          # with zero reinstall / zero network. Allowed by the cluster OPA policy
-          # because this is a trusted (beclab/) image.
+          # The upper is on node-local cache (not JuiceFS) and is NEVER reset, so
+          # user packages persist across upgrades with zero reinstall / zero
+          # network. Allowed by the cluster OPA policy because this is a trusted
+          # (beclab/) image.
           image: "{{ $image }}"
           command: ["sh", "-c", "exec /opt/olares-bake/lib/init-overlay.sh"]
           resources:
@@ -148,6 +352,10 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: pkg-overlay
+              mountPath: /home/opencode/.pkg-overlay
+            - name: apk-cache
+              mountPath: /home/opencode/.apk-cache
         {{- end }}
       serviceAccountName: proxylistener
       containers:
@@ -204,6 +412,10 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: pkg-overlay
+              mountPath: /home/opencode/.pkg-overlay
+            - name: apk-cache
+              mountPath: /home/opencode/.apk-cache
             - name: opencode-workspace
               mountPath: /home/opencode/workspace
             - name: pkg-bin
@@ -352,6 +564,10 @@ spec:
           volumeMounts:
             - name: opencode-home
               mountPath: /home/opencode
+            - name: pkg-overlay
+              mountPath: /home/opencode/.pkg-overlay
+            - name: apk-cache
+              mountPath: /home/opencode/.apk-cache
             - name: pkg-bin
               mountPath: /bin
               mountPropagation: HostToContainer
@@ -390,7 +606,7 @@ spec:
         {{- if $enableDind }}
         # Privileged Docker-in-Docker engine. Runs dockerd on tcp://localhost:2375
         # (in-pod only); the opencode container's DOCKER_HOST points here. Image
-        # layers persist on the appData hostPath so `docker` state survives restarts.
+        # layers persist on node-local cache so overlay2 is not stored on JuiceFS.
         - name: docker-dind
           image: "docker.io/beclab/docker:29.3.0-dind"
           imagePullPolicy: IfNotPresent
@@ -466,58 +682,68 @@ spec:
             items:
               - key: certbot
                 path: certbot
-        # Parent of the overlay tree (upper/work/merged + marker). init-overlay
-        # mounts this Bidirectional so the overlay mounts it creates propagate to
-        # the node and are visible to the other containers' merged binds below.
+        # Parent of the overlay tree (upper/work/merged + marker). Must be a
+        # block filesystem: JuiceFS returns EOPNOTSUPP for an overlay upper/work
+        # dir. init-overlay mounts this Bidirectional so the overlay mounts it
+        # creates propagate to the node and are visible to the merged binds below.
+        # init-packages.sh writes this same tree at /home/opencode/.pkg-overlay.
         - name: pkg-overlay
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay"
+            type: DirectoryOrCreate
+        # pkg-manager.sh points /etc/apk/cache at $HOME/.apk-cache. JuiceFS turns
+        # apk's index temp files into unreadable ghosts ("No such file or
+        # directory"), so the cache has to be node-local ext4 like the overlay.
+        - name: apk-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/.apk-cache"
             type: DirectoryOrCreate
         # Merged overlay views (image lower + user upper), populated by init-overlay.
         - name: pkg-bin
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/bin"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/merged/bin"
             type: DirectoryOrCreate
         - name: pkg-sbin
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/sbin"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/merged/sbin"
             type: DirectoryOrCreate
         - name: pkg-usr
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/usr"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/merged/usr"
             type: DirectoryOrCreate
         - name: pkg-lib
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/lib"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/merged/lib"
             type: DirectoryOrCreate
         - name: pkg-lib64
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/merged/lib64"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/merged/lib64"
             type: DirectoryOrCreate
         # Tiny /etc bits kept as plain persistent files/dirs (seeded by init-packages
         # from the image); not part of the overlay.
         - name: pkg-etc-passwd
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/passwd"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/etc/passwd"
             type: FileOrCreate
         - name: pkg-etc-group
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/group"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/etc/group"
             type: FileOrCreate
         - name: pkg-etc-apk
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/apk"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/etc/apk"
             type: DirectoryOrCreate
         - name: pkg-etc-ssl
           hostPath:
-            path: "{{ .Values.userspace.appData }}/.pkg-overlay/etc/ssl"
+            path: "{{ .Values.userspace.appCache }}/.pkg-overlay/etc/ssl"
             type: DirectoryOrCreate
         {{- if $enableDind }}
-        # DIND: dockerd's image/layer store persisted on the appData hostPath.
-        # (The docker client is staged into $HOME by init-docker-cli, no volume.)
+        # DIND: dockerd's image/layer store on node-local cache. overlay2 cannot
+        # use a JuiceFS directory. The docker client is staged into $HOME by
+        # init-docker-cli, no extra volume for the client.
         - name: dind-storage
           hostPath:
-            path: "{{ .Values.userspace.appData }}/docker"
+            path: "{{ .Values.userspace.appCache }}/docker"
             type: DirectoryOrCreate
         {{- end }}
 
