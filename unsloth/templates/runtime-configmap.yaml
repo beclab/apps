@@ -1,0 +1,86 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unsloth-runtime
+  namespace: {{ .Release.Namespace }}
+data:
+  uv.toml: |
+    [pip]
+    target = "/opt/unsloth-studio/runtime-packages/{{ .Values.image.tag }}"
+  prepare-runtime.py: |
+   """Backport descendant cleanup to the pinned 2026.10.10 Studio image.
+
+   Only the watchdog's force_terminate path changes. Cooperative stop/save, job
+   identity checks, history finalization and checkpoint cleanup stay upstream-owned.
+   Prepare an emptyDir copy; never modify the image or persistent application data.
+   Remove this backport after upgrading to an image with equivalent cleanup.
+   """
+
+   import ast
+   from pathlib import Path
+   import sys
+
+
+   HELPERS = '''
+
+   def _olares_terminate_descendants(pid):
+       import psutil
+       try:
+           descendants = psutil.Process(pid).children(recursive=True)
+       except psutil.NoSuchProcess:
+           return []
+       for child in reversed(descendants):
+           try:
+               child.terminate()
+           except psutil.NoSuchProcess:
+               pass
+       return descendants
+
+
+   def _olares_reap_descendants(descendants):
+       import psutil
+       _, alive = psutil.wait_procs(descendants, timeout=5)
+       for child in alive:
+           try:
+               child.kill()
+           except psutil.NoSuchProcess:
+               pass
+       psutil.wait_procs(alive, timeout=2)
+   '''
+
+
+   def patch_training(source):
+       """Fail closed if the pinned method changes; never silently skip the fix."""
+       tree = ast.parse(source)
+       methods = [
+           node for node in ast.walk(tree)
+           if isinstance(node, ast.FunctionDef) and node.name == "force_terminate"
+       ]
+       if len(methods) != 1 or "_olares_terminate_descendants" in source:
+           raise ValueError("Unexpected Studio training implementation; review the backport")
+       method = methods[0]
+       lines = source.splitlines(keepends=True)
+       original = "".join(lines[method.lineno - 1:method.end_lineno])
+       replacements = [
+           ("        with self._lock:\n", "        descendants = []\n        with self._lock:\n"),
+           ("                proc.terminate()\n",
+            "                descendants = _olares_terminate_descendants(proc.pid)\n"
+            "                proc.terminate()\n"),
+           ("        # Wait for pump thread to finish DB finalization",
+            "        _olares_reap_descendants(descendants)\n\n"
+            "        # Wait for pump thread to finish DB finalization"),
+       ]
+       patched = original
+       for before, after in replacements:
+           if patched.count(before) != 1:
+               raise ValueError("Studio force_terminate changed; review the backport")
+           patched = patched.replace(before, after, 1)
+       lines[method.lineno - 1:method.end_lineno] = [patched]
+       result = "".join(lines) + HELPERS
+       compile(result, "training.py", "exec")
+       return result
+
+
+   if __name__ == "__main__":
+       source, destination = map(Path, sys.argv[1:])
+       destination.write_text(patch_training(source.read_text()), encoding="utf-8")
