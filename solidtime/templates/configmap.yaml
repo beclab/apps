@@ -28,6 +28,7 @@ metadata:
   name: solidtime-env
   namespace: {{ .Release.Namespace }}
 data:
+  APP_VERSION: "0.22.1"
   APP_NAME: "solidtime"
   VITE_APP_NAME: "solidtime"
   APP_ENV: "production"
@@ -46,7 +47,7 @@ data:
   DB_CONNECTION: "pgsql"
   DB_HOST: "{{ .Values.postgres.host }}"
   DB_PORT: "{{ .Values.postgres.port }}"
-  DB_SSLMODE: "require"
+  DB_SSL_MODE: "require"
   DB_DATABASE: "{{ .Values.postgres.databases.solidtimedb }}"
   DB_USERNAME: "{{ .Values.postgres.username }}"
 
@@ -115,3 +116,79 @@ data:
         echo "Container mode mismatched."
         exit 1
     fi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solidtime-init-script
+  namespace: {{ .Release.Namespace }}
+data:
+  initialize.sh: |
+    #!/bin/sh
+    set -eu
+    umask 077
+    key=/etc/app-keys/.env
+    if [ ! -s "$key" ]; then
+      php artisan self-host:generate-keys > "$key.tmp"
+      grep -q '^APP_KEY=' "$key.tmp"
+      grep -q '^PASSPORT_PRIVATE_KEY=' "$key.tmp"
+      mv "$key.tmp" "$key"
+    fi
+    chmod 600 "$key"
+    cp "$key" /var/www/html/.env
+    php artisan migrate --force
+    state=$(php <<'PHP'
+    <?php
+    require 'vendor/autoload.php';
+    $app=require 'bootstrap/app.php';
+    $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+    echo App\Models\User::query()->where('email',strtolower(getenv('ADMIN_EMAIL')))->exists()?'exists':'new';
+    PHP
+    )
+    if [ "$state" = new ]; then
+      printf '%s\n' "$ADMIN_PASSWORD" | php artisan admin:user:create "$ADMIN_NAME" "$ADMIN_EMAIL" --verify-email --ask-for-password
+    fi
+    php <<'PHP'
+    <?php
+    require 'vendor/autoload.php';
+    $app=require 'bootstrap/app.php';
+    $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+    $exists=App\Models\Passport\Client::query()->get()->contains(fn($client)=>$client->hasGrantType('personal_access'));
+    if(!$exists){
+      $status=Illuminate\Support\Facades\Artisan::call('passport:client',['--personal'=>true,'--name'=>'solidtime Personal Access Client','--no-interaction'=>true]);
+      if($status!==0)throw new RuntimeException('Personal access client initialization failed');
+    }
+    echo "Application initialization completed; existing keys and accounts retained.\n";
+    PHP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solidtime-supervisor
+  namespace: {{ .Release.Namespace }}
+data:
+  supervisord-scheduler.conf: |
+    [supervisord]
+    nodaemon = true
+    user = %(ENV_USER)s
+
+    [supervisorctl]
+
+    [inet_http_server]
+    port = 127.0.0.1:9002
+
+    [rpcinterface:supervisor]
+    supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+  supervisord-queue.conf: |
+    [supervisord]
+    nodaemon = true
+    user = %(ENV_USER)s
+
+    [supervisorctl]
+
+    [inet_http_server]
+    port = 127.0.0.1:9003
+
+    [rpcinterface:supervisor]
+    supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface

@@ -46,50 +46,59 @@ spec:
             - '-c'
           args:
             - |
-              mkdir -p /var/www/html/storage/logs /var/www/html/storage/app
-              chown -R 1000:1000 /var/www/html/storage
-              chmod -R 755 /var/www/html/storage
+              for d in /var/www/html/storage /var/www/html/storage/app-storage /var/www/html/storage/logs /cache-logs /cache-logs/logs /etc/app-keys; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+              chmod 700 /etc/app-keys
           resources: { }
           volumeMounts:
             - name: solidtime-data
               mountPath: /var/www/html/storage
+            - name: solidtime-logs
+              mountPath: /cache-logs
+            - name: solidtime-keys
+              mountPath: /etc/app-keys
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 0
-        - name: solidtime-init
-          image: docker.io/solidtime/solidtime:0.17.0
-          command: ["sh", "-c"]
+        - name: backup-database
+          image: docker.io/postgres:17-alpine
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command: ["sh", "-ec"]
           args:
-            - |-
-              set -e
-
-              echo "=== Running database migrations ==="
-              php /var/www/html/artisan migrate --force
-
-              echo "=== Creating admin user ==="
-              echo $ADMIN_PASSWORD | php /var/www/html/artisan admin:user:create "{{ .Values.olaresEnv.ADMIN_NAME }}" "{{ .Values.olaresEnv.ADMIN_EMAIL }}" --verify-email --ask-for-password || true
-
-              echo "=== Checking if keys already exist ==="
-              KEY_FILE="/etc/app-keys/.env"
-
-              if [ -f "$KEY_FILE" ]; then
-                echo "✓ Keys already exist in PVC, skipping generation..."
-                cat "$KEY_FILE"
-              else
-                echo "Generating new application keys..."
-                php /var/www/html/artisan self-host:generate-keys > "$KEY_FILE" 2>&1 || true
-
-                if [ ! -s "$KEY_FILE" ]; then
-                  echo "ERROR: Failed to generate keys file or file is empty!"
-                  exit 1
-                fi
-
-                echo "✓ Keys generated successfully:"
-                cat "$KEY_FILE"
-              fi
+            - |
+              umask 077
+              folder=/data/.php-upgrade-backup
+              mkdir -p "$folder"
+              if [ -f "$folder/.pre-0.22.1-complete" ]; then exit 0; fi
+              export PGPASSWORD="$DB_PASSWORD" PGSSLMODE=require
+              pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USERNAME" -d "$DB_DATABASE" -Fc -f "$folder/pre-0.22.1.dump"
+              test -s "$folder/pre-0.22.1.dump"
+              pg_restore --list "$folder/pre-0.22.1.dump" > "$folder/pre-0.22.1-toc.txt"
+              test -s "$folder/pre-0.22.1-toc.txt"
+              sha256sum "$folder/pre-0.22.1.dump"
+              touch "$folder/.pre-0.22.1-complete"
+          envFrom:
+            - configMapRef:
+                name: solidtime-env
+            - secretRef:
+                name: {{ .Release.Name }}-secrets
+          volumeMounts:
+            - name: solidtime-data
+              mountPath: /data
+        - name: solidtime-init
+          image: docker.io/solidtime/solidtime:0.22.1
+          command: ["sh", "/olares-init/initialize.sh"]
           env:
+            - name: ADMIN_NAME
+              value: {{ .Values.olaresEnv.ADMIN_NAME | quote }}
+            - name: ADMIN_EMAIL
+              value: {{ .Values.olaresEnv.ADMIN_EMAIL | quote }}
             - name: CONTAINER_MODE
               value: scheduler
             - name: ADMIN_PASSWORD
@@ -98,13 +107,16 @@ spec:
                   name: {{ .Release.Name }}-secrets
                   key: ADMIN_PASSWORD
             - name: AUTO_DB_MIGRATE
-              value: "true"
+              value: "false"
           envFrom:
             - configMapRef:
                 name: solidtime-env
             - secretRef:
                 name: {{ .Release.Name }}-secrets
           volumeMounts:
+            - name: init-script
+              mountPath: /olares-init
+              readOnly: true
             - name: solidtime-keys
               mountPath: /etc/app-keys
             - name: solidtime-data
@@ -115,12 +127,12 @@ spec:
               subPath: logs
       containers:
         - name: solidtime
-          image: docker.io/solidtime/solidtime:0.17.0
+          image: docker.io/solidtime/solidtime:0.22.1
           env:
             - name: CONTAINER_MODE
               value: http
             - name: AUTO_DB_MIGRATE
-              value: "true"
+              value: "false"
           envFrom:
             - configMapRef:
                 name: solidtime-env
@@ -167,19 +179,8 @@ spec:
               subPath: logs
 
         - name: solidtime-scheduler
-          image: docker.io/solidtime/solidtime:0.17.0
-          command:
-            - /bin/sh
-            - '-c'
-          args:
-            - |-
-              echo "Changing supervisor port for worker to 9002"
-              sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9002/" /etc/supervisord.conf
-
-              echo "New supervisor config:"
-              grep "port =" /etc/supervisord.conf
-
-              start-container
+          image: docker.io/solidtime/solidtime:0.22.1
+          command: ["/usr/local/bin/start-container"]
           env:
             - name: CONTAINER_MODE
               value: scheduler
@@ -198,6 +199,10 @@ spec:
               cpu: 100m
               memory: 256Mi
           volumeMounts:
+            - name: supervisor-config
+              mountPath: /etc/supervisord.conf
+              subPath: supervisord-scheduler.conf
+              readOnly: true
             - name: solidtime-keys
               mountPath: /var/www/html/.env
               subPath: .env
@@ -231,19 +236,8 @@ spec:
             failureThreshold: 5
 
         - name: solidtime-queue
-          image: docker.io/solidtime/solidtime:0.17.0
-          command:
-            - /bin/sh
-            - '-c'
-          args:
-            - |-
-              echo "Changing supervisor port for worker to 9003"
-              sed -i "s/^port = 127.0.0.1:9001/port = 127.0.0.1:9003/" /etc/supervisord.conf
-
-              echo "New supervisor config:"
-              grep "port =" /etc/supervisord.conf
-
-              start-container
+          image: docker.io/solidtime/solidtime:0.22.1
+          command: ["/usr/local/bin/start-container"]
           env:
             - name: CONTAINER_MODE
               value: worker
@@ -264,6 +258,10 @@ spec:
               cpu: 100m
               memory: 256Mi
           volumeMounts:
+            - name: supervisor-config
+              mountPath: /etc/supervisord.conf
+              subPath: supervisord-queue.conf
+              readOnly: true
             - name: solidtime-keys
               mountPath: /var/www/html/.env
               subPath: .env
@@ -328,6 +326,12 @@ spec:
 
       restartPolicy: Always
       volumes:
+        - name: supervisor-config
+          configMap:
+            name: solidtime-supervisor
+        - name: init-script
+          configMap:
+            name: solidtime-init-script
         - name: solidtime-data
           hostPath:
             type: DirectoryOrCreate
