@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1
 
-ARG NEXTCLOUD_VERSION=32.0.14
-FROM docker.io/library/nextcloud:${NEXTCLOUD_VERSION}-apache
+# Preserve the intermediate app code and entrypoint while using patched PHP.
+FROM docker.io/library/nextcloud:32.0.14-apache AS nextcloud-source
+FROM docker.io/library/nextcloud:33.0.10-apache
+
+ENV NEXTCLOUD_VERSION=32.0.14
+RUN rm -rf /usr/src/nextcloud
+COPY --from=nextcloud-source /usr/src/nextcloud /usr/src/nextcloud
+COPY --from=nextcloud-source /entrypoint.sh /entrypoint.sh
+COPY --from=nextcloud-source /cron.sh /cron.sh
 
 # Debian www-data is uid/gid 33. Olares userspace hostPath is 1000:1000.
 # Capture the old ids before usermod; files keep the numeric owner until chown.
