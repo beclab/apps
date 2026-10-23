@@ -1,0 +1,277 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: showdoc-runtime
+  namespace: {{ .Release.Namespace }}
+data:
+  start.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+    umask 0022
+    test "$(id -u)" = 1000
+    data=/data
+    app=/var/www/html
+    source=/showdoc_data/html
+    mkdir -p /tmp/showdoc/sessions
+    # Code is disposable; user data remains in the original Home/showdoc directory.
+    rsync -r --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r --exclude=Sqlite/ --exclude=Public/Uploads/ "$source/" "$app/"
+    if [ ! -e "$data/Sqlite/showdoc.db.php" ]; then
+      rsync -r "$source/Sqlite/" "$data/Sqlite/"
+    fi
+    db="$data/Sqlite/showdoc.db.php"
+    test -s "$db"
+    version=$(php -r '$j=json_decode(file_get_contents("/showdoc_data/html/composer.json"),true); echo $j["version"];')
+    if [ "$(cat "$data/.olares-version" 2>/dev/null || true)" != "$version" ]; then
+      stamp=$(date -u +%Y%m%dT%H%M%SZ)
+      backup="$data/Sqlite/showdoc.db.php.olares-backup-$stamp"
+      sqlite3 "$db" ".timeout 30000" ".backup '$backup'"
+      test -s "$backup"
+      sqlite3 -readonly "$backup" 'SELECT count(*) FROM sqlite_master;' >/dev/null
+      echo "Database backup completed: $backup"
+      php /etc/showdoc/sqlite-guard.php "$db" "$backup"
+    fi
+    ln -sfn "$data/Sqlite" "$app/Sqlite"
+    ln -sfn "$data/Public/Uploads" "$app/Public/Uploads"
+    ln -sfn "$data/install/install.lock" "$app/install/install.lock"
+    legacy=config.php
+    config=server/Application/Home/Conf/$legacy
+    if [ -f "$data/$config" ]; then
+      cp "$data/$config" "$app/$config"
+    fi
+    if [ -f "$data/.env" ]; then
+      ln -sfn "$data/.env" "$app/.env"
+    fi
+    if [ -f "$data/web/index.html" ] && grep -q "lang:.*'en'" "$data/web/index.html"; then
+      sed -i "s/lang: 'zh-cn'/lang: 'en'/" "$app/web/index.html" "$app/web_src/index.html"
+    fi
+    printf '<?php echo file_get_contents("index.html");\n' > "$app/web/index.php"
+    mkdir -p "$app/server/app/Runtime" "$app/server/Application/Runtime"
+    cd "$app/server"
+    php index.php /api/update/dockerUpdateCode > /tmp/showdoc/migration.json
+    php -r '$r=json_decode(file_get_contents("/tmp/showdoc/migration.json"),true); if (!is_array($r) || ($r["error_code"] ?? -1) != 0) {fwrite(STDERR,"ShowDoc migration failed\n"); exit(1);}'
+    printf '%s\n' "$version" > "$data/.olares-version"
+    printf '%s\n' "$version" > "$app/.ver"
+    echo "ShowDoc $version prepared as UID $(id -u)"
+    exec /usr/bin/supervisord -c /etc/showdoc/supervisord.conf
+  nginx.conf: |
+    worker_processes auto;
+    pid /tmp/showdoc/nginx.pid;
+    error_log /dev/stderr warn;
+    events { worker_connections 1024; }
+    http {
+      map $http_x_forwarded_proto $forwarded_https {
+        default $https;
+        https on;
+      }
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      access_log /dev/stdout;
+      client_body_temp_path /tmp/showdoc/client_temp;
+      proxy_temp_path /tmp/showdoc/proxy_temp;
+      fastcgi_temp_path /tmp/showdoc/fastcgi_temp;
+      uwsgi_temp_path /tmp/showdoc/uwsgi_temp;
+      scgi_temp_path /tmp/showdoc/scgi_temp;
+      client_max_body_size 5120m;
+      server {
+        listen 8080;
+        server_name _;
+        root /var/www/html;
+        index index.php index.html;
+        location / { try_files $uri $uri/ /index.php?$query_string; }
+        location /web/ { try_files $uri $uri/ =404; }
+        location ^~ /Public/Uploads/ { deny all; }
+        location ^~ /Sqlite/ { deny all; }
+        location ^~ /server/bin/ { deny all; }
+        location ~ /\. { deny all; }
+        location ~ ^/Public/Uploads/.*\.php { deny all; }
+        location ~ \.php$ {
+          try_files $uri =404;
+          include /etc/nginx/fastcgi_params;
+          fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+          fastcgi_param HTTPS $forwarded_https;
+          fastcgi_pass 127.0.0.1:9000;
+          fastcgi_read_timeout 600;
+        }
+      }
+      # Dedicated MCP listener: no web UI, installer, uploads or generic API routing.
+      server {
+        listen 8081;
+        server_name _;
+        location = / { rewrite ^ /mcp.php last; }
+        location = /mcp.php {
+          include /etc/nginx/fastcgi_params;
+          fastcgi_param SCRIPT_FILENAME /var/www/html/mcp.php;
+          fastcgi_param HTTPS $forwarded_https;
+          fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+          fastcgi_pass 127.0.0.1:9000;
+          fastcgi_buffering off;
+          fastcgi_read_timeout 600;
+        }
+        location / { return 404; }
+      }
+    }
+  php-fpm.conf: |
+    [global]
+    daemonize = no
+    pid = /tmp/showdoc/php-fpm.pid
+    error_log = /dev/stderr
+    [www]
+    listen = 127.0.0.1:9000
+    pm = dynamic
+    pm.max_children = 16
+    pm.start_servers = 2
+    pm.min_spare_servers = 1
+    pm.max_spare_servers = 4
+    clear_env = no
+    catch_workers_output = yes
+    php_admin_value[session.save_path] = /tmp/showdoc/sessions
+    php_admin_value[upload_tmp_dir] = /tmp/showdoc
+    php_admin_value[upload_max_filesize] = 5120M
+    php_admin_value[post_max_size] = 5120M
+    php_admin_value[error_log] = /dev/stderr
+    php_admin_flag[log_errors] = on
+  supervisord.conf: |
+    [supervisord]
+    nodaemon=true
+    pidfile=/tmp/showdoc/supervisord.pid
+    logfile=/dev/null
+    logfile_maxbytes=0
+    childlogdir=/tmp/showdoc
+    [unix_http_server]
+    file=/tmp/showdoc/supervisor.sock
+    chmod=0700
+    [rpcinterface:supervisor]
+    supervisor.rpcinterface_factory=supervisor.rpcinterface:make_main_rpcinterface
+    [supervisorctl]
+    serverurl=unix:///tmp/showdoc/supervisor.sock
+    [program:nginx]
+    command=/usr/sbin/nginx -e /dev/stderr -c /etc/showdoc/nginx.conf -g "daemon off;"
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:php-fpm]
+    command=/usr/local/sbin/php-fpm --fpm-config /etc/showdoc/php-fpm.conf --nodaemonize
+    autorestart=true
+    stopasgroup=true
+    killasgroup=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:mock]
+    command=/usr/bin/node /showdoc_data/mock/index.js
+    directory=/showdoc_data/mock
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:backup]
+    command=/bin/bash /etc/showdoc/backup.sh
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+  backup.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+    umask 0022
+    while true; do
+      if [ "${1:-}" = once ] || [ "$(date -u +%H%M)" = 2001 ]; then
+        if ! mkdir /tmp/showdoc/backup.lock 2>/dev/null; then
+          [ "${1:-}" != once ] || exit 0
+          sleep 65
+          continue
+        fi
+        stopped=0
+        cleanup() {
+          if [ "$stopped" = 1 ]; then
+            supervisorctl -c /etc/showdoc/supervisord.conf start php-fpm
+          fi
+          rmdir /tmp/showdoc/backup.lock
+        }
+        trap cleanup EXIT
+        backup="/data/Sqlite/showdoc.db.php.daily-$(date -u +%Y%m%dT%H%M%SZ)"
+        # PHP keeps SQLite locked. Quiesce requests briefly for a consistent backup.
+        supervisorctl -c /etc/showdoc/supervisord.conf stop php-fpm
+        stopped=1
+        sqlite3 /data/Sqlite/showdoc.db.php '.timeout 30000' ".backup '$backup'"
+        test -s "$backup"
+        sqlite3 -readonly "$backup" 'SELECT count(*) FROM sqlite_master;' >/dev/null
+        supervisorctl -c /etc/showdoc/supervisord.conf start php-fpm
+        stopped=0
+        cleanup
+        trap - EXIT
+        echo "Daily database backup completed: $backup"
+        [ "${1:-}" != once ] || exit 0
+        sleep 65
+      fi
+      sleep 30
+    done
+
+  sqlite-guard.php: |
+    <?php
+    // Run before PHP/Mock start. Only the exact upstream seed's four orphan pages
+    // are eligible; other integrity errors require operator intervention.
+    umask(0077);
+    $path=$argv[1]??'';
+    if(!is_file($path))throw new RuntimeException('SQLite database is missing');
+    function logicalSnapshot(SQLite3 $db): array {
+        $schema=[];$q=$db->query('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name');
+        while($row=$q->fetchArray(SQLITE3_ASSOC))$schema[]=$row;
+        $q->finalize();
+        $tables=[];$q=$db->query("SELECT name,sql FROM sqlite_master WHERE type='table' ORDER BY name");
+        while($row=$q->fetchArray(SQLITE3_ASSOC))$tables[]=$row;
+        $q->finalize();$content=[];
+        foreach($tables as $table){
+            $name=$table['name'];$quoted='"'.str_replace('"','""',$name).'"';
+            $withRowid=!str_starts_with($name,'sqlite_')&&!str_contains(strtoupper($table['sql']??''),'WITHOUT ROWID');
+            $q=$db->query('SELECT '.($withRowid?'rowid AS "__audit_rowid", ':'').'* FROM '.$quoted);
+            $rows=[];while($row=$q->fetchArray(SQLITE3_ASSOC))$rows[]=hash('sha256',serialize($row));
+            $q->finalize();sort($rows,SORT_STRING);
+            $content[$name]=['rows'=>count($rows),'sha256'=>hash('sha256',implode('',$rows))];
+        }
+        return ['schema_sha256'=>hash('sha256',serialize($schema)),'tables'=>$content,'user_version'=>$db->querySingle('PRAGMA user_version'),'application_id'=>$db->querySingle('PRAGMA application_id'),'encoding'=>$db->querySingle('PRAGMA encoding')];
+    }
+    function integrity(SQLite3 $db): array {
+        $rows=[];$q=$db->query('PRAGMA integrity_check');
+        while($row=$q->fetchArray(SQLITE3_NUM))$rows[]=$row[0];
+        $q->finalize();return $rows;
+    }
+    $db=new SQLite3($path,SQLITE3_OPEN_READWRITE);$db->enableExceptions(true);$db->busyTimeout(30000);
+    $check=integrity($db);
+    if($check===['ok']){$db->close();echo "SQLite integrity check passed.\n";exit(0);}
+    $pages=[];
+    foreach(preg_split('/\R/',implode("\n",$check)) as $line){
+        if($line===''||$line==='*** in database main ***')continue;
+        if(!preg_match('/^Page (\d+): never used$/',$line,$m))throw new RuntimeException('Unexpected SQLite integrity error; original database retained');
+        $pages[]=(int)$m[1];
+    }
+    sort($pages);
+    if($pages!==[34,35,36,95])throw new RuntimeException('Unrecognized SQLite seed anomaly; original database retained');
+    if($db->querySingle('PRAGMA journal_mode')!=='delete')throw new RuntimeException('Seed maintenance requires DELETE journal mode; original database retained');
+    $before=logicalSnapshot($db);
+    $stamp=gmdate('Ymd\THis\Z').'-'.bin2hex(random_bytes(3));
+    $backup=$argv[2]??($path.'.olares-before-repack-'.$stamp);
+    if(isset($argv[2])){
+        if(!is_file($backup)||realpath($backup)===realpath($path))throw new RuntimeException('A separate pre-maintenance backup is required');
+        $copy=new SQLite3($backup,SQLITE3_OPEN_READONLY);
+    }else{
+        $copy=new SQLite3($backup,SQLITE3_OPEN_READWRITE|SQLITE3_OPEN_CREATE);
+        if(!$db->backup($copy))throw new RuntimeException('Pre-maintenance backup failed');
+    }
+    $copy->enableExceptions(true);chmod($backup,0600);
+    if(logicalSnapshot($copy)!==$before)throw new RuntimeException('Backup data verification failed');
+    $copy->close();
+    $candidate=$path.'.olares-repack-'.$stamp;
+    if(!$db->exec("VACUUM INTO '".SQLite3::escapeString($candidate)."'"))throw new RuntimeException('SQLite seed repack failed; original database retained');
+    $copy=new SQLite3($candidate,SQLITE3_OPEN_READONLY);$copy->enableExceptions(true);
+    if(integrity($copy)!==['ok']||logicalSnapshot($copy)!==$before)throw new RuntimeException('Repacked data/row-ID verification failed; original database retained');
+    $copy->close();$db->close();
+    foreach(['-wal','-shm','-journal'] as $suffix)if(file_exists($path.$suffix)||file_exists($candidate.$suffix))throw new RuntimeException('Active SQLite journal detected; original database retained');
+    chmod($candidate,fileperms($path)&0777);
+    if(!rename($candidate,$path))throw new RuntimeException('Atomic SQLite replacement failed; original database retained');
+    echo 'Known seed orphan pages removed; schema, every row and application row IDs verified; backup retained: '.$backup."\n";
