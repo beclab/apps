@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-upgrade
+  namespace: {{ .Release.Namespace }}
+data:
+  upgrade.php: |
+    <?php
+    // Fresh databases are initialized by the upstream web installer.
+    $pdo = new PDO('mysql:host='.getenv('LEAN_DB_HOST').';dbname='.getenv('LEAN_DB_DATABASE'), getenv('LEAN_DB_USER'), getenv('LEAN_DB_PASSWORD'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $check = $pdo->query("SHOW TABLES LIKE 'zp_settings'");
+    if (!$check->fetchColumn()) { echo "Fresh database: use the Leantime installer.\n"; exit(0); }
+    $marker = '/data/backupdb/.migrated-3.12.0';
+    if (!is_file($marker)) {
+        umask(0077);
+        if (!is_file('/data/backupdb/.backup-3.12.0-ready')) { throw new RuntimeException('Verified database backup is missing; migration stopped.'); }
+        passthru('php bin/leantime db:migrate --no-interaction', $status);
+        if ($status!==0) { throw new RuntimeException('Upstream migration failed; database backup retained.'); }
+        if (file_put_contents($marker, gmdate(DATE_ATOM))===false) { throw new RuntimeException('Could not save migration marker.'); }
+        echo "Database migration completed; pre-upgrade backup retained.\n";
+    }
