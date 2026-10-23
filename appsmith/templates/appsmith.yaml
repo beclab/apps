@@ -20,8 +20,77 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: appsmith
     spec:
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      initContainers:
+        - name: snapshot-legacy-stacks
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          securityContext: {runAsUser: 0, runAsGroup: 0}
+          command: [sh, /migration/snapshot.sh]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 1000m, memory: 512Mi}
+          volumeMounts:
+            - {name: legacy-data, mountPath: /legacy}
+            - {name: postgres-run, mountPath: /postgres-run}
+            - {name: migration, mountPath: /migration, readOnly: true}
+        - name: migrate-stacks
+          image: docker.io/appsmith/appsmith-ee:v2.5.1
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+          command: [python3, /migration/migrate.py]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 1000m, memory: 512Mi}
+          volumeMounts:
+            - {name: legacy-data, mountPath: /legacy, readOnly: true}
+            - {name: stacks, mountPath: /target}
+            - {name: migration, mountPath: /migration, readOnly: true}
+        - name: validate-persisted-config
+          image: docker.io/appsmith/appsmith-ee:v2.5.1
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+          command: [sh, -ec, 'if [ -f /appsmith-stacks/configuration/docker.env ]; then python3 /opt/appsmith/env-file.py validate /appsmith-stacks/configuration/docker.env; fi']
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: stacks, mountPath: /appsmith-stacks}
+        - name: reset-serialized-cache
+          image: docker.io/beclab/aboveos-redis:7
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+          command:
+            - sh
+            - -ec
+            - |
+              host="{{ .Release.Name }}-redis"
+              until redis-cli -h "$host" ping | grep -q PONG; do sleep 1; done
+              redis-cli -h "$host" --eval /migration/cache.lua
+          volumeMounts:
+            - {name: migration, mountPath: /migration, readOnly: true}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
       containers:
+        - name: postgres-legacy
+          image: docker.io/postgres:14.23-bookworm
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+          args: [postgres, -c, listen_addresses=127.0.0.1, -c, unix_socket_directories=/var/run/postgresql]
+          env:
+            - {name: PGDATA, value: /appsmith-stacks/data/postgres/main}
+            - {name: POSTGRES_USER, value: postgres}
+            - {name: POSTGRES_DB, value: appsmith}
+            # The DB listens only on this pod's loopback, preserving the upstream
+            # local trust model; no PostgreSQL port is published by any Service.
+            - {name: POSTGRES_HOST_AUTH_METHOD, value: trust}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          readinessProbe:
+            exec: {command: [psql, -h, /var/run/postgresql, -U, postgres, -d, appsmith, -tAc, "SELECT 1"]}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: stacks, mountPath: /appsmith-stacks}
+            - {name: postgres-run, mountPath: /var/run/postgresql}
         - env:
+            - {name: APPSMITH_ENABLE_EMBEDDED_DB, value: "0"}
             - name: TZ
               value: Etc/UTC
             - name: APPSMITH_ENCRYPTION_PASSWORD
@@ -36,8 +105,18 @@ spec:
                   key: APPSMITH_ENCRYPTION_SALT
             - name: APPSMITH_REDIS_URL
               value: 'redis://appsmith-redis:6379'
-          image: "docker.io/appsmith/appsmith-ee:v2.2.1"
+          image: "docker.io/appsmith/appsmith-ee:v2.5.1"
           name: appsmith
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, runAsNonRoot: true}
+          startupProbe:
+            httpGet: {path: /api/v1/health, port: 80}
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: {path: /api/v1/health, port: 80}
+            periodSeconds: 10
+            timeoutSeconds: 10
           resources:
             requests:
               cpu: '1500m'
@@ -58,12 +137,22 @@ spec:
           volumeMounts:
             - mountPath: /appsmith-stacks
               name: stacks
+            - {name: postgres-run, mountPath: /var/run/postgresql}
       restartPolicy: Always
       volumes:
+        - name: postgres-run
+          emptyDir: {}
+        - name: legacy-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: migration
+          configMap:
+            name: '{{ .Release.Name }}-migration'
         - name: stacks
           hostPath:
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appData }}/stacks'
+            path: '{{ .Values.userspace.appData }}/stacks-v2.5.1'
 
 status: {}
 ---
