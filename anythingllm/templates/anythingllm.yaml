@@ -17,6 +17,10 @@ spec:
       labels:
         app: anythingllm
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       initContainers:
         - name: init-permissions
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
@@ -25,11 +29,20 @@ spec:
             - sh
             - "-c"
             - |
-              echo "[Init] Fixing permissions on /app/server/storage..."
+              set -eu
+              if [ -f /app/server/storage/anythingllm.db ] && [ ! -f /app/server/storage/.env ]; then
+                echo "Export /app/server/.env from the OLD running container to /app/server/storage/.env BEFORE upgrading. Refusing to initialize over an existing database without its configuration."
+                exit 1
+              fi
               mkdir -p /app/server/storage/comkey
-              chown -R 1000:1000 /app/server/storage
-              chmod -R 770 /app/server/storage
-          resources: {}
+              [ -f /app/server/storage/.env ] || touch /app/server/storage/.env
+              chown 1000:1000 /app/server/storage /app/server/storage/comkey
+              chmod 770 /app/server/storage /app/server/storage/comkey
+              chown 1000:1000 /app/server/storage/.env
+              chmod 600 /app/server/storage/.env
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
           volumeMounts:
             - name: anythingllm-storage
               mountPath: /app/server/storage
@@ -37,9 +50,30 @@ spec:
           terminationMessagePolicy: File
           securityContext:
             runAsUser: 0
+        - name: backup-before-migration
+          image: docker.io/mintplexlabs/anythingllm:1.18.0
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+          command: [python3, /upgrade/backup.py]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: anythingllm-storage, mountPath: /app/server/storage}
+            - {name: upgrade-backup, mountPath: /upgrade, readOnly: true}
       containers:
         - name: anythingllm
-          image: "docker.io/beclab/mintplex-labs-anything-llm:1.14.1"
+          image: "docker.io/mintplexlabs/anythingllm:1.18.0"
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              test -f /app/server/storage/.env
+              rm -f /app/server/.env
+              ln -s /app/server/storage/.env /app/server/.env
+              exec /bin/bash /usr/local/bin/docker-entrypoint.sh
           env:
             - name: PGID
               value: "1000"
@@ -66,7 +100,7 @@ spec:
               memory: 2Gi
           livenessProbe:
             httpGet:
-              path: /
+              path: /api/ping
               port: 3001
               scheme: HTTP
             initialDelaySeconds: 30
@@ -89,6 +123,9 @@ spec:
             - mountPath: /app/server/storage
               name: anythingllm-storage
       volumes:
+        - name: upgrade-backup
+          configMap:
+            name: anythingllm-upgrade
         - name: anythingllm-storage
           hostPath:
             {{- if .Values.sysVersion }}
