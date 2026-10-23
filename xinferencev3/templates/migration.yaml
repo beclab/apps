@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: '{{ .Release.Name }}-migration'
+  namespace: '{{ .Release.Namespace }}'
+data:
+  snapshot.sh: |
+    set -eu
+    umask 077
+    state=/legacy/data/runtime-v4
+    backup=/legacy/data/.upgrade-v4
+    mkdir -p "$state" "$backup"
+    # Only the volume root and the two newly managed directories change owner.
+    chown 1000:1000 /legacy/data "$state" "$backup"
+    if [ -f "$state/.migration-complete" ]; then exit 0; fi
+    if [ -f "$backup/snapshot-complete" ]; then
+      (cd "$backup" && sha256sum -c SHA256SUMS)
+      exit 0
+    fi
+    tar -cf "$backup/data.tar.tmp" --exclude=./runtime-v4 --exclude=./.upgrade-v4 -C /legacy/data .
+    tar -tf "$backup/data.tar.tmp" >/dev/null
+    mv "$backup/data.tar.tmp" "$backup/data.tar"
+    tar -cf "$backup/cache.tar.tmp" -C /legacy/cache .
+    tar -tf "$backup/cache.tar.tmp" >/dev/null
+    mv "$backup/cache.tar.tmp" "$backup/cache.tar"
+    (cd "$backup" && sha256sum data.tar cache.tar >SHA256SUMS && sha256sum -c SHA256SUMS)
+    touch "$backup/snapshot-complete"
+    chown 1000:1000 "$backup/data.tar" "$backup/cache.tar" "$backup/SHA256SUMS" "$backup/snapshot-complete"
+    echo 'Legacy state snapshot verified; original data retained.'
+  migrate.py: |
+    import hashlib, json, os, tarfile
+    from pathlib import Path
+
+    state = Path('/root')
+    backup = Path('/legacy/data/.upgrade-v4')
+    marker = state / '.migration-complete'
+    if marker.exists():
+        print('Previously verified migration retained.')
+        raise SystemExit(0)
+    expected_archives = {}
+    for line in (backup / 'SHA256SUMS').read_text().splitlines():
+        digest, name = line.split(None, 1)
+        name = name.lstrip('*')
+        path = backup / name
+        if path.parent != backup or not path.is_file():
+            raise RuntimeError('Invalid snapshot index')
+        with path.open('rb') as f:
+            if hashlib.file_digest(f, 'sha256').hexdigest() != digest:
+                raise RuntimeError('Snapshot checksum mismatch')
+        expected_archives[name] = digest
+    if set(expected_archives) != {'data.tar', 'cache.tar'}:
+        raise RuntimeError('Incomplete snapshot')
+    copied = {}
+    links = {}
+    # Durable appData takes precedence over stale appCache state.
+    for name in ('data.tar', 'cache.tar'):
+        with tarfile.open(backup / name) as archive:
+            for item in archive:
+                rel = Path(item.name)
+                if rel.is_absolute() or '..' in rel.parts:
+                    raise RuntimeError('Unsafe legacy member')
+                if str(rel) == '.':
+                    continue
+                dest = state / rel
+                if name == 'cache.tar' and (dest.exists() or dest.is_symlink()):
+                    continue
+                if item.issym():
+                    original_link = item.linkname
+                    if item.linkname == '/usr/bin/python3.12':
+                        if not Path(item.linkname).is_file() or not dest.parent.resolve().is_relative_to(state):
+                            raise RuntimeError('Invalid legacy interpreter link')
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        if dest.is_symlink():
+                            if os.readlink(dest) != item.linkname:
+                                raise RuntimeError('Conflicting interpreter link')
+                        elif dest.exists():
+                            raise RuntimeError('Interpreter destination is not a link')
+                        else:
+                            dest.symlink_to(item.linkname)
+                        links[str(rel)] = {'source': original_link, 'destination': item.linkname}
+                        continue
+                    if item.linkname.startswith('/root/'):
+                        item.linkname = os.path.relpath(item.linkname, str(dest.parent))
+                    links[str(rel)] = {'source': original_link, 'destination': item.linkname}
+                archive.extract(item, state, filter='data')
+                if item.isfile():
+                    with archive.extractfile(item) as f:
+                        want = hashlib.file_digest(f, 'sha256').hexdigest()
+                    with dest.open('rb') as f:
+                        got = hashlib.file_digest(f, 'sha256').hexdigest()
+                    if want != got:
+                        raise RuntimeError('Migrated file checksum mismatch: ' + str(rel))
+                    copied[str(rel)] = {'bytes': item.size, 'sha256': got}
+    home = state / '.xinference'
+    if (home / 'auth_config.json').exists() and not (home / 'auth/auth.db').exists():
+        raise RuntimeError('Legacy JSON authentication requires xinference-migrate-auth with the persistent encryption key; original data and snapshots are retained.')
+    result = {'archives': expected_archives, 'files': copied, 'links': links, 'uid': os.getuid()}
+    (state / '.migration-report.json').write_text(json.dumps(result, sort_keys=True))
+    marker.write_text('verified-v4\n')
+    print(json.dumps({'migration': 'verified', 'files': len(copied), 'links': len(links), 'bytes': sum(v['bytes'] for v in copied.values()), 'uid': os.getuid()}))
