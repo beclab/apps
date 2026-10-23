@@ -18,11 +18,66 @@ spec:
         app: leantime
     spec:
       securityContext:
-        runAsUser: 0
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -ec
+            - |
+              for d in /data /data/userfiles /data/public-userfiles /data/plugins /data/backupdb; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: backup-database
+          image: beclab/library-mysql:8.0.39
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+          command:
+            - sh
+            - -ec
+            - |
+              if [ -f /data/backupdb/.migrated-3.12.0 ]; then exit 0; fi
+              export MYSQL_PWD="$LEAN_DB_PASSWORD"
+              count=$(mysql -N -h "$LEAN_DB_HOST" -u "$LEAN_DB_USER" "$LEAN_DB_DATABASE" -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='zp_settings'")
+              if [ "$count" = 0 ]; then echo 'Fresh database: no migration backup required.'; exit 0; fi
+              umask 077
+              backup="/data/backupdb/pre-3.12.0-$(date -u +%Y%m%dT%H%M%S).sql"
+              mysqldump --single-transaction --no-tablespaces --set-gtid-purged=OFF -h "$LEAN_DB_HOST" -u "$LEAN_DB_USER" "$LEAN_DB_DATABASE" > "$backup"
+              test -s "$backup"
+              grep -q 'CREATE TABLE' "$backup"
+              sha256sum "$backup"
+              touch /data/backupdb/.backup-3.12.0-ready
+          env:
+            - name: LEAN_DB_HOST
+              value: "{{ .Values.mysql.host }}"
+            - name: LEAN_DB_USER
+              value: "{{ .Values.mysql.username }}"
+            - name: LEAN_DB_DATABASE
+              value: "{{ .Values.mysql.databases.leantime }}"
+            - name: LEAN_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: LEAN_DB_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
-        - image: docker.io/beclab/aby913-leantime:3.5.12
+        - image: docker.io/leantime/leantime:3.12.0
           imagePullPolicy: IfNotPresent
           name: leantime
+          command: ["sh", "-ec"]
+          args:
+            - php /olares-upgrade/upgrade.php; exec /sbin/tini -- /start.sh
           ports:
             - containerPort: 8080
           resources:
@@ -35,6 +90,21 @@ spec:
           volumeMounts:
             - mountPath: /data
               name: data
+            - name: data
+              mountPath: /var/www/html/userfiles
+              subPath: userfiles
+            - name: data
+              mountPath: /var/www/html/public/userfiles
+              subPath: public-userfiles
+            - name: data
+              mountPath: /var/www/html/app/Plugins
+              subPath: plugins
+            - name: data
+              mountPath: /var/www/html/backupdb
+              subPath: backupdb
+            - name: upgrade
+              mountPath: /olares-upgrade
+              readOnly: true
           env:
             - name: PGID
               value: "1000"
@@ -54,6 +124,9 @@ spec:
             - name: LEAN_DB_DATABASE
               value: "{{ .Values.mysql.databases.leantime }}"
       volumes:
+        - name: upgrade
+          configMap:
+            name: {{ .Release.Name }}-upgrade
         - name: data
           hostPath:
             type: DirectoryOrCreate
