@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG NEXTCLOUD_VERSION=33.0.9
+ARG NEXTCLOUD_VERSION=33.0.10
 FROM docker.io/library/nextcloud:${NEXTCLOUD_VERSION}-apache
 
 # Debian www-data is uid/gid 33. Olares userspace hostPath is 1000:1000.
