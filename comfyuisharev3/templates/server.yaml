@@ -13,6 +13,10 @@
 {{- $gpuType = (.Values.GPU | default dict).Type | default "nvidia" -}}
 {{- end -}}
 {{- $isGb10 := or $gb10FromNodes (eq $gpuType "nvidia-gb10") -}}
+{{- /* intel-gpu = discrete Intel Arc (Xe2/Battlemage). Different image, different
+       CLI flags, and it needs /dev/dri + /sys/class/drm mounted by the chart —
+       the platform only binds the card, it does not inject the device nodes. */ -}}
+{{- $isIntel := eq $gpuType "intel-gpu" -}}
 {{- $memRequest := "20Gi" -}}
 {{- $memLimit := "70Gi" -}}
 {{- if $isGb10 -}}
@@ -22,6 +26,23 @@
 {{- if $isGb10 -}}
 {{- $image = "beclab/comfyui_launcher-arm64:v0.42.1-fe1.58.0-launcher0.2.54-arm64" -}}
 {{- end -}}
+{{- if $isIntel -}}
+{{- /* XPU line: same launcher, -xpu suffix. Built by
+       .github/workflows/build-comfyui-images-xpu.yml (no nunchaku stage there).
+       Tag must match the composite tag that job prints:
+         <comfyui>-fe<frontend>-launcher<launcher>-xpu-omix
+       The -omix suffix is load-bearing, not cosmetic: it marks the build that
+       ships the OMIX Intel userspace stack (ZE 26.31). The earlier plain -xpu
+       image carried ZE 25.18, which does not know the Arc Pro B70 device ID
+       (8086:E223) and therefore enumerated zero XPU devices.
+       Verified on hardware: matmul on xpu + xpu-smi lists "Arc(TM) Pro B70". */ -}}
+{{- $image = "beclab/comfyui_xpu:v0.42.0-fe1.59.0-launcher0.2.54-xpu-omix" -}}
+{{- end -}}
+{{- /* CLI flags: --disable-cuda-malloc / --disable-dynamic-vram are CUDA-only
+       knobs, meaningless (and misleading) on XPU, so the Intel branch drops
+       them. --disable-xformers stays because xformers has no XPU build either.
+       The frontend pin must match the fe version baked into the image,
+       otherwise ComfyUI downloads a different one at startup. */ -}}
 
 ---
 apiVersion: apps/v1
@@ -538,7 +559,11 @@ spec:
             - name: TZ
               value: Etc/UTC
             - name: CLI_ARGS
+{{- if $isIntel }}
+              value: "--disable-xformers --disable-smart-memory --front-end-version Comfy-Org/ComfyUI_frontend@v1.59.0"
+{{- else }}
               value: '--disable-xformers --disable-smart-memory --disable-cuda-malloc --disable-dynamic-vram --front-end-version Comfy-Org/ComfyUI_frontend@v1.58.0'
+{{- end }}
             - name: HOME
               value: /root
             - name: PIP_CACHE_DIR
@@ -551,6 +576,15 @@ spec:
               value: /root/.config/pip/pip.conf
             - name: PIP_INDEX_URL
               value: 'https://pypi.joinolares.cn/root/olares3/+simple/'
+{{- if $isIntel }}
+            # The xpu image is Ubuntu 24.04, where PEP 668 marks the system
+            # python as externally managed. Every runtime pip call (ComfyUI
+            # Manager, custom-node requirements, frontend restore) then dies
+            # with "externally-managed-environment". The CUDA base image does
+            # not have that marker, so this only affects the Intel branch.
+            - name: PIP_BREAK_SYSTEM_PACKAGES
+              value: '1'
+{{- end }}
             - name: MODELS_DIR
               value: '/root/ComfyUI/models'
             # User-editable copy under appData (seeded/merged by seed-extra-model-paths init)
@@ -620,6 +654,25 @@ spec:
               mountPath: /root/ComfyUI/output
             - name: input
               mountPath: /root/ComfyUI/input
+{{- if $isIntel }}
+            # Intel Arc: the accelerator binding owns the device cgroup entry for
+            # the assigned render node (there is no Intel device plugin, and
+            # `privileged: true` is NOT required — the sibling intel-gpu apps on
+            # this platform run unprivileged). What the binding does not do is
+            # create the nodes inside the container, so the chart mounts them.
+            # /sys/class/drm is mounted alongside /dev/dri because Level-Zero
+            # reads card name and topology from sysfs, not from the node alone.
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+              readOnly: true
+            # Default /dev/shm in a container is 64MiB. ComfyUI's loader and
+            # several custom nodes use shared memory; tmpfs-backed emptyDir is
+            # what the other Intel apps on this platform do.
+            - name: dshm
+              mountPath: /dev/shm
+{{- end }}
           # Entrances route via comfyuientrance Service (8080->8190, 8081->8080 gateway).
           # Gate readiness on the Launcher ComfyUI proxy (:8190) so Olares does not
           # publish the entrance before the "please start" page can be served.
@@ -688,6 +741,24 @@ spec:
           configMap:
             name: script
             defaultMode: 420
+{{- if $isIntel }}
+        # Intel Arc device passthrough (same shape as the platform's other
+        # intel-gpu apps: vllmintelqwen359bv3, audioqwen3asr06v3).
+        # type: Directory (not DirectoryOrCreate) — the host must really have
+        # these; creating an empty dir would silently hide a missing driver.
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+{{- end }}
 
 ---
 apiVersion: v1
