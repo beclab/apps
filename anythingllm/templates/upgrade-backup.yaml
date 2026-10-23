@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: anythingllm-upgrade
+  namespace: {{ .Release.Namespace }}
+data:
+  backup.py: |
+    import hashlib,json,os,sqlite3,tarfile,shutil
+    from pathlib import Path
+    root=Path('/app/server/storage')
+    backup=root/'.olares-upgrade'/'1.18.0'
+    marker=backup/'verified.json'
+    envfile=root/'.env'
+    if not (root/'anythingllm.db').exists() and (not envfile.exists() or envfile.stat().st_size==0):
+        shutil.copyfile('/app/server/.env',envfile)
+        envfile.chmod(0o600)
+    def digest(p):
+        h=hashlib.sha256()
+        with p.open('rb') as f:
+            for b in iter(lambda:f.read(1024*1024),b''): h.update(b)
+        return h.hexdigest()
+    if marker.exists():
+        record=json.loads(marker.read_text())
+        for name,sha in record.get('archives',{}).items():
+            if digest(backup/name)!=sha: raise RuntimeError('Upgrade backup integrity failure: '+name)
+        print('Previously verified pre-1.18.0 backup retained')
+    else:
+        backup.mkdir(parents=True,exist_ok=True,mode=0o700)
+        db=root/'anythingllm.db'
+        if not db.exists():
+            record={'fresh':True,'archives':{}}
+        else:
+            dbcopy=backup/'anythingllm.db'
+            with sqlite3.connect('file:'+str(db)+'?mode=ro',uri=True) as src,sqlite3.connect(dbcopy) as dst:
+                src.backup(dst)
+                if dst.execute('PRAGMA integrity_check').fetchone()[0]!='ok': raise RuntimeError('SQLite backup corrupt')
+            archive=backup/'storage.tar.gz'
+            def keep(info):
+                parts=Path(info.name).parts
+                return None if '.olares-upgrade' in parts or info.name in ('storage/anythingllm.db','storage/anythingllm.db-wal','storage/anythingllm.db-shm') else info
+            with tarfile.open(archive,'w:gz') as out: out.add(root,arcname='storage',filter=keep)
+            with tarfile.open(archive,'r:gz') as check:
+                count=0
+                for info in check:
+                    if info.isfile():
+                        f=check.extractfile(info)
+                        while f.read(1024*1024): pass
+                        count+=1
+            record={'fresh':False,'sqlite_integrity':'ok','file_members':count,'archives':{p.name:digest(p) for p in [dbcopy,archive]}}
+        temp=backup/'verified.json.tmp'
+        temp.write_text(json.dumps(record));temp.chmod(0o600);temp.replace(marker)
+        print(json.dumps({k:v for k,v in record.items() if k!='archives'}))
