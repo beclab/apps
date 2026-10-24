@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-upgrade
+  namespace: {{ .Release.Namespace }}
+data:
+  backup.py: |
+    import hashlib,json,os,tarfile
+    from pathlib import Path
+    os.umask(0o077)
+    home=Path('/opt/data');root=Path('/upgrade-backups')
+    generation='{{ .Chart.AppVersion }}-chart-{{ .Chart.Version }}'
+    target=root/('before-'+generation+'.tar');marker=target.with_suffix('.json')
+    def sha(p):
+     h=hashlib.sha256()
+     with p.open('rb') as f:
+      for b in iter(lambda:f.read(1024*1024),b''):h.update(b)
+     return h.hexdigest()
+    if marker.exists():
+     saved=json.loads(marker.read_text());assert target.exists() and sha(target)==saved['sha256'],'Backup verification failed'
+     print('Previously verified workspace backup retained');raise SystemExit(0)
+    assert not target.exists(),'Unverified backup already exists; preserve it for inspection'
+    inventory={}
+    with tarfile.open(target,'w',dereference=False) as t:
+     for p in sorted(home.rglob('*')):
+      rel=p.relative_to(home).as_posix()
+      if p.is_symlink():inventory[rel]={'link':os.readlink(p)}
+      elif p.is_file():inventory[rel]={'sha256':sha(p),'size':p.stat().st_size,'mode':p.stat().st_mode&0o777}
+      t.add(p,arcname=rel,recursive=False)
+    with tarfile.open(target) as t:
+     for name,item in inventory.items():
+      m=t.getmember(name)
+      if 'link' in item:assert m.issym() and m.linkname==item['link']
+      else:
+       h=hashlib.sha256();f=t.extractfile(m)
+       for b in iter(lambda:f.read(1024*1024),b''):h.update(b)
+       assert h.hexdigest()==item['sha256'] and m.size==item['size']
+    saved={'sha256':sha(target),'files':len(inventory),'bytes':sum(i.get('size',0) for i in inventory.values()),'inventory':inventory}
+    marker.write_text(json.dumps(saved));print(json.dumps({k:v for k,v in saved.items() if k!='inventory'}))

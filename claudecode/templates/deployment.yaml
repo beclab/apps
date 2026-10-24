@@ -1,3 +1,7 @@
+{{- $claudecodeDomainENV := split  ","  .Values.domain.terminal -}}
+{{- $claudecodeDomain := index $claudecodeDomainENV "_0" -}}
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -43,7 +47,9 @@ spec:
               # ~85MiB binary and do not reorder PATH (npm -g installs must still
               # win for tools the image does not ship). Target need not exist in
               # this ubuntu init image — it is valid in the main container.
-              ln -sfn /usr/local/bin/olares-cli /opt/data/.local/bin/olares-cli
+              if [ ! -e /opt/data/.local/bin/olares-cli ] && [ ! -L /opt/data/.local/bin/olares-cli ]; then
+                ln -s /usr/local/bin/olares-cli /opt/data/.local/bin/olares-cli
+              fi
               echo "[init-chmod-data] ~/.local/bin/olares-cli -> /usr/local/bin/olares-cli"
               # certbot (clawdbot-style): non-root defaults under $HOME=/opt/data; Olares TLS needs RSA.
               mkdir -p /opt/data/.config/letsencrypt \
@@ -61,34 +67,49 @@ spec:
                 echo "[init-chmod-data] seeded certbot cli.ini under /opt/data/.config/letsencrypt"
               fi
               # certbot wrapper (opencode-style): image ships /usr/bin/certbot; init installs ~/.local/bin/certbot.
-              if [ -f /opt/certbot-wrapper/certbot ]; then
+              if [ ! -e /opt/data/.local/bin/certbot ] && [ -f /opt/certbot-wrapper/certbot ]; then
                 cp /opt/certbot-wrapper/certbot /opt/data/.local/bin/certbot
                 chmod a+rx /opt/data/.local/bin/certbot
               fi
-              chown -R 1000:1000 /opt/data
-              chmod -R 0755 /opt/data
+              chown 1000:1000 /opt/data /opt/data/.local /opt/data/.local/bin /opt/data/.claude /opt/data/.claude/skills /opt/data/.install-state /opt/data/.config /opt/data/.config/letsencrypt /opt/data/letsencrypt /opt/data/letsencrypt/config /opt/data/letsencrypt/work /opt/data/letsencrypt/logs
+              chown 1000:1000 /opt/data/.config/letsencrypt/cli.ini /opt/data/.local/bin/certbot
+              mkdir -p /upgrade-backups
+              chown 1000:1000 /upgrade-backups
+              chmod 0700 /upgrade-backups
               echo "[init-chmod-data] /opt/data owned by 1000:1000"
           resources: {}
           volumeMounts:
             - mountPath: /opt/data
               name: app-data-home
+            - {name: upgrade-backups, mountPath: /upgrade-backups}
             - mountPath: /opt/certbot-wrapper
               name: certbot-wrapper
               readOnly: true
 
         # Flatten Olares skills from /skills-staging into Claude Code's
         # user skills dir (~/.claude/skills = /opt/data/.claude/skills).
+        - name: backup-workspace
+          image: beclab/harveyff-claudecode-base:0.5.9
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, allowPrivilegeEscalation: false}
+          command: [python3, /upgrade/backup.py]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: app-data-home, mountPath: /opt/data}
+            - {name: upgrade-backups, mountPath: /upgrade-backups}
+            - {name: upgrade-script, mountPath: /upgrade, readOnly: true}
         - name: init-skills
-          image: "beclab/harveyff-claudecode-base:0.5.8"
+          image: "beclab/harveyff-claudecode-base:0.5.9"
           imagePullPolicy: IfNotPresent
           securityContext:
-            runAsUser: 0
-            runAsGroup: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
             - sh
             - -c
             - |
-              set -u
+              set -eu
               if [ ! -d /skills-staging ]; then
                 echo "[init-skills] /skills-staging not in image; skipping"
                 exit 0
@@ -96,9 +117,9 @@ spec:
               mkdir -p /opt/data/.claude/skills
               for d in /skills-staging/*/; do
                 name="$(basename "$d")"
-                rm -rf "/opt/data/.claude/skills/$name"
-                cp -a "$d" "/opt/data/.claude/skills/$name"
-                chown -R 1000:1000 "/opt/data/.claude/skills/$name"
+                if [ ! -e "/opt/data/.claude/skills/$name" ]; then
+                  cp -r "$d" "/opt/data/.claude/skills/$name"
+                fi
               done
               echo "[init-skills] Olares skills installed under /opt/data/.claude/skills:"
               ls -1 /skills-staging
@@ -112,7 +133,7 @@ spec:
         # only writes under $HOME. A sentinel file makes subsequent
         # Pod starts skip the download.
         - name: init-install-claude
-          image: "beclab/harveyff-claudecode-base:0.5.8"
+          image: "beclab/harveyff-claudecode-base:0.5.9"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -138,7 +159,7 @@ spec:
               SENTINEL="$HOME/.install-state/install-complete-${CLAUDE_VERSION}"
               mkdir -p "$HOME/.install-state" "$HOME/.local/bin"
 
-              if [ -x "$HOME/.local/bin/claude" ] && [ -f "$SENTINEL" ]; then
+              if [ -x "$HOME/.local/bin/claude" ] && [ -f "$SENTINEL" ] && [ "$("$HOME/.local/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_VERSION" ]; then
                 echo "[init-install-claude] cached claude ${CLAUDE_VERSION} found (installed $(cat "$SENTINEL"))"
                 "$HOME/.local/bin/claude" --version
                 exit 0
@@ -163,6 +184,7 @@ spec:
                 exit 1
               fi
 
+              test "$("$HOME/.local/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_VERSION"
               date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
               echo "[init-install-claude] installed claude ${CLAUDE_VERSION}"
               "$HOME/.local/bin/claude" --version
@@ -205,14 +227,14 @@ spec:
             - mountPath: /docker-cli
               name: docker-cli-bin
         {{- end }}
-
+      serviceAccountName: proxylistener
       containers:
         # Workspace container. kubectl exec from the beclab terminal
         # apiserver lands here as UID 1000. HOME/PATH are set on env so
         # login / non-login / interactive / non-interactive shells all
         # see the claude binary on PATH.
         - name: claudecode
-          image: "beclab/harveyff-claudecode-base:0.5.8"
+          image: "beclab/harveyff-claudecode-base:0.5.9"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
@@ -289,6 +311,11 @@ spec:
           command:
             - sleep
             - infinity
+          readinessProbe:
+            exec:
+              command: [sh, -ec, 'test "$(/opt/data/.local/bin/claude --version | cut -d" " -f1)" = "{{ .Chart.AppVersion }}"']
+            periodSeconds: 20
+            timeoutSeconds: 10
           resources:
             limits:
               cpu: "4"
@@ -297,6 +324,7 @@ spec:
               cpu: 100m
               memory: 2Gi
           volumeMounts:
+            - {name: upgrade-backups, mountPath: /opt/backups, readOnly: true}
             - mountPath: /opt/data
               name: app-data-home
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -329,7 +357,7 @@ spec:
           command:
             - dockerd
             - --host
-            - tcp://0.0.0.0:2375
+            - tcp://127.0.0.1:2375
             - --host
             - unix:///var/run/docker.sock
             - --mtu=1450
@@ -368,9 +396,50 @@ spec:
             - mountPath: /opt/data
               name: app-data-home
         {{- end }}
-
+        - name: port-watcher
+          image: beclab/proxy-listener:0.0.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORT_WATCHER_ADDR
+              value: "127.0.0.1:19790"
+            - name: PORT_WATCHER_DENYLIST
+              value: "19790,2375"
+            - name: PORT_WATCHER_DEBOUNCE
+              value: "1s"
+            - name: ENTRANCE_HOST
+              value: "{{ $claudecodeDomain }}"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
       restartPolicy: Always
       volumes:
+        - name: upgrade-backups
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/upgrade-backups"
+            type: DirectoryOrCreate
+        - name: upgrade-script
+          configMap:
+            name: {{ .Release.Name }}-upgrade
         - name: certbot-wrapper
           configMap:
             name: certbot-wrapper
@@ -402,3 +471,39 @@ spec:
             path: "{{ .Values.userspace.appData }}/docker"
             type: DirectoryOrCreate
         {{- end }}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxylistener
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+rules:
+  - apiGroups:
+      - app.bytetrade.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+subjects:
+  - kind: ServiceAccount
+    name: proxylistener
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+  apiGroup: rbac.authorization.k8s.io
