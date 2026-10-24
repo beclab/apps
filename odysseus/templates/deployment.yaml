@@ -13,6 +13,7 @@ spec:
       labels: {app: odysseus}
       annotations:
         checksum/runtime-config: {{ include (print $.Template.BasePath "/runtime-config.yaml") . | sha256sum }}
+        checksum/document-dependencies: {{ include (print $.Template.BasePath "/document-dependencies.yaml") . | sha256sum }}
     spec:
       enableServiceLinks: false
       securityContext: {runAsUser: 1000, runAsGroup: 1000}
@@ -23,7 +24,7 @@ spec:
           command: [sh, -ec]
           args:
             - |
-              for d in /runtime /data /data/logs /data/ssh /data/local /cache; do
+              for d in /runtime /data /data/logs /data/ssh /data/local /data/document-deps /cache; do
                 mkdir -p "$d"
                 chown 1000:1000 "$d"
               done
@@ -58,6 +59,19 @@ spec:
           volumeMounts:
             - {name: runtime, mountPath: /runtime}
             - {name: runtime-config, mountPath: /runtime-config, readOnly: true}
+        - name: prepare-document-dependencies
+          image: beclab/odysseus-dev-odysseus:1.0.3@sha256:141077b62824698bf38e03c6061deabba60ce785e920b64a7b678d7a14d8fe3b
+          command: [python, /document-config/install.py]
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: PYTHONNOUSERSITE, value: '1'}
+            - {name: PYTHONDONTWRITEBYTECODE, value: '1'}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: '2', memory: 2Gi}
+          volumeMounts:
+            - {name: data, mountPath: /document-deps, subPath: document-deps}
+            - {name: document-config, mountPath: /document-config, readOnly: true}
       containers:
         - name: odysseus
           image: beclab/odysseus-dev-odysseus:1.0.3@sha256:141077b62824698bf38e03c6061deabba60ce785e920b64a7b678d7a14d8fe3b
@@ -75,6 +89,7 @@ spec:
             - {name: USER, value: odysseus}
             - {name: LOGNAME, value: odysseus}
             - {name: PYTHONDONTWRITEBYTECODE, value: '1'}
+            - {name: PYTHONPATH, value: /app/document-deps/site-packages}
             - {name: APP_PORT, value: '7000'}
             - {name: AUTH_ENABLED, value: 'true'}
             - {name: LOCALHOST_BYPASS, value: 'false'}
@@ -117,10 +132,13 @@ spec:
             - {name: data, mountPath: /app/logs, subPath: logs}
             - {name: data, mountPath: /app/.ssh, subPath: ssh}
             - {name: data, mountPath: /app/.local, subPath: local}
+            - {name: data, mountPath: /app/document-deps, subPath: document-deps}
             - {name: cache, mountPath: /app/.cache}
       volumes:
         - name: runtime-config
           configMap: {name: odysseus-runtime}
+        - name: document-config
+          configMap: {name: odysseus-document-dependencies}
         - name: runtime
           emptyDir: {}
         - name: data

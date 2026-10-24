@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: odysseus-document-dependencies
+  namespace: {{ .Release.Namespace | quote }}
+data:
+  requirements.txt: |
+    mammoth==1.11.0
+    markitdown[docx,pptx,xlsx,xls]==0.1.6
+    PyMuPDF==2.0
+    # Match FastEmbed and recurring calendar event requirements in the base image.
+    Pillow>=12.0.0,<13.0
+    python-dateutil>=2.9.0,<3.0
+  install.py: |
+    """Provision document parsers once per requirements and Python runtime."""
+    import hashlib
+    import os
+    from pathlib import Path
+    import platform
+    import shutil
+    import subprocess
+    import sys
+    import tempfile
+
+    root = Path('/document-deps')
+    requirements = Path('/document-config/requirements.txt')
+    target = root / 'site-packages'
+    marker = root / 'ready.sha256'
+    signature = hashlib.sha256(
+        requirements.read_bytes() + Path(__file__).read_bytes()
+        + sys.version.encode() + platform.machine().encode()
+    ).hexdigest()
+
+    def check(directory):
+        code = (
+            'import sys; sys.path.insert(0, sys.argv[1]); '
+            'import mammoth, markitdown, pymupdf; '
+            'from importlib.metadata import version; '
+            'assert version("mammoth") == "1.11.0"; '
+            'assert version("markitdown") == "0.1.6"; '
+            'assert version("PyMuPDF") == "2.0"'
+        )
+        subprocess.run([sys.executable, '-s', '-c', code, str(directory)], check=True, timeout=90)
+
+    if marker.exists() and marker.read_text().strip() == signature:
+        try:
+            check(target)
+            print('Document dependencies ready (reused)', flush=True)
+            sys.exit(0)
+        except (subprocess.SubprocessError, OSError):
+            print('Document dependencies need repair', flush=True)
+
+    staging = Path(tempfile.mkdtemp(prefix='install-', dir=root))
+    try:
+        subprocess.run([
+            sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check',
+            '--no-cache-dir', '--only-binary=:all:', '--ignore-installed',
+            '--target', str(staging), '-r', str(requirements),
+        ], check=True, timeout=600)
+        check(staging)
+        backup = root / 'previous-site-packages'
+        if backup.exists():
+            shutil.rmtree(backup)
+        if target.exists():
+            target.rename(backup)
+        staging.rename(target)
+        marker.write_text(signature + '\n')
+        if backup.exists():
+            shutil.rmtree(backup)
+        print('Document dependencies ready (installed)', flush=True)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
