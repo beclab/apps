@@ -26,21 +26,41 @@ spec:
           image: beclab/aboveos-busybox:1.37.0
           securityContext:
             runAsUser: 0
-          command: [sh, -c, 'mkdir -p /data/storage /data/wings; chown 1000:1000 /data /data/storage /data/wings']
+          command: [sh, -c, 'set -eu; mkdir -p /data/storage /data/wings /data/.olares-upgrade; chown 1000:1000 /data /data/storage /data/wings /data/.olares-upgrade; chmod 700 /data/.olares-upgrade']
           volumeMounts:
             - name: data
               mountPath: /data
         - name: copy-app
-          image: {{ .Values.image }}
+          image: docker.io/beclab/pterodactyl-panel:v1.15.2
           command: [sh, -c, 'cp -R /app/. /runtime/; cp -Rn /app/storage/. /data/storage/']
           volumeMounts:
             - name: app
               mountPath: /runtime
             - name: data
               mountPath: /data
+        - name: pre-upgrade-snapshot
+          image: docker.io/beclab/mariadb:11.4.3-noble
+          command: [bash, /config/backup.sh]
+          envFrom:
+            - secretRef:
+                name: pterodactyl-auth
+          env:
+            - name: DB_HOST
+              value: {{ .Values.mariadb.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.mariadb.port | default 3306 | quote }}
+            - name: DB_DATABASE
+              value: {{ .Values.mariadb.databases.panel | quote }}
+            - name: DB_USERNAME
+              value: {{ .Values.mariadb.username | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
       containers:
         - name: panel
-          image: {{ .Values.image }}
+          image: docker.io/beclab/pterodactyl-panel:v1.15.2
           command: [/bin/ash, /config/start.sh]
           envFrom:
             - secretRef:

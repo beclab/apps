@@ -69,6 +69,7 @@ data:
     catch_workers_output = yes
     php_admin_value[upload_max_filesize] = 100M
     php_admin_value[post_max_size] = 100M
+    php_admin_flag[session.upload_progress.enabled] = off
   start.sh: |
     #!/bin/ash
     set -eu
@@ -139,6 +140,18 @@ data:
         ]);
     }
     $config=$node->getConfiguration();
+    // Keep existing node settings, including user customization and Wings-expanded defaults.
+    if (is_file('/data/wings/config.yml')) {
+        $saved = Symfony\Component\Yaml\Yaml::parseFile('/data/wings/config.yml');
+        if (!is_array($saved)) throw new RuntimeException('Existing Wings configuration is invalid; retained unchanged.');
+        foreach (['uuid', 'token_id', 'token'] as $field) {
+            if (!isset($saved[$field], $config[$field]) || !hash_equals((string)$config[$field], (string)$saved[$field])) {
+                throw new RuntimeException('Existing Wings configuration belongs to a different node; retained unchanged.');
+            }
+        }
+        echo "Existing local Wings configuration preserved\n";
+        return;
+    }
     $config['api']['port']=8080;
     $config['api']['ssl']=['enabled'=>false];
     $config['system']=array_replace_recursive($config['system'],[
@@ -157,3 +170,32 @@ data:
     file_put_contents('/data/wings/config.yml.new',Symfony\Component\Yaml\Yaml::dump($config,8,2));
     rename('/data/wings/config.yml.new','/data/wings/config.yml');
     echo "Local Wings node configured\n";
+  backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    umask 077
+    state=/data/.olares-upgrade/1.15.2
+    mkdir -p "$state"
+    if [ ! -s "$state/files.tar.gz" ]; then
+      items=(storage)
+      [ ! -f /data/app-key ] || items+=(app-key)
+      [ ! -f /data/wings/config.yml ] || items+=(wings/config.yml)
+      tar -czf "$state/files.tar.gz.tmp" -C /data "${items[@]}"
+      tar -tzf "$state/files.tar.gz.tmp" >/dev/null
+      mv "$state/files.tar.gz.tmp" "$state/files.tar.gz"
+    fi
+    tar -tzf "$state/files.tar.gz" >/dev/null
+    export MYSQL_PWD="$DB_PASSWORD"
+    for attempt in $(seq 1 90); do
+      mariadb --skip-ssl --host="$DB_HOST" --port="${DB_PORT:-3306}" --user="$DB_USERNAME" "$DB_DATABASE" -N -e 'SELECT 1' >/dev/null 2>&1 && break
+      [ "$attempt" -lt 90 ] || { echo 'Application database is unavailable' >&2; exit 1; }
+      sleep 2
+    done
+    if [ ! -s "$state/database.sql.gz" ]; then
+      mariadb-dump --skip-ssl --host="$DB_HOST" --port="${DB_PORT:-3306}" --user="$DB_USERNAME" --single-transaction --quick --skip-lock-tables --hex-blob --routines --events "$DB_DATABASE" | gzip > "$state/database.sql.gz.tmp"
+      gzip -t "$state/database.sql.gz.tmp"
+      gzip -cd "$state/database.sql.gz.tmp" | tail -n 8 | grep -q 'Dump completed'
+      mv "$state/database.sql.gz.tmp" "$state/database.sql.gz"
+    fi
+    gzip -t "$state/database.sql.gz"
+    echo 'Application file and database snapshots verified'
