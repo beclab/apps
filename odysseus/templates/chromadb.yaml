@@ -1,0 +1,59 @@
+# Chroma's native collection API is required by the upstream HTTP client;
+# Olares PostgreSQL/pgvector is not a compatible replacement for this service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromadb
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.chromadb.replicaCount }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: odysseus-chromadb}
+  template:
+    metadata:
+      labels: {app: odysseus-chromadb}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext: {runAsUser: 0}
+          command: [sh, -ec, 'mkdir -p /data; chown 1000:1000 /data']
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts: [{name: chroma, mountPath: /data}]
+      containers:
+        - name: chromadb
+          image: chromadb/chroma:1.5.5@sha256:3ce58229cf62ab1450e3120f31b613bf19037d896f25c8469d2be469aed2a155
+          env:
+            - {name: ANONYMIZED_TELEMETRY, value: 'FALSE'}
+            - {name: HOME, value: /tmp}
+          ports: [{name: http, containerPort: 8000}]
+          readinessProbe:
+            httpGet: {path: /api/v2/heartbeat, port: http}
+            periodSeconds: 10
+          startupProbe:
+            httpGet: {path: /api/v2/heartbeat, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {cpu: '2', memory: 2Gi}
+          volumeMounts: [{name: chroma, mountPath: /data}]
+      volumes:
+        - name: chroma
+          hostPath:
+            path: {{ .Values.userspace.appData }}/chroma
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: odysseus-chromadb}
+  ports: [{name: http, port: 8000, targetPort: http}]

@@ -1,0 +1,142 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: odysseus
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.odysseus.replicaCount }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: odysseus}
+  template:
+    metadata:
+      labels: {app: odysseus}
+      annotations:
+        checksum/runtime-config: {{ include (print $.Template.BasePath "/runtime-config.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext: {runAsUser: 0}
+          command: [sh, -ec]
+          args:
+            - |
+              for d in /runtime /data /data/logs /data/ssh /data/local /cache; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+              chmod 700 /data/ssh
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: runtime, mountPath: /runtime}
+            - {name: data, mountPath: /data}
+            - {name: cache, mountPath: /cache}
+        # Copy only image-owned application code into a writable ephemeral tree.
+        # This avoids upstream's root entrypoint and recursive ownership repair.
+        - name: prepare-runtime
+          image: beclab/odysseus-dev-odysseus:1.0.3@sha256:141077b62824698bf38e03c6061deabba60ce785e920b64a7b678d7a14d8fe3b
+          command: [sh, -ec]
+          args:
+            - |
+              cp -R /app/. /runtime/
+              python /runtime-config/prepare-runtime.py /runtime/core/database.py
+              cp /etc/passwd /runtime/.olares-passwd
+              cp /etc/group /runtime/.olares-group
+              if ! getent passwd 1000 >/dev/null; then
+                printf 'odysseus:x:1000:1000:Odysseus:/app:/bin/sh\n' >> /runtime/.olares-passwd
+              fi
+              if ! getent group 1000 >/dev/null; then
+                printf 'odysseus:x:1000:\n' >> /runtime/.olares-group
+              fi
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          volumeMounts:
+            - {name: runtime, mountPath: /runtime}
+            - {name: runtime-config, mountPath: /runtime-config, readOnly: true}
+      containers:
+        - name: odysseus
+          image: beclab/odysseus-dev-odysseus:1.0.3@sha256:141077b62824698bf38e03c6061deabba60ce785e920b64a7b678d7a14d8fe3b
+          workingDir: /app
+          command: [sh, -ec]
+          args:
+            - |
+              export PATH="/app/.local/bin:$PATH"
+              python -c 'import setup; setup.create_dirs(); setup.init_database(); result = setup.create_default_admin(); assert result in ("exists", "created"), result'
+              exec uvicorn app:app --host 0.0.0.0 --port 7000 --proxy-headers --forwarded-allow-ips '*'
+          envFrom:
+            - secretRef: {name: odysseus-config}
+          env:
+            - {name: HOME, value: /app}
+            - {name: USER, value: odysseus}
+            - {name: LOGNAME, value: odysseus}
+            - {name: PYTHONDONTWRITEBYTECODE, value: '1'}
+            - {name: APP_PORT, value: '7000'}
+            - {name: AUTH_ENABLED, value: 'true'}
+            - {name: LOCALHOST_BYPASS, value: 'false'}
+            - {name: SECURE_COOKIES, value: 'true'}
+            - {name: ODYSSEUS_ADMIN_USER, value: admin}
+            - {name: CHROMADB_HOST, value: chromadb}
+            - {name: CHROMADB_PORT, value: '8000'}
+            - {name: HF_HOME, value: /app/.cache/huggingface}
+            - {name: FASTEMBED_CACHE_PATH, value: /app/.cache/fastembed}
+            - {name: VLLM_USE_FLASHINFER_SAMPLER, value: '0'}
+            - {name: ANONYMIZED_TELEMETRY, value: 'false'}
+            - name: ALLOWED_ORIGINS
+              value: {{ printf "https://%s" .Values.domain.odysseus | quote }}
+            - name: OAUTH_REDIRECT_BASE_URL
+              value: {{ printf "https://%s" .Values.domain.odysseus | quote }}
+            {{- with .Values.olaresEnv.SEARXNG_URL }}
+            - name: SEARXNG_INSTANCE
+              value: {{ . | quote }}
+            {{- end }}
+          ports: [{name: http, containerPort: 7000}]
+          startupProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /api/health, port: http}
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: {cpu: 300m, memory: 1Gi}
+            limits: {cpu: '3', memory: 5Gi}
+          volumeMounts:
+            - {name: runtime, mountPath: /app}
+            - {name: runtime, mountPath: /etc/passwd, subPath: .olares-passwd, readOnly: true}
+            - {name: runtime, mountPath: /etc/group, subPath: .olares-group, readOnly: true}
+            - {name: data, mountPath: /app/data}
+            - {name: data, mountPath: /app/logs, subPath: logs}
+            - {name: data, mountPath: /app/.ssh, subPath: ssh}
+            - {name: data, mountPath: /app/.local, subPath: local}
+            - {name: cache, mountPath: /app/.cache}
+      volumes:
+        - name: runtime-config
+          configMap: {name: odysseus-runtime}
+        - name: runtime
+          emptyDir: {}
+        - name: data
+          hostPath:
+            path: {{ .Values.userspace.appData }}/workspace
+            type: DirectoryOrCreate
+        - name: cache
+          hostPath:
+            path: {{ .Values.userspace.appCache }}/cache
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: odysseus
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: odysseus}
+  ports: [{name: http, port: 7000, targetPort: http}]

@@ -1,0 +1,294 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: odysseus-runtime
+  namespace: {{ .Release.Namespace | quote }}
+data:
+  prepare-runtime.py: |
+    """Make the pinned upstream's SQLAlchemy migration introspection portable.
+    
+    SQLite-only sqlite3 migrations already skip non-file DATABASE_URLs. The
+    SQLAlchemy migrations, however, issue SQLite PRAGMA statements unconditionally.
+    Use SQLAlchemy's dialect-aware inspector while retaining their tuple contract.
+    """
+    from pathlib import Path
+    import re
+    import sys
+    
+    target = Path(sys.argv[1])
+    source = target.read_text(encoding='utf-8')
+    pattern = r'conn\.execute\(text\("PRAGMA table_info\(([a-z_]+)\)"\)\)'
+    patched, count = re.subn(pattern, r'_olares_table_info(conn, "\1")', source)
+    if count != 15:
+        raise RuntimeError(f"Pinned database migration source changed: expected 15 sites, got {count}")
+    helper = '''
+    
+    def _olares_table_info(connection, table_name):
+        """Return PRAGMA-shaped column tuples using portable introspection."""
+        schema = inspect(connection)
+        primary_keys = set(schema.get_pk_constraint(table_name).get("constrained_columns") or [])
+        return [
+            (index, column["name"], str(column["type"]),
+             int(not column["nullable"]), column.get("default"),
+             int(column["name"] in primary_keys))
+            for index, column in enumerate(schema.get_columns(table_name))
+        ]
+    '''
+    anchor = '\ndef init_db():'
+    if patched.count(anchor) != 1:
+        raise RuntimeError('Pinned database initialization entry changed')
+    patched = patched.replace(anchor, helper + anchor, 1)
+    compile(patched, str(target), 'exec')
+    target.write_text(patched, encoding='utf-8')
+    print(f"Prepared {count} portable database migration queries")
+    
+    # Router publishes provider models separately from callable aliases. Preserve
+    # an explicitly selected default-chat alias instead of replacing it with the
+    # first provider model during the upstream skill-test preflight.
+    root = target.parent.parent
+    skills = root / 'routes/skills_routes.py'
+    skills_source = skills.read_text(encoding='utf-8')
+    old = 'if _avail and model not in _avail:'
+    if skills_source.count(old) != 1:
+        raise RuntimeError('Pinned skill model preflight changed')
+    skills_source = skills_source.replace(old, 'if _avail and model not in _avail and model != "default-chat":', 1)
+    compile(skills_source, str(skills), 'exec')
+    skills.write_text(skills_source, encoding='utf-8')
+    audit_models = root / 'services/skills/model_selection.py'
+    audit_source = audit_models.read_text(encoding='utf-8')
+    if audit_source.count(old) != 1:
+        raise RuntimeError('Pinned skill audit model preflight changed')
+    audit_source = audit_source.replace(old, 'if _avail and model not in _avail and model != "default-chat":', 1)
+    compile(audit_source, str(audit_models), 'exec')
+    audit_models.write_text(audit_source, encoding='utf-8')
+    
+    # Vision and other helpers probe /models too. Explicitly pinned aliases are
+    # operator choices; include them only after that endpoint was reachable.
+    interaction = root / 'src/ai_interaction.py'
+    interaction_source = interaction.read_text(encoding='utf-8')
+    old = '                if model_type == "image" and endpoint_reachable:\n'
+    if interaction_source.count(old) != 1:
+        raise RuntimeError('Pinned model-resolution preflight changed')
+    interaction_source = interaction_source.replace(old, '                if endpoint_reachable and model_name in _json_list(getattr(ep, "pinned_models", None)):\n                    if model_name not in model_ids:\n                        model_ids.append(model_name)\n' + old, 1)
+    compile(interaction_source, str(interaction), 'exec')
+    interaction.write_text(interaction_source, encoding='utf-8')
+    
+    # This wrapper calls the native FastAPI endpoint directly, so every Query
+    # default must be supplied as a plain value rather than left as Query(...).
+    codex = root / 'routes/codex_routes.py'
+    codex_source = codex.read_text(encoding='utf-8')
+    old = '            cache_bust=None,\n            owner=owner,\n'
+    if codex_source.count(old) != 1:
+        raise RuntimeError('Pinned Codex email wrapper changed')
+    codex_source = codex_source.replace(old, '            date_from=None,\n            date_to=None,\n            cached_only=0,\n            refresh=0,\n' + old, 1)
+    compile(codex_source, str(codex), 'exec')
+    codex.write_text(codex_source, encoding='utf-8')
+    print('Prepared Router alias preservation and Codex email defaults')
+    
+    # Preserve the authenticated caller in the SMTP worker's captured config, so
+    # LAN mail policy sees the same owner as account testing and IMAP operations.
+    email_routes = root / 'routes/email/email_routes.py'
+    email_source = email_routes.read_text(encoding='utf-8')
+    old = '                        "smtp_host": _smtp_host,\n'
+    if email_source.count(old) != 1:
+        raise RuntimeError('Pinned SMTP delivery capture changed')
+    email_source = email_source.replace(old, '                        "owner": owner,\n' + old, 1)
+    compile(email_source, str(email_routes), 'exec')
+    email_routes.write_text(email_source, encoding='utf-8')
+    
+    
+    def patch_file(relative, old, new):
+        path = root / relative
+        value = path.read_text(encoding='utf-8')
+        if value.count(old) != 1:
+            raise RuntimeError(f'Pinned source changed: {relative}: {old[:70]}')
+        value = value.replace(old, new, 1)
+        if path.suffix == '.py':
+            compile(value, str(path), 'exec')
+        path.write_text(value, encoding='utf-8')
+    
+    
+    # Resolve against the original router. Recent FastAPI versions may retain
+    # included routers lazily, so scanning only app.routes misses these endpoints.
+    patch_file('app.py', 'app.include_router(setup_cookbook_routes())',
+               'cookbook_router = setup_cookbook_routes()\napp.include_router(cookbook_router)')
+    patch_file('app.py', '    document_router=document_router,\n',
+               '    document_router=document_router,\n    cookbook_router=cookbook_router,\n')
+    patch_file('routes/codex_routes.py', '    document_router: APIRouter | None = None,\n',
+               '    document_router: APIRouter | None = None,\n    cookbook_router: APIRouter | None = None,\n')
+    patch_file('routes/codex_routes.py', '_find_endpoint(None, "GET", "/api/model/cached")',
+               '_find_endpoint(cookbook_router, "GET", "/api/model/cached")')
+    
+    # A request task must not own an MCP transport: its AnyIO cancel scopes must
+    # remain open and be closed by the same long-lived task, including failures.
+    patch_file('src/mcp_manager.py',
+               'res = await self._connect_stdio(server_id, name, command, args or [], env or {})',
+               'res = await self._olares_owned_transport(self._connect_stdio, server_id, name, command, args or [], env or {})')
+    patch_file('src/mcp_manager.py',
+               'res = await self._connect_sse(server_id, name, url)',
+               'res = await self._olares_owned_transport(self._connect_sse, server_id, name, url)')
+    patch_file('src/mcp_manager.py', '    async def _connect_stdio(', '''    async def _olares_owned_transport(self, connector, server_id, *args):
+            ready = asyncio.get_running_loop().create_future()
+            stop = asyncio.Event()
+    
+            async def own():
+                self._owner_tasks[server_id] = asyncio.current_task()
+                self._owner_shutdown_events[server_id] = stop
+                try:
+                    connected = await connector(server_id, *args)
+                    if not ready.done():
+                        ready.set_result(connected)
+                    if connected:
+                        await stop.wait()
+                except BaseException as error:
+                    if not ready.done():
+                        ready.set_exception(error)
+                    raise
+                finally:
+                    stack = self._stacks.pop(server_id, None)
+                    try:
+                        if stack:
+                            await stack.aclose()
+                    finally:
+                        if self._owner_tasks.get(server_id) is asyncio.current_task():
+                            self._owner_tasks.pop(server_id, None)
+                            self._owner_shutdown_events.pop(server_id, None)
+    
+            task = asyncio.create_task(own())
+            try:
+                return await asyncio.shield(ready)
+            except BaseException:
+                ready.cancel()
+                task.cancel()
+                try:
+                    await task
+                except BaseException:
+                    pass
+                raise
+    
+        async def _connect_stdio(''')
+    patch_file('src/mcp_manager.py', '        event = asyncio.Event()\n', '''        existing = self._owner_tasks.get(server_id)
+            if existing is not None and existing is not asyncio.current_task():
+                await asyncio.shield(existing)
+                return
+            event = asyncio.Event()
+    ''')
+    
+    # Short vision helper answers must spend their budget on the visible answer.
+    # Scope this provider extension to the Olares Router callable alias only.
+    patch_file('routes/gallery/gallery_routes.py',
+               '                # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.',
+               '''                from urllib.parse import urlparse
+                    router_host = (urlparse(chat_url).hostname or "").lower()
+                    if model_name == "default-chat" and router_host.startswith("router.") and router_host.endswith(".olares.com"):
+                        payload["chat_template_kwargs"] = {"enable_thinking": False}
+                        payload[_tok_key] = 512
+                    # Reasoning models (o1/o3/o4/gpt-5) reject an explicit temperature.''')
+    patch_file('routes/gallery/gallery_routes.py', '            # Clean up tags\n',
+               '''            if not isinstance(content, str) or not content.strip():
+                    raise HTTPException(502, "Vision model returned no tags")
+                # Clean up tags
+    ''')
+    
+    # Callable aliases have no capability-bearing name. An explicitly configured
+    # Vision model is authoritative only for that exact endpoint/model pair.
+    patch_file('src/chat_helpers.py', '    if endpoint_url:\n        try:\n            advertised = lmstudio_supports_vision', '''    if endpoint_url:
+            try:
+                from src.settings import get_setting
+                from src.ai_interaction import _resolve_model
+                configured = get_setting("vision_model", "")
+                if configured:
+                    url, resolved, _ = _resolve_model(configured)
+                    if resolved == model_name and url.rstrip("/").removesuffix("/chat/completions") == endpoint_url.rstrip("/").removesuffix("/chat/completions"):
+                        return True
+            except Exception:
+                pass
+            try:
+                advertised = lmstudio_supports_vision''')
+    
+    # Some Router TTS engines expose ElevenLabs routes rather than OpenAI speech.
+    # A 404 is safe to adapt: the first request did not start a generation.
+    patch_file('services/tts/tts_service.py',
+               '            r = httpx.post(url, json=payload, headers=headers, timeout=60)\n            r.raise_for_status()',
+               '''            r = httpx.post(url, json=payload, headers=headers, timeout=180)
+                if r.status_code == 404:
+                    from urllib.parse import quote
+                    r = httpx.post(
+                        base_url + "/text-to-speech/" + quote(voice, safe=""),
+                        params={"model": model, "output_format": "mp3_44100_128"},
+                        json={"model_id": model, "text": text, "voice_settings": {"speed": speed}},
+                        headers=headers, timeout=180,
+                    )
+                r.raise_for_status()
+                if not r.headers.get("content-type", "").lower().startswith("audio/"):
+                    raise ValueError("TTS endpoint did not return audio")''')
+    
+    # Keep configured/custom models and voices representable in the native UI.
+    patch_file('static/js/settings/speech.js',
+               "  function getModel() { return isEndpoint() ? modelSelect.value : modelInput.value; }\n  function getVoice() { return isEndpoint() ? voiceSelect.value : voiceInput.value; }",
+               '''  function getModel() { return isEndpoint() && modelSelect.value !== '__custom__' ? modelSelect.value : modelInput.value; }
+      function getVoice() { return isEndpoint() && voiceSelect.value !== '__custom__' ? voiceSelect.value : voiceInput.value; }
+      function addOption(select, value, label) {
+        if (Array.from(select.options).some(o => o.value === value)) return;
+        var option = document.createElement('option'); option.value = value; option.textContent = label || value; select.appendChild(option);
+      }
+      addOption(modelSelect, '__custom__', 'Custom model');
+      addOption(voiceSelect, '__custom__', 'Custom voice');''')
+    patch_file('static/js/settings/speech.js',
+               "      modelSelect.style.display = ''; modelInput.style.display = 'none';\n      voiceSelect.style.display = ''; voiceInput.style.display = 'none';",
+               "      modelSelect.style.display = ''; modelInput.style.display = modelSelect.value === '__custom__' ? '' : 'none';\n      voiceSelect.style.display = ''; voiceInput.style.display = voiceSelect.value === '__custom__' ? '' : 'none';")
+    patch_file('static/js/settings/speech.js',
+               "    if (settings.tts_provider) provSel.value = settings.tts_provider;",
+               '''    if (settings.tts_provider) {
+          addOption(provSel, settings.tts_provider);
+          provSel.value = settings.tts_provider;
+        }
+        if (settings.tts_model) addOption(modelSelect, settings.tts_model);
+        if (settings.tts_voice) addOption(voiceSelect, settings.tts_voice);''')
+    patch_file('static/js/settings/speech.js',
+               "  modelSelect.addEventListener('change', saveAndClearCache);",
+               "  modelSelect.addEventListener('change', function() { updateVisibility(); if (modelSelect.value !== '__custom__') saveAndClearCache(); });")
+    patch_file('static/js/settings/speech.js',
+               "  voiceSelect.addEventListener('change', saveAndClearCache);",
+               "  voiceSelect.addEventListener('change', function() { updateVisibility(); if (voiceSelect.value !== '__custom__') saveAndClearCache(); });")
+    patch_file('static/js/settings/speech.js', '      if (!hasTTS) return;',
+               "      if (!hasTTS && ep.endpoint_kind !== 'proxy') return;")
+    
+    # Router aliases hide the underlying local model name. Honor an explicit
+    # thinking setting for this platform route too, without changing other hosts.
+    patch_file('src/llm_core.py',
+               '    if not is_local_endpoint(url):\n        return\n    if not (_supports_thinking(model) or _is_odysseus_qwen_tool_router_model(model)):\n        return\n',
+               '''    from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+        router_alias = model == "default-chat" and host.startswith("router.") and host.endswith(".olares.com")
+        if not router_alias and not is_local_endpoint(url):
+            return
+        if not router_alias and not (_supports_thinking(model) or _is_odysseus_qwen_tool_router_model(model)):
+            return
+    ''')
+    patch_file('src/deep_research.py',
+               '            timeout=timeout,\n        )\n        return strip_thinking(response)',
+               '''            timeout=timeout,
+                thinking_mode="off" if self.llm_model == "default-chat" else None,
+            )
+            return strip_thinking(response)''')
+    patch_file('src/deep_research.py',
+               '            if len(result.split()) < 400:\n',
+               '''            concise_requested = bool(re.search(
+                    r"\\b(?:brief(?:ly)?|concise|short answer|one paragraph|single paragraph)\\b|简短|简洁|一段话",
+                    question, re.IGNORECASE,
+                ))
+                if len(result.split()) < 400 and not concise_requested:
+    ''')
+    # Keep a bounded, configurable deadline for report generation. Short planning
+    # and extraction calls retain their original timeouts.
+    patch_file('src/deep_research.py',
+               '        from src.llm_core import llm_call_async\n        response = await llm_call_async(',
+               '''        from src.llm_core import llm_call_async
+            if timeout == 180:
+                from src.settings import get_setting
+                try:
+                    timeout = min(1800, max(180, int(get_setting("research_report_timeout_seconds", 600))))
+                except (ValueError, TypeError):
+                    timeout = 600
+            response = await llm_call_async(''')
