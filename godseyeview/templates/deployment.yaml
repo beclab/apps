@@ -1,0 +1,176 @@
+{{- /*
+  God's Eye View — one container, one process.
+
+  The Vite dev server is the entire application: it serves the Cesium client and
+  runs every provider proxy (ADS-B, AIS, OpenSky, OpenAI Realtime, CCTV/HLS) as
+  middleware, so there is no separate API tier and nothing to migrate. It keeps
+  no state it cannot rebuild, which is why this is a Deployment rather than a
+  StatefulSet, and the only mounts are its two runtime directories.
+*/ -}}
+{{- $olaresEnv := default (dict) .Values.olaresEnv -}}
+{{- /*
+  Effective Host allowlist. The entrance domain this install was given is always
+  included first, so a bad value in GEV_EXTRA_ALLOWED_HOSTS can never lock the
+  owner out of their own app. Extra names are appended, de-duplicated, and
+  trimmed. Exact hostnames only: upstream's build/allowedHosts.js silently drops
+  wildcard and leading-dot entries, so `*.lan` would look configured and do
+  nothing.
+
+  Why this is editable rather than baked: a custom entrance domain is an
+  app-service override that outlives chart re-projection, while
+  `.Values.domain.web` at render time is still the derived default. Set a custom
+  domain without listing it here and the app answers 403 for the new hostname —
+  the failure this field exists to avoid.
+*/ -}}
+{{- $hosts := list -}}
+{{- if .Values.domain.web }}{{- $hosts = append $hosts .Values.domain.web }}{{- end -}}
+{{- range $h := splitList "," (index $olaresEnv "GEV_EXTRA_ALLOWED_HOSTS" | default "") -}}
+  {{- $t := trim $h -}}
+  {{- if and $t (not (has $t $hosts)) }}{{- $hosts = append $hosts $t -}}{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: godseyeview
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: godseyeview
+    app.kubernetes.io/name: godseyeview
+    app.kubernetes.io/instance: "{{ .Release.Name }}"
+spec:
+  replicas: {{ .Values.workloads.godseyeview.replicaCount }}
+  # Recreate, not RollingUpdate: the two runtime directories are hostPath
+  # mounts, and a rolling update would run the old and new pods against the same
+  # host paths at once. app-service drives suspend/resume through the replica
+  # count below, so the strategy is not what pauses the app.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: godseyeview
+  template:
+    metadata:
+      labels:
+        app: godseyeview
+        app.kubernetes.io/name: godseyeview
+    spec:
+      # The app's own config prefix is GEV_; a Service named after that prefix
+      # would inject a tcp:// URL over it. Cheap insurance, no downside here —
+      # nothing in this pod discovers neighbours by Docker-link style env.
+      enableServiceLinks: false
+      # The image already runs as 1000:1000; Kubernetes overrides a Dockerfile
+      # USER, so state it. The OlaresManifest's `runAsUser: true` puts 1000 at
+      # pod level too — this is the same value written down twice on purpose.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      # Olares grants the mount but does not chown it: DirectoryOrCreate makes
+      # the volume root root-owned, so a uid-1000 app would fail its first write
+      # to .gev-cache. Each directory is chowned non-recursively on purpose — a
+      # recursive chown fails on subdirectories the app later owns as uid 1000,
+      # which breaks upgrades rather than fresh installs.
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        command:
+        - sh
+        - -c
+        - |
+          for d in /app/.gev-cache /app/.gev-logs; do
+            mkdir -p "$d" && chown 1000:1000 "$d"
+          done
+        securityContext:
+          runAsUser: 0
+        volumeMounts:
+        - name: gev-cache
+          mountPath: /app/.gev-cache
+        - name: gev-logs
+          mountPath: /app/.gev-logs
+      containers:
+      - name: godseyeview
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 4173
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "4173"
+        - name: HOST
+          # Reachable from the entrance proxy inside the pod network. The Host
+          # allowlist below is what actually decides who is served.
+          value: "0.0.0.0"
+        - name: GEV_ALLOWED_HOSTS
+          # Exact-match allowlist (build/allowedHosts.js ignores wildcards and
+          # leading dots), so the hostname served must be listed or the request
+          # answers 403 "Blocked request. This host is not allowed." Composed
+          # above: this install's entrance domain, plus anything the owner adds
+          # in GEV_EXTRA_ALLOWED_HOSTS.
+          value: "{{ join "," $hosts }}"
+        - name: GEV_KEY_SETUP_TRUSTED_PEERS
+          # 'none' keeps the in-app POWER UP panel closed: it is a loopback-only
+          # key editor, and behind an entrance its own gateway-discovery default
+          # would trust whatever pod delivers the request. Keys arrive here as
+          # environment variables instead, which is the supported headless path.
+          value: "none"
+        - name: OPENSKY_AUTH_MODE
+          value: {{ index $olaresEnv "OPENSKY_AUTH_MODE" | default "anon" | quote }}
+        - name: GEV_RATELIMIT_GOOGLE_PER_MIN
+          value: {{ index $olaresEnv "GEV_RATELIMIT_GOOGLE_PER_MIN" | default "60" | quote }}
+        - name: GEV_RATELIMIT_OPENAI_PER_MIN
+          value: {{ index $olaresEnv "GEV_RATELIMIT_OPENAI_PER_MIN" | default "30" | quote }}
+        {{- range $key := .Values.gevSecretKeys }}
+        {{- if index $olaresEnv $key }}
+        # Rendered only when the installer actually filled this one in. An empty
+        # string would read as "configured" and light up a layer whose key is
+        # missing, and the app's own defaults then never apply.
+        - name: {{ $key }}
+          valueFrom:
+            secretKeyRef:
+              name: godseyeview-keys
+              key: {{ $key }}
+        {{- end }}
+        {{- end }}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+        # GET / is answered by Vite itself, and an IP Host is always allowed, so
+        # a kubelet probe never trips the Host allowlist.
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 8
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 45
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 4
+        volumeMounts:
+        - name: gev-cache
+          # Provider disk cache: TLEs, terrain heights, TomTom tiles + the daily
+          # tile budget counter, FIRMS responses. Losing it costs quota, not data.
+          mountPath: /app/.gev-cache
+        - name: gev-logs
+          # Voice diagnostics (.gev-logs/realtime-conversations.jsonl).
+          mountPath: /app/.gev-logs
+      volumes:
+      - name: gev-cache
+        hostPath:
+          path: '{{ .Values.userspace.appCache }}'
+          type: DirectoryOrCreate
+      - name: gev-logs
+        hostPath:
+          path: '{{ .Values.userspace.appData }}'
+          type: DirectoryOrCreate
