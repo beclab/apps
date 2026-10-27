@@ -71,7 +71,7 @@ spec:
         - name: dshm
           mountPath: /dev/shm
       - name: prepare-runtime
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: {{ include "unsloth.image" . | quote }}
         imagePullPolicy: IfNotPresent
         command:
         - /opt/unsloth-studio-app/unsloth_studio/bin/python
@@ -93,7 +93,7 @@ spec:
           mountPath: /runtime-compat
       containers:
       - name: unsloth
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        image: {{ include "unsloth.image" . | quote }}
         imagePullPolicy: IfNotPresent
         args:
         - bash
@@ -146,7 +146,7 @@ spec:
         - name: UV_CONFIG_FILE
           value: /runtime-config/uv.toml
         - name: PIP_TARGET
-          value: /opt/unsloth-studio/runtime-packages/{{ .Values.image.tag }}
+          value: /opt/unsloth-studio/runtime-packages/{{ include "unsloth.imageTag" . }}
         # Set before the backend and training workers import huggingface_hub.
         - name: HF_HUB_DISABLE_XET
           value: "1"
@@ -155,12 +155,14 @@ spec:
           value: "15"
         - name: UNSLOTH_LLAMA_CPP_PATH
           value: /opt/unsloth-studio/llama-cpp
-        {{- $oe := .Values.olaresEnv | default dict -}}
-        {{- if $oe.HF_ENDPOINT }}
+        {{- $oe := .Values.olaresEnv | default dict }}
+        - name: UNSLOTH_MODEL_IDLE_TTL
+          value: {{ $oe.UNSLOTH_MODEL_IDLE_TTL | default "300" | quote }}
+        {{- if $oe.SYSTEM_HF_ENDPOINT }}
         - name: HF_ENDPOINT
-          value: {{ $oe.HF_ENDPOINT | quote }}
+          value: {{ $oe.SYSTEM_HF_ENDPOINT | quote }}
         {{- end }}
-        {{- if $oe.HF_TOKEN }}
+        {{- if $oe.SYSTEM_HF_TOKEN }}
         - name: HF_TOKEN
           valueFrom:
             secretKeyRef:
