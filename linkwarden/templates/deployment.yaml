@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkwarden
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.linkwarden.replicaCount }}
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: linkwarden}}
+  template:
+    metadata: {labels: {app: linkwarden}}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext: {runAsUser: 0}
+        command: [sh, -ec, 'mkdir -p /data/archive /data/search; chown 1000:1000 /data /data/archive /data/search']
+        volumeMounts: [{name: data, mountPath: /data}]
+      containers:
+      - name: linkwarden
+        image: ghcr.io/linkwarden/linkwarden:v2.16.3@sha256:0664c28a039bda8ffa6663389e8536b2fc717219e329f85b83faca7efed3b144
+        command: [sh, -ec]
+        args:
+        - |
+          export PATH=/data/node_modules/.bin:$PATH
+          until node -e "fetch('http://127.0.0.1:7700/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; do sleep 2; done
+          prisma migrate deploy --schema=/data/packages/prisma/schema.prisma
+          exec concurrently -k -n web,worker "cd /data/apps/web && exec next start" "cd /data/apps/worker && exec tsx worker.ts"
+        envFrom: [{secretRef: {name: linkwarden-auth}}]
+        env:
+        - {name: NEXTAUTH_URL, value: 'https://{{ .Values.domain.linkwarden }}/api/v1/auth'}
+        - {name: STORAGE_FOLDER, value: /data/data}
+        - {name: MEILI_HOST, value: 'http://127.0.0.1:7700'}
+        - {name: NEXT_PUBLIC_DISABLE_REGISTRATION, value: 'false'}
+        - {name: NEXT_PUBLIC_CREDENTIALS_ENABLED, value: 'true'}
+        - {name: MAX_WORKERS, value: '2'}
+        - {name: HOME, value: /tmp}
+        - {name: OPENAI_API_KEY, value: olares}
+        - {name: OPENAI_MODEL, value: default-chat}
+        - {name: CUSTOM_OPENAI_BASE_URL, value: 'https://router.{{ .Values.user.zone }}/v1'}
+        - {name: CUSTOM_OPENAI_NAME, value: 'Olares AI Router'}
+        ports: [{name: http, containerPort: 3000}]
+        startupProbe: {tcpSocket: {port: http}, periodSeconds: 10, failureThreshold: 60}
+        readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits: {cpu: '3', memory: 3Gi}
+        volumeMounts: [{name: data, mountPath: /data/data, subPath: archive}]
+      - name: meilisearch
+        image: docker.io/getmeili/meilisearch:v1.13.3@sha256:bed3fb650e62da53145777204891159242f6ea4ce69e215b36223af4aa64a0ae
+        env:
+        - name: MEILI_MASTER_KEY
+          valueFrom:
+            secretKeyRef: {name: linkwarden-auth, key: MEILI_MASTER_KEY}
+        - {name: MEILI_ENV, value: production}
+        - {name: MEILI_NO_ANALYTICS, value: 'true'}
+        - {name: MEILI_MAX_INDEXING_MEMORY, value: 512MiB}
+        - {name: MEILI_MAX_INDEXING_THREADS, value: '2'}
+        - {name: MEILI_DB_PATH, value: /meili_data/data.ms}
+        ports: [{name: search, containerPort: 7700}]
+        readinessProbe: {httpGet: {path: /health, port: search}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: '1', memory: 1Gi}
+        volumeMounts: [{name: data, mountPath: /meili_data, subPath: search}]
+      volumes:
+      - name: data
+        hostPath: {path: '{{ .Values.userspace.appData }}/data', type: DirectoryOrCreate}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkwarden
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: linkwarden}
+  ports: [{name: http, port: 3000, targetPort: http}]
