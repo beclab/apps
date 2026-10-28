@@ -4,31 +4,16 @@ metadata:
 
 spec:
   upgradeDescription: |
-    Upgrade SGLang from v0.5.18-cu130 to v0.5.21-cu130. Chart 1.2.33.
+    Upgrade SGLang from v0.5.21-cu130 to v0.5.22-cu130. Chart 1.2.34.
 
-    **What's Changed** (v0.5.18 → v0.5.21)
+    **What's Changed** (v0.5.21 → v0.5.22)
 
-    v0.5.21
-    - New models: DeepSeek-V4.1 Flash, GigaChat 3.5, IQuest-Q1, MiMo-V2.6 / V2.6-Pro, Ling-3.0-flash-VL, plus the DiffusionGemma, Qwen-Image 2.1, Anima Base v1.0, Ming-Image 0.1 and FLUX 3 Action diffusion models
-    - The prefix cache now runs on a Rust core by default; unsupported configurations fall back to Python automatically (`SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python` forces the old core)
-    - New Decisions API (`/v1/decisions`) turns an LLM/VLM into a low-latency classifier and scorer; the Score API (`/v1/score`) scores all candidates in one request
-    - DeepSeek-V4.1 first token is 22% faster on long prompts, and Kimi K3 prefill throughput is up 20.6% in PD serving
-    - Breaking: a request-supplied `chat_template` is rejected unless the server starts with `--trust-request-chat-template`; deprecated endpoints are gone (`/model_info` replaces `/get_weight_version`, `/v1/loads` replaces `/get_load`); `--kv-cache-dtype fp4_e2m1` becomes `fp4_mx_block16`; FlashInfer MoE fused finalize is off by default for numerical accuracy; the legacy radix cache implementations are removed
-
-    v0.5.20
-    - New models: GLM-5.3-Flash, Hy4-Preview, Qwen3.8-Flash-Next, K2 Horizon, Nanbeige4.2, and several diffusion models
-    - The unified radix tree caches SWA branching points: on DeepSeek-V4-Flash with a shared system prompt, token hit rate rises from 43.8% to 60.8% and mean TTFT falls from 1.57 s to 1.07 s
-    - `return_sampling_mask` returns the exact token support per decode step for RL rollouts, with capacity set by `--sampling-mask-max-tokens` (default 4096)
-    - DeepSeek-V4 on Blackwell: TRT-LLM attention now covers the CSA and HCA layers on SM100/SM103 (about 1.2x prefill and 1.45x decode versus FlashMLA)
-    - On 32 GB GPUs the decode CUDA-graph cap rises from 24 to 48 (160 at TP >= 4) and chunked prefill from 2K to 4K
-    - Breaking: the CUDA 12 lane is retired (this chart already uses the CUDA 13 image); `/v1/responses` storage requires `--enable-response-store`; prefill context parallelism v1 is removed; seventeen deprecated CLI flags are removed; the `cutlass_mla` attention backend, the non-Marlin `gptq` path, and Dual Chunk Flash Attention are deleted; an undersized SWA pool now fails at startup instead of hanging at warmup
-
-    v0.5.19
-    - New models: Qwen3.8 (2.4T-A95B), Qwen3.8-27B, dots3.note, Ling-3.0-flash and Ling-3.0-tiny, Spark2.5, MiniCPM-SALA, Granite 4.2
-    - Beam search is supported through `beam_width`, though not yet together with speculative decoding, disaggregation, DP attention, or HiCache
-    - `--enable-layernorm-sp` trims 3.5% off Qwen3-8B prefill on H100 and 5.6% on B200, with the saving growing with the TP degree
-    - DeepEP v2 ElasticBuffer is available via `--moe-a2a-backend deepep_v2`, keeping decode under CUDA graphs across nodes
-    - Breaking: the unified radix tree becomes the default cache for every configuration; FlashInfer 0.6.18 is required; the Spark 2.5 tool-call parser is renamed from `spark` to `spark25`; requests are limited to 32 stop strings and 32 stop regex patterns of at most 256 bytes each
+    - New models: Clef / Clef Flash, PPLX-Decider v1 / v1.1, EmbeddingGemma 2, and LLaDA2.2, plus the HunyuanImage-3.0-Instruct, Kandinsky 6 / 6 SR, Wan-Animate-2, SANA-Video 2.0, and LLaDA-Image / LLaDA-Image-Turbo diffusion models
+    - DeepSeek-V4.1 reaches up to 2.3x throughput per GPU on H200. Qwen3.8-Flash-Next decodes 12% faster on B200, GLM-5.3-Flash with DFlash is 10% faster on B300, and MiMo-V2.6-Pro gets 1.85x decode throughput with DFlash on B300. GLM-5.2 and GLM-5.3 can combine decode context parallelism with MTP, up to 2.1x faster decoding on GLM-5.3
+    - The InstantTensor loader can load models about 10x faster (DeepSeek-R1 on 8x H200: 15.3 s instead of 160 s from 50 GB/s storage). PD disaggregation gains up to 27% throughput and about half the p95 TTFT on long prompts. HiSparse now supports EAGLE and MTP with the KV cache in CPU memory
+    - Fix: hybrid linear models could resume from the wrong Mamba state when speculative decoding and structured output were used together
+    - The CUDA image moves to PyTorch 2.14.1, Transformers 5.19.0, and FlashInfer 0.7.1
+    - Breaking: Python 3.11 or newer is required (this CUDA 13 image already ships Python 3.12). `--enable-dp-attention` is deprecated in favor of `--attn-dp-size N`, and `--dp-size` now counts model replicas only. `--disaggregation-decode-host-receive-threshold` flips its meaning: `1` (the new default) disables host receive, and `0` means always receive on the host. `ChunkCache` is removed. The `tc_piecewise` prefill CUDA graph backend is removed. For OpenAI chat responses, `tool_choice: "none"` no longer shows tool schemas to DeepSeek models, an absent `tool_calls` field is omitted instead of returned as `null`, and a stream keeps one `created` timestamp. `--enable-layernorm-sp` is rejected together with pipeline parallelism
 
     For detailed release notes, visit:
     https://github.com/sgl-project/sglang/releases
