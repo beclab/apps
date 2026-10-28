@@ -2,20 +2,20 @@
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
 #     -f Dockerfile.brew-base-cli \
-#     -t beclab/harveyff-openclaw-brew-base:2026.9.2-cli \
+#     -t beclab/harveyff-openclaw-brew-base:2026.10.28-cli.10-r1 \
 #     --push .
 # syntax=docker/dockerfile:1.7
 
 # ---- Stage 1: olares-cli binary + Olares skills ----
 # @olares/cli postinstall downloads the Go binary per arch
 # (arch detection + GitHub/cdn.olares.com fallback + extract + chmod).
-# skills CLI clones beclab/Olares via git, so git is required in this stage.
+# Skills are carried by the pinned binary and need no separate Git checkout.
 # Copy the vendor binary (not the JS wrapper) so the full verb set is available
 # (wrapper forces OLARES_CLI_REMOTE_ONLY=1 and drops commands).
 FROM node:24-bookworm-slim AS olares-assets
-ARG OLARES_CLI_NPM_VERSION=1.12.6-cli.2
+ARG OLARES_CLI_NPM_VERSION=1.12.7-cli.10
 
-# skills CLI needs git; bookworm-slim does not ship it
+# Install TLS certificates for the CLI binary download.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates \
@@ -26,14 +26,13 @@ RUN npm install -g @olares/cli@${OLARES_CLI_NPM_VERSION} \
  && install -D "$(npm root -g)/@olares/cli/vendor/olares-cli" /out/bin/olares-cli \
  && ( /out/bin/olares-cli --version || /out/bin/olares-cli version || true )
 
-# Olares skills: project scope + --copy => ./skills/ with real files, no symlinks
+# Install the exact skills embedded in the pinned CLI, without fetching a drifting repo.
 WORKDIR /skills-build
-RUN npx -y skills add beclab/Olares -a openclaw -y --copy \
- && test -d /skills-build/skills \
+RUN HOME=/skills-build /out/bin/olares-cli skills install \
+ && test -d /skills-build/.agents/skills/olares-shared \
  && mkdir -p /out/skills \
- && cp -a /skills-build/skills/. /out/skills/ \
- && ls -la /out/skills
-
+ && cp -a /skills-build/.agents/skills/olares-* /out/skills/ \
+ && grep -q 'version: 1.12.7-cli.10' /out/skills/olares-shared/SKILL.md
 # ---- Stage 2: brew base (final image, no Node) ----
 FROM debian:bookworm-slim
 
@@ -72,9 +71,12 @@ RUN export PATH="${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin:${PATH}" \
  && ln -sf pip3 ${HOMEBREW_PREFIX}/bin/pip \
  && python3 --version \
  && pip3 --version \
- && find "${HOMEBREW_PREFIX}" -name EXTERNALLY-MANAGED -delete \
+ && find "${HOMEBREW_PREFIX}" -name EXTERNALLY-MANAGED -delete
+
+# Keep transient tap clone failures from repeating the full package installation.
+RUN export PATH="${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin:${PATH}" \
  && brew trust steipete/tap \
- && brew tap steipete/tap
+ && (brew tap steipete/tap || brew tap steipete/tap || brew tap steipete/tap)
 USER 0
 
 # olares-cli: copy vendor binary into brew bin.
