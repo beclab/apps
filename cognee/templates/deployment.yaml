@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognee
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.cognee.replicaCount }}
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: cognee}}
+  template:
+    metadata:
+      labels: {app: cognee}
+      annotations:
+        checksum/proxy: {{ include (print $.Template.BasePath "/proxy.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext: {runAsUser: 0}
+        command: [sh, -ec, 'mkdir -p /storage/system /storage/data /storage/cache; chown 1000:1000 /storage /storage/system /storage/data /storage/cache /compat']
+        volumeMounts: [{name: data, mountPath: /storage}, {name: compat, mountPath: /compat}]
+      - name: init-live-events-compat
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        image: docker.io/cognee/cognee@sha256:29427e968f8b273db0bb7b037a7bb119d7695d960f73a59d649f00c5111a85bd
+        command: [python, -c]
+        args:
+        - |
+          # Upstream 1.6.5 can mix aware session timestamps with a naive UTC cursor.
+          # Normalize only the comparison; authorization and returned timestamps stay intact.
+          from pathlib import Path
+          source = Path('/app/cognee/api/v1/visualize/visualize.py').read_text()
+          old = 'and event_time > cutoff'
+          assert source.count(old) == 1, 'Pinned upstream compatibility pattern changed'
+          Path('/compat/visualize.py').write_text(source.replace(old, 'and _as_naive_utc(event_time) > cutoff'))
+          Path('/compat/visualize.py').chmod(0o644)
+        volumeMounts: [{name: compat, mountPath: /compat}]
+      containers:
+      - name: cognee
+        image: docker.io/cognee/cognee@sha256:29427e968f8b273db0bb7b037a7bb119d7695d960f73a59d649f00c5111a85bd
+        envFrom: [{secretRef: {name: cognee-app}}]
+        env:
+        - {name: ENV, value: production}
+        - {name: HOME, value: /cognee-storage}
+        - {name: SYSTEM_ROOT_DIRECTORY, value: /cognee-storage/system}
+        - {name: DATA_ROOT_DIRECTORY, value: /cognee-storage/data}
+        - {name: HF_HOME, value: /cognee-storage/cache/huggingface}
+        - {name: FASTEMBED_CACHE_PATH, value: /cognee-storage/cache/fastembed}
+        - {name: DB_PROVIDER, value: postgres}
+        - {name: DB_HOST, value: '{{ .Values.postgres.host }}'}
+        - {name: DB_PORT, value: '{{ .Values.postgres.port }}'}
+        - {name: DB_NAME, value: '{{ .Values.postgres.databases.cognee }}'}
+        - {name: DB_USERNAME, value: '{{ .Values.postgres.username }}'}
+        - {name: LLM_PROVIDER, value: openai}
+        - {name: LLM_MODEL, value: openai/default-chat}
+        - {name: LLM_ENDPOINT, value: 'https://router.{{ .Values.user.zone }}/v1'}
+        - {name: LLM_API_KEY, value: olares}
+        - {name: EMBEDDING_PROVIDER, value: fastembed}
+        - {name: EMBEDDING_MODEL, value: BAAI/bge-small-en-v1.5}
+        - {name: EMBEDDING_DIMENSIONS, value: '384'}
+        - {name: GRAPH_DATABASE_PROVIDER, value: kuzu}
+        - {name: DATABASE_MAX_LRU_CACHE_SIZE, value: '2'}
+        - {name: DATASET_QUEUE_MAX_CONCURRENT, value: '2'}
+        - {name: KUZU_NUM_THREADS, value: '2'}
+        - {name: KUZU_BUFFER_POOL_SIZE, value: '1073741824'}
+        - {name: VECTOR_DB_PROVIDER, value: lancedb}
+        - {name: ENABLE_BACKEND_ACCESS_CONTROL, value: 'true'}
+        - {name: CORS_ALLOWED_ORIGINS, value: 'https://{{ .Values.domain.cognee }}'}
+        ports: [{name: api, containerPort: 8000}]
+        startupProbe: {httpGet: {path: /health, port: api}, periodSeconds: 10, failureThreshold: 90}
+        readinessProbe: {httpGet: {path: /health, port: api}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 200m, memory: 1Gi}
+          limits: {cpu: '3', memory: 9Gi}
+        volumeMounts:
+        - {name: data, mountPath: /cognee-storage}
+        - {name: compat, mountPath: /app/cognee/api/v1/visualize/visualize.py, subPath: visualize.py, readOnly: true}
+      - name: frontend
+        image: docker.io/cognee/cognee-ui@sha256:e8903024cb874079d2fefbeb3eca09803be257a35c5daaceae8b31310c9330f2
+        env:
+        - name: DEFAULT_USER_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: cognee-app, key: DEFAULT_USER_PASSWORD}
+        - {name: COGNEE_BACKEND_URL, value: 'http://127.0.0.1:8000'}
+        - {name: NEXT_TELEMETRY_DISABLED, value: '1'}
+        ports: [{name: web, containerPort: 3000}]
+        readinessProbe: {tcpSocket: {port: web}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 80m, memory: 192Mi}
+          limits: {cpu: 800m, memory: 960Mi}
+      - name: proxy
+        image: docker.io/library/nginx:1.30.6-alpine
+        command: [nginx, -c, /config/nginx.conf, -g, 'daemon off;']
+        ports: [{name: http, containerPort: 8080}]
+        readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits: {cpu: 200m, memory: 64Mi}
+        volumeMounts: [{name: proxy, mountPath: /config, readOnly: true}]
+      volumes:
+      - name: compat
+        emptyDir: {}
+      - name: data
+        hostPath: {path: '{{ .Values.userspace.appData }}/data', type: DirectoryOrCreate}
+      - name: proxy
+        configMap: {name: cognee-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognee
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: cognee}
+  ports: [{name: http, port: 3000, targetPort: http}]
