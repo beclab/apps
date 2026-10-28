@@ -1,0 +1,134 @@
+olaresManifest.version: 0.12.0
+olaresManifest.type: app
+apiVersion: v3
+metadata:
+  name: rustdesk
+  appid: rustdesk
+  title: RustDesk Server
+  description: Self-hosted ID and relay services for RustDesk remote desktop connections
+  icon: https://cdn.olares.com/images/2026/10/4f9153e49aa8750df57399f8db773703.png
+  version: 0.0.17
+  categories:
+  - Utilities
+  - homelab
+entrances:
+- name: rustdesk
+  host: rustdesk-web
+  port: 8080
+  title: RustDesk Server
+  icon: https://cdn.olares.com/images/2026/10/4f9153e49aa8750df57399f8db773703.png
+  authLevel: private
+  openMethod: window
+spec:
+  versionName: 1.1.16
+  developer: RustDesk
+  submitter: harveyff
+  sourceCode: https://github.com/rustdesk/rustdesk-server
+  website: https://rustdesk.com
+  runAsUser: true
+  supportArch:
+  - amd64
+  - arm64
+  requiredCpu: 100m
+  limitedCpu: '2'
+  requiredMemory: 128Mi
+  limitedMemory: 512Mi
+  requiredDisk: 256Mi
+  limitedDisk: 2Gi
+  doc: https://rustdesk.com/docs/en/self-host/rustdesk-server-oss/
+  license:
+  - text: AGPL-3.0
+    url: https://github.com/rustdesk/rustdesk-server/blob/master/LICENSE
+  locale:
+  - en-US
+  - zh-CN
+  - de-DE
+  - es-ES
+  - fr-FR
+  - it-IT
+  - ja-JP
+  fullDescription: |
+    RustDesk Server provides the ID and relay services used by RustDesk clients to connect to remote computers. Install the RustDesk client separately on each computer; this app is the server, not a browser-based remote desktop.
+
+    **Key features**
+
+    - Device registration and connection negotiation through the ID server
+    - Relay forwarding when computers cannot connect directly
+    - A connection settings page with copyable server addresses, a public key and language selection
+    - Persistent server keys and registration data
+
+    **Before you connect**
+
+    Connect both computers through LarePass VPN, or use local Overlay when both computers are on the same network as Olares. For Overlay, find the assigned IP in Settings → Network → Overlay Gateway. Both computers must be able to reach the relay address exchanged during connection negotiation; using VPN on one side and Overlay on the other can fail.
+
+    Leave API Server empty in the RustDesk client. The open-source server does not include the RustDesk Server Pro management console. Making the settings page public does not expose RustDesk TCP/UDP ports to the internet.
+  featuredImage: https://cdn.olares.com/images/2026/10/ea06a3f6f67c90359f28817bd43c269f.png
+  promoteImage:
+  - https://cdn.olares.com/images/2026/10/ea06a3f6f67c90359f28817bd43c269f.png
+  - https://cdn.olares.com/images/2026/10/a82c1cab43c4155e78a822be63d04975.png
+permission:
+  appData: true
+options:
+  dependencies:
+  - name: olares
+    version: '>=1.12.6-0'
+    type: system
+workloadReplicas:
+  rustdesk: 1
+ports:
+- name: nat-test
+  host: rustdesk-id
+  port: 21115
+  exposePort: 31115
+  protocol: tcp
+- name: id-tcp
+  host: rustdesk-id
+  port: 21116
+  exposePort: 31116
+- name: relay-tcp
+  host: rustdesk-id
+  port: 21117
+  exposePort: 31117
+  protocol: tcp
+envs:
+- envName: SERVER_HOST
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  regex: ^$|^[A-Za-z0-9][A-Za-z0-9.-]*$
+  description: Reachable server IP or hostname, without scheme or port. Defaults to the Olares user domain. Connect
+    Olares VPN for remote access.
+overlayGateway:
+  enable: true
+  entrances:
+  - title: RustDesk ID (TCP)
+    workload: rustdesk
+    port: 21116
+    protocol: tcp
+    description: RustDesk ID server
+  - title: RustDesk ID (UDP)
+    workload: rustdesk
+    port: 21116
+    protocol: udp
+    description: RustDesk registration and heartbeat
+  - title: RustDesk NAT test
+    workload: rustdesk
+    port: 21115
+    protocol: tcp
+    description: RustDesk NAT type test
+  - title: RustDesk Relay
+    workload: rustdesk
+    port: 21117
+    protocol: tcp
+    description: RustDesk relay server
+tailscale:
+  acls:
+  - proto: tcp
+    dst:
+    - '*:31115'
+    - '*:31116'
+    - '*:31117'
+  - proto: udp
+    dst:
+    - '*:31116'
