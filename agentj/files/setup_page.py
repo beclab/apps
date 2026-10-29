@@ -1,7 +1,8 @@
 """Agent J on Olares — the setup page behind the app's entrance (stdlib only).
 
 The entrance is `authLevel: private`: Olares has already signed the owner in before a request reaches this port. The
-page shows where the install stands, takes the seat setup code (ajt_…) or installation code (AJI-…) once, binds this
+page shows where the install stands, takes the seat setup code (ajt_…, or ajh_… issued by another Agent J host when a
+seat moves — P547) or installation code (AJI-…) once, binds this
 computer with `agentj login`, and then tells the owner how to add the phone from the account page. A setup code goes to
 `agentj login --seat -` on stdin and never touches the disk; an installation code (the CLI only reads it from a file) is
 written 0600 inside Agent J's state directory, which the fenced Agent cannot see, and deleted at once. Neither is logged,
@@ -24,7 +25,7 @@ OLA = os.path.join(HOME, ".agentj-olares")
 STATE = os.environ.get("AGENTJ_STATE_DIR") or os.path.join(HOME, ".local/state/agentj")
 PORT = int(os.environ.get("AGENTJ_SETUP_PORT", "8080"))
 ACCOUNT_URL = os.environ.get("AGENTJ_ACCOUNT_URL", "https://agentj.app/account")
-CODE = re.compile(r"AJI-[a-f0-9]{32}|ajt_[A-Za-z0-9_-]{43}")
+CODE = re.compile(r"AJI-[a-f0-9]{32}|aj[th]_[A-Za-z0-9_-]{43}")
 LOCK = threading.Lock()
 _cache: dict = {"t": 0.0, "v": None}
 
@@ -114,7 +115,7 @@ def login(body: dict) -> dict:
     name = body.get("name") if isinstance(body.get("name"), str) else ""
     name = name.strip()[:32]
     named = ["--name", name] if name else []
-    if code.startswith("ajt_"):
+    if code.startswith(("ajt_", "ajh_")):
         rc, out = _run(["agentj", "login", "--seat", "-"] + named, 90, stdin=code + "\n")
     else:
         d = os.path.join(STATE, "olares-setup")
@@ -167,14 +168,14 @@ placeholder:'把复制的整段安装提示粘贴到这里',guide1:'① 空席�
 ph:{starting:'正在启动…','error-image':'应用镜像不完整，已停止（请重新安装或联系我们）',ready:'已安装',serving:'已安装，正在运行'},
 pair:a=>`<ol><li>手机打开 <a href="${a}" target="_blank" rel="noopener">${a}</a> 登录</li><li>找到这台 Agent J 主机「${N}」的席位卡，点「添加遥控器」</li><li>用通行密钥确认，按页面提示完成</li></ol>`,
 paired:'手机已配对 ✓ 现在可以在手机上和 Agent 说话了。',model:m=>`模型：Olares Router 上的 ${m}（OpenCode）`,
-no_code:'没找到设置码：请粘贴 ajt_ 或 AJI- 开头的码，或整段安装提示词。',already_bound:'这台 Olares 已经绑定了席位。要换席位，先在 Agent J Terminal 里运行 agentj unlink。',not_ready:'Agent J 还没准备好，请稍等再试。',wait:'正在绑定…',bound:'已绑定'}
+no_code:'没找到设置码：请粘贴 ajt_、ajh_ 或 AJI- 开头的码，或整段安装提示词。',already_bound:'这台 Olares 已经绑定了席位。要换席位，先在 Agent J Terminal 里运行 agentj unlink。',not_ready:'Agent J 还没准备好，请稍等再试。',wait:'正在绑定…',bound:'已绑定'}
 :{sub:'Agent J on your Olares: direct the AI agent on this machine from your phone.',s1:'Install Agent J',s2:'Bind your seat',
 s2h:'On the account page below, press “Copy installation prompt” on an empty seat card. Paste the entire prompt here; no need to pick out the code. The setup code is never shown or kept.',
 placeholder:'Paste the entire copied installation prompt here',guide1:'1. Empty seat card → Copy installation prompt',guide2:'2. Paste all of it below → Bind',buyh:'No seat yet? Register and buy one, then come back to paste.',buy:'Buy a seat',nameh:'Name this Agent (optional)',go:'Bind',s3:'Add your phone as a remote',foot:'Only visible after you sign in to your Olares. The code is used once and deleted.',
 ph:{starting:'Starting…','error-image':'The app image is incomplete; stopped (reinstall, or contact us)',ready:'Installed',serving:'Installed and running'},
 pair:a=>`<ol><li>On your phone open <a href="${a}" target="_blank" rel="noopener">${a}</a> and sign in</li><li>On the seat card of “${N}” choose Add a remote</li><li>Confirm with your passkey and follow the page</li></ol>`,
 paired:'Phone paired ✓ You can talk to the Agent from your phone now.',model:m=>`Model: ${m} on Olares Router (OpenCode)`,
-no_code:'No setup code found: paste the code starting with ajt_ or AJI-, or the whole installation prompt.',already_bound:'This Olares is already bound to a seat. To change it, run agentj unlink in Agent J Terminal first.',not_ready:'Agent J is not ready yet; try again in a moment.',wait:'Binding…',bound:'Bound'};
+no_code:'No setup code found: paste the code starting with ajt_, ajh_ or AJI-, or the whole installation prompt.',already_bound:'This Olares is already bound to a seat. To change it, run agentj unlink in Agent J Terminal first.',not_ready:'Agent J is not ready yet; try again in a moment.',wait:'Binding…',bound:'Bound'};
 let N='';const $=i=>document.getElementById(i);
 document.documentElement.lang=zh?'zh-CN':'en';
 document.querySelectorAll('[data-t]').forEach(e=>e.textContent=T[e.dataset.t]);
