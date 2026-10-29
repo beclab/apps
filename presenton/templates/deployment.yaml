@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presenton
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.presenton.replicaCount }}
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: presenton}}
+  template:
+    metadata: {labels: {app: presenton}}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext: {runAsUser: 0}
+        command: [sh, -ec, 'chown 1000:1000 /data /run /nginx-lib /nginx-log /next-build /compat']
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: run, mountPath: /run}
+        - {name: nginx-lib, mountPath: /nginx-lib}
+        - {name: nginx-log, mountPath: /nginx-log}
+        - {name: next-build, mountPath: /next-build}
+        - {name: compat, mountPath: /compat}
+      - name: init-compatibility
+        image: docker.io/harveyff/presenton-olares:20261029-amd64@sha256:18b7331753e133de2272db1b2ab0d92de75a8fc6c14e1dea81bb8a9edb8a4e95
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        command: [python, -c]
+        args:
+        - |
+          # Upstream batches ten slide completions, exceeding small local model queues.
+          # Serialize only that batch; keep the pinned application's other behavior intact.
+          from pathlib import Path
+          import shutil
+          shutil.copytree('/app/servers/nextjs/.next-build', '/next-build', dirs_exist_ok=True)
+          source = Path('/app/servers/fastapi/api/v1/ppt/endpoints/presentation.py').read_text()
+          old = 'batch_size = 10'
+          assert source.count(old) == 1, 'Pinned upstream compatibility pattern changed'
+          Path('/compat/presentation.py').write_text(source.replace(old, 'batch_size = 1'))
+          Path('/compat/presentation.py').chmod(0o644)
+          source = Path('/app/servers/fastapi/utils/llm_config.py').read_text()
+          old = '        extra_body["enable_thinking"] = False'
+          assert source.count(old) == 1, 'Pinned custom provider pattern changed'
+          source = source.replace(old, old + '\n        extra_body["chat_template_kwargs"] = {"enable_thinking": False}')
+          old = '    config.generation = get_generation_defaults()'
+          assert source.count(old) == 1, 'Pinned generation defaults pattern changed'
+          # The Router alias does not advertise reasoning capabilities. Send the
+          # compatible template flags without the unsupported reasoning_effort=none.
+          source = source.replace(old, old + '\n    if get_llm_provider() == LLMProvider.CUSTOM and disable_thinking() and not has_explicit_reasoning_settings():\n        config.generation.reasoning = ReasoningConfig()')
+          Path('/compat/llm_config.py').write_text(source)
+          Path('/compat/llm_config.py').chmod(0o644)
+          source = Path('/app/servers/fastapi/utils/llm_utils.py').read_text()
+          old = '        kwargs["response_format"] = response_format'
+          assert source.count(old) == 1, 'Pinned response format pattern changed'
+          # Router aliases may resolve to local engines whose constrained-schema
+          # decoding stalls. Preserve the schema in the prompt and retain all of
+          # Presenton's existing parse, schema validation and repair loops.
+          new = old + '\n        from llmai.shared import JSONObjectResponse, JSONSchemaResponse\n        from utils.llm_provider import get_llm_provider\n        from enums.llm_provider import LLMProvider\n        if get_llm_provider() == LLMProvider.CUSTOM and isinstance(response_format, JSONSchemaResponse):\n            kwargs["response_format"] = JSONObjectResponse()\n            from llmai.shared import UserMessage\n            import json\n            kwargs["messages"].append(UserMessage(content="Return only a JSON object matching this schema: " + json.dumps(response_format.json_schema)))'
+          Path('/compat/llm_utils.py').write_text(source.replace(old, new))
+          Path('/compat/llm_utils.py').chmod(0o644)
+        volumeMounts: [{name: compat, mountPath: /compat}, {name: next-build, mountPath: /next-build}]
+      containers:
+      - name: presenton
+        image: docker.io/harveyff/presenton-olares:20261029-amd64@sha256:18b7331753e133de2272db1b2ab0d92de75a8fc6c14e1dea81bb8a9edb8a4e95
+        envFrom: [{secretRef: {name: presenton-app}}]
+        env:
+        - {name: APP_DATA_DIRECTORY, value: /app_data}
+        - {name: HOME, value: /app_data}
+        - {name: HF_HOME, value: /app_data/.cache/huggingface}
+        - {name: FASTEMBED_CACHE_PATH, value: /app_data/.cache/presenton/fastembed}
+        - {name: PRESENTON_FASTEMBED_ICON_CACHE_DIR, value: /app_data/.cache/presenton/fastembed-icons}
+        - {name: XDG_CACHE_HOME, value: /app_data/.cache}
+        - {name: LLM, value: custom}
+        - {name: CUSTOM_LLM_URL, value: 'https://router.{{ .Values.user.zone }}/v1'}
+        - {name: CUSTOM_LLM_API_KEY, value: olares}
+        - {name: CUSTOM_MODEL, value: default-chat}
+        - {name: DISABLE_THINKING, value: 'true'}
+        - {name: DISABLE_IMAGE_GENERATION, value: 'true'}
+        - {name: START_OLLAMA, value: 'false'}
+        - {name: MIGRATE_DATABASE_ON_STARTUP, value: 'true'}
+        - {name: CAN_CHANGE_KEYS, value: 'false'}
+        - {name: PRESENTON_PUBLIC_URL, value: 'https://{{ .Values.domain.presenton }}'}
+        - {name: PRESENTON_COMMUNITY_ENABLED, value: 'false'}
+        ports: [{name: http, containerPort: 80}]
+        startupProbe: {tcpSocket: {port: http}, periodSeconds: 10, failureThreshold: 60}
+        readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 300m, memory: 1Gi}
+          limits: {cpu: '4', memory: 6Gi}
+        volumeMounts:
+        - {name: data, mountPath: /app_data}
+        - {name: run, mountPath: /run}
+        - {name: nginx-lib, mountPath: /var/lib/nginx}
+        - {name: nginx-log, mountPath: /var/log/nginx}
+        - {name: next-build, mountPath: /app/servers/nextjs/.next-build}
+        - {name: compat, mountPath: /app/servers/fastapi/api/v1/ppt/endpoints/presentation.py, subPath: presentation.py, readOnly: true}
+        - {name: compat, mountPath: /app/servers/fastapi/utils/llm_config.py, subPath: llm_config.py, readOnly: true}
+        - {name: compat, mountPath: /app/servers/fastapi/utils/llm_utils.py, subPath: llm_utils.py, readOnly: true}
+      volumes:
+      - name: data
+        hostPath: {path: '{{ .Values.userspace.appData }}/data', type: DirectoryOrCreate}
+      - {name: run, emptyDir: {}}
+      - {name: nginx-lib, emptyDir: {}}
+      - {name: nginx-log, emptyDir: {}}
+      - {name: next-build, emptyDir: {}}
+      - {name: compat, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presenton
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: presenton}
+  ports: [{name: http, port: 3000, targetPort: http}]
