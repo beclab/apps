@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    io.kompose.service: mempalaceingress
+  name: mempalaceingress
+  namespace: '{{ .Release.Namespace }}'
+spec:
+  replicas: {{ .Values.workloads.mempalaceingress.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: mempalaceingress
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/proxy-config.yaml") . | sha256sum }}
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: mempalaceingress
+    spec:
+      volumes:
+        - name: nginx-config
+          secret:
+            secretName: mempalace-mcp-auth
+            defaultMode: 420
+            items:
+            - key: nginx.conf
+              path: nginx.conf
+      containers:
+        - name: nginx
+          image: "docker.io/openresty/openresty:1.29.2.5-bookworm-fat"
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c"]
+          args:
+            - mkdir -p /tmp/openresty/logs; exec /usr/local/openresty/bin/openresty -p /tmp/openresty/ -c /etc/nginx/olares.conf -g 'daemon off;'
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+            - containerPort: 8081
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: 100m
+              memory: 256Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/olares.conf
+              subPath: nginx.conf
+              readOnly: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mempalaceingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    io.kompose.service: mempalaceingress
+  ports:
+    - name: terminal
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    - name: mcp
+      protocol: TCP
+      port: 8081
+      targetPort: 8081
