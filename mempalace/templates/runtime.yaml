@@ -1,0 +1,177 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mempalace-runtime
+  namespace: {{ .Release.Namespace }}
+data:
+  runtime.py: |
+    import http.server
+    import json
+    import os
+    import signal
+    import socket
+    import subprocess
+    import threading
+    import time
+
+    ADDRESS = "/tmp/mempalace-maintenance.sock"
+    ALLOWED = {"rooms", "kg", "hallways", "tunnels", "wings", "audit", "repair-status", "repair"}
+    stopping = threading.Event()
+    state = {"mode": "starting"}
+    active = None
+    interrupted = set()
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            ready = state["mode"] == "maintenance" or (active is not None and active.poll() is None)
+            body = json.dumps({"status": "ok" if ready else "starting", "mode": state["mode"]}).encode()
+            self.send_response(200 if ready else 503)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    def shutdown(*_):
+        stopping.set()
+        if state["mode"] == "maintenance" and active is not None and active.poll() is None and active.pid not in interrupted:
+            active.send_signal(signal.SIGINT)
+            interrupted.add(active.pid)
+
+    def stop_process(proc):
+        if proc is None or proc.poll() is not None:
+            return
+        if proc.pid not in interrupted:
+            proc.send_signal(signal.SIGINT)
+            interrupted.add(proc.pid)
+        try:
+            proc.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def start_server():
+        global active
+        active = subprocess.Popen([
+            "/app/.venv/bin/python", "-m", "mempalace.mcp_server",
+            "--transport", "http", "--host", "0.0.0.0", "--port", "8080"
+        ])
+        for _ in range(45):
+            if stopping.is_set() or active.poll() is not None:
+                break
+            try:
+                with socket.create_connection(("127.0.0.1", 8080), timeout=1):
+                    state["mode"] = "serving"
+                    return
+            except OSError:
+                time.sleep(1)
+        raise RuntimeError("MCP did not start listening within 45 seconds")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, shutdown)
+    health = http.server.ThreadingHTTPServer(("0.0.0.0", 8082), Health)
+    threading.Thread(target=health.serve_forever, daemon=True).start()
+    if os.path.exists(ADDRESS):
+        os.unlink(ADDRESS)
+    control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    control.bind(ADDRESS)
+    os.chmod(ADDRESS, 0o600)
+    control.listen(2)
+    control.settimeout(1)
+    start_server()
+    try:
+        while not stopping.is_set():
+            if active.poll() is not None:
+                print("MCP process exited; restarting", flush=True)
+                if stopping.wait(2):
+                    break
+                start_server()
+            try:
+                conn, _ = control.accept()
+            except socket.timeout:
+                continue
+            with conn:
+                conn.settimeout(5)
+                try:
+                    raw = bytearray()
+                    while b"\n" not in raw:
+                        part = conn.recv(4096)
+                        if not part:
+                            raise ValueError("incomplete request")
+                        raw.extend(part)
+                        if len(raw) > 65536:
+                            raise ValueError("request too large")
+                    args = json.loads(raw.split(b"\n", 1)[0])
+                    if not isinstance(args, list) or not args or args[0] not in ALLOWED or not all(isinstance(v, str) for v in args):
+                        raise ValueError("unsupported maintenance command")
+                    state["mode"] = "maintenance"
+                    stop_process(active)
+                    active = subprocess.Popen(["/app/.venv/bin/mempalace"] + args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                    try:
+                        output, _ = active.communicate(timeout=1200)
+                        result = {"exit": active.returncode, "output": output[-500000:]}
+                    except subprocess.TimeoutExpired:
+                        stop_process(active)
+                        result = {"exit": 124, "output": "Maintenance timed out. MCP will resume.\n"}
+                    finally:
+                        if not stopping.is_set():
+                            start_server()
+                    conn.sendall(json.dumps(result).encode())
+                except Exception as error:
+                    if state["mode"] == "maintenance" and not stopping.is_set():
+                        stop_process(active)
+                        start_server()
+                    try:
+                        conn.sendall(json.dumps({"exit": 1, "output": str(error) + "\n"}).encode())
+                    except OSError:
+                        pass
+    finally:
+        stopping.set()
+        stop_process(active)
+        health.shutdown()
+        control.close()
+        if os.path.exists(ADDRESS):
+            os.unlink(ADDRESS)
+  maintenance: |
+    #!/app/.venv/bin/python
+    import fcntl
+    import json
+    import socket
+    import sys
+    import urllib.request
+
+    args = sys.argv[1:]
+    if not args or args[0] in {"-h", "--help"}:
+        print("Usage: mempalace-maintenance <rooms|kg|hallways|tunnels|wings|audit|repair-status|repair> [arguments]")
+        print("Pauses MCP, runs the requested maintenance, then automatically resumes MCP.")
+        print("Use 'mempalace-maintenance status' to inspect runtime status.")
+        raise SystemExit(0)
+    if args == ["status"]:
+        with urllib.request.urlopen("http://127.0.0.1:8082/healthz", timeout=5) as response:
+            print(response.read().decode())
+        raise SystemExit(0)
+    with open("/tmp/mempalace-maintenance-client.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("Another maintenance command is running. Try again after it finishes.", file=sys.stderr)
+            raise SystemExit(75)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1250)
+            client.connect("/tmp/mempalace-maintenance.sock")
+            client.sendall(json.dumps(args).encode() + b"\n")
+            chunks = []
+            while True:
+                data = client.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+        result = json.loads(b"".join(chunks))
+        print(result["output"], end="")
+        raise SystemExit(result["exit"])
