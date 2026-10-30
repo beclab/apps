@@ -16,7 +16,7 @@ metadata:
   # Do NOT swap this for an app-served path: the entrance is private and its domain is
   # per-install, so an anonymous fetch returns the login page instead of the image.
   icon: https://cdn.olares.com/images/2026/10/f6f96af5f16e251375dab5ace0f8c335.png
-  version: 0.0.8
+  version: 0.0.10
   # GitBot for a NEW submission validates against a narrower registry than the
   # Market display list and than older merged charts: it rejected `Utilities` with
   # "registered: [agents developer homelab models workspace]". Pick only from
@@ -34,7 +34,7 @@ metadata:
   - satellites
 spec:
   # Upstream release the image was built from (bilawalsidhu/gods-eye-view).
-  versionName: "0.2.1"
+  versionName: "0.3.0"
   supportArch:
   - amd64
   # Honest scope: the image is built and smoke-tested for amd64 only. This daemon
@@ -83,8 +83,13 @@ spec:
       token or your own Google Maps key.
     - Sensor-style looks (CRT, night vision, FLIR/thermal) and a cockpit view that
       follows a tracked aircraft down to the runway.
-    - Hands-free voice control with your own OpenAI or Gemini key: ask it to fly to
-      an airport, follow one aircraft, or count flights over a region.
+    - Hands-free voice control with your own Gemini key: ask it to fly to an
+      airport, follow one aircraft, or count flights over a region.
+    - Street level: click a covered street and the nearest photo opens beside the
+      globe. Panoramax and KartaView need no key, Mapillary a free client token,
+      Google Street View your own Google Maps key.
+    - A layout built for phones, where panels open as sheets under a tab bar, and
+      an interface in English, Spanish, Russian or Simplified Chinese.
     - Rocket launches, radio and satellite passes need no key at all.
 
     **Before you install**
@@ -92,6 +97,12 @@ spec:
     - Some layers each need their own key: vessels, active fires, photorealistic 3D,
       street imagery and voice. Add them in this app's Environment settings after
       install; the rest of the globe works without them.
+    - The app refuses requests that carry reverse-proxy headers, and the Olares
+      entrance adds them. Gemini Live voice, the live layers, terrain and camera
+      feeds are unaffected; OpenAI realtime voice, Google Places search and TomTom
+      traffic tiles answer 403. This is the app's own anti-CSRF design, and it is
+      why keys belong in this app's Environment settings: the in-app Provider
+      Settings panel refuses proxied requests too.
     - Road traffic is partly simulated along real road networks, and broadcasts go
       quiet at times — terrestrial AIS in open ocean, or aircraft that do not
       transmit ADS-B — so gaps in the live picture are normal.
@@ -104,6 +115,26 @@ spec:
     **Project links**
 
     - [God's Eye View source and documentation](https://github.com/bilawalsidhu/gods-eye-view)
+  # User-facing changes in the release this update ships. Chart maintenance never
+  # belongs here. If English carries this field, every declared locale must too —
+  # gev-build/sync_locale_copy.py keeps the copies in step with the source.
+  upgradeDescription: |-
+    v0.3.0 — the app comes down to street level, onto your phone, and into more languages.
+    - Street level: click a covered street and the nearest photo opens beside the
+      globe — Panoramax and KartaView need no key, Mapillary a free client token,
+      Google Street View your own Google Maps key.
+    - A layout built for phones: a tab bar with one panel sheet at a time, easier
+      tap targets and more responsive pinch zoom.
+    - The interface now speaks Spanish, Russian and Simplified Chinese, or open it
+      with ?lang=es, ?lang=ru or ?lang=zh-CN.
+    - Short share links reopen the same view on any install, and can follow an
+      aircraft or a satellite.
+    - Import your own GeoJSON, KML, KMZ and GPX files; they never leave your device.
+    - Voice: Gemini Live as an alternative to OpenAI realtime, hold Space and ask
+      about what the cursor is on, and answers say when a layer is off or loading.
+    - Ten new camera packs, about thirty new bikeshare systems, nine Ontario
+      transit feeds, GNSS integrity, emergency squawks, air quality, and a star
+      field from the Yale Bright Star Catalogue.
   # The image's own user is already uid/gid 1000; declaring this makes
   # app-service inject the same uid at pod level, which is what the userspace
   # mounts expect (Kubernetes overrides a Dockerfile USER).
@@ -207,8 +238,10 @@ envs:
   applyOnChange: true
   type: password
   description: >-
-    Direct Google Photorealistic 3D Tiles, place search and Street View. Metered;
-    URL-restrict it. Client-exposed by design.
+    Direct Google Photorealistic 3D Tiles and Street View, both fetched by the
+    browser itself. Google place search goes through the app's proxy, which the
+    entrance's forwarding headers make the app refuse. Metered; URL-restrict it.
+    Client-exposed by design.
 - envName: GOOGLE_MAPS_SERVER_API_KEY
   required: false
   editable: true
@@ -223,15 +256,20 @@ envs:
   applyOnChange: true
   type: password
   description: >-
-    Voice control plus the AI HUD summary. Metered. Set your own usage limit in
-    the OpenAI console — the app's $5 cap is not. The ChatGPT/Codex OAuth voice
-    path is unavailable under a container, so a key is the only voice route here.
+    OpenAI realtime voice and the AI HUD summary. Both are refused through a
+    reverse proxy — the app rejects requests carrying forwarding headers — so here
+    they answer 403: use GEMINI_API_KEY for voice on Olares. Metered; set your own
+    limit in the OpenAI console, the app's $5 cap is not. The ChatGPT/Codex OAuth
+    voice path is unavailable under a container.
 - envName: GEMINI_API_KEY
   required: false
   editable: true
   applyOnChange: true
   type: password
-  description: Alternative voice provider, selectable in the GEV MIC chooser.
+  description: >-
+    Voice provider that does work behind Olares' entrance: Gemini Live, selectable
+    in the GEV MIC chooser. Server-side only — the browser gets a short-lived
+    credential, the key stays on the Node process.
 - envName: AISSTREAM_API_KEY
   required: false
   editable: true
@@ -250,8 +288,9 @@ envs:
   applyOnChange: true
   type: password
   description: >-
-    Free-tier TomTom key for real flow speeds. Without it the traffic layer still
-    runs on its built-in simulation. Server-side only.
+    Free-tier TomTom key for real flow speeds. The traffic proxy refuses requests
+    carrying reverse-proxy headers, so behind Olares' entrance these tiles answer
+    403 and the layer keeps running on its built-in simulation. Server-side only.
 - envName: MAPILLARY_CLIENT_TOKEN
   required: false
   editable: true
