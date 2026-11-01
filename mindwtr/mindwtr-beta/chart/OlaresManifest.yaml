@@ -1,0 +1,123 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+
+# 工作负载副本数，键名与 chart 里 workloads.<key>.replicaCount 对应
+workloadReplicas:
+  mindwtr: 1
+
+metadata:
+  name: mindwtr
+  title: Mindwtr
+  description: 自托管 Mindwtr：同步服务 + MCP 接口 + 网页端，一个容器一个端口
+  # 占位图标：换成自己的 256x256 PNG/WEBP（≤512KB）后重新提交
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  version: '1.0.0'
+  categories:
+  - Utilities
+  tags:
+  - gtd
+  - tasks
+  - mcp
+  - self-hosted
+
+permission:
+  # 需要读写应用数据目录（Cloud 的数据集落在 /app/cloud_data）
+  appData: true
+  appCache: false
+  externalData: false
+  userData:
+  - Home
+
+spec:
+  # 承载的上游 Mindwtr 版本
+  versionName: '1.3.7'
+  fullDescription: |
+    Mindwtr 是一个本地优先的 GTD 任务管理应用。这个包把它的三个组件合并进一个容器：
+
+    1. Mindwtr Cloud —— 同步服务与 REST API，手机 App、桌面 App 都能用它同步。
+    2. Mindwtr MCP helper —— 把 Cloud 的任务数据暴露成 MCP 接口，AI 助手可以直接读写任务。
+    3. PWA 网页端 —— 浏览器里直接用，无需安装。
+
+    对外只暴露一个端口（容器内 8080，由 nginx 按路径分流）：
+    /v1/* 走同步 API，/mcp 走 MCP 接口，其余路径走网页端。
+
+    数据保存在应用数据目录里，升级镜像不会丢。
+  upgradeDescription: |
+    首次安装：请在安装界面填写两个 token。
+    - MINDWTR_CLOUD_AUTH_TOKENS：Cloud 的访问 token（逗号分隔，每个 20-512 字符）。
+      手机/桌面 App 同步时填同一个 token。
+    - MINDWTR_MCP_HTTP_TOKEN：MCP 客户端访问 /mcp 时用的 token（至少 16 字符）。
+    生成方式：openssl rand -hex 32
+
+    升级只更换镜像版本，应用数据目录保留。
+  developer: ink
+  website: https://github.com/dongdongbh/Mindwtr
+  sourceCode: https://github.com/dongdongbh/Mindwtr
+  submitter: ink
+  locale:
+  - zh-CN
+  - en-US
+  doc: https://docs.mindwtr.app/
+  supportArch:
+  - amd64
+  - arm64
+
+options:
+  dependencies:
+  - name: olares
+    type: system
+    version: '>=1.12.6-0'
+
+  # 安装界面里让用户填的变量；Olares 会注入 .Values.olaresEnv.<NAME>
+  envs:
+  - envName: MINDWTR_CLOUD_AUTH_TOKENS
+    type: string
+    required: true
+    editable: true
+    applyOnChange: true
+    description: |
+      Cloud 访问 token，逗号分隔。规则来自上游 BEARER_TOKEN_PATTERN：
+      每个 token 20-512 字符，字符集 [A-Za-z0-9._~+/=-]。
+      生成方式：openssl rand -hex 32
+      手机 / 桌面 App 的「自托管同步」地址填本应用的入口地址，token 填这里。
+  - envName: MINDWTR_MCP_HTTP_TOKEN
+    type: string
+    required: true
+    editable: true
+    applyOnChange: true
+    description: |
+      MCP 客户端访问 /mcp 时用的 Bearer token，至少 16 字符（建议 20+）。
+      与 Cloud token 是两套独立凭证，不要复用。
+      生成方式：openssl rand -hex 32
+  - envName: MINDWTR_CLOUD_CORS_ORIGIN
+    type: string
+    required: false
+    editable: true
+    applyOnChange: true
+    description: |
+      浏览器打开网页端的完整地址（含 scheme，例如 https://mindwtr-svc.example.com）。
+      只能设一个 origin。本应用网页端与 API 同源时，这个值填入口域名。
+  - envName: MINDWTR_MCP_WRITE
+    type: bool
+    default: 'true'
+    required: false
+    editable: true
+    applyOnChange: true
+    description: |
+      MCP 是否允许写入任务。官方 helper 在 Cloud 模式下默认只读，
+      需要 AI 助手改任务时保持 true，改成 false 则只读。
+
+entrances:
+- name: mindwtr
+  port: 8080
+  # 必须与 templates/service.yaml 里 Service 的名字一致，即 <release>-svc
+  host: mindwtr-svc
+  title: Mindwtr
+  icon: https://app.cdn.olares.com/appstore/default/defaulticon.webp
+  # public：任何人可从公网访问该入口；页面与 API 本身仍需 token 才能读写数据。
+  # 想收紧就改成 private（内网与外网访问都要鉴权）。
+  authLevel: public
+  # 不在 Olares 桌面端显示入口图标，直接用域名访问。
+  invisible: true
+  openMethod: default

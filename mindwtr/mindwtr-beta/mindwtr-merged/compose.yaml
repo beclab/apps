@@ -1,0 +1,59 @@
+# Mindwtr 三合一（Cloud + MCP helper + PWA）参考 compose
+#
+# 基于官方 docker/compose.yaml（https://raw.githubusercontent.com/dongdongbh/Mindwtr/main/docker/compose.yaml）
+# 改写为单服务：官方是两个服务（mindwtr-cloud 8787 + mindwtr-app 5173），
+# 这里合成一个镜像、一个端口（8080），nginx 在容器内按路径分流。
+#
+# 用法：
+#   cp compose.yaml compose.override.yaml   # 按需改
+#   # 生成两个 token（Cloud 与 helper 共用同一个 Cloud token）
+#   openssl rand -hex 32
+#   docker compose up -d
+#
+# 环境变量清单（全部走环境变量，不进镜像层）：
+#   MINDWTR_CLOUD_AUTH_TOKENS  Cloud 允许的 Bearer token，逗号分隔，每个 20-512 字符，
+#                               字符集 [A-Za-z0-9._~+/=-]。不同 token 对应互相隔离的数据集。
+#   MINDWTR_CLOUD_CORS_ORIGIN  浏览器打开 PWA 的完整地址（含 scheme 与端口），只能设一个。
+#   MINDWTR_MCP_HTTP_TOKEN      MCP 客户端访问 /mcp 时用的 Bearer token，最少 16 字符（建议 20+）。
+#   MINDWTR_MCP_CLOUD_TOKEN     helper 访问 Cloud 用的 token，必须是上面某个 token。
+#   MINDWTR_DEFAULT_CLOUD_URL   PWA 首次打开时预填的 Cloud 地址，留空则用同源自动探测。
+
+services:
+  mindwtr:
+    image: ghcr.io/yourname/mindwtr-merged:1.0.0
+    # 本地构建时用下面这行（上下文是 mindwtr-merged/ 目录）：
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    container_name: mindwtr
+    hostname: mindwtr
+    restart: always
+    cpus: "1.0"
+    mem_limit: 1024m
+    ports:
+      # 唯一对外端口：nginx。/mcp、/healthz、/v1/*、PWA 都在这一个端口后面。
+      - "8080:8080"
+    environment:
+      # --- Cloud ---
+      - MINDWTR_CLOUD_AUTH_TOKENS=${MINDWTR_CLOUD_AUTH_TOKENS:?请先在 .env 里设置 MINDWTR_CLOUD_AUTH_TOKENS}
+      - MINDWTR_CLOUD_CORS_ORIGIN=${MINDWTR_CLOUD_CORS_ORIGIN:?请先在 .env 里设置 MINDWTR_CLOUD_CORS_ORIGIN}
+      # nginx 在 Cloud 前面，转发头只有被显式信任时才生效。
+      - MINDWTR_CLOUD_TRUST_PROXY_HEADERS=true
+      - MINDWTR_CLOUD_TRUSTED_PROXY_IPS=127.0.0.1
+      # --- MCP helper ---
+      - MINDWTR_MCP_HTTP_TOKEN=${MINDWTR_MCP_HTTP_TOKEN:?请先在 .env 里设置 MINDWTR_MCP_HTTP_TOKEN}
+      - MINDWTR_MCP_CLOUD_TOKEN=${MINDWTR_MCP_CLOUD_TOKEN:?请先在 .env 里设置 MINDWTR_MCP_CLOUD_TOKEN}
+      # helper 默认只读；需要让它能改数据就设为 true。
+      - MINDWTR_MCP_WRITE=${MINDWTR_MCP_WRITE:-true}
+      # --- PWA ---
+      - MINDWTR_DEFAULT_CLOUD_URL=${MINDWTR_DEFAULT_CLOUD_URL:-}
+      - MINDWTR_PWA_ENABLED=${MINDWTR_PWA_ENABLED:-true}
+    volumes:
+      # 数据卷：Cloud 的数据目录。升级镜像时这个卷必须保留。
+      - ./data:/app/cloud_data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3

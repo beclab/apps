@@ -1,0 +1,78 @@
+name: Build & Push mindwtr-merged
+
+on:
+  # 手动触发（在 GitHub Actions 页面点 "Run workflow"）
+  workflow_dispatch:
+    inputs:
+      upstream_version:
+        description: 'Upstream mindwtr version tag (e.g. 1.3.7)'
+        required: true
+        default: '1.3.7'
+      mcp_version:
+        description: 'mindwtr-mcp npm version'
+        required: true
+        default: '1.1.13'
+
+  # 当 merged 相关文件有变动时自动触发
+  push:
+    branches: [main, feature/mindwtr]
+    paths:
+      - 'mindwtr/mindwtr-beta/mindwtr-merged/**'
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # 推送到 GHCR 需要
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine versions
+        id: vars
+        run: |
+          # workflow_dispatch 时用输入值，push 时用默认值
+          UPSTREAM="${{ github.event.inputs.upstream_version || '1.3.7' }}"
+          MCP="${{ github.event.inputs.mcp_version || '1.1.13' }}"
+          echo "upstream=${UPSTREAM}" >> "$GITHUB_OUTPUT"
+          echo "mcp=${MCP}"           >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ github.repository_owner }}/mindwtr-merged" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: mindwtr/mindwtr-beta/mindwtr-merged
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            CLOUD_IMAGE=ghcr.io/dongdongbh/mindwtr-cloud:${{ steps.vars.outputs.upstream }}
+            APP_IMAGE=ghcr.io/dongdongbh/mindwtr-app:${{ steps.vars.outputs.upstream }}
+            MCP_VERSION=${{ steps.vars.outputs.mcp }}
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.upstream }}
+            ${{ steps.vars.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### ✅ 构建完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 字段 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 镜像 | \`ghcr.io/${{ github.repository_owner }}/mindwtr-merged:${{ steps.vars.outputs.upstream }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| 上游版本 | ${{ steps.vars.outputs.upstream }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| MCP 版本 | ${{ steps.vars.outputs.mcp }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 架构 | amd64, arm64 |" >> $GITHUB_STEP_SUMMARY
