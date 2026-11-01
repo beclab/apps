@@ -1,179 +1,119 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mindwtr-nginx-conf
-  namespace: {{ .Release.Namespace }}
-data:
-  default.conf: |
-    server {
-        listen 5173;
-        server_name _;
-
-        root /usr/share/nginx/html;
-        index index.html;
-        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "no-referrer" always;
-        add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-        add_header X-Frame-Options "SAMEORIGIN" always;
-
-        location /v1/ {
-            proxy_pass http://127.0.0.1:8787/v1/;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-            client_max_body_size 50M;
-        }
-
-        location /health {
-            proxy_pass http://127.0.0.1:8787/health;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        location /ready {
-            proxy_pass http://127.0.0.1:8787/ready;
-            proxy_set_header Host $host;
-            proxy_set_header X-Real-IP $remote_addr;
-            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-            proxy_set_header X-Forwarded-Proto $scheme;
-        }
-
-        location /assets/ {
-            add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
-            add_header X-Content-Type-Options "nosniff" always;
-            add_header Referrer-Policy "no-referrer" always;
-            add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-            add_header X-Frame-Options "SAMEORIGIN" always;
-            add_header Cache-Control "public, max-age=31536000, immutable" always;
-            try_files $uri =404;
-        }
-
-        location / {
-            add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: file:; media-src 'self' data: blob: file:; font-src 'self' data:; connect-src 'self' https: http://localhost:* ws://localhost:*; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'; worker-src 'self'" always;
-            add_header X-Content-Type-Options "nosniff" always;
-            add_header Referrer-Policy "no-referrer" always;
-            add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-            add_header X-Frame-Options "SAMEORIGIN" always;
-            add_header Cache-Control "no-cache" always;
-            try_files $uri /index.html;
-        }
-    }
----
+{{- /*
+Olares 会把 options.envs 里声明的变量注入 .Values.olaresEnv，
+这里优先取用户填的值，取不到再退回 values.yaml 里的默认值。
+*/ -}}
+{{- $olaresEnv := .Values.olaresEnv | default dict -}}
+{{- $env := .Values.env | default dict -}}
+{{- $cloudTokens := get $olaresEnv "MINDWTR_CLOUD_AUTH_TOKENS" | default (get $env "cloudAuthTokens") | default "" -}}
+{{- $mcpHttpToken := get $olaresEnv "MINDWTR_MCP_HTTP_TOKEN" | default (get $env "mcpHttpToken") | default "" -}}
+{{- $mcpCloudToken := get $olaresEnv "MINDWTR_MCP_CLOUD_TOKEN" | default (get $env "mcpCloudToken") | default "" -}}
+{{- $corsOrigin := get $olaresEnv "MINDWTR_CLOUD_CORS_ORIGIN" | default (get $env "cloudCorsOrigin") | default "" -}}
+{{- $defaultCloudUrl := get $olaresEnv "MINDWTR_DEFAULT_CLOUD_URL" | default (get $env "defaultCloudUrl") | default "" -}}
+{{- $mcpWrite := get $olaresEnv "MINDWTR_MCP_WRITE" | default (get $env "mcpWrite") | default "true" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mindwtr
+  name: {{ include "mindwtr.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    io.kompose.service: mindwtr
+    {{- include "mindwtr.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.workloads.mindwtr.replicaCount }}
   selector:
     matchLabels:
-      io.kompose.service: mindwtr
+      {{- include "mindwtr.selectorLabels" . | nindent 6 }}
   strategy:
     type: Recreate
   template:
     metadata:
       labels:
-        io.kompose.service: mindwtr
+        {{- include "mindwtr.selectorLabels" . | nindent 8 }}
     spec:
-      securityContext:
-        fsGroup: 1000
-      initContainers:
-        - name: fix-permissions
-          image: "docker.io/beclab/aboveos-busybox:1.37.0"
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-          args:
-            - |
-              mkdir -p /app/cloud_data
-              chown -R 1000:1000 /app/cloud_data
-              chmod -R 775 /app/cloud_data
-          volumeMounts:
-            - name: mindwtr-data
-              mountPath: /app/cloud_data
-          securityContext:
-            runAsUser: 0
       containers:
-        - name: mindwtr-app
-          image: "{{ .Values.image.app.repository }}:{{ .Values.image.app.tag }}"
-          imagePullPolicy: {{ .Values.image.app.pullPolicy | default "IfNotPresent" }}
+        - name: mindwtr
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - name: http
-              containerPort: 5173
+              containerPort: {{ .Values.containerPort }}
               protocol: TCP
-          volumeMounts:
-            - name: nginx-conf
-              mountPath: /etc/nginx/conf.d/default.conf
-              subPath: default.conf
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-        - name: mindwtr-cloud
-          image: "{{ .Values.image.cloud.repository }}:{{ .Values.image.cloud.tag }}"
-          imagePullPolicy: {{ .Values.image.cloud.pullPolicy | default "IfNotPresent" }}
           env:
+            # --- Cloud ---
+            - name: MINDWTR_CLOUD_AUTH_TOKENS
+              value: {{ $cloudTokens | quote }}
+            - name: MINDWTR_CLOUD_CORS_ORIGIN
+              value: {{ $corsOrigin | quote }}
+            # nginx 在 Cloud 前面，转发头必须显式信任才生效
+            - name: MINDWTR_CLOUD_TRUST_PROXY_HEADERS
+              value: "true"
+            - name: MINDWTR_CLOUD_TRUSTED_PROXY_IPS
+              value: "127.0.0.1"
             - name: MINDWTR_CLOUD_DATA_DIR
               value: "/app/cloud_data"
-            - name: MINDWTR_CLOUD_CORS_ORIGIN
-              value: "http://localhost:5173"
-            - name: MINDWTR_CLOUD_ALLOW_ANY_TOKEN
-              value: {{ .Values.cloud.allowAnyToken | default "true" | quote }}
-            {{- if .Values.cloud.authTokens }}
-            - name: MINDWTR_CLOUD_AUTH_TOKENS
-              value: {{ .Values.cloud.authTokens | quote }}
-            {{- end }}
-          ports:
-            - name: cloud
-              containerPort: 8787
-              protocol: TCP
+            # --- MCP helper ---
+            - name: MINDWTR_MCP_HTTP_TOKEN
+              value: {{ $mcpHttpToken | quote }}
+            - name: MINDWTR_MCP_CLOUD_TOKEN
+              value: {{ if $mcpCloudToken }}{{ $mcpCloudToken | quote }}{{ else }}{{ $cloudTokens | quote }}{{ end }}
+            - name: MINDWTR_MCP_WRITE
+              value: {{ $mcpWrite | quote }}
+            # helper 在容器内访问 Cloud，走回环 HTTP，因此要允许 insecure
+            - name: MINDWTR_MCP_CLOUD_ALLOW_INSECURE_HTTP
+              value: "true"
+            - name: MINDWTR_MCP_HTTP_HOST
+              value: "127.0.0.1"
+            - name: MINDWTR_MCP_HTTP_PORT
+              value: "8723"
+            # --- PWA ---
+            - name: MINDWTR_DEFAULT_CLOUD_URL
+              value: {{ $defaultCloudUrl | quote }}
+            - name: MINDWTR_PWA_ENABLED
+              value: "true"
           volumeMounts:
-            - name: mindwtr-data
+            - name: data
               mountPath: /app/cloud_data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory }}
             limits:
-              cpu: 1000m
-              memory: 512Mi
-      restartPolicy: Always
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory }}
       volumes:
-        - name: nginx-conf
-          configMap:
-            name: mindwtr-nginx-conf
-        - name: mindwtr-data
+        # 数据卷：Cloud 的数据目录。升级/换镜像时保留它。
+        - name: data
           hostPath:
+            path: "{{ .Values.userspace.appData }}/cloud_data"
             type: DirectoryOrCreate
-            path: '{{ .Values.userspace.appData }}/mindwtr'
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: mindwtr-service
+  name: {{ include "mindwtr.serviceName" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    io.kompose.service: mindwtr
+    {{- include "mindwtr.labels" . | nindent 4 }}
 spec:
-  ports:
-    - name: http
-      port: 5173
-      targetPort: 5173
-      protocol: TCP
-    - name: cloud
-      port: 8787
-      targetPort: 8787
-      protocol: TCP
+  type: ClusterIP
   selector:
-    io.kompose.service: mindwtr
+    {{- include "mindwtr.selectorLabels" . | nindent 4 }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.containerPort }}
+      targetPort: {{ .Values.containerPort }}
