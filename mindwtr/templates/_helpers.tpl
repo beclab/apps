@@ -11,13 +11,17 @@
 
 {{- define "mindwtr.labels" -}}
 app: {{ include "mindwtr.name" . }}
+io.kompose.service: mindwtr
 app.kubernetes.io/name: {{ include "mindwtr.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
+{{/*
+保持与历史版本 (1.0.1) 的 Deployment selector matchLabels 一致，避免 K8s immutable 升级报错
+*/}}
 {{- define "mindwtr.selectorLabels" -}}
-app: {{ include "mindwtr.name" . }}
+io.kompose.service: mindwtr
 {{- end -}}
 
 {{/*
