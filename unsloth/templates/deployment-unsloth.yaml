@@ -1,0 +1,250 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unsloth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: unsloth
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.unsloth.replicaCount }}
+  selector:
+    matchLabels:
+      app: unsloth
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: unsloth
+      annotations:
+        checksum/runtime-config: {{ include (print $.Template.BasePath "/runtime-configmap.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 180
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          for d in /workspace /opt/unsloth-studio /opt/unsloth-studio/runtime-packages /workspace/host /cache/huggingface /cache/triton /cache/python /runtime-compat /root /run /dev/shm; do
+            mkdir -p "$d"
+            chown 1000:1000 "$d"
+          done
+          chmod 1777 /dev/shm
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: studio
+          mountPath: /opt/unsloth-studio
+        - name: home
+          mountPath: /workspace/host
+        - name: hf-cache
+          mountPath: /cache/huggingface
+        - name: triton-cache
+          mountPath: /cache/triton
+        - name: python-cache
+          mountPath: /cache/python
+        - name: runtime-compat
+          mountPath: /runtime-compat
+        - name: root-home
+          mountPath: /root
+        - name: run
+          mountPath: /run
+        - name: dshm
+          mountPath: /dev/shm
+      - name: prepare-runtime
+        image: {{ include "unsloth.image" . | quote }}
+        imagePullPolicy: IfNotPresent
+        command:
+        - /opt/unsloth-studio-app/unsloth_studio/bin/python
+        - /runtime-config/prepare-runtime.py
+        - /opt/unsloth-studio-app/src/studio/backend/core/training/training.py
+        - /runtime-compat/training.py
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        volumeMounts:
+        - name: runtime-config
+          mountPath: /runtime-config
+          readOnly: true
+        - name: runtime-compat
+          mountPath: /runtime-compat
+      containers:
+      - name: unsloth
+        image: {{ include "unsloth.image" . | quote }}
+        imagePullPolicy: IfNotPresent
+        args:
+        - bash
+        - -lc
+        - |
+          set -eu
+          # Keep compiled add-ons separate for every image version. Both installers
+          # and all Python children must use the same writable package directory.
+          mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$PIP_TARGET"
+          export PYTHONPATH="$PIP_TARGET${PYTHONPATH:+:$PYTHONPATH}"
+          export PATH="$PIP_TARGET/bin:$PATH"
+          dest=/opt/unsloth-studio/llama-cpp
+          if [ -L "$dest" ] || [ ! -f "$dest/convert_hf_to_gguf.py" ] || [ ! -w "$dest" ]; then
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            cp -a /opt/unsloth/llama.cpp/. "$dest/"
+          fi
+          export UNSLOTH_LLAMA_CPP_PATH="$dest"
+          exec /usr/local/bin/unsloth-studio-launch
+        ports:
+        - name: studio
+          containerPort: 8000
+        - name: jupyter
+          containerPort: 8888
+        env:
+        - name: UNSLOTH_STUDIO_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-auth
+              key: UNSLOTH_STUDIO_PASSWORD
+        - name: JUPYTER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-auth
+              key: JUPYTER_PASSWORD
+        - name: HF_HOME
+          value: /workspace/.cache/huggingface
+        - name: HF_HUB_CACHE
+          value: /workspace/.cache/huggingface
+        - name: HUGGINGFACE_HUB_CACHE
+          value: /workspace/.cache/huggingface
+        - name: TRITON_CACHE_DIR
+          value: /workspace/.cache/triton
+        - name: UV_CACHE_DIR
+          value: /cache/python/uv
+        - name: PIP_CACHE_DIR
+          value: /cache/python/pip
+        - name: UV_LINK_MODE
+          value: copy
+        - name: UV_CONFIG_FILE
+          value: /runtime-config/uv.toml
+        - name: PIP_TARGET
+          value: /opt/unsloth-studio/runtime-packages/{{ include "unsloth.imageTag" . }}
+        # Set before the backend and training workers import huggingface_hub.
+        - name: HF_HUB_DISABLE_XET
+          value: "1"
+        # Cancel without saving must also finish when preparation is blocked.
+        - name: UNSLOTH_STUDIO_TRAINING_CANCEL_TIMEOUT_S
+          value: "15"
+        - name: UNSLOTH_LLAMA_CPP_PATH
+          value: /opt/unsloth-studio/llama-cpp
+        {{- $oe := .Values.olaresEnv | default dict }}
+        - name: UNSLOTH_MODEL_IDLE_TTL
+          value: {{ $oe.UNSLOTH_MODEL_IDLE_TTL | default "300" | quote }}
+        {{- if $oe.SYSTEM_HF_ENDPOINT }}
+        - name: HF_ENDPOINT
+          value: {{ $oe.SYSTEM_HF_ENDPOINT | quote }}
+        {{- end }}
+        {{- if $oe.SYSTEM_HF_TOKEN }}
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Release.Name }}-auth
+              key: HF_TOKEN
+        {{- end }}
+        readinessProbe:
+          httpGet:
+            path: /
+            port: studio
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
+        resources:
+          requests:
+            cpu: "2"
+            memory: 12Gi
+          limits:
+            cpu: "12"
+            memory: 48Gi
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: studio
+          mountPath: /opt/unsloth-studio
+        - name: home
+          mountPath: /workspace/host
+        - name: hf-cache
+          mountPath: /workspace/.cache/huggingface
+        - name: triton-cache
+          mountPath: /workspace/.cache/triton
+        - name: python-cache
+          mountPath: /cache/python
+        - name: runtime-config
+          mountPath: /runtime-config
+          readOnly: true
+        - name: runtime-compat
+          mountPath: /opt/unsloth-studio-app/src/studio/backend/core/training/training.py
+          subPath: training.py
+          readOnly: true
+        - name: root-home
+          mountPath: /root
+        - name: run
+          mountPath: /run
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: workspace
+        hostPath:
+          path: {{ .Values.userspace.appData }}/workspace
+          type: DirectoryOrCreate
+      - name: studio
+        hostPath:
+          path: {{ .Values.userspace.appData }}/studio
+          type: DirectoryOrCreate
+      - name: home
+        hostPath:
+          path: {{ .Values.userspace.userData }}
+          type: DirectoryOrCreate
+      - name: hf-cache
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}/huggingface
+          type: DirectoryOrCreate
+      - name: triton-cache
+        hostPath:
+          path: {{ .Values.userspace.appCache }}/triton
+          type: DirectoryOrCreate
+      - name: python-cache
+        hostPath:
+          path: {{ .Values.userspace.appCache }}/python
+          type: DirectoryOrCreate
+      - name: runtime-config
+        configMap:
+          name: unsloth-runtime
+      - name: runtime-compat
+        emptyDir: {}
+      - name: root-home
+        emptyDir: {}
+      - name: run
+        emptyDir: {}
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 16Gi

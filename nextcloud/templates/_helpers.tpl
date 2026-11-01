@@ -29,6 +29,14 @@ server {
     proxy_set_header upgrade $http_upgrade;
     proxy_set_header connection "upgrade";
 
+    location ^~ /office/ {
+        proxy_pass http://nextcloud-office:8080/;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Host $http_host/office;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_read_timeout 3600s;
+        proxy_buffering off;
+    }
     location = /healthz {
         access_log off;
         return 200 'ok\n';

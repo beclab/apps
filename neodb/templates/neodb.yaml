@@ -1,0 +1,512 @@
+{{- $appDomainENV := split "," (.Values.domain.neodb | default "localhost") -}}
+{{- $appDomain := index $appDomainENV "_0" -}}
+{{- $redisAuth := "" -}}
+{{- if .Values.redis.password -}}
+  {{- $redisAuth = printf ":%s@" (urlquery .Values.redis.password) -}}
+{{- end -}}
+{{- $adminUsername := (.Values.olaresEnv | default dict).ADMIN_USERNAME | default "admin" -}}
+{{- $adminPassword := (.Values.olaresEnv | default dict).ADMIN_PASSWORD | default "" -}}
+{{- if not $adminPassword -}}
+  {{- $existingSecret := lookup "v1" "Secret" .Release.Namespace "neodb-env" -}}
+  {{- if and $existingSecret $existingSecret.data (index $existingSecret.data "ADMIN_PASSWORD") -}}
+    {{- $adminPassword = index $existingSecret.data "ADMIN_PASSWORD" | b64dec -}}
+  {{- else -}}
+    {{- $adminPassword = randAlphaNum 16 -}}
+  {{- end -}}
+{{- end -}}
+{{- $emailUrl := (.Values.olaresEnv | default dict).NEODB_EMAIL_URL | default "" -}}
+{{- $emailFrom := (.Values.olaresEnv | default dict).NEODB_EMAIL_FROM | default "" -}}
+{{- $adminHandles := (.Values.olaresEnv | default dict).NEODB_ADMIN_HANDLES | default "" -}}
+{{- if and (not $emailUrl) (.Values.olaresEnv | default dict).SMTP_SERVER -}}
+  {{- $oe := .Values.olaresEnv -}}
+  {{- $smtpUser := $oe.SMTP_LOGIN | default "" | urlquery -}}
+  {{- $smtpPass := $oe.SMTP_PASSWORD | default "" | urlquery -}}
+  {{- $auth := "" -}}
+  {{- if or $smtpUser $smtpPass -}}
+    {{- $auth = printf "%s:%s@" $smtpUser $smtpPass -}}
+  {{- end -}}
+  {{- $emailUrl = printf "smtp://%s%s:%s" $auth $oe.SMTP_SERVER ($oe.SMTP_PORT | default "465") -}}
+  {{- if not $emailFrom -}}
+    {{- $emailFrom = $oe.SMTP_FROM_ADDRESS | default "" -}}
+  {{- end -}}
+{{- end -}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: neodb-patch
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+data:
+  sitecustomize.py: |
+    import sys
+    import os
+    import urllib.parse
+
+    class PostImportFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname in ("boofilsic.settings", "mastodon.auth"):
+                for finder in sys.meta_path:
+                    if finder is self:
+                        continue
+                    if hasattr(finder, "find_spec"):
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec is not None and spec.loader is not None:
+                            orig_loader = spec.loader
+                            class LoaderWrapper:
+                                def create_module(self, s):
+                                    return orig_loader.create_module(s)
+                                def exec_module(self, m):
+                                    orig_loader.exec_module(m)
+                                    if fullname == "boofilsic.settings":
+                                        r_url = os.environ.get("NEODB_REDIS_URL", "")
+                                        r_pass = os.environ.get("REDIS_PASSWORD", "")
+                                        if not r_pass and r_url:
+                                            try:
+                                                parsed = urllib.parse.urlparse(r_url)
+                                                r_pass = parsed.password
+                                            except Exception:
+                                                pass
+                                        if hasattr(m, "RQ_QUEUES"):
+                                            for q in m.RQ_QUEUES.values():
+                                                if r_pass:
+                                                    q["PASSWORD"] = r_pass
+                                                if r_url:
+                                                    q["URL"] = r_url
+                                        if hasattr(m, "AUTHENTICATION_BACKENDS"):
+                                            if "django.contrib.auth.backends.ModelBackend" not in m.AUTHENTICATION_BACKENDS:
+                                                m.AUTHENTICATION_BACKENDS.append("django.contrib.auth.backends.ModelBackend")
+                                    elif fullname == "mastodon.auth":
+                                        orig_auth = getattr(m.OAuth2Backend, "authenticate", None)
+                                        if orig_auth:
+                                            def patched_authenticate(self, request, username=None, password=None, **kwargs):
+                                                user = orig_auth(self, request, username=username, password=password, **kwargs)
+                                                if user:
+                                                    account = kwargs.get("social_account")
+                                                    if account:
+                                                        from django.conf import settings
+                                                        admin_handles = getattr(settings, "ADMIN_HANDLES", [])
+                                                        account_handle = f"{account.platform}:{account.handle}"
+                                                        if any(account_handle.lower() == h.strip().lower() for h in admin_handles):
+                                                            if not user.is_superuser or not user.is_staff:
+                                                                user.is_superuser = True
+                                                                user.is_staff = True
+                                                                user.save(update_fields=["is_superuser", "is_staff"])
+                                                            from takahe.models import User as TakaheUser
+                                                            tu = TakaheUser.objects.filter(pk=user.pk).first()
+                                                            if tu and not tu.admin:
+                                                                tu.admin = True
+                                                                tu.save(update_fields=["admin"])
+                                                return user
+                                            m.OAuth2Backend.authenticate = patched_authenticate
+                            spec.loader = LoaderWrapper()
+                            return spec
+            return None
+
+    sys.meta_path.insert(0, PostImportFinder())
+  init_admin.py: |
+    import os
+    import django
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "boofilsic.settings")
+    django.setup()
+
+    from django.contrib.auth import get_user_model
+    from users.models import APIdentity, Preference
+    from takahe.models import User as TakaheUser
+    from takahe.utils import Takahe
+
+    User = get_user_model()
+    username = os.environ.get("ADMIN_USERNAME", "admin").strip()
+    password = os.environ.get("ADMIN_PASSWORD", "").strip()
+
+    if username and password:
+        email = f"{username}@local.host"
+        u = User.objects.filter(username=username).first()
+        created = False
+        if not u:
+            u = User(username=username, email=email)
+            created = True
+        u.set_password(password)
+        u.is_staff = True
+        u.is_superuser = True
+        u.save()
+
+        # Ensure preference
+        Preference.objects.get_or_create(user=u)
+
+        # Ensure takahe identity
+        try:
+            Takahe.init_identity_for_local_user(u)
+        except Exception as e:
+            print(f">>> Note: init_identity_for_local_user: {e}")
+
+        tu = TakaheUser.objects.filter(pk=u.pk).first()
+        if tu:
+            tu.admin = True
+            tu.save()
+
+        print("=" * 60)
+        if created:
+            print(f">>> NeoDB Admin account created: {username}")
+        else:
+            print(f">>> NeoDB Admin password updated: {username}")
+        print(f">>> Password: {password}")
+        print("=" * 60)
+
+    admin_handles = [h.strip() for h in os.environ.get("NEODB_ADMIN_HANDLES", "").split(",") if h.strip()]
+    if admin_handles:
+        from mastodon.models.common import SocialAccount
+        for ah in admin_handles:
+            if ":" in ah:
+                platform, handle = ah.split(":", 1)
+                accounts = SocialAccount.objects.filter(platform__iexact=platform, handle__iexact=handle)
+                for sa in accounts:
+                    if sa.user and (not sa.user.is_superuser or not sa.user.is_staff):
+                        sa.user.is_superuser = True
+                        sa.user.is_staff = True
+                        sa.user.save(update_fields=["is_superuser", "is_staff"])
+                        tu = TakaheUser.objects.filter(pk=sa.user.pk).first()
+                        if tu and not tu.admin:
+                            tu.admin = True
+                            tu.save(update_fields=["admin"])
+                        print(f">>> Promoted existing account {sa.user.username} ({ah}) to admin")
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: neodb-env
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+type: Opaque
+stringData:
+  PYTHONPATH: "/neodb-patch"
+  ADMIN_USERNAME: {{ $adminUsername | quote }}
+  ADMIN_PASSWORD: {{ $adminPassword | quote }}
+  NEODB_ADMIN_HANDLES: {{ $adminHandles | quote }}
+  NEODB_EMAIL_URL: {{ $emailUrl | quote }}
+  NEODB_EMAIL_FROM: {{ $emailFrom | quote }}
+  REDIS_PASSWORD: {{ .Values.redis.password | default "" | quote }}
+  NEODB_DEBUG: "False"
+  NEODB_SECRET_KEY: {{ .Values.appSecret | quote }}
+  NEODB_SITE_NAME: {{ .Values.siteName | quote }}
+  NEODB_SITE_DOMAIN: {{ $appDomain | quote }}
+  NEODB_SITE_LOGO: "/s/img/logo.svg"
+  NEODB_SITE_ICON: "/s/img/icon.png"
+  NEODB_USER_ICON: "/s/img/avatar.png"
+  NEODB_SITE_COLOR: "azure"
+  NEODB_DB_URL: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "neodb" | default "neodb" }}"
+  TAKAHE_DB_URL: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "takahe" | default "takahe" }}"
+  NEODB_REDIS_URL: "redis://{{ $redisAuth }}{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  NEODB_SEARCH_URL: "typesense://user:{{ .Values.typesenseApiKey }}@127.0.0.1:8108/catalog"
+  NEODB_MEDIA_ROOT: "/www/m"
+  NEODB_MEDIA_URL: "/m/"
+  NEODB_VENV: "/neodb-venv"
+  TAKAHE_ENVIRONMENT: "production"
+  TAKAHE_SECRET_KEY: {{ .Values.appSecret | quote }}
+  TAKAHE_MAIN_DOMAIN: {{ $appDomain | quote }}
+  TAKAHE_DATABASE_SERVER: "postgres://{{ .Values.postgres.username }}:{{ .Values.postgres.password }}@{{ .Values.postgres.host }}:{{ .Values.postgres.port }}/{{ index .Values.postgres.databases "takahe" | default "takahe" }}"
+  TAKAHE_CACHES_DEFAULT: "redis://{{ $redisAuth }}{{ .Values.redis.host }}:{{ .Values.redis.port }}/0"
+  TAKAHE_MEDIA_BACKEND: "local://"
+  TAKAHE_MEDIA_ROOT: "/www/media"
+  TAKAHE_MEDIA_URL: "https://{{ $appDomain }}/media/"
+  TAKAHE_USE_PROXY_HEADERS: "true"
+  TAKAHE_STATOR_CONCURRENCY: "2"
+  TAKAHE_STATOR_CONCURRENCY_PER_MODEL: "1"
+  TAKAHE_DEBUG: "False"
+  TAKAHE_VENV: "/neodb-venv"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: neodb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+spec:
+  replicas: {{ .Values.workloads.neodb.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: neodb
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: neodb
+    spec:
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+        - name: fix-permissions
+          image: "{{ .Values.image.busybox.repository }}:{{ .Values.image.busybox.tag }}"
+          imagePullPolicy: {{ .Values.image.busybox.pullPolicy | default "IfNotPresent" }}
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              mkdir -p /data/m /data/media /data/cache /data/root /data/typesense
+              chown -R 1000:1000 /data
+              chmod -R 775 /data
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+        - name: migration
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              echo "Running Takahē migrations..."
+              takahe-manage migrate --noinput || exit 1
+              echo "Running NeoDB migrations..."
+              neodb-manage migrate --noinput || exit 1
+              echo "Migrations complete."
+              if [ -n "$ADMIN_PASSWORD" ] || [ -n "$NEODB_ADMIN_HANDLES" ]; then
+                echo "Initializing/updating administrator account..."
+                /neodb-venv/bin/python /neodb-patch/init_admin.py || echo "Admin user initialization finished."
+              fi
+          volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+      containers:
+        - name: neodb-nginx
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              mkdir -p /var/lib/nginx/body /var/lib/nginx/fastcgi /var/lib/nginx/proxy /var/lib/nginx/scgi /var/lib/nginx/uwsgi /run /var/log/nginx
+              envsubst '${NEODB_WEB_SERVER} ${NEODB_API_SERVER} ${NEODB_MCP_SERVER} ${TAKAHE_WEB_SERVER}' < $NGINX_CONF > /etc/nginx/conf.d/neodb.conf
+              exec nginx -g 'daemon off;'
+          env:
+            - name: NEODB_WEB_SERVER
+              value: "127.0.0.1:8001"
+            - name: NEODB_API_SERVER
+              value: "127.0.0.1:8001"
+            - name: TAKAHE_WEB_SERVER
+              value: "127.0.0.1:8002"
+            - name: NGINX_CONF
+              value: "/neodb/misc/nginx.conf.d/neodb.conf"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          volumeMounts:
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            - name: nginx-sites
+              mountPath: /etc/nginx/sites-enabled
+            - name: nginx-lib
+              mountPath: /var/lib/nginx
+            - name: nginx-log
+              mountPath: /var/log/nginx
+            - name: nginx-run
+              mountPath: /run
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+            - name: neodb-data
+              mountPath: /www/cache
+              subPath: cache
+            - name: neodb-data
+              mountPath: /www/root
+              subPath: root
+          resources:
+            {{- toYaml .Values.resources.nginx | nindent 12 }}
+
+        - name: neodb-web
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - /neodb-venv/bin/gunicorn
+          args:
+            - boofilsic.wsgi
+            - -w
+            - "2"
+            - --preload
+            - --max-requests
+            - "2000"
+            - --timeout
+            - "60"
+            - -b
+            - "127.0.0.1:8001"
+          volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.web | nindent 12 }}
+
+        - name: takahe-web
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - /neodb-venv/bin/gunicorn
+          args:
+            - --chdir
+            - /takahe
+            - takahe.wsgi
+            - -w
+            - "2"
+            - --preload
+            - --max-requests
+            - "2000"
+            - --timeout
+            - "60"
+            - -b
+            - "127.0.0.1:8002"
+          volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.takahe | nindent 12 }}
+
+        - name: neodb-worker
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - neodb-manage
+          args:
+            - rqworker-pool
+            - --num-workers
+            - "2"
+            - mastodon
+            - fetch
+            - ap
+            - crawl
+            - import
+            - export
+            - cron
+            - webhook
+          volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.worker | nindent 12 }}
+
+        - name: takahe-stator
+          image: "{{ .Values.image.neodb.repository }}:{{ .Values.image.neodb.tag }}"
+          imagePullPolicy: {{ .Values.image.neodb.pullPolicy | default "IfNotPresent" }}
+          envFrom:
+            - secretRef:
+                name: neodb-env
+          command:
+            - takahe-manage
+          args:
+            - runstator
+          volumeMounts:
+            - name: neodb-patch
+              mountPath: /neodb-patch
+            - name: neodb-data
+              mountPath: /www/m
+              subPath: m
+            - name: neodb-data
+              mountPath: /www/media
+              subPath: media
+          resources:
+            {{- toYaml .Values.resources.stator | nindent 12 }}
+
+        - name: typesense
+          image: "{{ .Values.image.typesense.repository }}:{{ .Values.image.typesense.tag }}"
+          imagePullPolicy: {{ .Values.image.typesense.pullPolicy | default "IfNotPresent" }}
+          command:
+            - /opt/typesense-server
+          args:
+            - --data-dir=/data
+            - --api-key={{ .Values.typesenseApiKey }}
+            - --listen-port=8108
+            - --enable-cors=true
+          ports:
+            - name: typesense
+              containerPort: 8108
+              protocol: TCP
+          volumeMounts:
+            - name: neodb-data
+              mountPath: /data
+              subPath: typesense
+          resources:
+            {{- toYaml .Values.resources.typesense | nindent 12 }}
+
+      restartPolicy: Always
+      volumes:
+        - name: nginx-conf
+          emptyDir: {}
+        - name: nginx-sites
+          emptyDir: {}
+        - name: nginx-lib
+          emptyDir: {}
+        - name: nginx-log
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: neodb-patch
+          configMap:
+            name: neodb-patch
+        - name: neodb-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}/neodb'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: neodb-service
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: neodb
+spec:
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+  selector:
+    io.kompose.service: neodb

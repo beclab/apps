@@ -1,0 +1,140 @@
+{{- /* Export legacy container-layer configuration before replacing its Pod. */ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-config-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-config-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-30"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [{{ .Release.Name | quote }}]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-config-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-config-migration
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-config-migration
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-config-migration
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  activeDeadlineSeconds: 180
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        gateway.olares.io/shared-caller-outbound: "false"
+      annotations:
+        linkerd.io/inject: disabled
+    spec:
+      serviceAccountName: {{ .Release.Name }}-config-migration
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: export-config
+          image: docker.io/beclab/bitnami-kubectl:1.0.0
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          env:
+            - name: RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              umask 077
+              # New installs may also receive an upgrade while replicas are zero.
+              command=$(kubectl -n "$NAMESPACE" get deployment "$RELEASE" -o jsonpath='{.spec.template.spec.containers[?(@.name=="anythingllm")].command}')
+              pods=$(kubectl -n "$NAMESPACE" get pods -l app=anythingllm --field-selector=status.phase=Running -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+              set -- $pods
+              if [ "$#" -eq 0 ]; then
+                case "$command" in
+                  *'/app/server/storage/.env'*)
+                    echo 'Deployment already uses persistent configuration; init will verify it.'
+                    exit 0 ;;
+                  *) echo 'No running legacy instance to export; refusing to replace its configuration.' >&2; exit 1 ;;
+                esac
+              fi
+              [ "$#" -eq 1 ] || { echo 'Expected exactly one running instance; configuration was not changed.' >&2; exit 1; }
+              kubectl -n "$NAMESPACE" exec -i "$1" -c anythingllm -- node - <<'JS'
+              const fs=require('fs'),path=require('path'),crypto=require('crypto');
+              const source='/app/server/.env',destination='/app/server/storage/.env';
+              if(!fs.existsSync(source)||!fs.statSync(source).isFile())throw new Error('Legacy configuration is missing; refusing upgrade');
+              const bytes=fs.readFileSync(source);
+              if(bytes.length===0)throw new Error('Legacy configuration is empty; refusing upgrade');
+              const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+              const directory='/app/server/storage/.olares-upgrade/config-migration';
+              fs.mkdirSync(directory,{recursive:true,mode:0o700});
+              const digest=hash(bytes),archive=path.join(directory,digest+'.env');
+              if(!fs.existsSync(archive))fs.writeFileSync(archive,bytes,{flag:'wx',mode:0o600});
+              if(hash(fs.readFileSync(archive))!==digest)throw new Error('Configuration backup verification failed');
+              if(fs.realpathSync(source)!==destination){
+                if(fs.existsSync(destination)){
+                  const previous=fs.readFileSync(destination),prior=path.join(directory,hash(previous)+'.env');
+                  if(!fs.existsSync(prior))fs.writeFileSync(prior,previous,{flag:'wx',mode:0o600});
+                  if(hash(fs.readFileSync(prior))!==hash(previous))throw new Error('Previous persistent configuration backup verification failed');
+                }
+                const pending=destination+'.migration-pending';
+                const fd=fs.openSync(pending,'w',0o600);try{fs.writeFileSync(fd,bytes);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+                if(hash(fs.readFileSync(pending))!==digest)throw new Error('Exported configuration differs');
+                fs.renameSync(pending,destination);
+                // Keep subsequent settings saves persistent during the handover.
+                const link=source+'.migration-link';
+                try{fs.unlinkSync(link);}catch(e){if(e.code!=='ENOENT')throw e;}
+                fs.symlinkSync(destination,link);fs.renameSync(link,source);
+              }
+              fs.chmodSync(destination,0o600);
+              if(hash(fs.readFileSync(source))!==hash(fs.readFileSync(destination)))throw new Error('Persistent configuration verification failed');
+              fs.writeFileSync(path.join(directory,'verified.json'),JSON.stringify({sha256:digest,bytes:bytes.length}),{mode:0o600});
+              console.log('Legacy configuration exported and verified; values were not logged.');
+              JS

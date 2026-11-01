@@ -7,9 +7,10 @@ metadata:
   description: "Generic vLLM engine base. Pick any HuggingFace Safetensors model at install via env."
   appid: vllmllmbasev3
   title: vLLM Engine Base
-  version: '1.2.30'
+  version: '1.2.32'
   categories:
     - AI
+    - models
 sharedEntrances:
   - name: vllmllmbasev3
     host: sharedentrances-api
@@ -33,30 +34,18 @@ workloadReplicas:
   llminit: 1
 spec:
   onlyAdmin: true
-  versionName: '0.29.0'
+  versionName: '0.32.0'
   upgradeDescription: |
-    Upgrade vLLM from v0.27.1 to v0.29.0. Chart 1.2.30.
+    Upgrade vLLM from v0.31.0 to v0.32.0. Chart 1.2.32.
 
     **What's Changed** (relevant to Olares)
 
-    v0.29.0
-    - Model Runner V2 is now the default for all models; adds CUDA graph memory profiling, prompt embeds, batch-sharded sampling, and expanded speculative decoding support
-    - Adds Hy4-preview, Qwen3.8-Flash-Next, GraniteSWA/MoeSWA, NemotronH Omni Reasoning V3, Kimi K3 NVFP4, DeepSeek-backbone embeddings, and FP8 ModernBERT
-    - Improves Kimi K3 and DeepSeek V4 performance, Mamba prefix caching, multimodal/video inputs, LoRA, and RL weight synchronization
-    - Enables FlashInfer all-reduce by default, deterministic prefix-cache hashing, and queue admission controls
-    - Breaking changes: removes ten deprecated architectures and the PyAV backend; `vllm serve` replaces the deprecated Python API-server module; Model Runner V1 is deprecated
-
-    v0.28.0
-    - Advances Kimi K3 and DeepSeek V4 kernels, speculative decoding, and Model Runner V2 E/P/D disaggregation
-    - Adds tiered KV offloading with disk and pluggable secondary tiers, plus Rust frontend gRPC controls
-    - Raises `max_num_batched_tokens` default to 16384 and enables Mamba prefix caching by default
-    - Adds ROCm gfx11/gfx950, Intel XPU, CPU MLA, and broader Blackwell support
-    - Breaking changes: bitsandbytes moves to an out-of-tree plugin; Transformers 5.15.0 is required
-
-    v0.27.1
-    - Patch release adding support for quantized DSpark Markov heads
-
-    v0.27.0 highlights included Kimi K3 full-stack support, Qwen3.5 and other new models, PyTorch 2.13.0, FlashAttention 4 on SM100, DeepSeek V4 optimizations, Model Runner V2 pooling/embedding support, tiered KV offloading, large-scale serving fault tolerance, and the Rust frontend gRPC control plane.
+    v0.32.0
+    - New models: EmbeddingGemma 2 (text, image, audio, and video embeddings), MiniCPM-V 4.7, and Nemotron 3.5 ASR. The new `POST /v1/systemone` endpoint serves structured `choice`, `noul`, and `score` decisions, including Cloudflare Clef Omni and LiquidAI d1-3B. The generic `hf` tool and reasoning parser reads a checkpoint's `response_template`, so models that ship one need no model-specific parser.
+    - NVFP4 KV cache now runs on SM8x, SM90, and SM12x. GLM-5.x defaults to an FP8 KV cache on SM100, about half the KV memory per rank. `fp8_ds_mla` on SM90 gives GLM-5.3-Flash up to 31% more output throughput. HiSparse can cache per-request residency and report up to 58% more throughput for GLM-5.3-NVFP4 on B200 when long contexts stay on the GPU.
+    - Faster startup: `vllm download-kernels` installs FlashInfer's precompiled kernels, and `vllm preload --preload-autotune` keeps the FlashInfer autotune table warm across restarts. A shared-memory tensor arena is on by default. With `--api-server-count` above 1, each connection goes to the least-loaded API worker.
+    - Security: chat templates are checked statically and rendered under a timeout, and a request-supplied `chat_template` is rejected. Default CORS no longer allows every origin; set `--allowed-origins` for browser clients. Untrusted images are limited to raster formats. JSON schemas nested more than 64 levels return HTTP 400.
+    - Breaking: Python 3.10 is no longer supported (the official CUDA image already requires Python 3.11 or newer). `max_tokens` is an upper bound on output and is no longer reserved from the context window, so long prompts that used to be rejected can now run. Cascade attention is removed (`--disable-cascade-attn` only warns). `mamba_cache_mode="all"` is removed. The torch.compile sequence-parallelism and AsyncTP passes are removed; model-level sequence parallelism is unchanged. Responses API reasoning stream events are renamed from `response.reasoning_part.added/done` to `response.content_part.added/done` with `part.type="reasoning_text"`.
 
     For detailed release notes, visit:
     https://github.com/vllm-project/vllm/releases

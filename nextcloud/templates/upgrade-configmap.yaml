@@ -1,0 +1,230 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-upgrade
+  namespace: {{ .Release.Namespace }}
+data:
+  migrate.sh: |
+    #!/bin/sh
+    set -eu
+    log() { printf '[%s] [migration-%s] %s\n' "$(date -u +%FT%TZ)" "$MIGRATION_STAGE" "$*"; }
+    warnings=0
+    migration_started=$(date +%s)
+    phase() { log "PHASE $1/6 $2; phase count is not a time-based percentage; remaining time unknown"; }
+    trap 'result=$?; if [ "$result" != 0 ]; then log "Migration stopped with exit=$result"; fi' EXIT
+    run_step() {
+      step="$1"
+      shift
+      started=$(date +%s)
+      log "START $step; remaining time unknown (depends on database size and disk speed)"
+      "$@" &
+      task_pid=$!
+      (
+        while kill -0 "$task_pid" 2>/dev/null; do
+          sleep 30
+          if kill -0 "$task_pid" 2>/dev/null; then
+            log "WAIT $step elapsed=$(($(date +%s) - started))s; process running, remaining time unknown"
+          fi
+        done
+      ) &
+      heartbeat_pid=$!
+      if wait "$task_pid"; then status=0; else status=$?; fi
+      kill "$heartbeat_pid" 2>/dev/null || true
+      wait "$heartbeat_pid" 2>/dev/null || true
+      if [ "$status" != 0 ]; then
+        log "FAILED $step exit=$status elapsed=$(($(date +%s) - started))s"
+        return "$status"
+      fi
+      log "DONE $step elapsed=$(($(date +%s) - started))s"
+    }
+    run_optional() {
+      if run_step "$@"; then
+        :
+      else
+        warnings=$((warnings + 1))
+        log "WARN Optional task failed; core upgrade continues. Background work can retry after startup"
+      fi
+    }
+    cd /var/www/html
+    log 'Starting migration; existing database and file directories are retained'
+    if [ ! -f config/config.php ] || [ ! -f version.php ]; then
+      log 'No installed Nextcloud; skipping intermediate migration'
+      exit 0
+    fi
+    major=$(php -r 'require "version.php"; echo $OC_Version[0];')
+    if [ "$major" -gt "$MIGRATION_STAGE" ]; then
+      log 'Intermediate migration already completed; skipping this stage'
+      exit 0
+    fi
+    if [ "$major" -lt 31 ]; then
+      echo 'This package supports installed Nextcloud 31 or newer' >&2
+      exit 1
+    fi
+    phase 1 'Check installed version and prepare recovery backup'
+    if [ "$MIGRATION_STAGE" = 31 ]; then
+      backup=data/.olares-upgrade-backups/pre-office-31
+      if [ ! -f "$backup/complete" ]; then
+        run_step 'Enable maintenance for backup' php occ maintenance:mode --on
+        mkdir -p "$backup"
+        chmod 700 "$backup"
+        run_step 'Backup PostgreSQL database' php -r '
+          require "config/config.php";
+          foreach (["PGHOST"=>"dbhost", "PGDATABASE"=>"dbname", "PGUSER"=>"dbuser", "PGPASSWORD"=>"dbpassword"] as $env=>$key) putenv($env."=".$CONFIG[$key]);
+          putenv("PGPORT=5432");
+          passthru("pg_dump -Fc --file=data/.olares-upgrade-backups/pre-office-31/database.dump.partial", $status);
+          exit($status);
+        '
+        run_step 'Validate database backup' sh -c 'pg_restore --list "$1" > "$2"' sh "$backup/database.dump.partial" "$backup/database-toc.txt"
+        mv "$backup/database.dump.partial" "$backup/database.dump"
+        phase 2 'Save configuration and version information; user files are not copied'
+        run_step 'Backup configuration and version information' tar -czf "$backup/config.tar.gz.partial" config version.php
+        run_step 'Validate configuration backup' sh -c 'tar -tzf "$1" > "$2"' sh "$backup/config.tar.gz.partial" "$backup/config-toc.txt"
+        mv "$backup/config.tar.gz.partial" "$backup/config.tar.gz"
+        run_step 'Generate backup checksums' sh -c 'sha256sum "$1" "$2" > "$3"' sh "$backup/database.dump" "$backup/config.tar.gz" "$backup/SHA256SUMS"
+        touch "$backup/complete"
+        log 'Backup completed and checksums recorded'
+      else
+        phase 2 'Existing recovery backup is available'
+        log 'Reusing completed pre-upgrade backup'
+      fi
+    else
+      phase 2 'Recovery backup was prepared in the previous version stage'
+    fi
+    # The official entrypoint performs exactly one supported version step.
+    # NEXTCLOUD_UPDATE makes it initialize/upgrade and then exit via `true`.
+    phase 3 'Deploy code and run official version upgrade (required)'
+    run_step 'Copy code and run official version upgrade' env NEXTCLOUD_UPDATE=1 /entrypoint.sh true
+    # A failed occ upgrade can leave version.php ahead of the database.
+    # Re-running occ also completes that interrupted step before proceeding.
+    phase 4 'Complete and verify database upgrade (required)'
+    run_step 'Disable maintenance before recovery check' php occ maintenance:mode --off
+    run_step 'Complete database upgrade' php occ upgrade --no-interaction
+    php occ status --output=json
+    run_step 'Verify installed version and database migration state' php -r '
+      require "version.php"; require "config/config.php";
+      if (empty($CONFIG["installed"]) || ($CONFIG["version"] ?? "") !== implode(".", $OC_Version)) {
+        fwrite(STDERR, "Installed database version does not match deployed code\n"); exit(1);
+      }
+    '
+    php occ maintenance:mode --off
+    background_mode=$(php occ config:app:get core backgroundjobs_mode || true)
+    phase 5 'Optional background jobs; errors here do not block the core upgrade'
+    log 'Background indexing excludes all external mounts, including Home/External Storage'
+    rounds_started=$(date +%s)
+    for attempt in 1 2 3; do
+      log "BACKGROUND round $attempt/3; completed rounds=$((attempt - 1))/3"
+      run_optional "Background jobs round $attempt/3" php /olares/migration-cron.php --verbose
+      rounds_elapsed=$(($(date +%s) - rounds_started))
+      log "BACKGROUND completed rounds=$attempt/3; rough remaining estimate=$((rounds_elapsed * (3 - attempt) / attempt))s based on prior rounds; workload varies, not a completion guarantee"
+    done
+    if [ -n "$background_mode" ]; then
+      run_optional 'Restore background-job mode' php occ config:app:set core backgroundjobs_mode --value="$background_mode"
+    else
+      run_optional 'Restore background-job mode' php occ config:app:delete core backgroundjobs_mode
+    fi
+    phase 6 'Intermediate version stage completed; final application startup follows'
+    log "Stage completed; optional warnings=$warnings total elapsed=$(($(date +%s) - migration_started))s; continuing to the next version"
+  migration-cron.php: |
+    <?php
+    declare(strict_types=1);
+
+    // Guards exist only in this migration process. Do not edit persisted core
+    // files, mount configuration, job rows or user background-job settings.
+    chdir('/var/www/html');
+    require_once '/var/www/html/lib/base.php';
+
+    function olaresMigrationProgress(string $kind): void {
+      static $counts = [], $started = [], $reported = [];
+      $now = microtime(true);
+      $started[$kind] ??= $now;
+      $counts[$kind] = ($counts[$kind] ?? 0) + 1;
+      if ($counts[$kind] === 1 || $counts[$kind] % 100 === 0 || $now - ($reported[$kind] ?? $now) >= 15) {
+        $elapsed = $now - $started[$kind];
+        $rate = $elapsed > 0 ? round($counts[$kind] / $elapsed, 1) : 0;
+        echo '[migration] PROGRESS ' . $kind . ': processed=' . $counts[$kind]
+          . ' elapsed=' . round($elapsed, 1) . 's rate=' . $rate
+          . '/s; total and remaining time unknown (no extra directory traversal)' . PHP_EOL;
+        $reported[$kind] = $now;
+      }
+    }
+
+    function olaresMigrationSkipMount(object $mount): bool {
+      $type = $mount->getMountType();
+      if ($type === 'external' || $type === 'external-session') {
+        static $reported = [];
+        $key = $mount->getMountPoint();
+        if (!isset($reported[$key])) {
+          $reported[$key] = true;
+          echo '[migration] SKIP external mount during indexing/metadata generation' . PHP_EOL;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    function olaresMigrationLoadGuardedClass(string $class, string $source, string $anchor, string $replacement): void {
+      if (class_exists($class, false)) {
+        throw new RuntimeException('Migration guard cannot be installed: class already loaded: ' . $class);
+      }
+      if (!str_starts_with($source, '<?php') || substr_count($source, $anchor) !== 1) {
+        throw new RuntimeException('Unsupported upstream source; refusing unguarded external indexing: ' . $class);
+      }
+      // Load the pinned upstream class with a process-local traversal guard.
+      eval(substr(str_replace($anchor, $replacement, $source), 5));
+    }
+
+    $anchor = 'private function scanFolder(Folder $folder): void {';
+    $guard = $anchor . "\n" . <<<'PHP'
+        if (\olaresMigrationSkipMount($folder->getMountPoint())) {
+          return;
+        }
+        \olaresMigrationProgress('Internal metadata folders');
+    PHP;
+    $sourcePath = '/var/www/html/core/BackgroundJobs/GenerateMetadataJob.php';
+    // The folder guard prevents recursion; also guard individual file mounts.
+    $nodeAnchor = 'foreach ($folder->getDirectoryListing() as $node) {';
+    $nodeGuard = $nodeAnchor . "\n" . <<<'PHP'
+        if (\olaresMigrationSkipMount($node->getMountPoint())) {
+          continue;
+        }
+        \olaresMigrationProgress('Internal metadata entries');
+    PHP;
+    $upstream = file_get_contents($sourcePath);
+    if ($upstream === false || substr_count($upstream, $nodeAnchor) !== 1) {
+      throw new RuntimeException('Unsupported metadata traversal; refusing unguarded external indexing');
+    }
+    // Combine both verified substitutions without changing the on-disk source.
+    $guardedSource = str_replace($nodeAnchor, $nodeGuard, $upstream);
+    olaresMigrationLoadGuardedClass(
+      'OC\Core\BackgroundJobs\GenerateMetadataJob',
+      $guardedSource,
+      $anchor,
+      $guard
+    );
+
+    $anchor = 'return array_combine($mountPoints, $mounts);';
+    $guard = <<<'PHP'
+      return array_filter(array_combine($mountPoints, $mounts),
+        static fn ($mount) => !\olaresMigrationSkipMount($mount));
+    PHP;
+    olaresMigrationLoadGuardedClass(
+      'OC\Files\Utils\Scanner',
+      file_get_contents('/var/www/html/lib/private/Files/Utils/Scanner.php'),
+      $anchor,
+      $guard
+    );
+
+    // Already-queued single-file metadata jobs must obey the same exclusion.
+    olaresMigrationLoadGuardedClass(
+      'OC\FilesMetadata\Job\UpdateSingleMetadata',
+      file_get_contents('/var/www/html/lib/private/FilesMetadata/Job/UpdateSingleMetadata.php'),
+      'if ($node) {',
+      'if ($node && !\olaresMigrationSkipMount($node->getMountPoint())) {'
+    );
+
+    echo '[migration] External indexing guards installed; starting verbose background jobs' . PHP_EOL;
+    // Keep job names, IDs and timing; job arguments can contain private data.
+    ob_start(static fn (string $output): string => preg_replace(
+      '/ \(id: ([0-9]+), arguments: [^\r\n]*\)/', ' (id: $1)', $output
+    ), 1);
+    require '/var/www/html/cron.php';

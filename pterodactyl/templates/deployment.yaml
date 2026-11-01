@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pterodactyl
+spec:
+  replicas: {{ .Values.workloads.pterodactyl.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: pterodactyl
+  template:
+    metadata:
+      labels:
+        app: pterodactyl
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command: [sh, -c, 'set -eu; mkdir -p /data/storage /data/wings /data/.olares-upgrade; chown 1000:1000 /data /data/storage /data/wings /data/.olares-upgrade; chmod 700 /data/.olares-upgrade']
+          volumeMounts:
+            - name: data
+              mountPath: /data
+        - name: copy-app
+          image: docker.io/beclab/pterodactyl-panel:v1.15.2
+          command: [sh, -c, 'cp -R /app/. /runtime/; cp -Rn /app/storage/. /data/storage/']
+          volumeMounts:
+            - name: app
+              mountPath: /runtime
+            - name: data
+              mountPath: /data
+        - name: pre-upgrade-snapshot
+          image: docker.io/beclab/mariadb:11.4.3-noble
+          command: [bash, /config/backup.sh]
+          envFrom:
+            - secretRef:
+                name: pterodactyl-auth
+          env:
+            - name: DB_HOST
+              value: {{ .Values.mariadb.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.mariadb.port | default 3306 | quote }}
+            - name: DB_DATABASE
+              value: {{ .Values.mariadb.databases.panel | quote }}
+            - name: DB_USERNAME
+              value: {{ .Values.mariadb.username | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+      containers:
+        - name: panel
+          image: docker.io/beclab/pterodactyl-panel:v1.15.2
+          command: [/bin/ash, /config/start.sh]
+          envFrom:
+            - secretRef:
+                name: pterodactyl-auth
+          env:
+            - name: ENABLE_WINGS
+              value: {{ .Values.olaresEnv.ENABLE_WINGS | quote }}
+            - name: WINGS_DOMAIN
+              value: {{ .Values.domain.wings | quote }}
+            - name: APP_URL
+              value: 'https://{{ .Values.domain.panel }}'
+            - name: APP_ENV
+              value: production
+            - name: APP_DEBUG
+              value: 'false'
+            - name: RECAPTCHA_ENABLED
+              value: 'false'
+            - name: APP_TIMEZONE
+              value: Asia/Shanghai
+            - name: TRUSTED_PROXIES
+              value: '*'
+            - name: DB_HOST
+              value: {{ .Values.mariadb.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.mariadb.port | quote }}
+            - name: DB_DATABASE
+              value: {{ .Values.mariadb.databases.panel | quote }}
+            - name: DB_USERNAME
+              value: {{ .Values.mariadb.username | quote }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_PREFIX
+              value: pterodactyl_
+            - name: CACHE_DRIVER
+              value: redis
+            - name: SESSION_DRIVER
+              value: redis
+            - name: QUEUE_CONNECTION
+              value: redis
+            - name: MAIL_MAILER
+              value: log
+          ports:
+            - containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /auth/login
+              port: 8080
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /auth/login
+              port: 8080
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+          volumeMounts:
+            - name: app
+              mountPath: /app
+            - name: data
+              mountPath: /data
+            - name: data
+              mountPath: /app/storage
+              subPath: storage
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: app
+          emptyDir: {}
+        - name: data
+          hostPath:
+            path: {{ .Values.userspace.appData | quote }}
+            type: DirectoryOrCreate
+        - name: config
+          configMap:
+            name: pterodactyl-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pterodactyl
+spec:
+  selector:
+    app: pterodactyl
+  ports:
+    - port: 8080
+      targetPort: 8080

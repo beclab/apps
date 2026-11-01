@@ -101,7 +101,7 @@ spec:
               mountPath: /data
       containers:
         - name: fireflyiii
-          image: docker.io/fireflyiii/core:version-6.6.6
+          image: docker.io/fireflyiii/core:version-6.7.9
           envFrom:
             - configMapRef:
                 name: fireflyiii-env
@@ -151,12 +151,12 @@ spec:
                       $app = require "bootstrap/app.php";
                       $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
                       $exists = Laravel\Passport\Client::query()
-                        ->where("personal_access_client", true)
                         ->where("revoked", false)
                         ->where(function ($query) {
                           $query->where("provider", "users")->orWhereNull("provider");
                         })
-                        ->exists();
+                        ->get()
+                        ->contains(fn ($client) => $client->hasGrantType("personal_access"));
                       exit($exists ? 0 : 1);
                     '; then
                       echo "[passport] Personal access client already exists."
@@ -170,7 +170,7 @@ spec:
                     fi
           readinessProbe:
             httpGet:
-              path: /
+              path: /login
               port: {{ .Values.port | default 3000 }}
             initialDelaySeconds: 10
             periodSeconds: 10
@@ -179,7 +179,7 @@ spec:
             failureThreshold: 10
           livenessProbe:
             httpGet:
-              path: /
+              path: /login
               port: {{ .Values.port | default 3000 }}
             initialDelaySeconds: 30
             periodSeconds: 30

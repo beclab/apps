@@ -30,32 +30,40 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: xinference
     spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: snapshot-legacy-state
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command: ["sh", "/migration/snapshot.sh"]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 1000m, memory: 512Mi}
+        volumeMounts:
+        - {name: legacy-data, mountPath: /legacy/data}
+        - {name: legacy-cache, mountPath: /legacy/cache, readOnly: true}
+        - {name: migration, mountPath: /migration, readOnly: true}
+      - name: migrate-state
+        image: beclab/xprobe-xinference:v4.0.1
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+        command: ["python3", "/migration/migrate.py"]
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 1000m, memory: 1Gi}
+        volumeMounts:
+        - {name: data, mountPath: /root}
+        - {name: legacy-data, mountPath: /legacy/data, readOnly: true}
+        - {name: migration, mountPath: /migration, readOnly: true}
       containers:
       - name: xinference
-        image: "xprobe/xinference:v2.12.0"
-        # GPU memory quota is injected by the platform (gpu-inject webhook); do not
-        # set nvidia.com/gpumem in the chart. xinference-local binds :9997 and :8000.
-        # One-time copy from legacy appCache (/root) into appData, then start.
-        command:
-          - sh
-          - -c
-          - |
-            if [ -d /migrate-from-cache ] && [ -n "$(ls -A /migrate-from-cache 2>/dev/null)" ] && [ ! -f /root/.xinference-migrated-from-cache ]; then
-              cp -an /migrate-from-cache/. /root/ && touch /root/.xinference-migrated-from-cache
-            fi
-            if [ -d /root/.xinference/huggingface ] && [ -n "$(ls -A /root/.xinference/huggingface 2>/dev/null)" ] && [ ! -f {{ $hfCache }}/.migrated-from-xinference-home ]; then
-              cp -an /root/.xinference/huggingface/. {{ $hfCache }}/ && touch {{ $hfCache }}/.migrated-from-xinference-home
-            fi
-            # v2.12 image ships CUDA 13 runtime but bundles a CUDA-12-linked xllamacpp;
-            # reinstall cu132 wheel so llama.cpp can import (lost on every fresh pod otherwise).
-            mkdir -p /root/.xinference
-            echo "Reinstalling xllamacpp (cu132) for CUDA 13 runtime..."
-            pip install xllamacpp --force-reinstall \
-              --index-url https://xorbitsai.github.io/xllamacpp/whl/cu132 \
-              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
-            python3 -c "from xllamacpp import CommonParams, Server; print('xllamacpp ok')" \
-              2>&1 | tee -a /root/.xinference/xllamacpp-install.log
-            exec xinference-local -H 0.0.0.0 --log-level debug
+        image: "beclab/xprobe-xinference:v4.0.1"
+        command: ["xinference-local", "-H", "0.0.0.0", "--port", "9997", "--log-level", "info"]
         ports:
           - containerPort: 9997
             protocol: TCP
@@ -94,12 +102,22 @@ spec:
             value: "8000"
           - name: HF_ENDPOINT
             value: "{{ $hfEndpoint }}"
-          # CUDA 13 libs in image; helps torch/vllm/xllamacpp resolve libcudart.so.13.
-          - name: LD_LIBRARY_PATH
-            value: "/usr/local/cuda-13.0/targets/x86_64-linux/lib:/usr/local/lib/python3.12/dist-packages/nvidia/cu13/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64"
-          # Use system xllamacpp (reinstalled above); avoid isolated venv missing cu132 wheel.
+          - name: HOME
+            value: /root
+          # PyTorch/TorchCodec call getpass.getuser(); uid 1000 is not in the image passwd file.
+          - name: USER
+            value: olares
+          - name: LOGNAME
+            value: olares
+          - name: XOSCAR_AUTH_KEY
+            valueFrom:
+              secretKeyRef:
+                name: '{{ .Release.Name }}-actor-auth'
+                key: key
+          - name: XINFERENCE_AUTH_ADVANCED
+            value: {{ ((.Values.olaresEnv | default dict).XINFERENCE_AUTH_ADVANCED | default "false") | quote }}
           - name: XINFERENCE_ENABLE_VIRTUAL_ENV
-            value: "0"
+            value: "1"
         resources:
           limits:
             cpu: "5"
@@ -113,9 +131,6 @@ spec:
         volumeMounts:
         - mountPath: /root
           name: data
-        - mountPath: /migrate-from-cache
-          name: legacy-cache
-          readOnly: true
         - mountPath: "{{ $hfCache }}"
           name: hf-cache
         - name: shm
@@ -126,9 +141,17 @@ spec:
       restartPolicy: Always
       volumes:
       - hostPath:
-          path: '{{ $appData }}'
+          path: '{{ $appData }}/runtime-v4'
           type: DirectoryOrCreate
         name: data
+      - hostPath:
+          path: '{{ $appData }}'
+          type: DirectoryOrCreate
+        name: legacy-data
+      - configMap:
+          name: '{{ .Release.Name }}-migration'
+          defaultMode: 0444
+        name: migration
       - hostPath:
           path: '{{ $appCache }}'
           type: DirectoryOrCreate

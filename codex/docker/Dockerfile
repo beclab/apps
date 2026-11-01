@@ -15,35 +15,42 @@
 # Build & push:
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     -t beclab/harveyff-codex-base:0.5.9 \
+#     -t beclab/harveyff-codex-base:0.5.10 \
 #     --push .
 # syntax=docker/dockerfile:1.7
 
 # ---- Stage 1: olares-cli binary + Olares skills (Codex layout) ----
 # @olares/cli postinstall downloads the Go binary; copy vendor binary (not JS
-# wrapper) so the full verb set is available. skills CLI needs git to clone.
+# wrapper) so the full verb set and its matching embedded skill suite are available.
 FROM node:24-bookworm-slim AS olares-assets
-ARG OLARES_CLI_NPM_VERSION=1.12.7-cli.0
+ARG OLARES_CLI_NPM_VERSION=1.12.7-cli.10
 
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @olares/cli@${OLARES_CLI_NPM_VERSION} \
+RUN npm install -g --allow-scripts=@olares/cli @olares/cli@${OLARES_CLI_NPM_VERSION} \
  && install -D "$(npm root -g)/@olares/cli/vendor/olares-cli" /out/bin/olares-cli \
- && ( /out/bin/olares-cli --version || /out/bin/olares-cli version || true )
+ && mkdir -p /out/share/olares-cli \
+ && cp "$(npm root -g)/@olares/cli/package.json" "$(npm root -g)/@olares/cli/checksums.txt" /out/share/olares-cli/ \
+ && /out/bin/olares-cli --version
 
 WORKDIR /skills-build
-# Codex project-local layout is .agents/skills (global is $CODEX_HOME/skills).
-RUN npx -y skills add beclab/Olares -a codex -y --copy \
- && test -d /skills-build/.agents/skills \
+# Export the suite embedded in this exact CLI release without a repository clone.
+RUN HOME=/skills-build /out/bin/olares-cli skills install \
+ && test -f /skills-build/.agents/skills/olares-shared/SKILL.md \
  && mkdir -p /out/skills \
  && cp -a /skills-build/.agents/skills/. /out/skills/ \
  && ls -la /out/skills
 
-# ---- Stage 2: Ubuntu runtime (no Node in final image) ----
+# ---- Stage 2: Ubuntu runtime and language toolchains ----
 FROM ubuntu:24.04
+
+# Keep PHP and its ABI-coupled extensions on the same Ubuntu security revision.
+ARG PHP_PACKAGE_VERSION=8.3.6-0ubuntu0.24.04.13
+ARG COMPOSER_VERSION=2.10.3
+ARG COMPOSER_SHA256=7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -101,16 +108,15 @@ RUN apt-get update \
         openjdk-21-jdk-headless \
         maven \
         gradle \
-        php8.3-cli \
-        php8.3-curl \
-        php8.3-intl \
-        php8.3-mbstring \
-        php8.3-mysql \
-        php8.3-pgsql \
-        php8.3-sqlite3 \
-        php8.3-xml \
-        php8.3-zip \
-        composer \
+        "php8.3-cli=${PHP_PACKAGE_VERSION}" \
+        "php8.3-curl=${PHP_PACKAGE_VERSION}" \
+        "php8.3-intl=${PHP_PACKAGE_VERSION}" \
+        "php8.3-mbstring=${PHP_PACKAGE_VERSION}" \
+        "php8.3-mysql=${PHP_PACKAGE_VERSION}" \
+        "php8.3-pgsql=${PHP_PACKAGE_VERSION}" \
+        "php8.3-sqlite3=${PHP_PACKAGE_VERSION}" \
+        "php8.3-xml=${PHP_PACKAGE_VERSION}" \
+        "php8.3-zip=${PHP_PACKAGE_VERSION}" \
         lua5.4 \
         sqlite3 \
         gfortran \
@@ -182,6 +188,14 @@ RUN apt-get update \
  && mkdir -p /opt/data \
  && chown -R 1000:1000 /opt/data
 
+# Composer is pinned to the upstream stable PHAR and verified before execution.
+RUN curl -fsSL --retry 3 "https://getcomposer.org/download/${COMPOSER_VERSION}/composer.phar" \
+      -o /usr/local/bin/composer \
+ && echo "${COMPOSER_SHA256}  /usr/local/bin/composer" | sha256sum -c - \
+ && chmod 755 /usr/local/bin/composer \
+ && php --version \
+ && composer --no-ansi --version
+
 # Node 20 LTS via NodeSource. Ubuntu 24.04's nodejs is v18.19.1, which is
 # too old for some CLIs (e.g. @larksuite/cli needs node >= 20.12.0). This
 # ships node + npm under /usr/local, replacing the distro packages above.
@@ -191,8 +205,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
  && node --version && npm --version
 
 COPY --from=olares-assets /out/bin/olares-cli /usr/local/bin/olares-cli
+COPY --from=olares-assets /out/share/olares-cli /usr/local/share/olares-cli
 RUN chmod 755 /usr/local/bin/olares-cli \
- && ( /usr/local/bin/olares-cli --version || /usr/local/bin/olares-cli version || true )
+ && /usr/local/bin/olares-cli --version
 
 # Baked skills; init-skills copies into $HOME/.codex/skills on the PVC.
 COPY --from=olares-assets /out/skills /skills-staging

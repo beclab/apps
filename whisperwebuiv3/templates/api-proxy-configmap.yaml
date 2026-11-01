@@ -62,6 +62,9 @@ data:
         allow_headers=["*"],
     )
 
+    from webui_retention import current_directory, install as install_audio_retention
+    _audio_storage = install_audio_retention(api_app)
+
     _whisper_inf = None
     _lock = threading.Lock()
     _current_model = None
@@ -452,7 +455,7 @@ data:
     async def _save_upload_to_temp(file: UploadFile) -> str:
         """Spool an UploadFile to a unique temp file.  Caller unlinks."""
         suffix = os.path.splitext(file.filename or "")[1] or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="up_") as tmp:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False, prefix="up_", dir=current_directory.get()) as tmp:
             tmp.write(await file.read())
             return tmp.name
 
@@ -481,7 +484,7 @@ data:
             stream = yt.streams.get_audio_only()
             if stream is None:
                 raise RuntimeError("no audio-only stream available for this video")
-            tmpdir = tempfile.mkdtemp(prefix="yt_")
+            tmpdir = str(current_directory.get())
             audio_path = stream.download(output_path=tmpdir, skip_existing=False)
             if not audio_path or not os.path.exists(audio_path):
                 raise RuntimeError("pytubefix returned no output path")
@@ -995,7 +998,7 @@ data:
                 headers=_maybe_headers(),
             )
         finally:
-            if vocals_path and vocals_path != audio_path and os.path.exists(vocals_path):
+            if vocals_path and not _audio_storage.retain and _audio_storage.is_owned(vocals_path) and vocals_path != audio_path and os.path.exists(vocals_path):
                 try:
                     os.unlink(vocals_path)
                 except OSError:
@@ -1019,7 +1022,7 @@ data:
             logger.error(f"Transcription error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            if tmp_path and os.path.exists(tmp_path):
+            if not _audio_storage.retain and tmp_path and os.path.exists(tmp_path):
                 try:
                     os.unlink(tmp_path)
                 except OSError:
@@ -1046,8 +1049,8 @@ data:
             logger.error(f"YouTube transcription error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            if tmp_dir and os.path.isdir(tmp_dir):
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+            if not _audio_storage.retain and tmp_dir and os.path.isdir(tmp_dir):
+                pass  # Request middleware releases the locked directory.
 
     @api_app.post("/v1/audio/translations")
     async def translate_audio(
@@ -1070,7 +1073,7 @@ data:
             logger.error(f"Translation error: {e}")
             raise HTTPException(500, str(e))
         finally:
-            if tmp_path and os.path.exists(tmp_path):
+            if not _audio_storage.retain and tmp_path and os.path.exists(tmp_path):
                 try:
                     os.unlink(tmp_path)
                 except OSError:

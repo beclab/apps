@@ -1,31 +1,6 @@
-# Olares Nextcloud image: official Apache tag + www-data remapped to 1000:1000.
-#
-# Current Market image is a full rebuild of nextcloud:31.0.4-apache with the same
-# uid remap baked in (beclab/aboveos-zhangdangfang-nextcloud:31.0.4.2). This file
-# is the maintainable equivalent: FROM the official image, then usermod/chown.
-#
-# Do not jump more than one Nextcloud major per running volume. Existing 31.0.4
-# data can go to 31.0.14 or 32.x in one upgrade; 33/34 need intermediate majors.
-#
-# Build (pick one version):
-#   docker buildx build --platform linux/amd64 \
-#     --build-arg NEXTCLOUD_VERSION=31.0.14 \
-#     -t beclab/harveyff-nextcloud:31.0.14.1 \
-#     --push .
-#
-#   --build-arg NEXTCLOUD_VERSION=32.0.14
-#   --build-arg NEXTCLOUD_VERSION=33.0.8
-#   --build-arg NEXTCLOUD_VERSION=34.0.3
-#
-# Multi-arch for Market (amd64+arm64):
-#   docker buildx build --platform linux/amd64,linux/arm64 \
-#     --build-arg NEXTCLOUD_VERSION=31.0.14 \
-#     -t beclab/harveyff-nextcloud:31.0.14.1 \
-#     --push .
-
 # syntax=docker/dockerfile:1
 
-ARG NEXTCLOUD_VERSION=31.0.14
+ARG NEXTCLOUD_VERSION=33.0.10
 FROM docker.io/library/nextcloud:${NEXTCLOUD_VERSION}-apache
 
 # Debian www-data is uid/gid 33. Olares userspace hostPath is 1000:1000.
@@ -40,3 +15,12 @@ RUN set -eux; \
       find "${dir}" -xdev \( -user "${old_uid}" -o -group "${old_gid}" \) \
         -exec chown -h www-data:www-data {} +; \
     done
+
+ADD --checksum=sha256:c746c726ddc7faeddc402c00a4c326bfa2395602c510d3e8807a1efdebaece77 https://github.com/Euro-Office/eurooffice-nextcloud/releases/download/v11.0.6/eurooffice.tar.gz /tmp/eurooffice.tar.gz
+RUN tar -xzf /tmp/eurooffice.tar.gz -C /usr/src/nextcloud/custom_apps/ && rm /tmp/eurooffice.tar.gz
+RUN chown -R 1000:1000 /usr/src/nextcloud/custom_apps/eurooffice \
+    && mkdir -p /var/run/apache2 /var/lock/apache2 \
+    && chown -R 1000:1000 /var/run/apache2 /var/lock/apache2
+RUN sed -i 's/Listen 80/Listen 8080/' /etc/apache2/ports.conf && sed -i 's/\*:80/\*:8080/g' /etc/apache2/sites-available/*.conf
+RUN printf 'ServerName localhost\n' > /etc/apache2/conf-available/servername.conf && a2enconf servername
+USER 1000:1000

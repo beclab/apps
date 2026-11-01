@@ -50,8 +50,23 @@ spec:
             - |
               set -e
               mkdir -p /opt/data/.config/poolside /opt/data/work /opt/data/.local/bin
-              chown -R 1000:1000 /opt/data
-              chmod -R 0755 /opt/data
+              for d in /opt/data /opt/data/.config /opt/data/.config/poolside /opt/data/work /opt/data/.local /opt/data/.local/bin /opt/data/.upgrade-backup; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+              done
+              chmod 700 /opt/data/.config/poolside /opt/data/.upgrade-backup
+              backup=/opt/data/.upgrade-backup/pre-1.0.16-config.tar.gz
+              if [ ! -f "$backup" ]; then
+                umask 077
+                set -- .config/poolside
+                if [ -f /opt/data/.local/bin/pool-local ]; then set -- "$@" .local/bin/pool-local; fi
+                tar -czf "$backup.tmp" -C /opt/data "$@"
+                test -s "$backup.tmp"
+                tar -tzf "$backup.tmp" >/dev/null
+                mv "$backup.tmp" "$backup"
+                chown 1000:1000 "$backup"
+              fi
+              tar -tzf "$backup" >/dev/null
 
               if [ "${USE_LOCAL_LLM}" = "true" ]; then
                 cat > /opt/data/.local/bin/pool-local << 'WRAPPER'
@@ -63,30 +78,15 @@ spec:
                 exit 1
               fi
               export POOLSIDE_API_KEY="${POOLSIDE_API_KEY:-ollama}"
-              # `pool exec` (and acp/config/...) take NO --model flag; they read the
-              # default model from pool.json (written by init below). Only the bare
-              # interactive session accepts -m, so inject it there only.
-              case "${1:-}" in
-                -v|--version|-h|--help)
-                  exec pool "$@"
-                  ;;
-                ""|-*)
-                  if [ -n "${POOL_MODEL:-}" ]; then
-                    exec pool --model "${POOL_MODEL}" "$@"
-                  fi
-                  exec pool "$@"
-                  ;;
-                *)
-                  exec pool "$@"
-                  ;;
-              esac
+              if [ -n "${POOL_MODEL:-}" ]; then export POOLSIDE_STANDALONE_MODEL="$POOL_MODEL"; fi
+              exec pool "$@"
               WRAPPER
                 chmod 0755 /opt/data/.local/bin/pool-local
                 chown 1000:1000 /opt/data/.local/bin/pool-local
                 echo "[init-chmod-data] installed pool-local helper"
               fi
 
-              echo "[init-chmod-data] /opt/data owned by 1000:1000"
+              echo "[init-chmod-data] persistent directories prepared for uid1000"
           resources: {}
           volumeMounts:
             - mountPath: /opt/data
@@ -104,7 +104,7 @@ spec:
 
       containers:
         - name: pool
-          image: "beclab/harveyff-pool:v1.0.6"
+          image: "beclab/harveyff-pool:v1.0.16-phpsec-20261023"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data/work
           securityContext:
@@ -136,6 +136,8 @@ spec:
               value: "tcp://localhost:2375"
             {{- end }}
             {{- if eq (toString .Values.olaresEnv.USE_LOCAL_LLM) "true" }}
+            - name: POOLSIDE_STANDALONE_MODEL
+              value: {{ .Values.olaresEnv.POOL_MODEL | default "" | quote }}
             - name: POOLSIDE_STANDALONE_BASE_URL
               value: {{ .Values.olaresEnv.POOLSIDE_STANDALONE_BASE_URL | default "" | quote }}
             - name: POOLSIDE_API_KEY
@@ -162,37 +164,6 @@ spec:
           command:
             - sleep
             - infinity
-          {{- if eq (toString .Values.olaresEnv.USE_LOCAL_LLM) "true" }}
-          # `pool exec` always requests the built-in default model
-          # `poolside/laguna-m.1` and offers no way to override it in standalone
-          # mode. So on startup we alias POOL_MODEL to that name in Ollama via the
-          # native /api/copy endpoint — then exec/interactive transparently use the
-          # local model with no per-command flags. (Best-effort, never blocks.)
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - sh
-                  - -c
-                  - |
-                    {
-                      [ "${USE_LOCAL_LLM}" = "true" ] || exit 0
-                      [ -n "${POOL_MODEL}" ] || exit 0
-                      [ -n "${POOLSIDE_STANDALONE_BASE_URL}" ] || exit 0
-                      base="${POOLSIDE_STANDALONE_BASE_URL%/v1}"
-                      i=0
-                      while [ "$i" -lt 15 ]; do
-                        if curl -fsS "${base}/api/copy" \
-                             -H 'Content-Type: application/json' \
-                             -d "{\"source\":\"${POOL_MODEL}\",\"destination\":\"poolside/laguna-m.1\"}" \
-                             >/dev/null 2>&1; then
-                          echo "[postStart] aliased ${POOL_MODEL} -> poolside/laguna-m.1"
-                          break
-                        fi
-                        i=$((i+1)); sleep 2
-                      done
-                    } >/tmp/pool-alias.log 2>&1 || true
-          {{- end }}
           resources:
             limits:
               cpu: "8"

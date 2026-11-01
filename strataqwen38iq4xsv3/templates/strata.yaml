@@ -1,0 +1,137 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $gpuMiB := include "llmbase.gpuMiB" ($oe.STRATA_REQUIRED_GPU_MEMORY | default "23Gi") -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: strata
+spec:
+  replicas: {{ .Values.workloads.strataqwen38iq4xsv3.replicaCount }}
+  selector:
+    matchLabels: {io.kompose.service: strata}
+  strategy: {type: Recreate}
+  template:
+    metadata:
+      labels:
+        io.kompose.service: strata
+        # Only the engine Pod carries the target label for llm-init's affinity.
+        app.kubernetes.io/instance: '{{ .Release.Name }}'
+      annotations:
+        checksum/wrappers: {{ include (print $.Template.BasePath "/wrappers.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: {{ $runStateHostPath | quote }}
+            type: DirectoryOrCreate
+        - name: strata-data
+          hostPath:
+            # Keep downloaded MTP tensors and prepared artifacts beside the HF
+            # weights. Mount only this app's subdirectory writable at /data;
+            # the shared HF cache remains read-only in the engine container.
+            path: "{{ .Values.userspace.appCommon }}/huggingface/models--unsloth--Qwen3.8-Flash-Next-GGUF/mtp"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: llm-init-wrappers
+            defaultMode: 0555
+      initContainers:
+        - name: init-permissions
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command: [sh, -ec, "chown 1000:1000 /data"]
+          securityContext: {runAsUser: 0}
+          volumeMounts:
+            - {name: strata-data, mountPath: /data}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: strata
+          image: {{ .Values.images.strata | quote }}
+          imagePullPolicy: IfNotPresent
+          # bash job control gives the supervisor a process group even without a tty.
+          command: [/bin/bash, /llm-init/wrappers/strata.sh]
+          env:
+            - {name: ENGINE_KIND, value: strata}
+            - {name: WRAPPER_COMMON, value: /run/llm-init/wrappers/common.sh}
+            - {name: WAIT_TIMEOUT, value: "86400"}
+            - {name: WRAPPER_COMMON_WAIT, value: "86400"}
+            - {name: STRATA_PORT, value: "8080"}
+            - name: STRATA_ALLOWED_HOSTS
+              value: strata
+            - {name: STRATA_DATA, value: /data}
+            - {name: XDG_CONFIG_HOME, value: /data/config}
+            - {name: XDG_CACHE_HOME, value: /data/cache}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+            - {name: STRATA_READ_AHEAD, value: "1"}
+            - {name: STRATA_NO_ARENA_THP, value: "1"}
+            - name: MODEL_NAME
+              value: {{ $oe.MODEL_NAME | quote }}
+            - name: ENGINE_ARGS
+              value: {{ $oe.ENGINE_ARGS | quote }}
+            - name: OMP_NUM_THREADS
+              value: {{ .Values.strata.cpuThreads | quote }}
+{{- if $oe.HF_ENDPOINT }}
+            - name: HF_ENDPOINT
+              value: {{ $oe.HF_ENDPOINT | quote }}
+{{- end }}
+{{- if $oe.HF_TOKEN }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ .Release.Name }}-secrets, key: HF_TOKEN}
+{{- end }}
+          ports:
+            - {name: http, containerPort: 8080}
+          # Olares waits for startupProbe before completing installation.
+          # The wrapper can be started while llm-init is still downloading;
+          # readiness below remains gated on the fully loaded model.
+          # No liveness probe: a Model Console relaunch may legitimately take minutes.
+          startupProbe:
+            exec:
+              command: [/bin/bash, -ec, 'kill -0 1; test -r /run/llm-init/wrappers/common.sh']
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 8640
+          readinessProbe:
+            exec:
+              command: [/opt/strata/.venv/bin/python, /llm-init/wrappers/strata-healthcheck.py]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 1
+          volumeMounts:
+            - {name: hf-cache, mountPath: /cache/hf/hub, readOnly: true}
+            - {name: run-state, mountPath: /run/llm-init, readOnly: true}
+            - {name: strata-data, mountPath: /data}
+            - {name: wrappers, mountPath: /llm-init/wrappers, readOnly: true}
+          resources:
+            requests:
+              cpu: {{ $oe.STRATA_CPU_REQUEST | default "1" | quote }}
+              memory: {{ $oe.STRATA_MEMORY_REQUEST | default "64Gi" | quote }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+            limits:
+              cpu: {{ $oe.STRATA_CPU_LIMIT | default "12" | quote }}
+              memory: {{ $oe.STRATA_MEMORY_LIMIT | default "80Gi" | quote }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: strata
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: {io.kompose.service: strata}
+  ports:
+    - {name: http, port: 8080, targetPort: 8080}
+  type: ClusterIP

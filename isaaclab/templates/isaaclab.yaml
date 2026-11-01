@@ -6,7 +6,7 @@ metadata:
   labels:
     io.kompose.service: isaaclab
   annotations:
-    applications.app.bytetrade.io/gpu-inject: "true"
+    applications.app.bytetrade.io/gpu-inject: "isaaclab"
 spec:
   replicas: {{ .Values.workloads.isaaclab.replicaCount }}
   selector:
@@ -22,19 +22,202 @@ spec:
         io.kompose.service: isaaclab
         bytetrade.io/terminal: isaaclab
     spec:
+      shareProcessNamespace: true
       containers:
-        - name: isaaclab
-          image: docker.io/beclab/nvidia-isaac-lab:2.3.2
+        - name: preload-cover
+          image: docker.io/beclab/nvidia-isaac-lab:3.0.0-rc1-uv1
           command: [ "/bin/bash" ]
           args:
             - "-c"
-            - "mount --bind /dev/null /etc/ld.so.preload && sleep infinity"
+            - |
+              echo "preload-cover started" >&2
+              needle="isaaclab-""hold"
+              covered=""
+              while true; do
+                target=""
+                for p in /proc/[0-9]*; do
+                  cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null || true)
+                  case "$cmd" in
+                    *"$needle"*) target=${p#/proc/}; break ;;
+                  esac
+                done
+                if [ -z "$target" ]; then
+                  sleep 0.5
+                  continue
+                fi
+                src=$(nsenter -t "$target" -m -- findmnt -n -o SOURCE /etc/ld.so.preload 2>/dev/null || true)
+                case "$src" in
+                  *null*)
+                    if [ "$covered" != "$target" ]; then
+                      echo "already covered pid=$target src=$src" >&2
+                      covered=$target
+                    fi
+                    sleep 2
+                    continue
+                    ;;
+                esac
+                uid=$(awk '/^Uid:/ {print $2}' /proc/"$target"/status)
+                gid=$(awk '/^Gid:/ {print $2}' /proc/"$target"/status)
+                echo "covering pid=$target uid=$uid src=${src}" >&2
+                nsenter -t "$target" -m -- chown "$uid:$gid" /root /workspace/isaaclab /workspace/isaaclab/isaaclab.sh /isaac-sim/runheadless.sh || echo "chown failed pid=$target" >&2
+                nsenter -t "$target" -m -- chmod 755 /root || true
+                nsenter -t "$target" -m -- bash -c 'src=/isaac-sim/kit/python/lib/python3.12/site-packages/isaacteleop/cloudxr/native; for bin in /isaac-sim/extscache/omni.kit.livestream.webrtc-*/bin; do ln -sfn "$src/libNvStreamBase.so" "$bin/libNvStreamBase.so" && ln -sfn "$src/libcudart.so.12" "$bin/libcudart.so.12" || exit 1; done' || echo "webrtc link failed pid=$target" >&2
+                if nsenter -t "$target" -m -- mount --bind /dev/null /etc/ld.so.preload; then
+                  echo "mount ok pid=$target" >&2
+                  covered=$target
+                  nsenter -t "$target" -m -- chown -R "$uid:$gid" /isaac-sim/kit/cache /root/.cache /root/.nv /root/.nvidia-omniverse /root/.local /root/Documents || echo "cache chown failed pid=$target" >&2
+                else
+                  echo "mount failed pid=$target" >&2
+                fi
+                sleep 1
+              done
+          securityContext:
+            runAsUser: 0
+            privileged: true
+          resources:
+            limits:
+              cpu: 200m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+        - name: isaaclab
+          image: docker.io/beclab/nvidia-isaac-lab:3.0.0-rc1-uv1
+          command: [ "/bin/bash" ]
+          args:
+            - "-c"
+            - |
+              : isaaclab-hold
+              while true; do
+                src=$(findmnt -n -o SOURCE /etc/ld.so.preload 2>/dev/null || true)
+                case "$src" in
+                  *null*) break ;;
+                esac
+                sleep 0.5
+              done
+              insert_hub_cleanup() {
+                file="$1"
+                needle="$2"
+                grep -q "pkill -x hub" "$file" && return 0
+                tmp=$(mktemp)
+                awk -v needle="$needle" '
+                  !done && $0 == needle {
+                    print "# stale omniverse hub keeps 49100/47998 after the previous Kit exits"
+                    print "pkill -f ^/usr/local/bin/hub >/dev/null 2>&1 || true"
+                    print "sleep 0.5"
+                    done = 1
+                  }
+                  { print }
+                ' "$file" > "$tmp" && cat "$tmp" > "$file" && rm -f "$tmp"
+              }
+              insert_hub_cleanup /isaac-sim/runheadless.sh 'EXTRA_FLAGS=""'
+              insert_hub_cleanup /workspace/isaaclab/isaaclab.sh 'set -e'
+              # uv's .venv exists so `uv run isaaclab` has an entrypoint. It is
+              # not Isaac Sim's Python, and the CLI refuses that combination.
+              # Both entrypoints below run this launcher, which keeps every
+              # flag on Kit's python.sh.
+              cat > /workspace/isaaclab/.kit-cli.py << 'PY'
+              import os
+              import sys
+              from pathlib import Path
+
+              os.environ.pop("VIRTUAL_ENV", None)
+              os.environ.pop("CONDA_PREFIX", None)
+              sys.argv[0] = "isaaclab"
+
+              # -s launches the windowed full kit. This container has no display;
+              # the streaming app is runheadless.sh.
+              if len(sys.argv) > 1 and sys.argv[1] in ("-s", "--sim"):
+                  cmd = [
+                      "/isaac-sim/runheadless.sh",
+                      "--ext-folder",
+                      "/workspace/isaaclab/source",
+                      *sys.argv[2:],
+                  ]
+                  os.execv(cmd[0], cmd)
+
+              import isaaclab.cli.utils as utils
+
+              _extract_python_exe = utils.extract_python_exe
+
+
+              def extract_python_exe():
+                  forced = "/isaac-sim/python.sh"
+                  if Path(forced).is_file():
+                      utils.print_info(f'Using Python: "{forced}"')
+                      return forced
+                  return _extract_python_exe()
+
+
+              utils.extract_python_exe = extract_python_exe
+
+              from isaaclab.cli import cli
+
+              cli()
+              PY
+              /isaac-sim/kit/python/bin/python3 - << 'PY'
+              from pathlib import Path
+              path = Path("/workspace/isaaclab/source/isaaclab_visualizers/isaaclab_visualizers/kit/kit_visualizer.py")
+              text = path.read_text()
+              if "ISAACLAB_LIVESTREAM_PUMP" not in text:
+                  old = """        # Headless mode: skip the app update and camera panel refresh; rendering is\n        # triggered on demand by render_rgb_array() / render_tiled_rgb_array().\n        if self._runtime_headless:\n            return\n"""
+                  new = """        # ISAACLAB_LIVESTREAM_PUMP: livestream marks SimulationApp headless, but\n        # /isaaclab/has_gui stays true. The WebRTC view advances only if this\n        # loop still calls app.update().\n        if self._runtime_headless and not get_settings_manager().get("/isaaclab/has_gui"):\n            return\n"""
+                  if old not in text:
+                      raise SystemExit("kit visualizer patch point missing")
+                  path.write_text(text.replace(old, new, 1))
+              PY
+              if ! grep -q ISAACLAB_KIT_CLI /workspace/isaaclab/isaaclab.sh; then
+                tmp=$(mktemp)
+                awk '
+                  !done && $0 == "set -e" {
+                    print
+                    print "# ISAACLAB_KIT_CLI: this uv venv is only the uv run entrypoint"
+                    print "unset VIRTUAL_ENV"
+                    print "unset CONDA_PREFIX"
+                    done = 1
+                    next
+                  }
+                  { print }
+                ' /workspace/isaaclab/isaaclab.sh > "$tmp" && cat "$tmp" > /workspace/isaaclab/isaaclab.sh && rm -f "$tmp"
+              fi
+              if grep -q 'from isaaclab.cli import cli; cli()' /workspace/isaaclab/isaaclab.sh; then
+                tmp=$(mktemp)
+                sed 's|^exec "\$python_exe" -c "from isaaclab.cli import cli; cli()" "\$@"|exec /isaac-sim/python.sh /workspace/isaaclab/.kit-cli.py "$@"|' /workspace/isaaclab/isaaclab.sh > "$tmp" && cat "$tmp" > /workspace/isaaclab/isaaclab.sh && rm -f "$tmp"
+              fi
+              cat > /workspace/isaaclab/.venv/bin/isaaclab << 'EOF'
+              #!/bin/bash
+              pkill -f ^/usr/local/bin/hub >/dev/null 2>&1 || true
+              sleep 0.5
+              unset VIRTUAL_ENV
+              unset CONDA_PREFIX
+              export ISAAC_PATH=/isaac-sim
+              export CARB_APP_PATH=/isaac-sim/kit
+              export EXP_PATH=/isaac-sim/apps
+              export RESOURCE_NAME="${RESOURCE_NAME:-IsaacSim}"
+              . /isaac-sim/setup_python_env.sh
+              export PYTHONPATH="/workspace/isaaclab/source/isaaclab:${PYTHONPATH}"
+              exec /isaac-sim/python.sh /workspace/isaaclab/.kit-cli.py "$@"
+              EOF
+              chmod +x /workspace/isaaclab/.venv/bin/isaaclab
+              sleep infinity
           env:
+            - name: PATH
+              value: /usr/local/bin:/root/.local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: UV_PYTHON_INSTALL_DIR
+              value: /opt/uv-python
+            - name: UV_OFFLINE
+              value: "1"
+            - name: UV_NO_SYNC
+              value: "1"
             - name: ACCEPT_EULA
               value: "Y"
             - name: PRIVACY_CONSENT
               value: "Y"
             - name: PUBLIC_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: ISAACSIM_HOST
               valueFrom:
                 fieldRef:
                   fieldPath: status.hostIP
@@ -47,10 +230,6 @@ spec:
               cpu: 8000m
               memory: 15Gi
               nvidia.com/gpu: 1
-          securityContext:
-            privileged: true
-            capabilities:
-              add: [ "SYS_ADMIN" ]
           ports:
             - containerPort: {{ .Values.port | default 3000 }}
               protocol: TCP

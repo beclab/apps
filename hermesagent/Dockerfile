@@ -2,8 +2,9 @@
 # ---------------------------------------------------------------------------
 # Thin overlay on the official Hermes Agent image.
 #
-# Purpose: remap the baked `hermes` user/group to UID/GID 1000 so the runtime
-# identity matches Olares user-data ownership (appData + Home/External host
+# Purpose: preinstall the Hindsight client and remap the baked `hermes`
+# user/group to UID/GID 1000 so the runtime identity matches Olares user-data
+# ownership (appData + Home/External host
 # mounts are owned 1000:1000).
 #
 # Why re-bake instead of just setting HERMES_UID=1000 at runtime:
@@ -21,24 +22,44 @@
 #
 # Build (all args optional; defaults shown):
 #   docker buildx build \
-#     --build-arg HERMES_VERSION=v2026.8.31 \
+#     --build-arg HERMES_VERSION=v0.22.2 \
 #     --build-arg TARGET_UID=1000 \
 #     --build-arg TARGET_GID=1000 \
-#     --platform linux/amd64 \
-#     -t beclab/harveyff-hermes-agent:v2026.8.31-uid1000 --push .
+#     --platform linux/amd64,linux/arm64 \
+#     -t beclab/harveyff-hermes-agent:v0.22.2-uid1000 --push .
 #
-# Upgrades: just pass a newer --build-arg HERMES_VERSION and rebuild.
+# Upgrades: pass the target --build-arg HERMES_VERSION and review upstream
+# image layout/toolchain changes before rebuilding.
 # ---------------------------------------------------------------------------
 
 # Global ARG consumed by FROM. Must be declared before the first FROM.
-ARG HERMES_VERSION=v2026.8.31
+ARG HERMES_VERSION=v0.22.2
 FROM nousresearch/hermes-agent:${HERMES_VERSION}
 
 # Re-declare after FROM to make these usable inside RUN below.
 ARG TARGET_UID=1000
 ARG TARGET_GID=1000
+ARG HINDSIGHT_VERSION=0.10.2
 
 USER root
+
+# Preinstall the client for a separate Hindsight service (local_external).
+# Keep its version explicit and configurable at build time.
+# Prefer official PyPI and ignore inherited project/user configuration so a
+# stale package mirror cannot hide the requested client release.
+# Newer images keep uv in the PM store instead of exposing it on PATH.
+# Resolve the installed launcher without downloading a second toolchain.
+RUN set -eu; \
+    UV_BIN="$(command -v uv || true)"; \
+    if [ -z "$UV_BIN" ]; then \
+        UV_BIN="$(cd /opt/hermes && /opt/hermes/.venv/bin/python3 -c 'from pm import uv_launcher; p = uv_launcher("uv"); assert p is not None, "Hermes PM uv launcher is missing"; print(p)')"; \
+    fi; \
+    test -x "$UV_BIN"; \
+    "$UV_BIN" --no-config pip install --no-cache --index https://pypi.org/simple \
+        --python /opt/hermes/.venv/bin/python3 \
+        "hindsight-client==${HINDSIGHT_VERSION}" \
+    && /opt/hermes/.venv/bin/python3 -c "from importlib.metadata import version; import hindsight_client; print(version('hindsight-client'))" \
+    && chown -hR hermes:hermes /opt/hermes/.venv
 
 RUN set -eu; \
     # Capture the upstream-baked UID/GID instead of hardcoding 10000, so the
@@ -62,4 +83,4 @@ RUN set -eu; \
     fi
 
 # Identity (now TARGET_UID:TARGET_GID), ENTRYPOINT (/init + main-wrapper) and
-# CMD are inherited from the base image — no other behavior changes.
+# CMD are inherited from the base image.

@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+data:
+  snapshot.sh: |
+    set -eu
+    chown 1000:1000 /postgres-run
+    chmod 775 /postgres-run
+    mkdir -p /legacy/stacks /legacy/stacks-v2.5.1 /legacy/.upgrade-2.5.1
+    if [ ! -f /legacy/.upgrade-2.5.1/stacks.tar.sha256 ]; then
+      tar -cf /legacy/.upgrade-2.5.1/stacks.tar -C /legacy/stacks .
+      tar -tf /legacy/.upgrade-2.5.1/stacks.tar >/dev/null
+      cd /legacy/.upgrade-2.5.1
+      sha256sum stacks.tar >stacks.tar.sha256
+    fi
+    cd /legacy/.upgrade-2.5.1
+    sha256sum -c stacks.tar.sha256
+    chown 1000:1000 /legacy/stacks-v2.5.1 /legacy/.upgrade-2.5.1 /legacy/.upgrade-2.5.1/stacks.tar /legacy/.upgrade-2.5.1/stacks.tar.sha256
+    chmod 700 /legacy/.upgrade-2.5.1
+    chmod 400 /legacy/.upgrade-2.5.1/stacks.tar /legacy/.upgrade-2.5.1/stacks.tar.sha256
+  migrate.py: |
+    import hashlib,json,os,tarfile
+    from pathlib import Path
+    archive=Path('/legacy/.upgrade-2.5.1/stacks.tar');target=Path('/target');marker=target/'.migration-2.5.1-complete'
+    def digest(path):
+     h=hashlib.sha256()
+     with path.open('rb') as f:
+      for b in iter(lambda:f.read(1024*1024),b''):h.update(b)
+     return h.hexdigest()
+    sha=digest(archive);expected=Path(str(archive)+'.sha256').read_text().split()[0]
+    assert sha==expected,'Legacy backup checksum mismatch'
+    if marker.exists():
+     report=json.loads(marker.read_text());assert report['archive_sha256']==sha,'Unexpected changed source backup'
+     print('Previously verified migration retained')
+    else:
+     count=0;size=0;links=0;directories=[]
+     with tarfile.open(archive,'r:') as src:
+      for info in src:
+       rel=Path(info.name)
+       assert not rel.is_absolute() and '..' not in rel.parts,info.name
+       if str(rel)=='.':continue
+       dst=target/rel
+       assert os.path.commonpath([target,str(dst.parent.resolve())])==str(target),'Path escapes target'
+       dst.parent.mkdir(parents=True,exist_ok=True)
+       if info.isdir():dst.mkdir(exist_ok=True);directories.append((dst,info.mode))
+       elif info.isfile():
+        content=src.extractfile(info);h=hashlib.sha256();written=0
+        with dst.open('wb') as out:
+         for b in iter(lambda:content.read(1024*1024),b''):out.write(b);h.update(b);written+=len(b)
+        dst.chmod(info.mode&0o777);assert written==info.size and digest(dst)==h.hexdigest(),info.name
+        count+=1;size+=written
+       elif info.issym():
+        link=Path(info.linkname)
+        assert not link.is_absolute() and os.path.commonpath([target,str((dst.parent/link).resolve())])==str(target),'Unsafe symlink'
+        if dst.is_symlink():assert os.readlink(dst)==info.linkname
+        else:dst.symlink_to(info.linkname)
+        links+=1
+       elif info.islnk():
+        link=Path(info.linkname);assert not link.is_absolute() and '..' not in link.parts
+        os.link(target/link,dst);links+=1
+       else:raise RuntimeError('Unsupported archived file type: '+info.name)
+     for p,mode in reversed(directories):p.chmod(mode&0o777)
+     report={'archive_sha256':sha,'files':count,'bytes':size,'links':links,'uid':os.getuid()}
+     marker.write_text(json.dumps(report));marker.chmod(0o600)
+     print(json.dumps(report))
+  cache.lua: |
+    -- Preserve incompatible organization-config cache values under a distinct key.
+    -- Persistent databases, sessions, other cache entries and their payloads are untouched.
+    local cursor = "0"
+    local moved = 0
+    local prefix = "olares:pre-2.5.1:"
+    local currentUID = string.char(240,210,180,38,106,114,173,56)
+    repeat
+      local page = redis.call("SCAN", cursor)
+      cursor = page[1]
+      for _, key in ipairs(page[2]) do
+        if string.sub(key, 1, string.len(prefix)) ~= prefix and redis.call("TYPE", key).ok == "string" then
+          local value = redis.call("GET", key)
+          if string.find(value, "OrganizationConfigurationCE", 1, true) and not string.find(value, currentUID, 1, true) then
+            local archived = prefix .. key
+            if redis.call("EXISTS", archived) ~= 0 then
+              return redis.error_reply("Refusing to overwrite a preserved legacy cache entry")
+            end
+            redis.call("RENAME", key, archived)
+            moved = moved + 1
+          end
+        end
+      end
+    until cursor == "0"
+    return moved

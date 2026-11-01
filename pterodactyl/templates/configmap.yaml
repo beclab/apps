@@ -1,0 +1,201 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pterodactyl-config
+data:
+  admin.php: |
+    <?php
+    require '/app/vendor/autoload.php';
+    $app = require '/app/bootstrap/app.php';
+    $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+    if (!Pterodactyl\Models\User::where('root_admin', true)->exists()) {
+        $username = getenv('ADMIN_USERNAME');
+        $password = getenv('ADMIN_PASSWORD');
+        if (!$username || !$password) {
+            throw new RuntimeException('Administrator username and password must be supplied at installation.');
+        }
+        $app->make(Pterodactyl\Services\Users\UserCreationService::class)->handle([
+            'email' => 'admin@example.com',
+            'username' => $username,
+            'name_first' => 'Panel',
+            'name_last' => 'Administrator',
+            'password' => $password,
+            'root_admin' => true,
+        ]);
+    }
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr;
+    events { worker_connections 1024; }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      access_log /dev/stdout;
+      client_body_temp_path /tmp/client-body;
+      fastcgi_temp_path /tmp/fastcgi;
+      proxy_temp_path /tmp/proxy;
+      uwsgi_temp_path /tmp/uwsgi;
+      scgi_temp_path /tmp/scgi;
+      server {
+        listen 8080;
+        server_name _;
+        root /app/public;
+        index index.php;
+        client_max_body_size 100m;
+        location / { try_files $uri $uri/ /index.php?$query_string; }
+        location ~ \.php$ {
+          include /etc/nginx/fastcgi_params;
+          fastcgi_pass 127.0.0.1:9000;
+          fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+          fastcgi_param HTTP_PROXY "";
+          fastcgi_read_timeout 300;
+          fastcgi_buffer_size 16k;
+          fastcgi_buffers 4 16k;
+        }
+        location ~ /\. { deny all; }
+      }
+    }
+  php-fpm.conf: |
+    [global]
+    pid = /tmp/php-fpm.pid
+    error_log = /proc/self/fd/2
+    daemonize = no
+    [www]
+    listen = 127.0.0.1:9000
+    pm = ondemand
+    pm.max_children = 9
+    pm.process_idle_timeout = 10s
+    clear_env = no
+    catch_workers_output = yes
+    php_admin_value[upload_max_filesize] = 100M
+    php_admin_value[post_max_size] = 100M
+    php_admin_flag[session.upload_progress.enabled] = off
+  start.sh: |
+    #!/bin/ash
+    set -eu
+    cd /app
+    export HOME=/app
+    printf '[client]\nskip-ssl\n' > /app/.my.cnf
+    mkdir -p storage/logs storage/framework/cache/data storage/framework/sessions storage/framework/views bootstrap/cache
+    # Retain the encryption key with durable data across namespace recreation.
+    if [ -s /data/app-key ]; then
+      export APP_KEY="$(cat /data/app-key)"
+    else
+      umask 077
+      printf '%s' "$APP_KEY" > /data/app-key
+    fi
+    touch .env
+    php artisan migrate --seed --force
+    php /config/admin.php
+    if [ "${ENABLE_WINGS:-false}" = true ]; then
+      php /config/wings-node.php
+    fi
+    exec supervisord -n -c /config/supervisord.conf
+  supervisord.conf: |
+    [supervisord]
+    nodaemon=true
+    logfile=/dev/null
+    pidfile=/tmp/supervisord.pid
+    [program:php]
+    command=php-fpm -F -y /config/php-fpm.conf
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:nginx]
+    command=nginx -e /dev/stderr -c /config/nginx.conf -g 'daemon off;'
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:queue]
+    command=php /app/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:scheduler]
+    command=/bin/ash -c 'while true; do php /app/artisan schedule:run; sleep 60; done'
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+  wings-node.php: |
+    <?php
+    require '/app/vendor/autoload.php';
+    $app = require '/app/bootstrap/app.php';
+    $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+    $location = Pterodactyl\Models\Location::firstOrCreate(['short'=>'olares-local'],['long'=>'Local Olares Wings node']);
+    $node = Pterodactyl\Models\Node::where('name','Olares Local Wings')->first();
+    if (!$node) {
+        $node = $app->make(Pterodactyl\Services\Nodes\NodeCreationService::class)->handle([
+            'name'=>'Olares Local Wings','location_id'=>$location->id,'fqdn'=>getenv('WINGS_DOMAIN'),
+            'scheme'=>'https','behind_proxy'=>true,'memory'=>4096,'memory_overallocate'=>0,
+            'disk'=>10240,'disk_overallocate'=>0,'daemonListen'=>443,'daemonSFTP'=>42022,
+            'daemonBase'=>'/wings/volumes','public'=>false,'upload_size'=>100,
+        ]);
+    }
+    $config=$node->getConfiguration();
+    // Keep existing node settings, including user customization and Wings-expanded defaults.
+    if (is_file('/data/wings/config.yml')) {
+        $saved = Symfony\Component\Yaml\Yaml::parseFile('/data/wings/config.yml');
+        if (!is_array($saved)) throw new RuntimeException('Existing Wings configuration is invalid; retained unchanged.');
+        foreach (['uuid', 'token_id', 'token'] as $field) {
+            if (!isset($saved[$field], $config[$field]) || !hash_equals((string)$config[$field], (string)$saved[$field])) {
+                throw new RuntimeException('Existing Wings configuration belongs to a different node; retained unchanged.');
+            }
+        }
+        echo "Existing local Wings configuration preserved\n";
+        return;
+    }
+    $config['api']['port']=8080;
+    $config['api']['ssl']=['enabled'=>false];
+    $config['system']=array_replace_recursive($config['system'],[
+        'root_directory'=>'/wings','log_directory'=>'/wings/logs','data'=>'/wings/volumes',
+        'archive_directory'=>'/wings/archives','backup_directory'=>'/wings/backups',
+        'tmp_directory'=>'/wings/tmp','timezone'=>'Asia/Shanghai',
+        'user'=>['rootless'=>['enabled'=>true,'container_uid'=>1000,'container_gid'=>1000],'uid'=>1000,'gid'=>1000],
+        'sftp'=>['bind_address'=>'0.0.0.0','bind_port'=>2022],'enable_log_rotate'=>false,
+        'machine_id'=>['enabled'=>false],
+    ]);
+    $config['remote']='http://pterodactyl:8080';
+    $config['allowed_mounts']=null;
+    $config['allowed_origins']=[getenv('APP_URL')];
+    $config['docker']=['network'=>['name'=>'pterodactyl_nw','interface'=>'172.30.0.1','network_mtu'=>1450,'interfaces'=>['v4'=>['subnet'=>'172.30.0.0/16','gateway'=>'172.30.0.1']]],'installer_limits'=>['memory'=>1024,'cpu'=>100]];
+    umask(0077);
+    file_put_contents('/data/wings/config.yml.new',Symfony\Component\Yaml\Yaml::dump($config,8,2));
+    rename('/data/wings/config.yml.new','/data/wings/config.yml');
+    echo "Local Wings node configured\n";
+  backup.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    umask 077
+    state=/data/.olares-upgrade/1.15.2
+    mkdir -p "$state"
+    if [ ! -s "$state/files.tar.gz" ]; then
+      items=(storage)
+      [ ! -f /data/app-key ] || items+=(app-key)
+      [ ! -f /data/wings/config.yml ] || items+=(wings/config.yml)
+      tar -czf "$state/files.tar.gz.tmp" -C /data "${items[@]}"
+      tar -tzf "$state/files.tar.gz.tmp" >/dev/null
+      mv "$state/files.tar.gz.tmp" "$state/files.tar.gz"
+    fi
+    tar -tzf "$state/files.tar.gz" >/dev/null
+    export MYSQL_PWD="$DB_PASSWORD"
+    for attempt in $(seq 1 90); do
+      mariadb --skip-ssl --host="$DB_HOST" --port="${DB_PORT:-3306}" --user="$DB_USERNAME" "$DB_DATABASE" -N -e 'SELECT 1' >/dev/null 2>&1 && break
+      [ "$attempt" -lt 90 ] || { echo 'Application database is unavailable' >&2; exit 1; }
+      sleep 2
+    done
+    if [ ! -s "$state/database.sql.gz" ]; then
+      mariadb-dump --skip-ssl --host="$DB_HOST" --port="${DB_PORT:-3306}" --user="$DB_USERNAME" --single-transaction --quick --skip-lock-tables --hex-blob --routines --events "$DB_DATABASE" | gzip > "$state/database.sql.gz.tmp"
+      gzip -t "$state/database.sql.gz.tmp"
+      gzip -cd "$state/database.sql.gz.tmp" | tail -n 8 | grep -q 'Dump completed'
+      mv "$state/database.sql.gz.tmp" "$state/database.sql.gz"
+    fi
+    gzip -t "$state/database.sql.gz"
+    echo 'Application file and database snapshots verified'

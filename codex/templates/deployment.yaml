@@ -30,6 +30,10 @@
 #   - Auto-updates are disabled de facto: upgrades go through chart
 #     version bumps, which change the sentinel filename and trigger a
 #     fresh download.
+
+{{- $codexDomainENV := split  ","  .Values.domain.terminal -}}
+{{- $codexDomain := index $codexDomainENV "_0" -}}
+
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -70,27 +74,41 @@ spec:
             - |
               set -e
               mkdir -p /opt/data/.local/bin /opt/data/.codex/skills /opt/data/.install-state
-              chown -R 1000:1000 /opt/data
-              chmod -R 0755 /opt/data
+              chown 1000:1000 /opt/data /opt/data/.local /opt/data/.local/bin /opt/data/.codex /opt/data/.codex/skills /opt/data/.install-state
+              mkdir -p /upgrade-backups
+              chown 1000:1000 /upgrade-backups
+              chmod 0700 /upgrade-backups
               echo "[init-chmod-data] /opt/data owned by 1000:1000"
           resources: {}
           volumeMounts:
+            - {name: upgrade-backups, mountPath: /upgrade-backups}
             - mountPath: /opt/data
               name: app-data-home
 
         # Flatten Olares skills from /skills-staging into Codex's
         # user skills dir (~/.codex/skills = /opt/data/.codex/skills).
+        - name: backup-workspace
+          image: beclab/harveyff-codex-base:0.5.10
+          securityContext: {runAsUser: 1000, runAsGroup: 1000, allowPrivilegeEscalation: false}
+          command: [python3, /upgrade/backup.py]
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: app-data-home, mountPath: /opt/data}
+            - {name: upgrade-backups, mountPath: /upgrade-backups}
+            - {name: upgrade-script, mountPath: /upgrade, readOnly: true}
         - name: init-skills
-          image: "beclab/harveyff-codex-base:0.5.9"
+          image: "beclab/harveyff-codex-base:0.5.10"
           imagePullPolicy: IfNotPresent
           securityContext:
-            runAsUser: 0
-            runAsGroup: 0
+            runAsUser: 1000
+            runAsGroup: 1000
           command:
             - sh
             - -c
             - |
-              set -u
+              set -eu
               if [ ! -d /skills-staging ]; then
                 echo "[init-skills] /skills-staging not in image; skipping"
                 exit 0
@@ -98,9 +116,9 @@ spec:
               mkdir -p /opt/data/.codex/skills
               for d in /skills-staging/*/; do
                 name="$(basename "$d")"
-                rm -rf "/opt/data/.codex/skills/$name"
-                cp -a "$d" "/opt/data/.codex/skills/$name"
-                chown -R 1000:1000 "/opt/data/.codex/skills/$name"
+                if [ ! -e "/opt/data/.codex/skills/$name" ]; then
+                  cp -r "$d" "/opt/data/.codex/skills/$name"
+                fi
               done
               echo "[init-skills] Olares skills installed under /opt/data/.codex/skills:"
               ls -1 /skills-staging
@@ -194,7 +212,7 @@ spec:
         # Require ~/.codex/packages/standalone so a leftover musl `codex`
         # binary is not treated as a complete install.
         - name: init-install-codex
-          image: "beclab/harveyff-codex-base:0.5.9"
+          image: "beclab/harveyff-codex-base:0.5.10"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsUser: 1000
@@ -235,7 +253,7 @@ spec:
               STANDALONE_CURRENT="$HOME/.codex/packages/standalone/current"
 
               if [ -x "$HOME/.local/bin/codex" ] && [ -e "$STANDALONE_CURRENT" ] && [ -f "$SENTINEL" ]; then
-                if "$HOME/.local/bin/codex" --version >/dev/null 2>&1; then
+                if [ "$("$HOME/.local/bin/codex" --version)" = "codex-cli ${CODEX_VERSION}" ]; then
                   echo "[init-install-codex] cached standalone package found (installed $(cat "$SENTINEL"), ${TARGET})"
                   "$HOME/.local/bin/codex" --version
                   exit 0
@@ -263,6 +281,7 @@ spec:
                 exit 1
               fi
 
+              test "$("$HOME/.local/bin/codex" --version)" = "codex-cli ${CODEX_VERSION}"
               date -u +%Y-%m-%dT%H:%M:%SZ > "$SENTINEL"
               echo "[init-install-codex] installed official standalone Codex ${CODEX_VERSION} for ${TARGET}"
               "$HOME/.local/bin/codex" --version
@@ -305,14 +324,14 @@ spec:
             - mountPath: /docker-cli
               name: docker-cli-bin
         {{- end }}
-
+      serviceAccountName: proxylistener
       containers:
         # Workspace container. kubectl exec from the beclab terminal
         # apiserver lands here as UID 1000. HOME/PATH are set on env so
         # login / non-login / interactive / non-interactive shells all
         # see the codex binary on PATH.
         - name: codex
-          image: "beclab/harveyff-codex-base:0.5.9"
+          image: "beclab/harveyff-codex-base:0.5.10"
           imagePullPolicy: IfNotPresent
           workingDir: /opt/data
           securityContext:
@@ -363,6 +382,11 @@ spec:
           command:
             - sleep
             - infinity
+          readinessProbe:
+            exec:
+              command: [sh, -ec, 'test "$(/opt/data/.local/bin/codex --version)" = "codex-cli {{ .Chart.AppVersion }}"']
+            periodSeconds: 20
+            timeoutSeconds: 10
           resources:
             limits:
               cpu: "4"
@@ -371,6 +395,7 @@ spec:
               cpu: 100m
               memory: 2Gi
           volumeMounts:
+            - {name: upgrade-backups, mountPath: /opt/backups, readOnly: true}
             - mountPath: /opt/data
               name: app-data-home
             {{- if eq (toString .Values.olaresEnv.ALLOW_HOME_DIR_ACCESS) "true" }}
@@ -403,7 +428,7 @@ spec:
           command:
             - dockerd
             - --host
-            - tcp://0.0.0.0:2375
+            - tcp://127.0.0.1:2375
             - --host
             - unix:///var/run/docker.sock
             - --mtu=1450
@@ -442,9 +467,51 @@ spec:
             - mountPath: /opt/data
               name: app-data-home
         {{- end }}
+        - name: port-watcher
+          image: beclab/proxy-listener:0.0.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORT_WATCHER_ADDR
+              value: "127.0.0.1:19790"
+            - name: PORT_WATCHER_DENYLIST
+              value: "19790,2375"
+            - name: PORT_WATCHER_DEBOUNCE
+              value: "1s"
+            - name: ENTRANCE_HOST
+              value: "{{ $codexDomain }}"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
 
       restartPolicy: Always
       volumes:
+        - name: upgrade-backups
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/upgrade-backups"
+            type: DirectoryOrCreate
+        - name: upgrade-script
+          configMap:
+            name: {{ .Release.Name }}-upgrade
         - name: app-data-home
           hostPath:
             path: "{{ .Values.userspace.appData }}/home"
@@ -469,3 +536,39 @@ spec:
             path: "{{ .Values.userspace.appData }}/docker"
             type: DirectoryOrCreate
         {{- end }}
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: proxylistener
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+rules:
+  - apiGroups:
+      - app.bytetrade.io
+    resources:
+      - applications
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+subjects:
+  - kind: ServiceAccount
+    name: proxylistener
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-{{ .Values.bfl.username }}
+  apiGroup: rbac.authorization.k8s.io

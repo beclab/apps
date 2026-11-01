@@ -1,0 +1,88 @@
+{{- $oe := .Values.olaresEnv | default dict -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localdeepresearch
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.localdeepresearch.replicaCount }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: localdeepresearch}
+  template:
+    metadata:
+      labels: {app: localdeepresearch}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: [sh, -ec]
+          args:
+            - |
+              for d in /data /data/logs /data/cache /data/cache/rag_indices /data/research_outputs /data/encrypted_databases /data/config /data/legacy-config; do
+                mkdir -p "$d"
+                chown 1000:1000 "$d"
+                chmod 700 "$d"
+              done
+          securityContext: {runAsUser: 0}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      containers:
+        - name: localdeepresearch
+          image: localdeepresearch/local-deep-research:1.10.7
+          # Bypass upstream's root chown/setpriv entrypoint; init prepares mounts.
+          command: [python, -c]
+          args:
+            - |
+              import wikipedia
+              wikipedia.set_user_agent("LocalDeepResearchOlares/1.10.7 (https://github.com/LearningCircuit/local-deep-research)")
+              from local_deep_research.web.app import main
+              main()
+          env:
+            - {name: LDR_WEB_HOST, value: "0.0.0.0"}
+            - {name: LDR_WEB_PORT, value: "5000"}
+            - {name: LDR_DATA_DIR, value: /data}
+            - {name: LDR_LLM_PROVIDER, value: openai_endpoint}
+            - name: LDR_LLM_MODEL
+              value: {{ index $oe "LDR_LLM_MODEL" | default "default-chat" | quote }}
+            - {name: LDR_SEARCH_TOOL, value: searxng}
+            - name: LDR_SEARCH_ENGINE_WEB_SEARXNG_DEFAULT_PARAMS_INSTANCE_URL
+              value: {{ index $oe "SEARXNG_URL" | quote }}
+            - name: LDR_LLM_OPENAI_ENDPOINT_URL
+              value: {{ index $oe "LDR_LLM_OPENAI_ENDPOINT_URL" | default (printf "https://router.%s/v1" .Values.user.zone) | quote }}
+            {{- with index $oe "LDR_LLM_OPENAI_ENDPOINT_API_KEY" }}
+            - name: LDR_LLM_OPENAI_ENDPOINT_API_KEY
+              valueFrom:
+                secretKeyRef: {name: localdeepresearch-model, key: api-key}
+            {{- end }}
+            - {name: MPLCONFIGDIR, value: /data/cache/matplotlib}
+            - {name: HF_HUB_CACHE, value: /data/cache/huggingface/hub}
+            - {name: HF_HUB_DISABLE_IMPLICIT_TOKEN, value: "1"}
+          ports: [{name: http, containerPort: 5000}]
+          startupProbe:
+            httpGet: {path: /api/v1/health, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /api/v1/health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /api/v1/health, port: http}
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests: {cpu: 200m, memory: 512Mi}
+            limits: {cpu: "2", memory: 4Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: data, mountPath: /app/.config/local_deep_research, subPath: legacy-config}
+      volumes:
+        - name: data
+          hostPath:
+            path: {{ .Values.userspace.appData | quote }}
+            type: DirectoryOrCreate

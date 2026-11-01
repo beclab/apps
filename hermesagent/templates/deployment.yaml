@@ -32,7 +32,7 @@
 # (NPM_CONFIG_PREFIX) so `npm install -g` and `npx` work and persist, and add
 # that prefix bin to PATH. Local `npm install` works from any writable cwd
 # (e.g. HOME=/opt/data). We do NOT mount over or re-open /opt/hermes.
-{{- $hermesImage := "beclab/harveyff-hermes-agent:v2026.8.31-uid1000" -}}
+{{- $hermesImage := "beclab/harveyff-hermes-agent:v0.22.2-uid1000" -}}
 {{- $oe := .Values.olaresEnv | default dict }}
 ---
 # Loopback dashboard (no Hermes auth gate) + nginx sidecar on :9119.
@@ -137,8 +137,26 @@ spec:
                   > /opt/data/.config/letsencrypt/cli.ini
                 echo "[init] seeded certbot cli.ini under /opt/data/.config/letsencrypt"
               fi
-              chown -R 1000:1000 /opt/data || true
-              chmod -R u+rwX,g+rwX /opt/data || true
+              # Prepare only directories created by this initContainer. Do not
+              # recursively widen permissions on user files or SSH private keys.
+              for d in /opt/data /opt/data/.olares-cli /opt/data/.olares-cli/data \
+                       /opt/data/npm-global /opt/data/npm-global/lib \
+                       /opt/data/npm-global/lib/node_modules /opt/data/npm-global/bin \
+                       /opt/data/.config /opt/data/.config/letsencrypt \
+                       /opt/data/letsencrypt /opt/data/letsencrypt/config \
+                       /opt/data/letsencrypt/work /opt/data/letsencrypt/logs; do
+                chown 1000:1000 "$d"
+                chmod u+rwX "$d"
+              done
+              if [ ! -L /opt/data/.ssh ]; then
+                mkdir -p /opt/data/.ssh
+                chown 1000:1000 /opt/data/.ssh
+                chmod 700 /opt/data/.ssh
+                if [ -f /opt/data/.ssh/id_ed25519 ] && [ ! -L /opt/data/.ssh/id_ed25519 ]; then
+                  chown 1000:1000 /opt/data/.ssh/id_ed25519
+                  chmod 600 /opt/data/.ssh/id_ed25519
+                fi
+              fi
               # Hook interactive shells into drop-to-hermes (kubectl exec is root).
               MARKER="# hermesagent: drop-to-hermes"
               for rc in /opt/data/.bashrc /opt/data/.profile; do
@@ -268,7 +286,8 @@ spec:
         - name: hermesagent
           image: "{{ $hermesImage }}"
           imagePullPolicy: IfNotPresent
-          # Image ENTRYPOINT should be /init + main-wrapper; only override CMD.
+          # Keep the image's entrypoint dispatcher, which starts s6 as PID 1;
+          # only override CMD.
           args:
             - gateway
             - run
@@ -388,8 +407,13 @@ spec:
             periodSeconds: 10
             failureThreshold: 60
           readinessProbe:
-            tcpSocket:
-              port: 19119
+            # The dashboard binds loopback. A kubelet TCP probe targets the Pod
+            # IP, which can fail even while the supervised dashboard is healthy.
+            exec:
+              command:
+                - /opt/hermes/.venv/bin/python3
+                - -c
+                - "import socket; socket.create_connection(('127.0.0.1', 19119), timeout=3).close()"
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 5

@@ -1,0 +1,74 @@
+﻿
+apiVersion: v1
+data:
+  nginx.conf: |
+      log_format wordpress '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent';
+      server {
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path /tmp/proxy;
+        fastcgi_temp_path /tmp/fastcgi;
+        uwsgi_temp_path /tmp/uwsgi;
+        scgi_temp_path /tmp/scgi;
+        listen 8080;
+        access_log /dev/stdout wordpress;
+        error_log /dev/stderr warn;
+
+        # Official OpenResty defaults to 1m; raise so media/plugin uploads are not 413.
+        client_max_body_size 500m;
+
+        # Compress negotiated HTML before it reaches the system HTML filter.
+        # Explicit identity / gzip;q=0 requests remain uncompressed.
+        gzip on;
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_min_length 1024;
+        gzip_comp_level 5;
+
+        proxy_connect_timeout                          30s;
+        proxy_send_timeout                             60s;
+        proxy_read_timeout                             300s;
+        
+        # Essential proxy headers - NO HTTPS indicators!
+        proxy_set_header      Host                      $host;
+        proxy_set_header      X-Real-IP                 $remote_addr;
+        proxy_set_header      X-Forwarded-For           $proxy_add_x_forwarded_for;
+        # DO NOT set X-Forwarded-Proto or X-Forwarded-Port
+        # WordPress will detect HTTPS and set secure cookies that browser rejects
+        proxy_set_header      X-Forwarded-Host          $http_host;
+        proxy_set_header      X-Forwarded-Server        $host;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header upgrade $http_upgrade;
+        proxy_set_header connection "upgrade";
+        
+          location / {
+              proxy_pass http://wordpressentrance:80;
+              
+              # Enable buffering for Lua header filter
+              proxy_buffering on;
+              proxy_buffer_size 4k;
+              proxy_buffers 8 4k;
+              
+              # Critical proxy headers - tell WordPress it's HTTPS
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-Host $host;
+              proxy_set_header X-Forwarded-Proto https;
+              proxy_set_header X-Forwarded-Ssl on;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              
+              # Rewrite Location headers - fix domain and scheme
+              proxy_redirect http://wordpressentrance/ https://$host/;
+              proxy_redirect https://wordpressentrance/ https://$host/;
+              proxy_redirect http:// https://;
+              
+              # No cookie manipulation - WordPress MU-plugin uses JavaScript to set cookies
+              # This bypasses Envoy's Set-Cookie header merging issue
+          }
+      }
+
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: {{ .Release.Namespace }}

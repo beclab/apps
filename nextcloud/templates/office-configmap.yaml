@@ -1,0 +1,121 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-office-runtime
+  namespace: {{ .Release.Namespace }}
+data:
+  start.sh: |
+    set -euo pipefail
+    umask 077
+    mkdir -p /var/lib/euro-office/documentserver/App_Data/cache/files
+    worker_ratio=$(jq -n --argjson cpus "$(getconf _NPROCESSORS_ONLN)" '2 / $cpus')
+    jq -n --argjson workers "$worker_ratio" 'env as $e | {
+      services: {CoAuthoring: {
+        server: {workerpercpu:$workers},
+        sql: {type:"postgres",dbHost:$e.DB_HOST,dbPort:($e.DB_PORT|tonumber),dbName:$e.DB_NAME,dbUser:$e.DB_USER,dbPass:$e.DB_PWD},
+        redis: {host:$e.REDIS_SERVER_HOST,port:($e.REDIS_SERVER_PORT|tonumber),options:{password:$e.REDIS_SERVER_PASS}},
+        token: {enable:{browser:true,request:{inbox:true,outbox:true}},inbox:{header:"AuthorizationJWT"},outbox:{header:"AuthorizationJWT"}},
+        secret: {browser:{string:$e.JWT_SECRET},session:{string:$e.JWT_SECRET},inbox:{string:$e.JWT_SECRET},outbox:{string:$e.JWT_SECRET}},
+        "request-filtering-agent": {allowPrivateIPAddress:true,allowMetaIPAddress:false}
+      }},
+      rabbitmq: {url:("amqp://"+($e.AMQP_USER|@uri)+":"+($e.AMQP_PWD|@uri)+"@"+$e.AMQP_HOST+":"+$e.AMQP_PORT+"/"+($e.AMQP_VHOST|@uri))},
+      storage: {fs:{secretString:$e.JWT_SECRET}},
+      persistentStorage: {fs:{secretString:$e.JWT_SECRET}},
+      FileConverter: {converter:{maxprocesscount:$workers}},
+      statsd: {useMetrics:false}
+    }' > /etc/euro-office/documentserver/local.json
+    sed -i "s@set \$secure_link_secret .*;@set \$secure_link_secret $JWT_SECRET;@" /etc/euro-office/documentserver/nginx/ds.conf
+    export PGHOST="$DB_HOST" PGPORT="$DB_PORT" PGUSER="$DB_USER" PGPASSWORD="$DB_PWD" PGDATABASE="$DB_NAME"
+    for attempt in $(seq 1 60); do
+      if pg_isready -q; then break; fi
+      if [ "$attempt" = 60 ]; then echo 'Office database unavailable' >&2; exit 1; fi
+      sleep 2
+    done
+    if [ "$(psql -tAc "SELECT to_regclass('public.task_result') IS NOT NULL")" != t ]; then
+      psql -v ON_ERROR_STOP=1 --single-transaction -f /var/www/euro-office/documentserver/server/schema/postgresql/createdb.sql
+    fi
+    exec supervisord -c /olares/supervisord.conf
+  supervisord.conf: |
+    [supervisord]
+    nodaemon=true
+    logfile=/dev/stdout
+    logfile_maxbytes=0
+    pidfile=/tmp/office-supervisor.pid
+    [program:docservice]
+    command=/var/www/euro-office/documentserver/server/DocService/docservice
+    directory=/var/www/euro-office/documentserver/server/DocService
+    environment=LD_LIBRARY_PATH="/var/www/euro-office/documentserver/server/FileConverter/bin:/var/www/euro-office/documentserver/server/FileConverter/lib"
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:converter]
+    command=/var/www/euro-office/documentserver/server/FileConverter/converter
+    directory=/var/www/euro-office/documentserver/server/FileConverter
+    environment=LD_LIBRARY_PATH="/var/www/euro-office/documentserver/server/FileConverter/bin:/var/www/euro-office/documentserver/server/FileConverter/lib"
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+    [program:nginx]
+    command=/usr/sbin/nginx -g "daemon off;"
+    autorestart=true
+    stdout_logfile=/dev/stdout
+    stdout_logfile_maxbytes=0
+    stderr_logfile=/dev/stderr
+    stderr_logfile_maxbytes=0
+  configure-nextcloud.sh: |
+    #!/bin/sh
+    set -eu
+    cd /var/www/html
+    log() { printf '[%s] [final-upgrade] %s\n' "$(date -u +%FT%TZ)" "$*"; }
+    log 'START Final database upgrade; remaining time unknown'
+    php occ upgrade --no-interaction
+    log 'DONE Final database upgrade'
+    # The official image does not process the legacy APPS_ENABLE variable.
+    # Keep Olares local mounts available after a major-version upgrade.
+    php occ app:enable files_external
+    ensure_local_mount() {
+      mount_name="$1"
+      mount_path="$2"
+      mounts=$(php occ files_external:list --output=json)
+      mount_exists=$(printf '%s' "$mounts" | php -r '
+        $mounts = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+        foreach ($mounts as $mount) {
+          // Match the physical local path to preserve user-selected names and access rules.
+          if (($mount["storage"] ?? "") === "\\OC\\Files\\Storage\\Local"
+              && rtrim($mount["configuration"]["datadir"] ?? "", "/") === rtrim($argv[2], "/")) {
+            echo "1"; exit(0);
+          }
+          if (trim($mount["mount_point"], "/") === $argv[1]) { echo "1"; exit(0); }
+        }
+        echo "0";
+      ' "$mount_name" "$mount_path")
+      if [ "$mount_exists" = 1 ]; then
+        return
+      fi
+      php occ files_external:create "$mount_name" local null::null -c "datadir=$mount_path"
+    }
+    if [ "${NEXTCLOUD_MOUNT_EXTERNAL_STORAGE:-false}" = true ]; then
+      ensure_local_mount "$NEXTCLOUD_MOUNT_EXTERNAL_STORAGE_NAME" "$NEXTCLOUD_MOUNT_EXTERNAL_STORAGE_PATH"
+    fi
+    if [ "${NEXTCLOUD_MOUNT_HOME_STORAGE:-false}" = true ]; then
+      ensure_local_mount "$NEXTCLOUD_MOUNT_HOME_STORAGE_NAME" "$NEXTCLOUD_MOUNT_HOME_STORAGE_PATH"
+    fi
+    configure_office() {
+      php occ app:enable eurooffice || return $?
+      php occ config:app:set eurooffice DocumentServerUrl --value="$OFFICE_PUBLIC_URL" || return $?
+      php occ config:app:set eurooffice DocumentServerInternalUrl --value="http://nextcloud-office:8080/" || return $?
+      php occ config:app:set eurooffice StorageUrl --value="http://nextcloud-svc/" || return $?
+      php occ config:app:set eurooffice jwt_secret --value="$JWT_SECRET" >/dev/null || return $?
+      php occ config:app:set eurooffice jwt_header --value="AuthorizationJWT" || return $?
+    }
+    log 'START Office connector configuration'
+    if configure_office; then
+      log 'DONE Office connector configuration'
+    else
+      log 'WARN Office configuration incomplete; Nextcloud file service will start. Retry connector configuration to restore Office editing'
+    fi
+    log 'DONE Upgrade hook; application web service startup follows'

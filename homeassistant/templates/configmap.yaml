@@ -24,6 +24,7 @@ data:
     import os
     from pathlib import Path
     import tempfile
+    import shutil
 
 
     HTTP_STORE = Path(
@@ -80,56 +81,105 @@ data:
                 os.unlink(temporary_name)
 
 
-    def main() -> None:
-        """Create fresh state or repair the 2026.8 unpromoted migration."""
-        if not HTTP_STORE.exists():
-            write_store(
-                {
-                    "version": 2,
-                    "minor_version": 2,
-                    "key": "http",
-                    "data": {
-                        "stable": desired_stable(),
-                        "pending": None,
-                        "yaml_migration_done": True,
-                    },
-                }
-            )
-            print("[http-bootstrap] initialized stable reverse-proxy configuration")
-            return
-
+    def load_store() -> dict:
+        """Read a supported store; never overwrite malformed input."""
         try:
             payload = json.loads(HTTP_STORE.read_text(encoding="utf-8"))
-            data = payload["data"]
-            stable = data["stable"]
-            pending = data.get("pending")
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+                raise TypeError("HTTP store and data must be objects")
+            if payload.get("key") != "http" or payload.get("version") not in (1, 2):
+                raise ValueError("unsupported HTTP store key or version")
+            stable = payload["data"].get("stable")
+            if stable is not None and not isinstance(stable, dict):
+                raise TypeError("stable HTTP configuration must be an object")
+            return payload
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise SystemExit(
                 f"[http-bootstrap] refusing to modify invalid HTTP store: {error}"
             ) from error
 
-        stable_has_proxy = bool(
-            stable.get("use_x_forwarded_for") and stable.get("trusted_proxies")
-        )
-        failed_yaml_trial = bool(
-            isinstance(pending, dict)
-            and pending.get("error") == "not_promoted"
-            and pending.get("use_x_forwarded_for")
-            and pending.get("trusted_proxies")
-        )
-        if stable_has_proxy or not failed_yaml_trial:
-            print("[http-bootstrap] existing HTTP configuration left unchanged")
+
+    def recover_stable(payload: dict) -> dict:
+        """Validate legacy settings, then restore the chart's HTTP transport."""
+        from homeassistant.components.http.config import HTTP_STORAGE_SCHEMA
+
+        data = payload["data"]
+        candidate = data.get("pending")
+        if not isinstance(candidate, dict) or candidate.get("error") not in (None, "not_promoted"):
+            candidate = data if payload["version"] == 1 else None
+        recovered = desired_stable()
+        if candidate is not None:
+            try:
+                settings = {key: value for key, value in candidate.items()
+                            if key not in ("created_at", "error", "error_message")}
+                recovered.update(HTTP_STORAGE_SCHEMA(settings))
+            except Exception as error:
+                print(f"[http-bootstrap] unusable recovery candidate: {error}")
+                recovered = desired_stable()
+        # nginx connects to HTTP on port 8123; preserve other validated settings.
+        recovered.update(server_port=8123, use_x_forwarded_for=True)
+        recovered["trusted_proxies"] = list(dict.fromkeys(
+            recovered.get("trusted_proxies", []) + TRUSTED_PROXIES
+        ))
+        for key in ("server_host", "ssl_certificate", "ssl_key", "ssl_peer_certificate"):
+            recovered.pop(key, None)
+        return recovered
+
+
+    def backup_store() -> None:
+        """Preserve the exact original bytes once before repairing stable."""
+        backup = HTTP_STORE.with_name("http.before-stable-repair")
+        if backup.exists():
+            return
+        with HTTP_STORE.open("rb") as source, backup.open("xb") as target:
+            os.chmod(backup, 0o600)
+            shutil.copyfileobj(source, target)
+            target.flush()
+            os.fsync(target.fileno())
+
+
+    def save_stable(payload: dict, stable: dict) -> None:
+        """Persist a successful stable configuration without a pending trial."""
+        stable = dict(stable, created_at=datetime.now(UTC).isoformat(),
+                      error=None, error_message=None)
+        payload.update(version=2, minor_version=2)
+        payload["data"] = {"stable": stable, "pending": None, "yaml_migration_done": True}
+        write_store(payload)
+
+
+    def promote_failed_trial(payload: dict) -> bool:
+        """Promote only the legacy failed reverse-proxy migration."""
+        data = payload["data"]
+        stable, pending = data["stable"], data.get("pending")
+        if stable.get("use_x_forwarded_for") and stable.get("trusted_proxies"):
+            return False
+        if not (isinstance(pending, dict) and pending.get("error") == "not_promoted"
+                and pending.get("use_x_forwarded_for") and pending.get("trusted_proxies")):
+            return False
+        repaired = dict(pending, created_at=datetime.now(UTC).isoformat(),
+                        error=None, error_message=None)
+        data.update(stable=repaired, pending=None, yaml_migration_done=True)
+        write_store(payload)
+        return True
+
+
+    def main() -> None:
+        """Initialize, recover missing stable, or retain existing settings."""
+        if not HTTP_STORE.exists():
+            save_stable({"key": "http"}, desired_stable())
+            print("[http-bootstrap] initialized stable reverse-proxy configuration")
             return
 
-        repaired = dict(pending)
-        repaired["created_at"] = datetime.now(UTC).isoformat()
-        repaired["error"] = None
-        repaired["error_message"] = None
-        data["stable"] = repaired
-        data["pending"] = None
-        data["yaml_migration_done"] = True
-        write_store(payload)
-        print("[http-bootstrap] promoted failed proxy migration to stable")
+        payload = load_store()
+        if payload["data"].get("stable") is None:
+            recovered = recover_stable(payload)
+            backup_store()
+            save_stable(payload, recovered)
+            print("[http-bootstrap] recovered missing stable HTTP configuration")
+        elif promote_failed_trial(payload):
+            print("[http-bootstrap] promoted failed proxy migration to stable")
+        else:
+            print("[http-bootstrap] existing HTTP configuration left unchanged")
 
 
     if __name__ == "__main__":

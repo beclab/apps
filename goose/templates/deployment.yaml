@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goose
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    io.kompose.service: goose
+spec:
+  replicas: {{ .Values.workloads.goose.replicaCount }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {io.kompose.service: goose}
+  template:
+    metadata:
+      labels: {io.kompose.service: goose, bytetrade.io/terminal: goose}
+    spec:
+      enableServiceLinks: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: [sh, -ec]
+          args:
+            - |
+              for d in /config /config/.config /config/.config/goose /config/.config/goose/custom_providers /config/.local /config/.local/share /config/workspace /cache; do
+                mkdir -p "$d" && chown 1000:1000 "$d"
+              done
+          securityContext: {runAsUser: 0}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: data, mountPath: /config}
+            - {name: cache, mountPath: /cache}
+      containers:
+        - name: goose
+          image: beclab/aaif-goose-goose:1.54.0@sha256:07543fb9182843429dd10d7bb6ff69e3e889a14e653e9bba4adc84081ed67884
+          command: [goose]
+          args: [serve, --platform, desktop, --enable-scheduler, --host, 0.0.0.0, --port, "3000"]
+          workingDir: /config/workspace
+          env:
+            - {name: HOME, value: /config}
+            - {name: XDG_CONFIG_HOME, value: /config/.config}
+            - {name: XDG_DATA_HOME, value: /config/.local/share}
+            - {name: XDG_CACHE_HOME, value: /cache}
+            - {name: GOOSE_DISABLE_KEYRING, value: "1"}
+            - name: TZ
+              value: {{ .Values.olaresEnv.TIMEZONE | quote }}
+            - name: GOOSE_SERVER__SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: goose-server, key: server-key}
+            {{- $oe := .Values.olaresEnv | default dict }}
+            - name: GOOSE_DISABLE_SESSION_NAMING
+              value: {{ index $oe "GOOSE_DISABLE_SESSION_NAMING" | default "true" | quote }}
+            {{- range $key := list "GOOSE_PROVIDER" "GOOSE_MODEL" "OPENAI_HOST" "OPENAI_BASE_PATH" }}
+            {{- with index $oe $key }}
+            - name: {{ $key }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $key := list "OPENAI_API_KEY" "ANTHROPIC_API_KEY" }}
+            {{- with index $oe $key }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef: {name: goose-server, key: {{ $key }}}
+            {{- end }}
+            {{- end }}
+          ports: [{name: http, containerPort: 3000}]
+          startupProbe:
+            httpGet: {path: /status, port: http}
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: {path: /status, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /status, port: http}
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: data, mountPath: /config}
+            - {name: cache, mountPath: /cache}
+            - name: router-provider
+              mountPath: /config/.config/goose/custom_providers/custom_olares_router.json
+              subPath: custom_olares_router.json
+              readOnly: true
+            {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+            - {name: home, mountPath: /config/Home}
+            {{- end }}
+            {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+            - {name: external, mountPath: /config/External}
+            {{- end }}
+      volumes:
+        - name: router-provider
+          configMap:
+            name: goose-router-provider
+        - name: data
+          hostPath: {path: {{ .Values.userspace.appData | quote }}, type: DirectoryOrCreate}
+        - name: cache
+          hostPath: {path: {{ .Values.userspace.appCache | quote }}, type: DirectoryOrCreate}
+        {{- if eq (toString (index $oe "ALLOW_HOME_DIR_ACCESS")) "true" }}
+        - name: home
+          hostPath: {path: {{ .Values.userspace.userData | quote }}, type: DirectoryOrCreate}
+        {{- end }}
+        {{- if eq (toString (index $oe "ALLOW_EXTERNAL_DIR_ACCESS")) "true" }}
+        - name: external
+          hostPath: {path: {{ .Values.sharedlib | quote }}, type: DirectoryOrCreate}
+        {{- end }}

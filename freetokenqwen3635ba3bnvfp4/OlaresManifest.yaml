@@ -1,0 +1,215 @@
+olaresManifest.version: '0.12.0'
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: freetokenqwen3635ba3bnvfp4
+  icon: https://app.cdn.olares.com/appstore/freetoken/icon.png
+  description: "FreeToken-powered Qwen3.6-35B-A3B for text, image understanding, and tool calling"
+  appid: freetokenqwen3635ba3bnvfp4
+  title: Qwen3.6-35B-A3B (FreeToken)
+  version: '1.0.4'
+  categories:
+  - AI
+  - models
+  tags:
+  - llm
+sharedEntrances:
+  - name: freetokenqwen3635ba3bnvfp4
+    host: sharedentrances-api
+    port: 0
+    title: Qwen3.6-35B-A3B
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/freetoken/icon.png
+entrances:
+  - name: freetokenclient
+    port: 8090
+    host: download-svc
+    title: Qwen3.6-35B-A3B
+    icon: https://app.cdn.olares.com/appstore/freetoken/icon.png
+    openMethod: window
+    authLevel: internal
+#   freetokenqwen3635ba3bnvfp4 — engine Deployment (== appid / Release.Name)
+#   llminit                    — llm-init / entrance Deployment
+workloadReplicas:
+  freetokenqwen3635ba3bnvfp4: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'nvidia/Qwen3.6-35B-A3B-NVFP4'
+  fullDescription: |
+    Qwen3.6-35B-A3B is a vision-language model from Alibaba's Qwen team for text generation, image understanding, thinking, and tool calling in compatible applications. It uses a Mixture-of-Experts architecture with 35 billion parameters in total and about 3 billion active per token. This app runs NVIDIA's 4-bit NVFP4 quantized edition locally.
+
+    FreeToken is FlashML's inference engine for running Mixture-of-Experts models on personal hardware. It keeps expert weights in system memory and caches a working set on the GPU, reducing the need to fit the whole model in GPU memory. Model Console connects the engine to Olares and lets you download the model, check its status, and adjust settings.
+
+    This edition accepts text and images, with a default context limit of 131,072 tokens and one running request at a time. Available context depends on memory and engine settings.
+
+    First startup downloads about 23.5 GB of model files and converts them to FreeToken's reusable weight format. Allow additional storage and preparation time for this conversion. The preset requires an NVIDIA GPU with 23 GiB of available GPU memory, system memory as listed in the resource requirements, and an NVIDIA R580 or newer driver.
+
+    [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) · [NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) · [FreeToken](https://github.com/FlashML-org/FreeToken)
+
+  developer: Alibaba
+  website: https://qwen.ai/home
+  sourceCode: https://github.com/FlashML-org/FreeToken
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - de-DE
+    - es-ES
+    - it-IT
+    - fr-FR
+    - ja-JP
+  license:
+    - text: Apache-2.0
+      url: https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4
+
+  accelerator:
+    # nvidia — discrete GPU; FREETOKEN_REQUIRED_GPU_MEMORY -> nvidia.com/gpumem.
+    # No nvidia-gb10 entry: the FreeToken image is amd64-only (CUDA 13
+    # devel base -- tag 0.1.3-cu132; the kernels are compiled on first use).
+    - mode: nvidia
+      limitedCpu: "15360m"
+      requiredCpu: "1100m"
+      requiredDisk: 50Mi
+      limitedDisk: 500Gi
+      # Engine MEMORY_REQUEST 24Gi + llm-init 256Mi <= requiredMemory 25Gi;
+      # MEMORY_LIMIT 32Gi + llm-init 2Gi <= limitedMemory 34Gi.
+      #
+      # The request has to cover the model itself: under MoE offload the NVFP4
+      # expert banks (21.8Gi, measured) sit in host RAM for the life of the
+      # process -- they are the model, not a transient. Steady state is ~25Gi
+      # with the ~3Gi python/torch/CUDA context on top, and --expert-load
+      # serial keeps the startup read bounded, so there is no load-time spike
+      # to leave room for: the 32Gi cap is ~7Gi of headroom over steady state,
+      # and an OOMKill under it would mean something is actually growing.
+      limitedMemory: "34Gi"
+      requiredMemory: "25Gi"
+      requiredGPUMemory: "23Gi"
+      limitedGPUMemory: "24Gi"
+
+  supportArch:
+    - amd64
+permission:
+  appCache: true
+  appData: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  # Model is preset for this app; these values are fixed and not user-editable.
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://nvidia/Qwen3.6-35B-A3B-NVFP4"
+    description:  "Example: hf://nvidia/Qwen3.6-35B-A3B-NVFP4. The source to download your model. FreeToken loads a Hugging Face checkpoint directory, so the whole repo is fetched — no `--include` filter."
+    regex: "^hf://"
+  - envName: MODEL_NAME          # served model id, also the name Router shows
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "nvidia/Qwen3.6-35B-A3B-NVFP4"
+    description:  "Example: nvidia/Qwen3.6-35B-A3B-NVFP4. The model id this app serves, passed to FreeToken as --served-model-name."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "chat"
+    options:
+    - title: Chat
+      value: chat
+    - title: Embedding
+      value: embedding
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "thinking,tools,vision"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Vision
+      value: vision
+    - title: Tools
+      value: tools
+    - title: Thinking
+      value: thinking
+    - title: None
+      value: none
+    description:  "The model capabilities. Pick what your model supports, if no extra capabilities, pick None."
+  - envName: ENGINE_ARGS
+    required: true
+    default: "--moe-strategy auto --expert-load serial --max-seq-len-override 131072 --kv-reserve-tokens 131072 --max-prefill-length 8192 --max-running-requests 1"
+    type: string
+    editable: true
+    applyOnChange: true
+    description:  "Raw `ft serve` flags. `--moe-strategy auto` picks the MoE placement (offload on this checkpoint), `--max-seq-len-override` sets the context window, `--kv-reserve-tokens` floors the KV pool before the expert cache takes the rest of the VRAM, `--max-running-requests` is the concurrency, `--expert-load serial` bounds how much host RAM the expert-bank read needs (see below). The wrapper also accepts SGLang's `--context-length N` as an alias for `--max-seq-len-override N`, which is the only spelling the model card can read the window from; a native `--max-seq-len-override` always wins over it."
+  - envName: LOG_LEVEL           # single-select: debug | info | warn | error
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN
+  - envName: FREETOKEN_CPU_REQUEST    # default: 500m
+    required: true
+    default: "500m"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: FREETOKEN_MEMORY_REQUEST # sum with llm-init <= requiredMemory 25Gi
+    required: true
+    default: "24Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: FREETOKEN_CPU_LIMIT      # default: 8
+    required: true
+    default: "8"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: FREETOKEN_MEMORY_LIMIT # 32Gi + llm-init 2Gi <= limitedMemory 34Gi
+    required: true
+    default: "32Gi"
+    type: string
+    editable: false
+    applyOnChange: false
+  - envName: FREETOKEN_REQUIRED_GPU_MEMORY  # 23Gi/23552/23552Mi -> bare-MiB gpumem
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "23Gi"
+    description:  "Example: `23Gi`, `23552`, or `23552Mi`. GPU memory required for the model. On NVIDIA this sets `nvidia.com/gpumem` in MiB."
+    regex: "^[0-9]+(Gi|Mi)?$"

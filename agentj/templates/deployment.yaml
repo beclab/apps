@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentj
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    io.kompose.service: agentj
+spec:
+  replicas: {{ .Values.workloads.agentj.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: agentj
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: agentj
+        bytetrade.io/terminal: agentj
+      annotations:
+        # A new chart with changed scripts must restart the pod (a ConfigMap change alone does not).
+        checksum/scripts: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      # A user-namespaced pod: root inside maps to an unprivileged host uid, and the container may mount a fresh /proc
+      # inside its own namespaces (procMount: Unmasked below). That is exactly what Agent J's fence (bubblewrap) needs
+      # to isolate the Agent from Agent J's keys — without privileged mode or any added capability.
+      # JuiceFS-backed Olares (fs_type jfs, a FUSE file system) is not known to support idmapped mounts (untested), so
+      # there the pod stays in the host user namespace: the fence cannot start and Agent J refuses to launch the Agent
+      # unfenced unless the owner approves that one launch with a passkey on the phone (never silently).
+      {{- if ne (.Values.fs_type | default "fs") "jfs" }}
+      hostUsers: false
+      {{- end }}
+      securityContext:
+        fsGroup: 1000
+      initContainers:
+      # Olares only lets beclab images run as root (chart lint), so this one step keeps the platform's own Ubuntu image.
+      - name: init-perms
+        image: beclab/ubuntu:24.04@sha256:9f80b61ccafb5e7d49cf66c9c145c34e6f1a8e04347f58813650367944372daf
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+          readOnlyRootFilesystem: true
+        # Non-recursive: only the two mount points the platform just created as root.
+        command: ["sh", "-c", "chown 1000:1000 /opt/data /opt/data/coding && chmod 0750 /opt/data"]
+        volumeMounts:
+        - { name: app-data, mountPath: /opt/data }
+        - { name: workspace, mountPath: /opt/data/coding }
+      containers:
+      - name: agentj
+        image: {{ include "agentj.image" . }}
+        imagePullPolicy: IfNotPresent
+        workingDir: /opt/data
+        command: ["bash", "/opt/agentj-olares/entry.sh"]
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          # Agent J, OpenCode, uv and bubblewrap live in the image; nothing in it is writable at run time.
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+          {{- if ne (.Values.fs_type | default "fs") "jfs" }}
+          procMount: Unmasked
+          {{- end }}
+        env:
+        - { name: HOME, value: /opt/data }
+        - { name: TZ, value: Etc/UTC }
+        - { name: TERM, value: xterm-256color }
+        - { name: PATH, value: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/data/.local/bin:/opt/data/.opencode/bin" }
+        - { name: AGENTJ_ACCOUNT_URL, value: {{ .Values.agentj.accountUrl | quote }} }
+        # The owner's Router, reached through this app's mesh identity (no key). OLARES_API_KEY is a fixed placeholder
+        # that OpenCode's OpenAI-compatible client insists on; it is not a credential.
+        {{- if .Values.user }}
+        - { name: OLARES_ROUTER_URL, value: {{ printf "https://router.%s/v1" .Values.user.zone | quote }} }
+        {{- end }}
+        - { name: OLARES_API_KEY, value: "olares-in-cluster" }
+        ports:
+        - { name: setup, containerPort: 8080 }
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          periodSeconds: 10
+        resources:
+          requests: { cpu: 200m, memory: 512Mi }
+          limits: { cpu: "4", memory: 8Gi }
+        volumeMounts:
+        - { name: app-data, mountPath: /opt/data }
+        - { name: workspace, mountPath: /opt/data/coding }
+        - { name: scripts, mountPath: /opt/agentj-olares, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+      volumes:
+      - name: app-data
+        hostPath:
+          path: "{{ .Values.userspace.appData }}/home"
+          type: DirectoryOrCreate
+      - name: workspace
+        hostPath:
+          path: "{{ .Values.userspace.userData }}/AgentJ"
+          type: DirectoryOrCreate
+      - name: scripts
+        configMap:
+          name: agentj-scripts
+          defaultMode: 0555
+      - name: tmp
+        emptyDir: {}

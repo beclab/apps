@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rustdesk
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.rustdesk.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rustdesk
+      component: id
+  template:
+    metadata:
+      annotations:
+        checksum/dashboard: {{ include (print $.Template.BasePath "/dashboard.yaml") . | sha256sum }}
+      labels:
+        applications.app.bytetrade.io/macvlan-init: "true"
+        app: rustdesk
+        component: id
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command: [sh, -ec, 'chown 1000:1000 /data; chmod 700 /data; cp /bin/busybox /tools/busybox; chmod 755 /tools/busybox; mkdir -p /tools/lib /tools/lib64; if [ -d /lib ]; then cp -a /lib/. /tools/lib/; fi; if [ -d /lib64 ]; then cp -a /lib64/. /tools/lib64/; fi']
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tools
+          mountPath: /tools
+      containers:
+      - name: hbbs
+        image: docker.io/rustdesk/rustdesk-server:1.1.16
+        command: [/usr/bin/hbbs]
+        args: ['-r', '$(SERVER_HOST):31117', '-k', '_']
+        workingDir: /data
+        env:
+        - name: SERVER_HOST
+          value: '{{ .Values.olaresEnv.SERVER_HOST | default .Values.user.zone }}'
+        - name: HOME
+          value: /data
+        ports:
+        - {name: nat, containerPort: 21115}
+        - {name: id-tcp, containerPort: 21116}
+        - {name: id-udp, containerPort: 21116, protocol: UDP}
+        readinessProbe:
+          tcpSocket: {port: 21116}
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 30m, memory: 32Mi}
+          limits: {cpu: '1', memory: 768Mi}
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      - name: hbbr
+        image: docker.io/rustdesk/rustdesk-server:1.1.16
+        command: [/tools/busybox, sh, -ec]
+        args:
+        - 'until [ -s /data/id_ed25519.pub ]; do /tools/busybox sleep 1; done; exec /usr/bin/hbbr -k _'
+        workingDir: /data
+        env:
+        - name: HOME
+          value: /data
+        ports:
+        - {name: relay, containerPort: 21117}
+        readinessProbe:
+          tcpSocket: {port: 21117}
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 800m, memory: 1216Mi}
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: tools
+          mountPath: /tools
+          readOnly: true
+        - name: tools
+          mountPath: /lib
+          subPath: lib
+          readOnly: true
+        - name: tools
+          mountPath: /lib64
+          subPath: lib64
+          readOnly: true
+      - name: dashboard
+        image: docker.io/library/nginx:1.30.6-alpine
+        command: [sh, -ec]
+        args:
+        - >-
+          envsubst '$SERVER_HOST' < /etc/rustdesk/nginx.conf > /tmp/nginx.conf;
+          exec nginx -c /tmp/nginx.conf -g 'daemon off;'
+        env:
+        - name: SERVER_HOST
+          value: '{{ .Values.olaresEnv.SERVER_HOST | default .Values.user.zone }}'
+        ports:
+        - {name: web, containerPort: 8080}
+        readinessProbe:
+          httpGet: {path: /healthz, port: 8080}
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 200m, memory: 64Mi}
+        volumeMounts:
+        - name: config
+          mountPath: /etc/rustdesk
+          readOnly: true
+        - name: data
+          mountPath: /data
+          readOnly: true
+      volumes:
+      - name: tools
+        emptyDir: {}
+      - name: data
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/data'
+          type: DirectoryOrCreate
+      - name: config
+        configMap:
+          name: rustdesk-dashboard

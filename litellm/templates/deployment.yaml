@@ -27,7 +27,10 @@ spec:
           args:
             - |
               set -e
-              DEST=/backup/backups/chart-1.0.22
+              umask 077
+              mkdir -p /backup/litellm
+              chown 1000:1000 /backup/litellm
+              DEST=/backup/backups/chart-1.0.24
               MARKER="${DEST}/.backup_complete"
               mkdir -p "$DEST"
               if [ -f "$MARKER" ]; then
@@ -63,17 +66,36 @@ spec:
           - --config
           - /app/proxy_config.yaml
         name: litellm
-        image: "docker.io/beclab/berriai-litellm:v1.103.0"
+        image: "docker.io/beclab/berriai-litellm:v1.106.2"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
         ports:
           - containerPort: 4000
             protocol: TCP
         env:
           {{- if and .Values.olaresEnv.LITELLM_MASTER_KEY (ne .Values.olaresEnv.LITELLM_MASTER_KEY "") }}
           - name: LITELLM_MASTER_KEY
-            value: {{ .Values.olaresEnv.LITELLM_MASTER_KEY | quote }}
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Release.Name }}-secrets
+                key: LITELLM_MASTER_KEY
           {{- end }}
+          {{- if .Values.olaresEnv.LITELLM_MIGRATE_FROM_MASTER_KEY }}
+          - name: LITELLM_MIGRATE_FROM_MASTER_KEY
+            valueFrom:
+              secretKeyRef:
+                name: {{ .Release.Name }}-secrets
+                key: LITELLM_MIGRATE_FROM_MASTER_KEY
+          {{- end }}
+          # Only a Helm upgrade retaining the historical public default is eligible.
+          # Empty keys and fresh installations never bypass the upstream check.
+          - name: LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY
+            value: {{ and .Release.IsUpgrade (eq (sha256sum (.Values.olaresEnv.LITELLM_MASTER_KEY | default "" | trim)) "88dc28d0f030c55ed4ab77ed8faf098196cb1c05df778539800c9f1243fe6b4b") | quote }}
           - name: UI_USERNAME
             value: {{ .Values.olaresEnv.UI_USERNAME | quote }}
+          - name: DISABLE_ENV_CREDENTIAL_LOGIN
+            value: {{ eq (lower (toString (.Values.olaresEnv.DISABLE_ENV_CREDENTIAL_LOGIN | default "false"))) "true" | quote }}
           - name: UI_PASSWORD
             valueFrom:
               secretKeyRef:

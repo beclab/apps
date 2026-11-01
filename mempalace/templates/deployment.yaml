@@ -1,0 +1,119 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "{{ .Release.Name }}"
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: mempalace
+spec:
+  replicas: {{ .Values.workloads.mempalace.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: mempalace
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        checksum/runtime: {{ include (print $.Template.BasePath "/runtime.yaml") . | sha256sum }}
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: mempalace
+        bytetrade.io/terminal: mempalace
+    spec:
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-chmod
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /home/app/.mempalace /home/app/.cache
+              chown 1000:1000 /home/app/.mempalace /home/app/.cache
+              chmod u+rwX,g+rwX /home/app/.mempalace /home/app/.cache
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: palace-data
+              mountPath: /home/app/.mempalace
+            - name: model-cache
+              mountPath: /home/app/.cache
+      containers:
+        - name: mempalace
+          image: docker.io/beclab/mempalace-mempalace:3.11.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/opt/olares/runtime.py"]
+          env:
+            - name: HOME
+              value: /home/app
+            - name: MEMPALACE_CONFIG_DIR
+              value: /home/app/.mempalace
+            - name: MEMPALACE_MCP_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mempalace-mcp-auth
+                  key: token
+          securityContext:
+            allowPrivilegeEscalation: false
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8082
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: runtime
+              mountPath: /opt/olares/runtime.py
+              subPath: runtime.py
+              readOnly: true
+            - name: runtime
+              mountPath: /usr/local/bin/mempalace-maintenance
+              subPath: maintenance
+              readOnly: true
+            - name: palace-data
+              mountPath: /home/app/.mempalace
+            - name: model-cache
+              mountPath: /home/app/.cache
+            - name: olares-home-dir
+              mountPath: /home/app/userdata/Home
+              readOnly: true
+      volumes:
+        - name: runtime
+          configMap:
+            name: mempalace-runtime
+            defaultMode: 365
+        - name: palace-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/mempalace'
+            type: DirectoryOrCreate
+        - name: model-cache
+          hostPath:
+            path: '{{ .Values.userspace.appCache }}/mempalace'
+            type: DirectoryOrCreate
+        - name: olares-home-dir
+          hostPath:
+            path: '{{ .Values.userspace.userData }}'
+            type: DirectoryOrCreate
+      restartPolicy: Always

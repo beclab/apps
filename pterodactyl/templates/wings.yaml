@@ -1,0 +1,105 @@
+{{- if eq (toString .Values.olaresEnv.ENABLE_WINGS) "true" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wings
+spec:
+  replicas: {{ .Values.workloads.wings.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: wings
+  template:
+    metadata:
+      labels:
+        app: wings
+      annotations:
+        config.linkerd.io/skip-subnets: '172.30.0.0/16'
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext: {runAsUser: 0}
+          command: [sh, -c, 'mkdir -p /wings/volumes /wings/logs /wings/archives /wings/backups /wings/tmp; chown 1000:1000 /wings /wings/volumes /wings/logs /wings/archives /wings/backups /wings/tmp']
+          volumeMounts:
+            - {name: wings-data, mountPath: /wings}
+        - name: wait-config
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext: {runAsUser: 1000}
+          command: [sh, -c, 'until test -s /wings/config.yml; do sleep 2; done']
+          volumeMounts:
+            - {name: wings-data, mountPath: /wings}
+      containers:
+        - name: wings
+          image: docker.io/beclab/pterodactyl-wings:v1.13.3
+          args: [--config, /wings/config.yml]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: DOCKER_HOST, value: 'tcp://127.0.0.1:2375'}
+            - {name: WINGS_UID, value: '1000'}
+            - {name: WINGS_GID, value: '1000'}
+          ports:
+            - {containerPort: 8080}
+            - {containerPort: 2022}
+          startupProbe:
+            tcpSocket: {port: 8080}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket: {port: 8080}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          volumeMounts:
+            - {name: wings-data, mountPath: /wings}
+        - name: dind
+          image: {{ .Values.dindImage }}
+          securityContext: {privileged: true}
+          env:
+            - {name: DOCKER_TLS_CERTDIR, value: ''}
+          command:
+            - sh
+            - -c
+            - |
+              if iptables -t nat -S PROXY_INIT_OUTPUT >/dev/null 2>&1; then
+                iptables -t nat -C PROXY_INIT_OUTPUT -d 172.30.0.0/16 -j RETURN 2>/dev/null ||
+                  iptables -t nat -I PROXY_INIT_OUTPUT 1 -d 172.30.0.0/16 -j RETURN
+              fi
+              exec dockerd --host=tcp://127.0.0.1:2375 --host=unix:///var/run/docker.sock --mtu=1450
+          startupProbe:
+            exec: {command: [docker, info]}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 200m, memory: 256Mi}
+            limits: {cpu: '3', memory: 5Gi}
+          volumeMounts:
+            - {name: docker-data, mountPath: /var/lib/docker}
+            - {name: wings-data, mountPath: /wings}
+      volumes:
+        - name: wings-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/wings'
+            type: DirectoryOrCreate
+        - name: docker-data
+          hostPath:
+            path: '{{ .Values.userspace.appCache }}/docker'
+            type: DirectoryOrCreate
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wings
+spec:
+  selector: {app: wings}
+  ports:
+    - {name: api, port: 8080, targetPort: 8080}
+    - {name: sftp, port: 2022, targetPort: 2022}
+    - {name: game, port: 30000, targetPort: 30000}

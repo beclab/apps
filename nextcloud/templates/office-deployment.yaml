@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloudoffice
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.nextcloudoffice.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nextcloudoffice
+  template:
+    metadata:
+      labels:
+        app: nextcloudoffice
+      annotations:
+        checksum/runtime: {{ include (print $.Template.BasePath "/office-configmap.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command: [sh, -c, 'mkdir -p /office/documentserver/App_Data/cache/files; chown 1000:1000 /office /office/documentserver /office/documentserver/App_Data /office/documentserver/App_Data/cache /office/documentserver/App_Data/cache/files']
+          volumeMounts:
+            - name: office-data
+              mountPath: /office
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+      containers:
+        - name: office
+          image: docker.io/beclab/harveyff-euro-office:9.3.4-hotfix.1-olares.6
+          envFrom:
+            - secretRef:
+                name: nextcloud-office
+          env:
+            - name: DB_HOST
+              value: {{ .Values.postgres.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: DB_USER
+              value: {{ .Values.postgres.username | quote }}
+            - name: DB_NAME
+              value: {{ .Values.postgres.databases.eurooffice | quote }}
+            - name: REDIS_SERVER_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_SERVER_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: AMQP_HOST
+              value: {{ .Values.rabbitmq.host | quote }}
+            - name: AMQP_PORT
+              value: {{ .Values.rabbitmq.port | quote }}
+            - name: AMQP_USER
+              value: {{ .Values.rabbitmq.username | quote }}
+            - name: AMQP_VHOST
+              value: {{ .Values.rabbitmq.vhosts.eurooffice | quote }}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: {path: /healthcheck, port: 8080}
+            periodSeconds: 10
+          startupProbe:
+            httpGet: {path: /healthcheck, port: 8080}
+            periodSeconds: 10
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 500m, memory: 2Gi}
+            limits: {cpu: '2', memory: 4Gi}
+          volumeMounts:
+            - name: runtime
+              mountPath: /olares
+            - name: office-data
+              mountPath: /var/lib/euro-office
+      volumes:
+        - name: runtime
+          configMap:
+            name: nextcloud-office-runtime
+        - name: office-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/nextcloud/office'
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud-office
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: nextcloudoffice
+  ports:
+    - port: 8080
+      targetPort: 8080
