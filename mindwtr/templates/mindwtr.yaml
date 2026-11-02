@@ -7,7 +7,22 @@ Olares 会把 options.envs 里声明的变量注入 .Values.olaresEnv，
 {{- $cloudTokens := get $olaresEnv "MINDWTR_CLOUD_AUTH_TOKENS" | default (get $env "cloudAuthTokens") | default "mindwtr-default-cloud-sync-token-2026" -}}
 {{- $mcpHttpToken := get $olaresEnv "MINDWTR_MCP_HTTP_TOKEN" | default (get $env "mcpHttpToken") | default "mindwtr-default-mcp-access-token-2026" -}}
 {{- $mcpCloudToken := get $olaresEnv "MINDWTR_MCP_CLOUD_TOKEN" | default (get $env "mcpCloudToken") | default "" -}}
+{{- /*
+镜像里写死了 NODE_ENV=production，此时 Cloud 的 server-config.ts 会强制要求显式 origin，
+为空就 throw 导致进程起不来。所以这里必须保证非空：优先用户填的值，其次用 Olares 注入的
+应用域名（.Values.domain.<appid>，可能是逗号分隔的多个，取第一个），最后兜底 localhost。
+PWA 与 /v1 同源，这个值只影响跨域场景，同源请求不受影响。
+*/ -}}
 {{- $corsOrigin := get $olaresEnv "MINDWTR_CLOUD_CORS_ORIGIN" | default (get $env "cloudCorsOrigin") | default "" -}}
+{{- if not $corsOrigin -}}
+{{-   $domainRaw := default "" (index (default dict .Values.domain) "mindwtr") -}}
+{{-   $appDomain := index (split "," $domainRaw) "_0" -}}
+{{-   if $appDomain -}}
+{{-     $corsOrigin = printf "https://%s" $appDomain -}}
+{{-   else -}}
+{{-     $corsOrigin = "http://localhost:5173" -}}
+{{-   end -}}
+{{- end -}}
 {{- $defaultCloudUrl := get $olaresEnv "MINDWTR_DEFAULT_CLOUD_URL" | default (get $env "defaultCloudUrl") | default "" -}}
 {{- $mcpWrite := get $olaresEnv "MINDWTR_MCP_WRITE" | default (get $env "mcpWrite") | default "true" -}}
 apiVersion: apps/v1
@@ -33,6 +48,10 @@ spec:
         - name: mindwtr
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # 关键：merged 镜像的最终阶段基于 nginx 基底，没有 WORKDIR，默认 cwd 是 /。
+          # 而 start.sh 里是 `bun run --filter mindwtr-cloud start`，必须在带 workspaces
+          # 的根 package.json 所在目录执行，否则 bun 直接抛 `error: ENOENT` 退出。
+          workingDir: /app
           ports:
             - name: http
               containerPort: {{ .Values.containerPort }}
@@ -53,8 +72,17 @@ spec:
             # --- MCP helper ---
             - name: MINDWTR_MCP_HTTP_TOKEN
               value: {{ $mcpHttpToken | quote }}
+            # Olares 是在 helm 渲染之后才把清单里声明过的 env 补进 Deployment 的，
+            # 渲染期 $cloudTokens 恒为空，所以不能在这里直接写它的值——那样会渲染成空串，
+            # helper 的启动脚本 `: "${MINDWTR_MCP_CLOUD_TOKEN:?...}"` 会直接 exit。
+            # 用 kubelet 的 $(VAR) 展开：容器启动时取上面 MINDWTR_CLOUD_AUTH_TOKENS 的真实值
+            # （即 Olares 最终注入的那个），不依赖渲染期。多 token（逗号分隔）请显式填 mcpCloudToken。
             - name: MINDWTR_MCP_CLOUD_TOKEN
-              value: {{ if $mcpCloudToken }}{{ $mcpCloudToken | quote }}{{ else }}{{ $cloudTokens | quote }}{{ end }}
+              {{- if $mcpCloudToken }}
+              value: {{ $mcpCloudToken | quote }}
+              {{- else }}
+              value: "$(MINDWTR_CLOUD_AUTH_TOKENS)"
+              {{- end }}
             - name: MINDWTR_MCP_WRITE
               value: {{ $mcpWrite | quote }}
             # helper 在容器内访问 Cloud，走回环 HTTP，因此要允许 insecure
