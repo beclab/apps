@@ -57,24 +57,7 @@ print(ms[0]["id"], int(ms[0].get("context_size") or 0)) if ms else print("", 0)'
 route_router
 phase "ready"
 
-# serve supervisor. serve runs only while a seat is bound (the setup page keeps `bound` in step with the account), so no
-# Agent is running while the setup page would accept a new seat code. It is restarted when it exits, when the service
-# environment file changes (a key saved from the phone's secret card) or when the setup page asks.
-ENVF="$HOME/.config/systemd/user/agentj.env"
-stamp() { stat -c %Y "$ENVF" 2>/dev/null; }
-while true; do
-  if [ ! -f "$OLA/bound" ]; then sleep 3; continue; fi
-  phase "serving"
-  rm -f "$OLA/restart"
-  python3 -I /opt/agentj-olares/serve_env.py "$ENVF" agentj serve --events quiet --no-stdin &
-  pid=$! seen=$(stamp)
-  while kill -0 "$pid" 2>/dev/null; do
-    sleep 3
-    if [ "$(stamp)" != "$seen" ] || [ -f "$OLA/restart" ] || [ ! -f "$OLA/bound" ]; then
-      kill "$pid" 2>/dev/null; wait "$pid"; break
-    fi
-  done
-  wait "$pid" 2>/dev/null
-  [ -f "$OLA/bound" ] || phase "ready"
-  sleep 3
-done
+# The root-owned wheel is the manager. Its private /tmp socket is hidden by the
+# Agent fence. It owns serve and serial switch workers independently, including
+# restart acknowledgement, rollback survival, unbinding and Pod interruption.
+exec /opt/agentj/bin/python -I -m agentj.olares_supervisor
