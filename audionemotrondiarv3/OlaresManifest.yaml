@@ -1,0 +1,257 @@
+olaresManifest.version: "0.12.0"
+olaresManifest.type: app
+apiVersion: 'v3'
+metadata:
+  name: audionemotrondiarv3
+  icon: https://app.cdn.olares.com/appstore/audioengines/nemo/icon.png
+  description: A local service that labels speakers and marks when they speak, in recordings or live audio
+  appid: audionemotrondiarv3
+  title: Nemotron 3 Diarization
+  version: '1.0.1'
+  categories:
+    - AI
+    - models
+  tags:
+  - speaker-diarization
+  - audio
+
+# Internal shared API stub: in-cluster callers use http://sharedentrances-api.<ns>:80 + /v1.
+sharedEntrances:
+  - name: audionemotrondiarv3api
+    host: sharedentrances-api
+    port: 0
+    title: Nemotron 3 Diarization API
+    invisible: true
+    authLevel: internal
+    icon: https://app.cdn.olares.com/appstore/audioengines/nemo/icon.png
+# Entrance -> llm-init (download-svc:8090): dashboard on "/", engine /v1/* reverse-proxied; authLevel internal.
+entrances:
+  - name: audionemotrondiarv3
+    port: 8090
+    host: download-svc
+    title: Nemotron 3 Diarization
+    icon: https://app.cdn.olares.com/appstore/audioengines/nemo/icon.png
+    openMethod: window
+    authLevel: internal
+workloadReplicas:
+  audionemotrondiarv3: 1
+  llminit: 1
+spec:
+  onlyAdmin: true
+  versionName: 'nvidia/Nemotron-3-Diarization'
+  fullDescription: |
+    Nemotron 3 Diarization processes audio locally to mark when each speaker talks. It groups speech under anonymous speaker labels in order of first appearance, without identifying people by name, and keeps overlapping speech. It works on complete recordings and on live audio streams. Compatible Olares applications can use these results to distinguish speakers.
+
+    **Key features**
+    - Detect speech and changes between speakers, including overlapping speech.
+    - Label up to 8 speakers per recording.
+    - Diarize complete recordings, or live audio over a streaming connection.
+    - Make diarization available to compatible Olares applications.
+
+    A compatible NVIDIA GPU is required. Intel iGPU and Arc use the OpenVINO image, which is amd64 only.
+
+  developer: NVIDIA
+  website: https://www.nvidia.com/
+  sourceCode: https://huggingface.co/nvidia/Nemotron-3-Diarization
+  submitter: Olares
+  locale:
+    - en-US
+    - zh-CN
+    - fr-FR
+    - de-DE
+    - ja-JP
+    - it-IT
+    - es-ES
+  doc: https://huggingface.co/nvidia/Nemotron-3-Diarization
+  license:
+    - text: OpenMDW-1.1
+      url: https://huggingface.co/nvidia/Nemotron-3-Diarization
+
+  accelerator:
+    # Sum rule: accelerator >= engine + llm-init (200m/256Mi req, 1/4Gi lim).
+    # Measured on dev4/slim3: peak RSS 2.43 GB (nvidia) / 2.65 GB (gb10), ~0.4 GB GPU, flat at any length;
+    # CPU 1.0-1.3 cores while diarizing an upload, 2.3 peak with a stream alongside, never throttled at 4.
+    - mode: nvidia
+      limitedCpu: "4"
+      requiredCpu: "1200m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "10Gi"
+      requiredMemory: "3328Mi"
+      requiredGPUMemory: "2Gi"
+      limitedGPUMemory: "2Gi"
+    - mode: nvidia-gb10
+      limitedCpu: "4"
+      requiredCpu: "1200m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "9Gi"
+      requiredMemory: "5376Mi"
+    # Not measured. Engine 8Gi/12Gi plus llm-init 256Mi/4Gi. Intel image is amd64 only.
+    - mode: intel
+      limitedCpu: "4"
+      requiredCpu: "1200m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "16Gi"
+      requiredMemory: "8448Mi"
+    - mode: intel-gpu
+      limitedCpu: "4"
+      requiredCpu: "1200m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "16Gi"
+      requiredMemory: "8448Mi"
+      requiredGPUMemory: "4Gi"
+      limitedGPUMemory: "4Gi"
+
+  supportArch:
+    - amd64
+    - arm64
+permission:
+  appData: true
+  appCache: true
+  appCommon: true
+options:
+  apiTimeout: 0
+  LLMGatewaySupported: true
+  shared: true
+  templateOnly: false
+  dependencies:
+    - name: olares
+      version: '>=1.12.7-0'
+      type: system
+envs:
+  - envName: MODEL_SOURCE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "hf://nvidia/Nemotron-3-Diarization --include Nemotron-3-Diarization.nemo"
+    description: "HuggingFace source llm-init downloads into the shared cache. Public
+      repository: no access form and no connected HuggingFace account are needed. The
+      --include keeps only the .nemo checkpoint the engine restores; the GGUF, safetensors
+      and demo media in the repository are not used."
+    regex: "^hf://"
+  - envName: MODEL_NAME
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "nvidia/Nemotron-3-Diarization"
+    description: "Model id advertised to clients; must match the engine /v1/models id."
+  - envName: MODEL_MODE
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "audio"
+    options:
+    - title: Audio
+      value: audio
+  - envName: MODEL_SUPPORTS
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "diar,diar_stream"
+    multiSelect: true
+    splitter: ","
+    options:
+    - title: Diarization (who spoke when)
+      value: diar
+    - title: Diarization Stream (streaming speakers, WebSocket)
+      value: diar_stream
+    description: "Capabilities this app exposes."
+  - envName: REQUIRED_GPU_MEMORY
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "2Gi"
+    description: "GPU memory this app reserves on a discrete NVIDIA card. Measured: the engine
+      holds about 0.4 GB and does not grow with clip length, because uploads and streams both
+      run chunk by chunk; 2Gi leaves room for driver and card differences. On GB10 the unified
+      pool is sized separately (5Gi of memory) and this value is not used."
+  - envName: CPU_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "1"
+  - envName: MEMORY_REQUEST
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "3Gi"
+  - envName: CPU_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "3"
+  - envName: MEMORY_LIMIT
+    required: true
+    type: string
+    editable: false
+    applyOnChange: false
+    default: "6Gi"
+  - envName: LOG_LEVEL
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "info"
+    options:
+    - title: Debug
+      value: debug
+    - title: Info
+      value: info
+    - title: Warn
+      value: warn
+    - title: Error
+      value: error
+  - envName: ENGINE_IMAGE
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    description: "Engine image override. Left empty, nvidia and nvidia-gb10 use
+      docker.io/beclab/audio-nemotron:v1.1.32, and intel and intel-gpu use
+      docker.io/beclab/audio-nemotron-ov:v1.1.32. Filling this REPLACES that choice
+      for every mode."
+  - envName: ENGINE_ARGS
+    required: false
+    type: string
+    editable: true
+    applyOnChange: true
+    default: "--min-duration-off 1.25"
+    description: "Engine-native flags (llm-init ENGINE_ARGS), space separated.
+      Whatever is here REPLACES the whole list, so carry existing flags over when adding one,
+      e.g. --min-duration-off 1.25 --latency-preset low.
+      --min-duration-off SECONDS (default 1.25) fills a speaker's pause shorter than it;
+      --min-duration-on SECONDS (default 0) then drops turns shorter than it. Both apply to
+      the POST and the stream; a caller may override them per request (form fields, or the
+      stream's start message) as min_duration_off / min_duration_on.
+      --latency-preset takes high (the default, 30.4s), low (1.04s), verylow (0.64s) or
+      ultralow (0.32s) and trades diarization accuracy for streaming lag; latency does not
+      include compute. --chunk-len, --right-context, --fifo-len, --update-period and
+      --spkcache-len override single fields of the preset, in 80 ms frames.
+      Offline decodes and diarizes in chunks, so memory does not grow with length:
+      --max-audio-seconds and --max-upload-mb default to 0 (no cap) and set one if wanted.
+      num_speakers is accepted and ignored. exclusive=1 (exclusive_method score_aware_v1, the default
+      when the method is omitted) returns one non-overlapping timeline in segments, the original
+      overlapping timeline in nonexclusive_segments, and exclusive_evidence aligned to segments.
+      Any other exclusive_method is refused.
+      A flag this engine does not take is ignored with a warning in the log, not an error."
+  - envName: HF_ENDPOINT
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
+  - envName: HF_TOKEN
+    required: false
+    applyOnChange: true
+    valueFrom:
+      envName: OLARES_SYSTEM_HUGGINGFACE_TOKEN

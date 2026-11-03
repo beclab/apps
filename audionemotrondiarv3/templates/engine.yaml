@@ -1,0 +1,207 @@
+{{- /* Nemotron 3 Diarization: one NeMo Sortformer checkpoint serves diar (POST) and diar_stream (WS).
+     nvidia and nvidia-gb10 stay on the CUDA image. intel and intel-gpu use the OpenVINO image. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $supportsKeys := list -}}
+{{- range $tok := splitList "," ($oe.MODEL_SUPPORTS | default "diar,diar_stream") -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- $supportsKeys = append $supportsKeys (ternary $tok (printf "supports_%s" $tok) (hasPrefix "supports_" $tok)) -}}
+{{- end -}}
+{{- end -}}
+{{- $supportsRaw := join "," $supportsKeys -}}
+{{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
+{{- $cpuRequest := trim ($oe.CPU_REQUEST | default "1") -}}
+{{- $memRequest := trim ($oe.MEMORY_REQUEST | default "3Gi") -}}
+{{- $cpuLimit := trim ($oe.CPU_LIMIT | default "3") -}}
+{{- $memLimit := trim ($oe.MEMORY_LIMIT | default "6Gi") -}}
+{{- $gpuRaw := trim ($oe.REQUIRED_GPU_MEMORY | default "2Gi") -}}
+{{- $wantGpu := and (ne $gpuRaw "") (ne $gpuRaw "0") -}}
+{{- $gpuMiB := "" -}}
+{{- $gpuType := .Values.gpu | default "" -}}
+{{- if not $gpuType -}}
+{{- if .Values.GPU -}}{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}{{- else -}}{{- $gpuType = "nvidia" -}}{{- end -}}
+{{- end -}}
+{{- $intel := or (eq $gpuType "intel") (eq $gpuType "intel-gpu") -}}
+{{- $nvidiaImage := "docker.io/beclab/audio-nemotron:v1.1.32" -}}
+{{- $ovImage := "docker.io/beclab/audio-nemotron-ov:v1.1.32" -}}
+{{- $engineImage := $oe.ENGINE_IMAGE | default (ternary $ovImage $nvidiaImage $intel) -}}
+{{- $unifiedMem := and $wantGpu (eq $gpuType "nvidia-gb10") -}}
+{{- if and $wantGpu (not $intel) -}}
+{{- $gpuMiB = include "llmbase.gpuMiB" $gpuRaw -}}
+{{- /* GB10 shares one pool: the engine's 2.65 GB peak RSS plus its GPU share, not the discrete-card numbers. */ -}}
+{{- if $unifiedMem -}}
+{{- $memRequest = "5Gi" -}}
+{{- $memLimit = "5Gi" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Intel pod memory is the GPU budget (unified). Not a measured footprint: room for the first-boot IR export. */ -}}
+{{- if $intel -}}
+{{- $memRequest = "8Gi" -}}
+{{- $memLimit = "12Gi" -}}
+{{- end -}}
+{{- /* Same string as the manifest default; the engine's own value is 1.25 too, so a replaced box keeps it. */ -}}
+{{- $engineArgs := trim ($oe.ENGINE_ARGS | default "--min-duration-off 1.25") -}}
+{{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
+{{- $cname := printf "audio-%s" $modelSan | trunc 63 | trimSuffix "-" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '{{ .Release.Name }}'
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: audio-engine
+  annotations:
+    audio.bytetrade.io/model: "{{ $modelName }}"
+    audio.bytetrade.io/supports: "{{ $supportsRaw }}"
+{{- if or $wantGpu $intel }}
+    applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
+{{- end }}
+spec:
+  replicas: {{ .Values.workloads.audionemotrondiarv3.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: audio-engine
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: audio-engine
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: "{{ .Values.userspace.appData }}/data"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name }}"
+            type: DirectoryOrCreate
+        - name: wrappers
+          configMap:
+            name: audio-wrappers
+            defaultMode: 0555
+{{- if $intel }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+{{- end }}
+      containers:
+        - name: {{ $cname }}
+          image: "{{ $engineImage }}"
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/wrappers/nemotron.sh"]
+          env:
+            - name: ENGINE_KIND
+              value: audio
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_SOURCE
+              value: "{{ $modelSource }}"
+            - name: MODEL_SUPPORTS
+              value: "{{ $supportsRaw }}"
+            - name: ENGINE_PORT
+              value: "{{ $enginePort }}"
+            - name: LOG_LEVEL
+              value: "{{ $oe.LOG_LEVEL | default "info" }}"
+            - name: WRAPPER_COMMON
+              value: /run/llm-init/wrappers/common.sh
+            - name: OLARES_GPU_MODE
+              value: "{{ $gpuType }}"
+{{- if $engineArgs }}
+            - name: ENGINE_ARGS
+              value: "{{ $engineArgs }}"
+{{- end }}
+{{- if and $wantGpu (not $intel) }}
+            - name: REQUIRED_GPU_MEMORY
+              value: "{{ $gpuRaw }}"
+{{- end }}
+            - name: HF_HOME
+              value: /cache/hf
+            - name: HF_HUB_CACHE
+              value: /cache/hf/hub
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /cache/hf/hub
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              value: "{{ $hfToken }}"
+{{- end }}
+            - name: TZ
+              value: Etc/UTC
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+{{- if and $wantGpu (not $intel) }}
+            - name: GPU_CORE_UTILIZATION_POLICY
+              value: "{{ $oe.GPU_CORE_UTILIZATION_POLICY | default "disable" }}"
+{{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $enginePort }}
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /cache/hf/hub
+            - name: data
+              mountPath: /tmp
+            - name: run-state
+              mountPath: /run/llm-init
+              readOnly: true
+            - name: wrappers
+              mountPath: /wrappers
+              readOnly: true
+{{- if $intel }}
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+{{- end }}
+          resources:
+            requests:
+              cpu: "{{ $cpuRequest }}"
+              memory: "{{ $memRequest }}"
+{{- if and $wantGpu (not $unifiedMem) (not $intel) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+            limits:
+              cpu: "{{ $cpuLimit }}"
+              memory: "{{ $memLimit }}"
+{{- if and $wantGpu (not $unifiedMem) (not $intel) }}
+              nvidia.com/gpumem: {{ $gpuMiB }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audio-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: audio-engine
+spec:
+  selector:
+    io.kompose.service: audio-engine
+  ports:
+    - name: http
+      port: {{ $enginePort }}
+      targetPort: {{ $enginePort }}
+  type: ClusterIP
