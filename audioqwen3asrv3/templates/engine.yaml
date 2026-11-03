@@ -1,4 +1,5 @@
-{{- /* Qwen ASR engine: one baked image serves stt / stt_stream / align off a single load; this only sizes the GPU. */ -}}
+{{- /* Qwen ASR engine: NVIDIA uses the qwen/vLLM image; Intel uses the OpenVINO image.
+       One chart, four accelerator modes. Capabilities stay stt / stt_stream. */ -}}
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
@@ -11,7 +12,6 @@
 {{- end -}}
 {{- end -}}
 {{- $supportsRaw := join "," $supportsKeys -}}
-{{- $engineImage := $oe.ENGINE_IMAGE | default "docker.io/beclab/audio-qwen:v1.1.3" -}}
 {{- $enginePort := int ($oe.ENGINE_PORT | default "8000") -}}
 {{- $cpuRequest := trim ($oe.CPU_REQUEST | default "500m") -}}
 {{- $memRequest := trim ($oe.MEMORY_REQUEST | default "4Gi") -}}
@@ -25,20 +25,47 @@
 {{- if not $gpuType -}}
 {{- if .Values.GPU -}}{{- $gpuType = .Values.GPU.Type | default "nvidia" -}}{{- else -}}{{- $gpuType = "nvidia" -}}{{- end -}}
 {{- end -}}
-{{- $unifiedMem := and $wantGpu (eq $gpuType "nvidia-gb10") -}}
+{{- $isIntel := or (eq $gpuType "intel") (eq $gpuType "intel-gpu") -}}
+{{- /* gb10 unified memory: size the pod from REQUIRED_GPU_MEMORY (12Gi).
+       iGPU is also unified; its host envelope is MEMORY_LIMIT (16Gi), the
+       same engine limit as Arc. intel-gpu (Arc) is discrete. */ -}}
+{{- $unifiedMem := and $wantGpu (or (eq $gpuType "nvidia-gb10") (eq $gpuType "intel")) -}}
+{{- /* ENGINE_IMAGE has no manifest default: filling one would pin every mode to the same image. */ -}}
+{{- $engineImage := $oe.ENGINE_IMAGE | default (ternary "docker.io/beclab/audio-qwen-ov:v1.1.29" "docker.io/beclab/audio-qwen:v1.1.29" $isIntel) -}}
 {{- if $wantGpu -}}
 {{- $gpuMiB = include "llmbase.gpuMiB" $gpuRaw -}}
-{{- if $unifiedMem -}}
+{{- if and $unifiedMem (eq $gpuType "nvidia-gb10") -}}
 {{- $memRequest = printf "%sMi" $gpuMiB -}}
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
+{{- else if and $unifiedMem (eq $gpuType "intel") -}}
+{{- /* iGPU request is not the 16Gi limit. 6Gi + llm-init 256Mi = requiredMemory 6400Mi. */ -}}
+{{- $memRequest = "6Gi" -}}
 {{- end -}}
 {{- end -}}
 {{- /* Engine-native flags in llm-init's one channel; the engine derives its GPU share from the
        quota below. gb10 profiles a smaller KV budget after the encoder than a discrete slice, and
-       graph capture is where startup has been seen to wedge holding the vGPU lock. */ -}}
+       graph capture is where startup has been seen to wedge holding the vGPU lock.
+       A span count is not a measure of memory, so batching stays on and the engine sizes each
+       call, except on the integrated GPU (gpu type intel, not Arc) when the smallest node
+       reports under 48Gi: an empty box then adds --batch-max-spans 8 (at most eight spans
+       a call). Arc keeps its own 32Gi and is not memory-pressured, so it is not capped.
+       Unreadable memory leaves batching on. A filled ENGINE_ARGS replaces this whole string. */ -}}
+{{- $hostBytes := 0 -}}
+{{- range $n := (.Values.nodes | default list) -}}
+{{- /* api.NodeInfo is a struct. toJson uses its json tags (memory.total); dig misses nothing without aborting the render. */ -}}
+{{- $t := int (dig "memory" "total" 0 (fromJson (toJson $n))) -}}
+{{- if and (gt $t 0) (or (eq $hostBytes 0) (lt $t $hostBytes)) -}}
+{{- $hostBytes = $t -}}
+{{- end -}}
+{{- end -}}
+{{- /* Arc (intel-gpu) is discrete. The cap is the integrated part sharing host memory. */ -}}
+{{- $forceSerial := and (eq $gpuType "intel") (gt $hostBytes 0) (lt $hostBytes (mul 48 1073741824)) -}}
 {{- $engineArgs := trim ($oe.ENGINE_ARGS | default "") -}}
 {{- if eq $engineArgs "" -}}
-{{- $engineArgs = printf "--max-model-len %s --enforce-eager" (ternary "3072" "8192" (eq $gpuType "nvidia-gb10")) -}}
+{{- $engineArgs = printf "--max-model-len %s --enforce-eager --repetition-detection" (ternary "3072" "8192" (eq $gpuType "nvidia-gb10")) -}}
+{{- if $forceSerial -}}
+{{- $engineArgs = printf "%s --batch-max-spans 8" $engineArgs -}}
+{{- end -}}
 {{- end -}}
 {{- $modelSan := regexReplaceAll "[^a-z0-9]+" (lower $modelName) "-" | trimAll "-" -}}
 {{- $cname := printf "audio-%s" $modelSan | trunc 63 | trimSuffix "-" -}}
@@ -55,7 +82,7 @@ metadata:
   annotations:
     audio.bytetrade.io/model: "{{ $modelName }}"
     audio.bytetrade.io/supports: "{{ $supportsRaw }}"
-{{- if $wantGpu }}
+{{- if or $isIntel $wantGpu }}
     applications.app.bytetrade.io/gpu-inject: "{{ $cname }}"
 {{- end }}
 spec:
@@ -89,6 +116,20 @@ spec:
           configMap:
             name: audio-wrappers
             defaultMode: 0555
+{{- if $isIntel }}
+        - name: dri
+          hostPath:
+            path: /dev/dri
+            type: Directory
+        - name: drm
+          hostPath:
+            path: /sys/class/drm
+            type: Directory
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+{{- end }}
       containers:
         - name: {{ $cname }}
           image: "{{ $engineImage }}"
@@ -109,6 +150,11 @@ spec:
               value: "{{ $oe.LOG_LEVEL | default "info" }}"
             - name: WRAPPER_COMMON
               value: /run/llm-init/wrappers/common.sh
+            - name: OLARES_GPU_MODE
+              value: "{{ $gpuType }}"
+            # Requests Router may hold open here at once; inference still runs one call at a time.
+            - name: ENGINE_MAX_CONCURRENCY
+              value: "{{ $oe.ENGINE_MAX_CONCURRENCY | default "3" }}"
 {{- if $engineArgs }}
             - name: ENGINE_ARGS
               value: "{{ $engineArgs }}"
@@ -117,10 +163,12 @@ spec:
             - name: REQUIRED_GPU_MEMORY
               value: "{{ $gpuRaw }}"
 {{- end }}
+{{- if not $isIntel }}
             - name: VLLM_USE_V1
               value: "0"
             - name: VLLM_WORKER_MULTIPROC_METHOD
               value: spawn
+{{- end }}
             - name: HF_HOME
               value: /cache/hf
             - name: HF_HUB_CACHE
@@ -160,17 +208,25 @@ spec:
             - name: wrappers
               mountPath: /wrappers
               readOnly: true
+{{- if $isIntel }}
+            - name: dri
+              mountPath: /dev/dri
+            - name: drm
+              mountPath: /sys/class/drm
+            - name: dshm
+              mountPath: /dev/shm
+{{- end }}
           resources:
             requests:
               cpu: "{{ $cpuRequest }}"
               memory: "{{ $memRequest }}"
-{{- if and $wantGpu (not $unifiedMem) }}
+{{- if and $wantGpu (not $unifiedMem) (not $isIntel) }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
             limits:
               cpu: "{{ $cpuLimit }}"
               memory: "{{ $memLimit }}"
-{{- if and $wantGpu (not $unifiedMem) }}
+{{- if and $wantGpu (not $unifiedMem) (not $isIntel) }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 {{- end }}
 ---
