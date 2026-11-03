@@ -7,7 +7,7 @@ metadata:
   description: A multilingual speech recognition model for recorded and live audio
   appid: audioqwen3asrv3
   title: Qwen3-ASR 1.7B
-  version: '1.0.13'
+  version: '1.0.30'
   categories:
     - AI
     - models
@@ -84,6 +84,24 @@ spec:
       limitedDisk: 200Gi
       limitedMemory: "16Gi"
       requiredMemory: "12544Mi"
+    # Intel iGPU: engine request 6Gi / limit 16Gi + llm-init 256Mi/4Gi. Request is not the limit. No GPU-memory field.
+    - mode: intel
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "6400Mi"
+    # Intel Arc: discrete, same envelope as nvidia. GPU-memory field is for the installer. The pod only bind-mounts /dev/dri, same as Speakrs, for both intel and intel-gpu.
+    - mode: intel-gpu
+      limitedCpu: "7"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 200Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "4352Mi"
+      requiredGPUMemory: "12Gi"
+      limitedGPUMemory: "12Gi"
 
   supportArch:
     - amd64
@@ -191,16 +209,34 @@ envs:
     type: string
     editable: true
     applyOnChange: true
+    # No default: nvidia/gb10 → audio-qwen:v1.1.29; intel/intel-gpu → audio-qwen-ov:v1.1.29.
+    description: "Engine image override. Left empty, nvidia and nvidia-gb10 use
+      docker.io/beclab/audio-qwen:v1.1.29; intel and intel-gpu use
+      docker.io/beclab/audio-qwen-ov:v1.1.29. Filling this REPLACES that choice for every mode."
   - envName: ENGINE_ARGS
     required: false
     type: string
     editable: true
     applyOnChange: true
-    # Left blank on purpose: the built-in depends on the card, which a static default cannot express.
+    # Left blank on purpose: `--max-model-len` depends on the card, which a static default cannot express.
     description: "Engine-native flags (llm-init ENGINE_ARGS). Left empty, the chart uses
-      \"--max-model-len 8192 --enforce-eager\", and 3072 instead of 8192 on a gb10, whose unified
-      memory leaves a smaller KV budget after the encoder. Whatever is here REPLACES that whole
-      list, so carry the flags over when adding one."
+      \"--max-model-len 8192 --enforce-eager --repetition-detection\",
+      and 3072 instead of 8192 on a gb10, whose unified memory leaves a smaller KV budget after
+      the encoder. On the integrated GPU only (mode intel, not intel-gpu), when the smallest
+      node reports under 48Gi of memory, that empty value also gains --batch-max-spans 8, so
+      each call carries at most eight spans. Arc is discrete and is not capped. At 48Gi or more,
+      on any other mode, or when the total cannot be read, an empty box leaves batching sized
+      by the engine. Whatever is here
+      REPLACES that whole list, so carry the flags over when adding one."
+  - envName: ENGINE_MAX_CONCURRENCY
+    required: false
+    type: int
+    editable: true
+    applyOnChange: true
+    default: "3"
+    description: "How many transcriptions and live streams Router may send this engine at once.
+      They still run one step at a time on the GPU, so more streams make each one slower;
+      at 1, a second caller is refused while the first is open."
   - envName: HF_ENDPOINT
     required: false
     applyOnChange: true
