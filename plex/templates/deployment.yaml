@@ -1,0 +1,132 @@
+{{- $gpu := .Values.gpu | default ((.Values.GPU | default dict).Type) | default "cpu" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plex
+  namespace: '{{ .Release.Namespace }}'
+  {{- if eq $gpu "nvidia" }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "plex"
+  {{- end }}
+spec:
+  replicas: {{ .Values.workloads.plex.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: plex
+  template:
+    metadata:
+      labels:
+        app: plex
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: [sh, -ec, 'mkdir -p /config /transcode; chown 1000:1000 /config /transcode']
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: transcode
+              mountPath: /transcode
+      containers:
+        - name: plex
+          image: plexinc/pms-docker:1.43.3.10896-cb3ebc72d
+          ports:
+            - name: http
+              containerPort: 32400
+          env:
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: video,compute,utility
+            - name: PLEX_UID
+              value: '1000'
+            - name: PLEX_GID
+              value: '1000'
+            - name: CHANGE_CONFIG_DIR_OWNERSHIP
+              value: 'false'
+            - name: ADVERTISE_IP
+              value: 'https://{{ .Values.domain.plex }}/'
+            - name: PLEX_CLAIM
+              valueFrom:
+                secretKeyRef:
+                  name: plex-claim
+                  key: PLEX_CLAIM
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: '4'
+              memory: 4Gi
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: transcode
+              mountPath: /transcode
+            - name: movies
+              mountPath: /media/Movies
+              readOnly: true
+            - name: music
+              mountPath: /media/Music
+              readOnly: true
+        - name: setup
+          image: python:3.12.12-alpine3.22
+          command: [python, -B, /app/setup.py]
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+          ports:
+            - name: setup
+              containerPort: 8080
+          env:
+            - name: ALLOWED_ORIGIN
+              value: 'https://{{ .Values.domain.setup }}'
+            - name: PLEX_WEB_URL
+              value: 'https://{{ .Values.domain.plex }}/web/index.html'
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: setup
+          volumeMounts:
+            - name: setup-script
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: setup-script
+          configMap:
+            name: plex-setup
+        - name: config
+          hostPath:
+            path: {{ .Values.userspace.appData }}
+            type: DirectoryOrCreate
+        - name: transcode
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: movies
+          hostPath:
+            path: {{ .Values.userspace.userData }}/Movies
+            type: DirectoryOrCreate
+        - name: music
+          hostPath:
+            path: {{ .Values.userspace.userData }}/Music
+            type: DirectoryOrCreate
