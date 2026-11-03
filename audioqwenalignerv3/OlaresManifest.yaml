@@ -7,7 +7,7 @@ metadata:
   description: A model for matching transcript words to their times in a recording
   appid: audioqwenalignerv3
   title: Qwen3 Forced Aligner
-  version: '1.0.13'
+  version: '1.0.28'
   categories:
     - AI
     - models
@@ -73,7 +73,7 @@ spec:
       requiredCpu: "700m"
       requiredDisk: 50Mi
       limitedDisk: 50Gi
-      limitedMemory: "12Gi"
+      limitedMemory: "20Gi"
       requiredMemory: "2304Mi"
       requiredGPUMemory: "4Gi"
       limitedGPUMemory: "4Gi"
@@ -84,6 +84,22 @@ spec:
       limitedDisk: 50Gi
       limitedMemory: "8Gi"
       requiredMemory: "4352Mi"
+    - mode: intel
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "2304Mi"
+    - mode: intel-gpu
+      limitedCpu: "5"
+      requiredCpu: "700m"
+      requiredDisk: 50Mi
+      limitedDisk: 50Gi
+      limitedMemory: "20Gi"
+      requiredMemory: "2304Mi"
+      requiredGPUMemory: "4Gi"
+      limitedGPUMemory: "4Gi"
 
   supportArch:
     - amd64
@@ -168,7 +184,7 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-    default: "8Gi"
+    default: "16Gi"
   - envName: LOG_LEVEL
     required: false
     type: string
@@ -189,12 +205,28 @@ envs:
     type: string
     editable: true
     applyOnChange: true
+    description: "Engine image override. Left empty, nvidia and nvidia-gb10 use
+      docker.io/beclab/audio-qwen:v1.1.28; intel and intel-gpu use
+      docker.io/beclab/audio-qwen-ov:v1.1.29. Filling this REPLACES that choice for every mode."
   - envName: ENGINE_ARGS
     required: false
     type: string
     editable: true
     applyOnChange: true
-    description: "Engine-native flags (llm-init ENGINE_ARGS); unset lets the image decide."
+    description: "Engine-native flags (llm-init ENGINE_ARGS); unset lets the image decide,
+      except on the integrated GPU (mode intel, not intel-gpu) when the smallest node reports
+      under 48Gi of memory: an empty box then becomes --align-batch off, one span a call.
+      Arc is discrete and keeps batching on. At 48Gi or more, on any other mode, or when the
+      total cannot be read, an empty box leaves batching on. Whatever is here REPLACES the whole list, so carry
+      existing flags over when adding one.
+      The forced aligner reads: --align-batch (on; group several spans into one model call),
+      --no-kv-cache (off; the checkpoint builds a cache nothing reads), --gpu-budget-fraction
+      (0.5; the share of the remaining grant one call may reach for) and --max-span-seconds
+      (300; the longest span the model can put a timestamp on). Grouping is on by default: it
+      moves a small number of timestamps by one or two 80 ms cells, leaving the words and the
+      segment count unchanged. Write --align-batch off for one span a call. Switches take 1,
+      true, yes or on, or 0, false, no or off; any other value falls back to the default and
+      says so in the startup log."
   - envName: HF_ENDPOINT
     required: false
     applyOnChange: true
