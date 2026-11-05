@@ -17,3 +17,11 @@
 {{- int $g -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "strata.hfPath" -}}
+/cache/hf/hub
+{{- end -}}
+
+{{- define "strata.runStateHostPath" -}}
+{{- printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- end -}}
