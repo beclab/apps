@@ -1,0 +1,256 @@
+# Scripts are embedded here, matching the FreeToken chart layout.
+# The ConfigMap mounts them under /llm-init/wrappers in the engine container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+data:
+  strata.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=strata
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _wc=0
+    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
+    unset _wc
+    # shellcheck source=common.sh
+    . "$WRAPPER_COMMON"
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+
+    export MODEL_PATH
+
+    # ---- Strata 0.2.2 ghcr image bridge -------------------------------------
+    # The upstream image ships terminal/ + seed/ + components/engine, while the
+    # launcher expects a writable source tree with engine/ beside setup.py.
+    # Assemble that layout once under /data/root (idempotent across restarts;
+    # rebuilt when the engine's BUILD.json changes).
+    STRATA_APP=${STRATA_APP:-/opt/strata}
+    STRATA_ROOT=${STRATA_ROOT:-/data/root}
+    # The upstream image nests the engine one level deeper:
+    # components/engine/<variant>/BUILD.json. setup.py wants BUILD.json directly
+    # under ROOT/engine, so resolve the variant dir and link that.
+    engine_src=""
+    for d in "$STRATA_APP"/components/engine/*/; do
+        if [ -f "$d/BUILD.json" ]; then engine_src=${d%/}; break; fi
+    done
+    if [ -z "$engine_src" ] && [ -f "$STRATA_APP/components/engine/BUILD.json" ]; then
+        engine_src="$STRATA_APP/components/engine"
+    fi
+    bridge_ver=$(tr -d ' \n' < "$engine_src/BUILD.json" 2>/dev/null || echo none)
+    bridge_rev=r3
+    if [ "$(cat "$STRATA_ROOT/.bridge-ok" 2>/dev/null)" != "$bridge_rev $bridge_ver" ]; then
+        printf '[bridge] preparing %s (engine record %s)\n' "$STRATA_ROOT" "${bridge_ver:-none}"
+        rm -rf "$STRATA_ROOT"
+        mkdir -p "$STRATA_ROOT"
+        if [ -d "$STRATA_APP/seed" ]; then
+            cp -r "$STRATA_APP/seed/." "$STRATA_ROOT/"
+        fi
+        for item in "$STRATA_APP"/terminal/*; do
+            d=$(basename "$item")
+            [ "$d" = __pycache__ ] && continue
+            if [ ! -e "$STRATA_ROOT/$d" ]; then
+                cp -r "$item" "$STRATA_ROOT/"
+            fi
+        done
+        ln -sfn "$engine_src" "$STRATA_ROOT/engine"
+        if [ ! -f "$STRATA_ROOT/setup.py" ] || [ ! -f "$STRATA_ROOT/serve/server.py" ] || [ ! -f "$STRATA_ROOT/tools/gguf_reader.py" ] || [ ! -x "$STRATA_ROOT/python/bin/python3" ] || [ ! -f "$STRATA_ROOT/engine/BUILD.json" ]; then
+            printf '[bridge] FATAL: incomplete tree at %s\n' "$STRATA_ROOT" >&2
+            ls -la "$STRATA_ROOT" >&2
+            exit 1
+        fi
+        printf '%s %s' "$bridge_rev" "$bridge_ver" > "$STRATA_ROOT/.bridge-ok"
+        printf '[bridge] ready\n'
+    fi
+    STRATA_PYTHON=${STRATA_PYTHON:-$STRATA_ROOT/python/bin/python3}
+    export STRATA_ROOT STRATA_PYTHON
+
+    run_strata() {
+        load_engine_args_from_handoff
+        export ENGINE_ARGS
+        exec "${STRATA_PYTHON:-/data/root/python/bin/python3}" \
+            "${STRATA_LAUNCHER:-/llm-init/wrappers/prepare-strata.py}" "$@"
+    }
+
+    supervise_engine run_strata "$@"
+  prepare-strata.py: |
+    #!/usr/bin/env python3
+    """Prepare the downloaded GGUF with upstream setup.py, then exec its API server."""
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import shlex
+    import signal
+    import subprocess
+    import sys
+
+    # These belong to the chart's download, networking and model contract.
+    MANAGED = {
+        '--family', '--model', '--data-dir', '--models-dir', '--gguf-dir', '--host',
+        '--port', '--api-key', '--backend', '--vision', '--gpu', '--gpus', '--prebuilt',
+        '--build', '--setup', '--yes', '--no-start', '--check', '--update', '--inspect',
+        '--browser', '--no-browser', '--skip-build', '--rollback-engine', '--cuda',
+    }
+
+
+    def setup_args(raw):
+        args = shlex.split(raw)
+        for arg in args:
+            if arg.split('=', 1)[0] in MANAGED:
+                raise ValueError(f'{arg}: managed by the Strata chart, not ENGINE_ARGS')
+        return args
+
+
+    def run_setup(command, cwd):
+        # A restart during preparation must also stop pack/MTP subprocesses.
+        child = subprocess.Popen(command, cwd=cwd, start_new_session=True)
+
+        def stop(signum, _frame):
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+            raise SystemExit(128 + signum)
+
+        old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGINT)}
+        try:
+            if child.wait() != 0:
+                raise RuntimeError('Strata setup failed; refusing to start with stale configuration')
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
+
+
+    def main():
+        root = Path(os.environ.get('STRATA_ROOT', '/opt/strata'))
+        source = Path(os.environ['MODEL_PATH'])
+        if source.is_file():
+            source = source.parent
+        if not source.is_dir() or not list(source.glob('*.gguf')):
+            raise ValueError(f'No GGUF shards in {source}; MODEL_SOURCE must select the GSQ-RCO IQ3_S GGUF files')
+        expected = [f'Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-{i:05d}-of-00002.gguf' for i in range(1, 3)]
+        missing = [name for name in expected if not (source / name).is_file()]
+        if missing:
+            raise ValueError(f'Incomplete GGUF snapshot; llm-init must download missing shards: {missing}')
+        args = setup_args(os.environ.get('ENGINE_ARGS', ''))
+        # Never reuse a derived pack after changing the downloaded HF snapshot.
+        identity = str(source.resolve()) + (root / 'engine/BUILD.json').read_text()
+        key = hashlib.sha256(identity.encode()).hexdigest()[:20]
+        data = Path(os.environ.get('STRATA_DATA', '/data')) / key
+        data.mkdir(parents=True, exist_ok=True)
+        # Unsloth setup writes SHA-256 .done markers beside the shards. Keep
+        # shared HF blobs read-only, with writable links/markers in our cache.
+        gguf = data / 'gguf'
+        gguf.mkdir(exist_ok=True)
+        for shard in sorted(source.glob('*.gguf')):
+            link = gguf / shard.name
+            if not link.is_symlink() or link.resolve() != shard.resolve():
+                link.unlink(missing_ok=True)
+                link.with_name(link.name + '.done').unlink(missing_ok=True)
+                link.symlink_to(shard.resolve())
+        port = os.environ.get('STRATA_PORT', '8080')
+        generated = root / 'strata-iq3_s.json'
+        # This file is generated by us, not an operator-owned model configuration.
+        # Avoid upstream's merge of old settings (e.g. a removed parallel flag).
+        generated.unlink(missing_ok=True)
+        command = [sys.executable, str(root / 'setup.py'),
+                   '--setup', '--yes', '--no-start', '--no-browser',
+                   '--family', 'qwen', '--model', 'IQ3_S', '--backend', 'cuda',
+                   '--gpu', '0', '--vision', 'cpu', '--data-dir', str(data),
+                   '--gguf-dir', str(gguf), '--host', '0.0.0.0', '--port', port,
+                   '--context', '32768', '--parallel', '1',
+                   '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'off',
+                   '--vram-reserve-mib', '1024', *args]
+        print('[strata] preparing GGUF and MTP cache; first start can take several minutes', flush=True)
+        run_setup(command, root)
+        if not generated.exists():
+            candidates = sorted(root.glob('strata-*.json'), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not candidates:
+                raise FileNotFoundError(f'setup.py wrote no strata-*.json under {root}')
+            generated = candidates[0]
+        cfg = json.loads(generated.read_text())
+        cfg['model_name'] = os.environ['MODEL_NAME']  # /v1/models must match Model Console.
+        cfg['log'] = str(data / 'engine.log')
+        cfg['open_browser'] = False
+        # DNS-rebinding guard (server.py host_allowed): the Olares entrance sends
+        # Host <name>.<installer-domain>, which differs per Olares account and is
+        # unknowable at chart time - so the guard is lifted ("*"). Reachability is
+        # already gated: the engine binds to the pod network, and the entrance
+        # requires an Olares session (authLevel internal) before it proxies.
+        cfg['allowed_hosts'] = ['*']
+        # Strata 0.2.10: DFlash2 is the default drafter. setup.py regenerates this
+        # config every boot and leaves drafting ABSENT (which keeps the legacy MTP
+        # args); "auto" = both drafters current, each request picks one (rule df2).
+        # Packs fetched once with the terminal's `strata drafting fetch` (pinned
+        # download, SHA-256 checked): arena dflash2/ holds q4_0 + converted selq4.
+        cfg['drafting'] = 'auto'
+        # Apply the drafting choice to the engine arguments HERE, the way `strata
+        # launch` does: setup.py only writes legacy MTP args, and server.py merely
+        # consumes args + restart-fallbacks (it never applies). Pack already sits
+        # at <data>/dflash2/ (fetched once, sha-pinned). Loud on failure: staying
+        # on MTP is a safe fallback but must be visible in the log.
+        try:
+            sys.path.insert(0, str(root))
+            from strata_control import drafting
+            eb = json.loads((root / 'engine' / 'BUILD.json').read_text())
+            archs = [int(a) for a in str(eb.get('archs', '')).replace(',', ';').split(';') if a.strip().isdigit()]
+            # slots as server.py reads them: --batch/--slots/--parallel in the engine
+            # args (0/absent = one at a time). Dormant while parallel cannot run
+            # DFlash2; correct the day upstream removes that limit (coldniko on X).
+            sa = [str(a) for a in cfg.get('args') or []]
+            slots = next((int(sa[sa.index(k) + 1]) for k in ('--batch', '--slots', '--parallel')
+                          if k in sa and sa.index(k) + 1 < len(sa) and sa[sa.index(k) + 1].isdigit()), 1)
+            dec = drafting.apply(cfg, klass=drafting.card_class(archs), data_dir=drafting.data_dir_of(cfg['args']),
+                                 family='qwen', backend='cuda', archs=archs, vram_mib=24453.0, slots=slots,
+                                 engine=str(root / 'engine' / 'strata'))
+            print(f"[strata] drafting {dec.asked} -> {dec.drafter} flags={list(dec.flags)}{' note=' + dec.note if dec.note else ''}", flush=True)
+        except Exception as exc:
+            print(f'[strata] drafting apply FAILED ({exc}); engine stays on the args setup.py wrote', flush=True)
+        cfg.pop('api_key', None)  # internal ClusterIP only; Olares authenticates the entrance.
+        target = data / 'server.json'
+        temporary = target.with_suffix('.tmp')
+        temporary.write_text(json.dumps(cfg, indent=2))
+        temporary.replace(target)
+        os.chdir(root)
+        os.execv(sys.executable, [sys.executable, str(root / 'serve/server.py'),
+                                '--engine', 'strata', '--config', str(target),
+                                '--host', '0.0.0.0', '--port', port])
+
+
+    if __name__ == '__main__':
+        main()
+  strata-healthcheck.py: |
+    #!/usr/bin/env python3
+    import json
+    import os
+    import sys
+    import urllib.request
+
+
+    def healthy(state):
+        return isinstance(state, dict) and state.get('status') == 'ok' and state.get('loaded') is True
+
+
+    def main():
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open('http://127.0.0.1:' + os.environ.get('STRATA_PORT', '8080') + '/health', timeout=3) as response:
+                return 0 if healthy(json.load(response)) else 1
+        except (OSError, ValueError):
+            return 1
+
+
+    if __name__ == '__main__':
+        sys.exit(main())
