@@ -47,6 +47,15 @@ def _read(name: str) -> str:
         return ""
 
 
+def terminal_url() -> str:
+    """The chart's private entrance, never a request-derived navigation target."""
+    value = os.environ.get("AGENTJ_OLARES_TERMINAL_URL", "")
+    host = value.removeprefix("https://")
+    labels = host.split(".")
+    return value if value.startswith("https://") and host == host.lower() and not host.replace(".", "").isdigit() and len(host) <= 253 and len(labels) >= 2 and all(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in labels) else ""
+
+
 def status() -> dict:
     if time.time() - _cache["t"] < 3 and _cache["v"]:
         return _cache["v"]
@@ -159,17 +168,18 @@ button:disabled{opacity:.5}.msg{white-space:pre-wrap;margin-top:10px;font-size:1
 <p class="mute" data-t="nameh" style="margin:10px 0 4px"></p><input id="name" maxlength="32" autocomplete="off">
 <button id="go" data-t="go"></button><div class="msg" id="m2"></div><p class="mute" data-t="buyh"></p><div class="buyrow"><a class="buy" href="https://agentj.app/account?source=olares&amp;utm_source=olares&amp;utm_medium=setup" target="_blank" rel="noopener noreferrer" data-t="buy"></a></div></div></div>
 <div class="step" id="s3"><h2><span class="dot"></span><span data-t="s3"></span></h2><div id="s3d" class="mute"></div></div>
+<div class="step" id="terminal-card" hidden><h2 data-t="terminal"></h2><p class="mute" data-t="terminal_hint"></p><a id="terminal-link" target="_blank" rel="noopener noreferrer" data-t="terminal_open"></a></div>
 <p class="mute" data-t="foot"></p>
 </main><script>
 const zh=(new URLSearchParams(location.search).get('lang')||navigator.language||'').toLowerCase().startsWith('zh');
-const T=zh?{sub:'在你的 Olares 上运行的 Agent J：用手机指挥这台机器上的 AI Agent。',s1:'安装 Agent J',s2:'绑定你的席位',
+const T=zh?{terminal:'网页终端',terminal_hint:'在 Agent J 自己的容器中查看状态和后台任务。打开后由 Olares 验证你的登录。',terminal_open:'打开网页终端',sub:'在你的 Olares 上运行的 Agent J：用手机指挥这台机器上的 AI Agent。',s1:'安装 Agent J',s2:'绑定你的席位',
 s2h:'在下方账户页的空席位卡上点「复制安装提示词」。整段粘贴就行，不用挑出代码；设置码不会显示或保存。',
 placeholder:'把复制的整段安装提示粘贴到这里',guide1:'① 空席位卡 → 复制安装提示词',guide2:'② 整段粘贴到下方 → 绑定',buyh:'还没有席位？先注册并购买一个，再回来粘贴。',buy:'购买席位',nameh:'给这个 Agent 起个名字（可不填）',go:'绑定',s3:'添加手机遥控器',foot:'这个页面只在你的 Olares 登录后可见。设置码只用一次，用完即删。',
 ph:{starting:'正在启动…','error-image':'应用镜像不完整，已停止（请重新安装或联系我们）',ready:'已安装',serving:'已安装，正在运行'},
 pair:a=>`<ol><li>手机打开 <a href="${a}" target="_blank" rel="noopener">${a}</a> 登录</li><li>找到这台 Agent J 主机「${N}」的席位卡，点「添加遥控器」</li><li>用通行密钥确认，按页面提示完成</li></ol>`,
 paired:'手机已配对 ✓ 现在可以在手机上和 Agent 说话了。',model:m=>`模型：Olares Router 上的 ${m}（OpenCode）`,
 no_code:'没找到设置码：请粘贴 ajt_、ajh_ 或 AJI- 开头的码，或整段安装提示词。',already_bound:'这台 Olares 已经绑定了席位。要换席位，先在 Agent J Terminal 里运行 agentj unlink。',not_ready:'Agent J 还没准备好，请稍等再试。',wait:'正在绑定…',bound:'已绑定'}
-:{sub:'Agent J on your Olares: direct the AI agent on this machine from your phone.',s1:'Install Agent J',s2:'Bind your seat',
+:{terminal:'Web terminal',terminal_hint:'View status and background tasks inside Agent J’s own container. Olares verifies your sign-in when you open it.',terminal_open:'Open web terminal',sub:'Agent J on your Olares: direct the AI agent on this machine from your phone.',s1:'Install Agent J',s2:'Bind your seat',
 s2h:'On the account page below, press “Copy installation prompt” on an empty seat card. Paste the entire prompt here; no need to pick out the code. The setup code is never shown or kept.',
 placeholder:'Paste the entire copied installation prompt here',guide1:'1. Empty seat card → Copy installation prompt',guide2:'2. Paste all of it below → Bind',buyh:'No seat yet? Register and buy one, then come back to paste.',buy:'Buy a seat',nameh:'Name this Agent (optional)',go:'Bind',s3:'Add your phone as a remote',foot:'Only visible after you sign in to your Olares. The code is used once and deleted.',
 ph:{starting:'Starting…','error-image':'The app image is incomplete; stopped (reinstall, or contact us)',ready:'Installed',serving:'Installed and running'},
@@ -183,6 +193,7 @@ $('code').placeholder=T.placeholder;$('guide-title').textContent=T.guide1+'; '+T
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function mark(id,state){$(id).classList.toggle('done',state==='done');$(id).classList.toggle('now',state==='now')}
 async function tick(){let s;try{s=await (await fetch('api/status',{cache:'no-store'})).json()}catch{return}
+const terminal=s.terminal_url||'';$('terminal-card').hidden=!terminal;if(terminal){$('terminal-link').href=terminal}else{$('terminal-link').removeAttribute('href')}
 N=esc(s.agent_name||'');const inst=!!s.version;mark('s1',inst?'done':'now');
 $('s1d').textContent=(T.ph[s.phase]||s.phase)+(s.version?' · v'+s.version:'')+(s.router_model?' · '+T.model(s.router_model):'');
 mark('s2',s.bound?'done':(inst?'now':''));$('go').disabled=!inst||s.bound;
@@ -220,7 +231,7 @@ class H(BaseHTTPRequestHandler):
         if p in ("/", "/index.html"):
             self._send(200, PAGE.replace("%ACCOUNT%", ACCOUNT_URL).encode(), "text/html; charset=utf-8")
         elif p == "/api/status":
-            self._json({**status(), "account_url": ACCOUNT_URL})
+            self._json({**status(), "account_url": ACCOUNT_URL, "terminal_url": terminal_url()})
         elif p == "/healthz":
             self._send(200, b"ok", "text/plain")
         else:
