@@ -33,11 +33,14 @@
 {{- end -}}
 {{- end -}}
 {{- $modelSupports = join "," $expandedSupports -}}
+{{- /* Publish reasoning levels and the default on the model card for Router. */ -}}
+{{- $reasoningEffort := $oe.MODEL_REASONING_EFFORT | default "" -}}
+{{- $reasoningEffortDefault := $oe.MODEL_REASONING_EFFORT_DEFAULT | default "" -}}
 {{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
 {{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $runStateHostPath := include "strata.runStateHostPath" . -}}
 ---
 # llm-init Pod (no GPU). Downloads the checkpoint, writes sentinel + model_path,
 # serves progress UI + OpenAI /v1/* proxy on :8090, and reverse-proxies the
@@ -67,7 +70,7 @@ spec:
         io.kompose.service: llm-init
     spec:
       restartPolicy: Always
-      # run-state is a node-local hostPath, so follow the engine onto its node.
+      # Both pods share run-state and model hostPath mounts; follow the engine onto its node.
       # Keep the target instance label off this Pod to prevent self-affinity
       # from allowing llm-init to schedule before the engine on another node.
       affinity:
@@ -101,11 +104,17 @@ spec:
           image: docker.io/beclab/aboveos-busybox:1.37.0
           command:
             - sh
-            - -c
-            - "mkdir -p /cache/hf/hub/.locks && chown 1000:1000 /cache/hf/hub /cache/hf/hub/.locks /run/llm-init"
+            - -ec
+            - |
+              hub={{ include "strata.hfPath" . | quote }}
+              repo="$hub/models--unsloth--Qwen3.8-Flash-Next-GGUF"
+              # The engine's nested mtp hostPath can create this parent as root.
+              # Fix only these known directories, never recursively chown shared models.
+              mkdir -p "$hub/.locks/models--unsloth--Qwen3.8-Flash-Next-GGUF" "$repo/blobs" "$repo/refs" "$repo/snapshots"
+              chown 1000:1000 "$hub" "$hub/.locks" "$hub/.locks/models--unsloth--Qwen3.8-Flash-Next-GGUF" "$repo" "$repo/blobs" "$repo/refs" "$repo/snapshots" /run/llm-init
           volumeMounts:
             - name: hf-cache
-              mountPath: /cache/hf/hub
+              mountPath: {{ include "strata.hfPath" . }}
             - name: run-state
               mountPath: /run/llm-init
           resources:
@@ -119,6 +128,8 @@ spec:
           image: {{ .Values.images.llmInit | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            - name: HF_HUB_CACHE
+              value: {{ include "strata.hfPath" . | quote }}
             - name: ENGINE_KIND
               value: strata
             - name: MODEL_NAME
@@ -130,6 +141,14 @@ spec:
 {{- if $modelSupports }}
             - name: MODEL_SUPPORTS
               value: "{{ $modelSupports }}"
+{{- end }}
+{{- if $reasoningEffort }}
+            - name: MODEL_REASONING_EFFORT
+              value: "{{ $reasoningEffort }}"
+{{- end }}
+{{- if $reasoningEffortDefault }}
+            - name: MODEL_REASONING_EFFORT_DEFAULT
+              value: "{{ $reasoningEffortDefault }}"
 {{- end }}
             - name: ENGINE_ARGS
               value: {{ $engineArgs | quote }}
@@ -173,7 +192,7 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - name: hf-cache
-              mountPath: /cache/hf/hub
+              mountPath: {{ include "strata.hfPath" . }}
             - name: run-state
               mountPath: /run/llm-init
           resources:

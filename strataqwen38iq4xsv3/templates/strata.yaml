@@ -1,6 +1,6 @@
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $gpuMiB := include "llmbase.gpuMiB" ($oe.STRATA_REQUIRED_GPU_MEMORY | default "23Gi") -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $runStateHostPath := include "strata.runStateHostPath" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -64,6 +64,8 @@ spec:
           # bash job control gives the supervisor a process group even without a tty.
           command: [/bin/bash, /llm-init/wrappers/strata.sh]
           env:
+            - name: HF_HUB_CACHE
+              value: {{ include "strata.hfPath" . | quote }}
             - {name: ENGINE_KIND, value: strata}
             - {name: WRAPPER_COMMON, value: /run/llm-init/wrappers/common.sh}
             - {name: WAIT_TIMEOUT, value: "86400"}
@@ -77,10 +79,13 @@ spec:
             - {name: PYTHONUNBUFFERED, value: "1"}
             - {name: STRATA_READ_AHEAD, value: "1"}
             - {name: STRATA_NO_ARENA_THP, value: "1"}
+            # experts_native prefill faults sm_120 (RTX 5090 Laptop) and the
+            # driver then drops the whole device. The non-fused path does not.
+            - {name: STRATA_PF_FUSED, value: "0"}
             - name: MODEL_NAME
               value: {{ $oe.MODEL_NAME | quote }}
             - name: ENGINE_ARGS
-              value: {{ $oe.ENGINE_ARGS | quote }}
+              value: {{ $oe.ENGINE_ARGS | default "" | quote }}
             - name: OMP_NUM_THREADS
               value: {{ .Values.strata.cpuThreads | quote }}
 {{- if $oe.HF_ENDPOINT }}
@@ -111,7 +116,7 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 1
           volumeMounts:
-            - {name: hf-cache, mountPath: /cache/hf/hub, readOnly: true}
+            - {name: hf-cache, mountPath: {{ include "strata.hfPath" . }}, readOnly: true}
             - {name: run-state, mountPath: /run/llm-init, readOnly: true}
             - {name: strata-data, mountPath: /data}
             - {name: wrappers, mountPath: /llm-init/wrappers, readOnly: true}
