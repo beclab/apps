@@ -42,3 +42,20 @@
 {{- $in := . -}}
 {{- trim ($in.Args | default "") -}}
 {{- end -}}
+
+{{- /* Resolve GPU type safely when the legacy GPU object is absent. */ -}}
+{{- define "llamacppqwen3827bggufv3.gpuType" -}}
+{{- $gpu := .Values.GPU | default dict -}}
+{{- .Values.gpu | default $gpu.Type | default "nvidia" -}}
+{{- end -}}
+{{- /* Intel uses one slot, MTP depth 2, and a targeted IQ3_S CPU fallback.
+         Match CPU threads to the engine's six-core limit to avoid throttling.
+         Preserve complete user-supplied custom argument strings. */ -}}
+{{- define "llamacppqwen3827bggufv3.platformArgs" -}}
+{{- $args := trim (.Args | default "") -}}
+{{- if and (eq .Gpu "intel-gpu") (or (eq $args "") (eq $args "-c 104448 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 2 -kvu --spec-type draft-mtp --spec-draft-n-max 2")) -}}
+-c 104448 -ngl all -fa on -ctk q8_0 -ctv q8_0 --jinja -np 1 -b 2048 -ub 2048 --spec-type draft-mtp --spec-draft-n-max 2 LLAMA_ARG_OVERRIDE_TENSOR=blk.14.ffn_down.weight=CPU -t 6 -tb 6
+{{- else -}}
+{{- $args -}}
+{{- end -}}
+{{- end -}}
