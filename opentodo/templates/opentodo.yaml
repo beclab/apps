@@ -1,0 +1,124 @@
+{{- $olaresEnv := .Values.olaresEnv | default dict -}}
+{{- $env := .Values.env | default dict -}}
+{{- $baseUrl := get $olaresEnv "OPENTODO_BASE_URL" | default (get $env "baseUrl") | default "" -}}
+{{- $setupToken := get $olaresEnv "OPENTODO_SETUP_TOKEN" | default (get $env "setupToken") | default "" -}}
+{{- $allowSignup := get $olaresEnv "OPENTODO_ALLOW_SIGNUP" | default (get $env "allowSignup") | default "false" -}}
+{{- $trustedProxies := get $olaresEnv "OPENTODO_TRUSTED_PROXIES" | default (get $env "trustedProxies") | default "" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opentodo.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opentodo.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.workloads.opentodo.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "opentodo.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "opentodo.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        fsGroup: 65532
+      initContainers:
+        - name: fix-permissions
+          image: "docker.io/beclab/aboveos-busybox:1.37.0"
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+          args:
+            - |
+              mkdir -p /data
+              chown -R 65532:65532 /data
+              chmod -R 775 /data
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: opentodo
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            {{- if $baseUrl }}
+            - name: OPENTODO_BASE_URL
+              value: {{ $baseUrl | quote }}
+            {{- end }}
+            {{- if $setupToken }}
+            - name: OPENTODO_SETUP_TOKEN
+              value: {{ $setupToken | quote }}
+            {{- end }}
+            - name: OPENTODO_ALLOW_SIGNUP
+              value: {{ $allowSignup | quote }}
+            {{- if $trustedProxies }}
+            - name: OPENTODO_TRUSTED_PROXIES
+              value: {{ $trustedProxies | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.containerPort }}
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.containerPort }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.containerPort }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory }}
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/data'
+            type: DirectoryOrCreate
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opentodo.serviceName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opentodo.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "opentodo.selectorLabels" . | nindent 4 }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.containerPort }}
+      targetPort: {{ .Values.containerPort }}
