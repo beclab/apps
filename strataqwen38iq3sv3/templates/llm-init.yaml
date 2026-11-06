@@ -3,6 +3,17 @@
 {{- $oe := .Values.olaresEnv | default dict -}}
 {{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
 {{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- /* The app's own HF cache dir may pre-exist root-owned (system HF service);
+       init-chown below takes it back to UID 1000 so fresh downloads work. */ -}}
+{{- $modelDir := "" -}}
+{{- if $modelSource -}}
+{{- $first := index (splitList " " $modelSource) 0 -}}
+{{- $or := trimPrefix "hf://" $first -}}
+{{- if contains "/" $or -}}
+{{- $sl := splitList "/" $or -}}
+{{- $modelDir = printf "models--%s--%s" (index $sl 0) (index $sl 1) -}}
+{{- end -}}
+{{- end -}}
 {{- $modelMode := $oe.MODEL_MODE | default "" -}}
 {{- /* MODEL_SUPPORTS is a multi-select of coarse capability GROUPS (vision /
        tools / thinking). Expand each group one-to-many into the supports_*
@@ -102,7 +113,7 @@ spec:
           command:
             - sh
             - -c
-            - "mkdir -p /cache/hf/hub/.locks && chown 1000:1000 /cache/hf/hub /cache/hf/hub/.locks /run/llm-init"
+            - "mkdir -p /cache/hf/hub/.locks{{ if $modelDir }} /cache/hf/hub/{{ $modelDir }}{{ end }} && chown 1000:1000 /cache/hf/hub /cache/hf/hub/.locks /run/llm-init{{ if $modelDir }} && chown -R 1000:1000 /cache/hf/hub/{{ $modelDir }}{{ end }}"
           volumeMounts:
             - name: hf-cache
               mountPath: /cache/hf/hub
