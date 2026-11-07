@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: yue2studio-gateway
+  namespace: '{{ .Release.Namespace }}'
+data:
+  entrypoint.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    umask 077
+    mkdir -p "$YUE_STUDIO_DATA_ROOT" "$YUE_MODELS_ROOT" "$HOME" "$XDG_CACHE_HOME"
+    MCP_AUTH_ENABLED="${MCP_AUTH_ENABLED:-false}"
+    case "${MCP_AUTH_ENABLED,,}" in
+        true|1|yes|on) export YUE_STUDIO_MCP_AUTH_DEFAULT=0 ;;
+        false|0|no|off|"") export YUE_STUDIO_MCP_AUTH_DEFAULT=1 ;;
+        *) printf 'MCP_AUTH_ENABLED must be true or false\n' >&2; exit 64 ;;
+    esac
+    test -n "${YUE_STUDIO_MCP_TOKEN:-}"
+    mkdir -p "$YUE_STUDIO_DATA_ROOT/config"
+    printf '%s\n' "$YUE_STUDIO_MCP_TOKEN" > "$YUE_STUDIO_DATA_ROOT/config/mcp-token"
+    export YUE_STUDIO_ACCESS_KEY
+    YUE_STUDIO_ACCESS_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    envsubst '${YUE_STUDIO_ACCESS_KEY} ${YUE_STUDIO_MCP_TOKEN} ${YUE_STUDIO_MCP_AUTH_DEFAULT}' < /opt/olares/nginx.conf.template > /tmp/yue2-nginx.conf
+    music-server &
+    server_pid=$!
+    nginx -c /tmp/yue2-nginx.conf -g 'daemon off;' &
+    proxy_pid=$!
+    cleanup() {
+        kill -TERM "$server_pid" "$proxy_pid" 2>/dev/null || true
+        wait "$server_pid" "$proxy_pid" 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    set +e
+    wait -n "$server_pid" "$proxy_pid"
+    exit $?
+  nginx.conf.template: |
+    worker_processes auto;
+    pid /tmp/nginx.pid;
+    error_log /dev/stderr warn;
+    events { worker_connections 1024; }
+    http {
+        map_hash_bucket_size 128;
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        access_log /dev/stdout;
+        client_body_temp_path /tmp/nginx-body;
+        proxy_temp_path /tmp/nginx-proxy;
+        fastcgi_temp_path /tmp/nginx-fastcgi;
+        uwsgi_temp_path /tmp/nginx-uwsgi;
+        scgi_temp_path /tmp/nginx-scgi;
+        client_max_body_size 256m;
+        map $http_authorization $api_authorized {
+            default ${YUE_STUDIO_MCP_AUTH_DEFAULT};
+            "Bearer ${YUE_STUDIO_MCP_TOKEN}" 1;
+        }
+        server {
+            listen 8080;
+            root /opt/yue2/ui;
+            location / { try_files $uri $uri/ /index.html; }
+            location ~ ^/(v1|setup|engine|health|mcp)(/|$) {
+                proxy_pass http://127.0.0.1:8791;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Forwarded-Host $http_host;
+                proxy_set_header Authorization "Bearer ${YUE_STUDIO_ACCESS_KEY}";
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_read_timeout 3600s;
+                proxy_send_timeout 3600s;
+            }
+        }
+        # This port is exposed only by the invisible internal entrance.
+        server {
+            listen 8081;
+            if ($api_authorized = 0) { return 401; }
+            location = /mcp {
+                proxy_pass http://127.0.0.1:8791;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Forwarded-Host $http_host;
+                proxy_set_header Authorization "Bearer ${YUE_STUDIO_ACCESS_KEY}";
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_read_timeout 3600s;
+                proxy_send_timeout 3600s;
+            }
+            location /v1/ {
+                proxy_pass http://127.0.0.1:8791;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Forwarded-Host $http_host;
+                proxy_set_header Authorization "Bearer ${YUE_STUDIO_ACCESS_KEY}";
+                proxy_set_header Connection "";
+                proxy_buffering off;
+                proxy_read_timeout 3600s;
+                proxy_send_timeout 3600s;
+            }
+            location / { return 404; }
+        }
+    }

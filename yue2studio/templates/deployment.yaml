@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yue2studio
+  namespace: '{{ .Release.Namespace }}'
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "yue2studio"
+spec:
+  replicas: {{ .Values.workloads.yue2studio.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: yue2studio
+  template:
+    metadata:
+      labels:
+        app: yue2studio
+      annotations:
+        checksum/gateway: {{ include (print $.Template.BasePath "/gateway-config.yaml") . | sha256sum }}
+        checksum/huggingface: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        command: [sh, -ec, 'mkdir -p /data /models; chown 1000:1000 /data /models']
+        securityContext:
+          runAsUser: 0
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: 100m, memory: 64Mi}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: models, mountPath: /models}
+      containers:
+      - name: yue2studio
+        image: beclab/harveyff-yue2-studio:3.8.5-cu130-sm120-olares6
+        imagePullPolicy: IfNotPresent
+        command: [bash, /opt/olares/entrypoint.sh]
+        env:
+        - name: MCP_AUTH_ENABLED
+          value: {{ .Values.olaresEnv.MCP_AUTH_ENABLED | default "false" | quote }}
+        - name: YUE_STUDIO_MCP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: yue2studio-mcp
+              key: token
+        - name: HF_ENDPOINT
+          value: {{ .Values.olaresEnv.HF_ENDPOINT | quote }}
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: yue2studio-hf
+              key: HF_TOKEN
+        ports:
+        - {name: http, containerPort: 8080}
+        - {name: api, containerPort: 8081}
+        resources:
+          requests: {cpu: 400m, memory: 1Gi}
+          limits:
+            cpu: '8'
+            memory: 16Gi
+        startupProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          periodSeconds: 10
+          timeoutSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: models, mountPath: /models}
+        - {name: gateway, mountPath: /opt/olares, readOnly: true}
+      volumes:
+      - name: gateway
+        configMap:
+          name: yue2studio-gateway
+      - name: data
+        hostPath:
+          path: {{ .Values.userspace.appData }}
+          type: DirectoryOrCreate
+      - name: models
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}/huggingface/yue2studio
+          type: DirectoryOrCreate
