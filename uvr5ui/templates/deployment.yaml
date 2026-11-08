@@ -1,0 +1,133 @@
+{{- $env := .Values.olaresEnv | default dict -}}
+{{- $input := $env.NAS_INPUT_SUBPATH | default "UNCONFIGURED/UVR5/Input" -}}
+{{- $output := $env.NAS_OUTPUT_SUBPATH | default "UNCONFIGURED/UVR5/Output" -}}
+{{- range $path := list $input $output -}}
+{{- if or (hasPrefix "/" $path) (has ".." (splitList "/" $path)) -}}
+{{- fail "NAS paths must stay relative to the Olares External directory" -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uvr5ui
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: {{ .Values.workloads.uvr5ui.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: uvr5ui
+  template:
+    metadata:
+      labels:
+        app: uvr5ui
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - mkdir -p /state /cache/models /cache/ytdl; chown 1000:1000 /state /cache /cache/models /cache/ytdl
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: state
+              mountPath: /state
+            - name: cache
+              mountPath: /cache
+      containers:
+        - name: uvr5ui
+          image: '{{ required "Build and verify the image, then set image.repository" .Values.image.repository }}:{{ .Values.image.tag }}'
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: http
+              containerPort: 9999
+          resources:
+            requests:
+              cpu: 500m
+              memory: 3Gi
+            limits:
+              cpu: "5"
+              memory: 15Gi
+          startupProbe:
+            httpGet:
+              path: /config
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /config
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: state
+              mountPath: /app/user_data
+            - name: cache
+              mountPath: /app/models
+              subPath: models
+            - name: cache
+              mountPath: /app/ytdl
+              subPath: ytdl
+            - name: nas-input
+              mountPath: /nas/input
+              readOnly: true
+            - name: nas-output
+              mountPath: /nas/output
+            - name: scratch
+              mountPath: /tmp
+      volumes:
+        - name: state
+          hostPath:
+            path: {{ .Values.userspace.appData | quote }}
+            type: DirectoryOrCreate
+        - name: cache
+          hostPath:
+            path: {{ .Values.userspace.appCache | quote }}
+            type: DirectoryOrCreate
+        - name: nas-input
+          hostPath:
+            path: {{ printf "%s/%s" .Values.sharedlib $input | quote }}
+            type: Directory
+        - name: nas-output
+          hostPath:
+            path: {{ printf "%s/%s" .Values.sharedlib $output | quote }}
+            type: Directory
+        - name: scratch
+          emptyDir:
+            sizeLimit: 12Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: uvr5ui-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: uvr5ui
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 9999
+      targetPort: http
