@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cognee-mcp
+  namespace: {{ .Release.Namespace | quote }}
+data:
+  start.py: |
+    import json, os, re, time, urllib.request, urllib.parse, urllib.error
+    from pathlib import Path
+    os.umask(0o077)
+    base = 'http://127.0.0.1:8000'
+    enabled = os.environ.get('MCP_AUTH_ENABLED', 'false').lower() == 'true'
+    key = os.environ.get('MCP_API_KEY', '') if enabled else ''
+    if enabled and not key:
+        raise RuntimeError('MCP authentication enabled: set MCP_API_KEY')
+    def request(path, data=None, headers=None):
+        req = urllib.request.Request(base+path, data=data, headers=headers or {})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.load(r)
+    if not key:
+        cache = Path('/mcp-state/internal-key.json')
+        for attempt in range(90):
+            try:
+                if cache.exists():
+                    key = json.loads(cache.read_text())['key']
+                    try:
+                        request('/api/v1/auth/me', headers={'X-Api-Key':key})
+                        break
+                    except urllib.error.HTTPError as error:
+                        if error.code not in (401,403): raise
+                token = request('/api/v1/auth/login', urllib.parse.urlencode({'username':'default_user@example.com', 'password':os.environ['DEFAULT_USER_PASSWORD']}).encode(), {'Content-Type':'application/x-www-form-urlencoded'})['access_token']
+                result = request('/api/v1/auth/api-keys', json.dumps({'name':'Olares internal MCP'}).encode(), {'Content-Type':'application/json','Authorization':'Bearer '+token})
+                key = result['key']
+                tmp = cache.with_suffix('.tmp')
+                tmp.write_text(json.dumps(result)); tmp.chmod(0o600); tmp.replace(cache)
+                break
+            except (urllib.error.URLError, KeyError):
+                if attempt == 89: raise RuntimeError('Could not initialize internal MCP identity') from None
+                time.sleep(5)
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+',key):
+        raise ValueError('Invalid MCP key format')
+    auth = Path('/mcp-auth/key.conf')
+    checks = 'if ($http_x_api_key = "") { return 401; }\nif ($http_x_api_key != $cognee_mcp_key) { return 403; }\n' if enabled else ''
+    auth.write_text('set $cognee_mcp_key '+json.dumps(key)+';\n')
+    Path('/mcp-auth/check.conf').write_text(checks)
+    Path('/mcp-auth/ready').touch()
+    os.environ['COGNEE_API_KEY'] = key
+    print('Official MCP ready; client authentication '+('enabled' if enabled else 'disabled'),flush=True)
+    os.execv('/app/.venv/bin/cognee-mcp',['cognee-mcp','--transport','http','--host','127.0.0.1','--port','8001','--api-url',base,'--api-auth-scheme','x-api-key','--tool-mode','all','--no-migration'])
+  nginx.conf: |
+    pid /tmp/mcp-nginx.pid;
+    error_log /dev/stderr warn;
+    events {worker_connections 128;}
+    http {
+      access_log /dev/stdout;
+      client_body_temp_path /tmp/mcp-body;
+      proxy_temp_path /tmp/mcp-proxy;
+      fastcgi_temp_path /tmp/mcp-fastcgi;
+      uwsgi_temp_path /tmp/mcp-uwsgi;
+      scgi_temp_path /tmp/mcp-scgi;
+      server {
+        listen 8083;
+        client_max_body_size 15m;
+        include /mcp-auth/key.conf;
+        location ~ ^/mcp/?$ {
+          include /mcp-auth/check.conf;
+          proxy_pass http://127.0.0.1:8001;
+          proxy_set_header Host 127.0.0.1:8001;
+          proxy_set_header Origin "";
+          proxy_http_version 1.1;
+          proxy_set_header Connection "";
+          proxy_buffering off;
+          proxy_read_timeout 1800s;
+          proxy_send_timeout 1800s;
+        }
+        location / { return 404; }
+      }
+    }
