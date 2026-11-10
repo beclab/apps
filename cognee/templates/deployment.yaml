@@ -1,0 +1,177 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognee
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.cognee.replicaCount }}
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: cognee}}
+  template:
+    metadata:
+      labels: {app: cognee}
+      annotations:
+        checksum/mcp: {{ include (print $.Template.BasePath "/mcp.yaml") . | sha256sum }}
+        checksum/proxy: {{ include (print $.Template.BasePath "/proxy.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext: {runAsUser: 0}
+        command: [sh, -ec, 'mkdir -p /storage/system /storage/data /storage/cache /storage/mcp; chown 1000:1000 /storage /storage/system /storage/data /storage/cache /storage/mcp /compat']
+        volumeMounts: [{name: data, mountPath: /storage}, {name: compat, mountPath: /compat}]
+      - name: init-live-events-compat
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        image: docker.io/cognee/cognee:1.6.6
+        command: [python, -c]
+        args:
+        - |
+          # Upstream 1.6.6 can mix aware session timestamps with a naive UTC cursor.
+          # Normalize only the comparison; authorization and returned timestamps stay intact.
+          from pathlib import Path
+          source = Path('/app/cognee/api/v1/visualize/visualize.py').read_text()
+          old = 'and event_time > cutoff'
+          assert source.count(old) == 1, 'Pinned upstream compatibility pattern changed'
+          Path('/compat/visualize.py').write_text(source.replace(old, 'and _as_naive_utc(event_time) > cutoff'))
+          Path('/compat/visualize.py').chmod(0o644)
+        volumeMounts: [{name: compat, mountPath: /compat}]
+      containers:
+      - name: cognee
+        image: docker.io/cognee/cognee:1.6.6
+        envFrom: [{secretRef: {name: cognee-app}}]
+        env:
+        - {name: ENV, value: production}
+        - {name: HOME, value: /cognee-storage}
+        - {name: SYSTEM_ROOT_DIRECTORY, value: /cognee-storage/system}
+        - {name: DATA_ROOT_DIRECTORY, value: /cognee-storage/data}
+        - {name: HF_HOME, value: /cognee-storage/cache/huggingface}
+        - {name: FASTEMBED_CACHE_PATH, value: /cognee-storage/cache/fastembed}
+        - {name: DB_PROVIDER, value: postgres}
+        - {name: DB_HOST, value: '{{ .Values.postgres.host }}'}
+        - {name: DB_PORT, value: '{{ .Values.postgres.port }}'}
+        - {name: DB_NAME, value: '{{ .Values.postgres.databases.cognee }}'}
+        - {name: DB_USERNAME, value: '{{ .Values.postgres.username }}'}
+        - {name: LLM_PROVIDER, value: openai}
+        - {name: LLM_MODEL, value: openai/default-chat}
+        - {name: LLM_ENDPOINT, value: 'https://router.{{ .Values.user.zone }}/v1'}
+        - {name: LLM_API_KEY, value: olares}
+        - {name: EMBEDDING_PROVIDER, value: fastembed}
+        - {name: EMBEDDING_MODEL, value: BAAI/bge-small-en-v1.5}
+        - {name: EMBEDDING_DIMENSIONS, value: '384'}
+        - {name: GRAPH_DATABASE_PROVIDER, value: kuzu}
+        - {name: DATABASE_MAX_LRU_CACHE_SIZE, value: '2'}
+        - {name: DATASET_QUEUE_MAX_CONCURRENT, value: '2'}
+        - {name: KUZU_NUM_THREADS, value: '2'}
+        - {name: KUZU_BUFFER_POOL_SIZE, value: '1073741824'}
+        - {name: VECTOR_DB_PROVIDER, value: lancedb}
+        - {name: ENABLE_BACKEND_ACCESS_CONTROL, value: 'true'}
+        - {name: CORS_ALLOWED_ORIGINS, value: 'https://{{ .Values.domain.cognee }}'}
+        ports: [{name: api, containerPort: 8000}]
+        startupProbe: {httpGet: {path: /health, port: api}, periodSeconds: 10, failureThreshold: 90}
+        readinessProbe: {httpGet: {path: /health, port: api}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 200m, memory: 1Gi}
+          limits: {cpu: '3', memory: 9Gi}
+        volumeMounts:
+        - {name: data, mountPath: /cognee-storage}
+        - {name: compat, mountPath: /app/cognee/api/v1/visualize/visualize.py, subPath: visualize.py, readOnly: true}
+      - name: official-mcp
+        image: docker.io/cognee/cognee-mcp:main-df2b4fa
+        command: [/app/.venv/bin/python, /mcp-config/start.py]
+        env:
+        - name: MCP_API_KEY
+          valueFrom:
+            secretKeyRef: {name: cognee-app, key: MCP_API_KEY}
+        - name: DEFAULT_USER_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: cognee-app, key: DEFAULT_USER_PASSWORD}
+        - {name: MCP_AUTH_ENABLED, value: '{{ .Values.olaresEnv.MCP_AUTH_ENABLED | default "false" }}'}
+        - {name: HOME, value: /tmp}
+        - {name: COGNEE_API_AUTH_SCHEME, value: x-api-key}
+        - {name: COGNEE_MCP_AGENT_SCOPED, value: 'false'}
+        ports: [{name: mcp, containerPort: 8001}]
+        startupProbe:
+          exec:
+            command: [/app/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          exec:
+            command: [/app/.venv/bin/python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+          periodSeconds: 10
+        resources:
+          requests: {cpu: 50m, memory: 256Mi}
+          limits: {cpu: '1', memory: 1536Mi}
+        volumeMounts:
+        - {name: mcp-config, mountPath: /mcp-config, readOnly: true}
+        - {name: mcp-auth, mountPath: /mcp-auth}
+        - {name: data, mountPath: /mcp-state, subPath: mcp}
+      - name: mcp-proxy
+        image: docker.io/library/nginx:1.30.6-alpine
+        command: [sh, -ec, 'until test -f /mcp-auth/ready; do sleep 1; done; exec nginx -c /mcp-config/nginx.conf -g "daemon off;"']
+        ports: [{name: mcp-api, containerPort: 8083}]
+        readinessProbe: {tcpSocket: {port: mcp-api}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 200m, memory: 64Mi}
+        volumeMounts:
+        - {name: mcp-config, mountPath: /mcp-config, readOnly: true}
+        - {name: mcp-auth, mountPath: /mcp-auth, readOnly: true}
+      - name: frontend
+        image: docker.io/cognee/cognee-ui:1.6.6
+        env:
+        - name: DEFAULT_USER_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: cognee-app, key: DEFAULT_USER_PASSWORD}
+        - {name: COGNEE_BACKEND_URL, value: 'http://127.0.0.1:8000'}
+        - {name: NEXT_TELEMETRY_DISABLED, value: '1'}
+        ports: [{name: web, containerPort: 3000}]
+        readinessProbe: {tcpSocket: {port: web}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 80m, memory: 192Mi}
+          limits: {cpu: 800m, memory: 960Mi}
+      - name: proxy
+        image: docker.io/library/nginx:1.30.6-alpine
+        command: [nginx, -c, /config/nginx.conf, -g, 'daemon off;']
+        ports: [{name: http, containerPort: 8080}]
+        readinessProbe: {tcpSocket: {port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits: {cpu: 200m, memory: 64Mi}
+        volumeMounts: [{name: proxy, mountPath: /config, readOnly: true}]
+      - name: agent-api-proxy
+        image: docker.io/library/nginx:1.30.6-alpine
+        command: [nginx, -c, /agent-api/nginx.conf, -g, 'daemon off;']
+        ports: [{name: agent-api, containerPort: 8082}]
+        readinessProbe: {tcpSocket: {port: agent-api}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 20m, memory: 32Mi}
+          limits: {cpu: 200m, memory: 64Mi}
+        volumeMounts: [{name: agent-api-config, mountPath: /agent-api, readOnly: true}]
+      volumes:
+      - name: mcp-config
+        configMap: {name: cognee-mcp}
+      - name: mcp-auth
+        emptyDir: {medium: Memory}
+      - name: agent-api-config
+        configMap: {name: cognee-agent-api}
+      - name: compat
+        emptyDir: {}
+      - name: data
+        hostPath: {path: '{{ .Values.userspace.appData }}/data', type: DirectoryOrCreate}
+      - name: proxy
+        configMap: {name: cognee-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognee
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: cognee}
+  ports: [{name: http, port: 3000, targetPort: http}, {name: agent-api, port: 3001, targetPort: agent-api}, {name: mcp-api, port: 3002, targetPort: mcp-api}]
