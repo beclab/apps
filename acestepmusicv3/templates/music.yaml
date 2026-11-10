@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: music
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: music
+spec:
+  replicas: {{ .Values.workloads.music.replicaCount }}
+  selector:
+    matchLabels:
+      app: music
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: music
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          securityContext:
+            runAsUser: 0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              for d in /data /data/media /data/tmp; do
+                mkdir -p "$d" && chown 1000:1000 "$d"
+              done
+          volumeMounts:
+            - name: app-data
+              mountPath: /data
+      containers:
+        - name: music
+          image: {{ .Values.image }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8440
+          env:
+            - name: MUSIC_MODEL
+              value: Olares/ACE-Step/acestep-v15-xl-sft
+            - name: MUSIC_MODEL_SETUP_URL
+              value: http://download-svc:8090
+            - name: MUSIC_ADDR
+              value: ":8440"
+            - name: MUSIC_DATA_DIR
+              value: /data
+            - name: ROUTER_BASE_URL
+              value: {{ printf "https://router.%s/v1" .Values.user.zone | quote }}
+            - name: OLARES_APP_ID
+              value: acestepmusicv3
+            - name: MUSIC_ROUTER_POLL_INTERVAL
+              value: "2s"
+            - name: MUSIC_ROUTER_TIMEOUT
+              value: "5m30s"
+            - name: MUSIC_JOB_TIMEOUT
+              value: "45m"
+            - name: MUSIC_DRAFT_TIMEOUT
+              value: "20m"
+            - name: MUSIC_STREAM_FIRST_BYTE_TIMEOUT
+              value: "10m"
+            - name: MUSIC_STREAM_IDLE_TIMEOUT
+              value: "90s"
+            - name: POSTGRES_HOST
+              value: {{ .Values.postgres.host | quote }}
+            - name: POSTGRES_PORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgres.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgres.databases.music | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-app
+                  key: DB_PASSWORD
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: app-data
+              mountPath: /data
+      volumes:
+        - name: app-data
+          hostPath:
+            path: {{ printf "%s/studio" .Values.userspace.appData | quote }}
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: music-svc
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: music
+  ports:
+    - name: http
+      port: 8440
+      targetPort: 8440
+      protocol: TCP
