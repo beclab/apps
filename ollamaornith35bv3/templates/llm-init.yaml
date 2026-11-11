@@ -46,10 +46,10 @@
 {{- /* User ENGINE_ARGS for llm-init: never OLLAMA_KEEP_ALIVE (see engineArgsForLlminit).
        Empty when user leaves ENGINE_ARGS blank — keep_alive is ollama-daemon-only. */ -}}
 {{- $engineArgs := include "ollamaornith35bv3.engineArgsForLlminit" (dict "Args" ($oe.ENGINE_ARGS | default "") "IsCpu" $isCpuMode) -}}
-{{- /* Shared RUN_DIR host path. Same convention as llamacppllmbasev3:
-       appCache (run/scratch state, not user data), namespaced per release.
+{{- /* Shared Common RUN_DIR host path for cross-node runtime state,
+       namespaced per release.
        Declared in both templates -- helm renders each file on its own. */ -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
 # llm-init Pod (no GPU). Talks to the ollama daemon via the "ollama"
 # Service on :11434 (defined in templates/ollama.yaml). llm-init derives
@@ -95,7 +95,43 @@ spec:
           hostPath:
             path: "{{ $runStateHostPath }}"
             type: DirectoryOrCreate
+        - name: legacy-run-state
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/llm-init-run/{{ .Release.Name }}"
+            type: DirectoryOrCreate
       initContainers:
+        - name: migrate-run-state
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /run/llm-init
+              chown 1000:1000 /run/llm-init
+              if [ -f /run/llm-init/model-spec.json ]; then
+                exit 0
+              fi
+              if [ -f /legacy-run-state/model-spec.json ]; then
+                # Publish the config last so an interrupted copy can be retried.
+                stage=/run/llm-init/.legacy-migration
+                mkdir -p "$stage"
+                cp -a /legacy-run-state/. "$stage/"
+                mv "$stage/model-spec.json" /run/llm-init/.model-spec.migrating
+                cp -a "$stage/." /run/llm-init/
+                rm -rf "$stage"
+                mv /run/llm-init/.model-spec.migrating /run/llm-init/model-spec.json
+              fi
+          volumeMounts:
+            - name: legacy-run-state
+              mountPath: /legacy-run-state
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
         # hostPath dirs are created root-owned; llm-init runs as UID 1000.
         - name: init-chown
           image: docker.io/beclab/aboveos-busybox:1.37.0
