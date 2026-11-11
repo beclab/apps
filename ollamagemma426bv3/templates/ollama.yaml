@@ -28,10 +28,10 @@
 {{- $memRequest = printf "%sMi" $gpuMiB -}}
 {{- $memLimit = printf "%sMi" $gpuMiB -}}
 {{- end -}}
-{{- /* Shared RUN_DIR host path. Same convention as llamacppllmbasev3:
-       appCache (run/scratch state, not user data), namespaced per release.
+{{- /* Shared Common RUN_DIR host path for cross-node runtime state,
+       namespaced per release.
        Declared in both templates -- helm renders each file on its own. */ -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
 # Ollama daemon Pod (single container) so the Olares
 # applications.app.bytetrade.io/gpu-inject annotation cleanly targets just
@@ -66,8 +66,6 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: ollama
-        # Target for llm-init's same-node affinity; keep this label off llm-init.
-        app.kubernetes.io/instance: '{{ .Release.Name }}'
     spec:
       restartPolicy: Always
       volumes:
@@ -85,8 +83,8 @@ spec:
         # CUDA JIT compile cache, kept under appCommon/ollama beside the blobs
         # on purpose: appCommon is shared across every ollama app, so one JIT
         # cache serves all of them, and purging the model store drops the
-        # matching cache with it. appCache is granted (the RUN_DIR handoff
-        # below uses it) but is per-app -- moving this there would fragment
+        # matching cache with it. Legacy appCache is per-app; moving this
+        # cache there would fragment
         # that sharing and orphan every existing install's warm cache.
         - name: cuda-compute-cache
           hostPath:
