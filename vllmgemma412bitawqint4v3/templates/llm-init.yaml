@@ -48,9 +48,8 @@
        empty -> huggingface.co with no auth. */ -}}
 {{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
 {{- $hfToken := $oe.HF_TOKEN | default "" -}}
-{{- /* Per-release hostPath under App Cache so sibling pods share the same
-       sentinel / model_path without persisting run-state across uninstall. */ -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- /* Per-release shared Common directory for cross-node runtime state. */ -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
 # Split into two Deployments to decouple readiness:
 #   - llm-init (this file, no GPU): downloads the HF model, writes the sentinel,
@@ -82,20 +81,6 @@ spec:
         io.kompose.service: llm-init
     spec:
       restartPolicy: Always
-      # run-state uses node-local appCache, so follow the engine onto its node.
-      # Keep the instance label off this Pod to prevent self-affinity scheduling.
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: kubernetes.io/hostname
-              labelSelector:
-                matchExpressions:
-                  - key: app.kubernetes.io/instance
-                    operator: In
-                    values:
-                      - '{{ .Release.Name }}'
-              namespaces:
-                - '{{ .Release.Namespace }}'
       volumes:
         # Shared cross-app HF Hub cache (App Common); image bakes HF_HUB_CACHE.
         - name: hf-cache
@@ -107,7 +92,43 @@ spec:
           hostPath:
             path: "{{ $runStateHostPath }}"
             type: DirectoryOrCreate
+        - name: legacy-run-state
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/llm-init-run/{{ .Release.Name }}"
+            type: DirectoryOrCreate
       initContainers:
+        - name: migrate-run-state
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /run/llm-init
+              chown 1000:1000 /run/llm-init
+              if [ -f /run/llm-init/model-spec.json ]; then
+                exit 0
+              fi
+              if [ -f /legacy-run-state/model-spec.json ]; then
+                # Publish the config last so an interrupted copy can be retried.
+                stage=/run/llm-init/.legacy-migration
+                mkdir -p "$stage"
+                cp -a /legacy-run-state/. "$stage/"
+                mv "$stage/model-spec.json" /run/llm-init/.model-spec.migrating
+                cp -a "$stage/." /run/llm-init/
+                rm -rf "$stage"
+                mv /run/llm-init/.model-spec.migrating /run/llm-init/model-spec.json
+              fi
+          volumeMounts:
+            - name: legacy-run-state
+              mountPath: /legacy-run-state
+              readOnly: true
+            - name: run-state
+              mountPath: /run/llm-init
+          securityContext:
+            runAsUser: 0
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
         # hostPath dirs are created root-owned; llm-init runs as UID 1000.
         - name: init-chown
           image: docker.io/beclab/aboveos-busybox:1.37.0
