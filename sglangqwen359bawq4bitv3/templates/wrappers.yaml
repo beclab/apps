@@ -39,15 +39,22 @@ data:
     # arrive late - the two containers are separate Deployments with no ordering
     # between them - so waiting here is the normal path.
     WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    # Shared storage can briefly report a file that cannot yet be opened.
+    _common_copy=$(mktemp "${TMPDIR:-/tmp}/sglang-common.XXXXXX")
     _wc=0
-    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+    while ! cp "$WRAPPER_COMMON" "$_common_copy" 2>/dev/null; do
+        if [ "$_wc" -ge "${WRAPPER_COMMON_WAIT:-3600}" ]; then
+            rm -f "$_common_copy"
+            printf '[wrapper] %s could not be read\n' "$WRAPPER_COMMON" >&2
+            exit 1
+        fi
         printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
         sleep 5
         _wc=$((_wc + 5))
     done
-    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
-    unset _wc
-    . "$WRAPPER_COMMON"
+    . "$_common_copy"
+    rm -f "$_common_copy"
+    unset _wc _common_copy
 
     looks_like_hf_repo_id() {
         s=$1
