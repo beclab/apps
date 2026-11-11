@@ -22,18 +22,19 @@
 #
 # Build (all args optional; defaults shown):
 #   docker buildx build \
-#     --build-arg HERMES_VERSION=v0.22.2 \
+#     --build-arg HERMES_VERSION=v0.23.1 \
 #     --build-arg TARGET_UID=1000 \
 #     --build-arg TARGET_GID=1000 \
 #     --platform linux/amd64,linux/arm64 \
-#     -t beclab/harveyff-hermes-agent:v0.22.2-uid1000 --push .
+#     -t harveyff/hermes-agent:v0.23.1-uid1000-multiarch --push .
+# Then transfer the source image to beclab through the Olares image-locker API.
 #
 # Upgrades: pass the target --build-arg HERMES_VERSION and review upstream
 # image layout/toolchain changes before rebuilding.
 # ---------------------------------------------------------------------------
 
 # Global ARG consumed by FROM. Must be declared before the first FROM.
-ARG HERMES_VERSION=v0.22.2
+ARG HERMES_VERSION=v0.23.1
 FROM nousresearch/hermes-agent:${HERMES_VERSION}
 
 # Re-declare after FROM to make these usable inside RUN below.
@@ -49,6 +50,8 @@ USER root
 # stale package mirror cannot hide the requested client release.
 # Newer images keep uv in the PM store instead of exposing it on PATH.
 # Resolve the installed launcher without downloading a second toolchain.
+# Keep dependency installation and UID remapping in one layer so the venv is
+# not duplicated in two ownership-only layers.
 RUN set -eu; \
     UV_BIN="$(command -v uv || true)"; \
     if [ -z "$UV_BIN" ]; then \
@@ -59,9 +62,7 @@ RUN set -eu; \
         --python /opt/hermes/.venv/bin/python3 \
         "hindsight-client==${HINDSIGHT_VERSION}" \
     && /opt/hermes/.venv/bin/python3 -c "from importlib.metadata import version; import hindsight_client; print(version('hindsight-client'))" \
-    && chown -hR hermes:hermes /opt/hermes/.venv
-
-RUN set -eu; \
+    && chown -hR hermes:hermes /opt/hermes/.venv || exit 1; \
     # Capture the upstream-baked UID/GID instead of hardcoding 10000, so the
     # sweep still works if upstream ever changes its default.
     OLD_UID="$(id -u hermes)"; \
