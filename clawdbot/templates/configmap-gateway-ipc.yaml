@@ -102,6 +102,28 @@ data:
     mkdir -p "$(dirname "$SENTINEL")" 2>/dev/null || true
     rm -f "$SENTINEL" "$FLAG" 2>/dev/null || true
 
+    STATE=/home/node/.openclaw
+    # Existing configured installations start normally. Fresh setup stays explicit
+    # even if a cancelled wizard has already saved a partial model configuration.
+    if [ ! -f "$STATE/.activation-required" ] && [ ! -f "$STATE/.activation-complete" ]; then
+      if ! /usr/local/bin/node -e 'const c=require(process.argv[1]);const m=c.agents?.defaults?.model;process.exit((typeof m==="string"?m:m?.primary)?0:1)' "$STATE/openclaw.json"; then
+        touch "$STATE/.activation-required"
+      fi
+    fi
+    if [ -f "$STATE/.activation-required" ] && [ ! -f "$STATE/.activation-complete" ]; then
+      /usr/local/bin/node /opt/olares/bin/setup-server.mjs &
+      child=$!
+      echo "[firstboot] serving setup page; Gateway is not running"
+      until [ -f "$STATE/.activation-complete" ]; do
+        kill -0 "$child" 2>/dev/null || exit 1
+        sleep 1
+      done
+      kill -TERM "$child"
+      wait "$child" || true
+      child=""
+      echo "[firstboot] setup committed; starting managed Gateway"
+    fi
+
     cd /app
     while :; do
       echo "[gateway-wrapper] starting openclaw gateway"

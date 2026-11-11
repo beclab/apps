@@ -23,4 +23,71 @@ data:
           ;;
       esac
     fi
+    if [ "${1:-}" = "onboard" ] && [ "${2:-}" = "--classic" ]; then
+      shift 2
+      exec /usr/local/bin/node /opt/olares/bin/firstboot.mjs "$@"
+    fi
     cd /app && exec /usr/local/bin/node /app/openclaw.mjs "$@"
+
+  firstboot.mjs: |
+    import fs from 'node:fs';
+    import {spawn} from 'node:child_process';
+    const state='/home/node/.openclaw',lock=state+'/.activation-lock',complete=state+'/.activation-complete';
+    const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+    const startTime=pid=>{try{return fs.readFileSync(`/proc/${pid}/stat`,'utf8').split(') ')[1].split(' ')[19];}catch{return null;}};
+    function acquire(){
+     const mine={pid:process.pid,start:startTime(process.pid)};
+     for(let i=0;i<2;i++){
+      try{fs.mkdirSync(lock);fs.writeFileSync(lock+'/owner.json',JSON.stringify(mine));return;}
+      catch(e){if(e.code!=='EEXIST')throw e;}
+      let owner;try{owner=JSON.parse(fs.readFileSync(lock+'/owner.json','utf8'));}catch{throw Error('Activation lock is incomplete; retry shortly.');}
+      if(startTime(owner.pid)===owner.start)throw Error('Another activation is running. Return to that terminal.');
+      fs.rmSync(lock,{recursive:true});
+     }
+     throw Error('Could not acquire activation lock.');
+    }
+    function release(){try{const o=JSON.parse(fs.readFileSync(lock+'/owner.json','utf8'));if(o.pid===process.pid)fs.rmSync(lock,{recursive:true});}catch{}}
+    async function run(args){return await new Promise(resolve=>{
+     const p=spawn('/usr/local/bin/node',['/app/openclaw.mjs',...args],{stdio:'inherit',cwd:'/app',env:process.env});
+     const signal=s=>{p.kill(s);};const term=()=>signal('SIGTERM'),hup=()=>signal('SIGHUP');
+     process.on('SIGTERM',term);process.on('SIGHUP',hup);
+     p.on('exit',(code)=>{process.off('SIGTERM',term);process.off('SIGHUP',hup);resolve(code??1);});
+     p.on('error',e=>{console.error(e.message);resolve(1);});
+    });}
+    async function ready(){
+     const c=JSON.parse(fs.readFileSync(state+'/openclaw.json','utf8'));
+     const headers=c.gateway?.auth?.token?{Authorization:'Bearer '+c.gateway.auth.token}:{};
+     for(let i=0;i<90;i++){try{const r=await fetch('http://127.0.0.1:18789/readyz',{headers,signal:AbortSignal.timeout(1500)});if(r.ok)return;}catch{}await sleep(1000);}
+     throw Error('Setup is saved, but Gateway readiness could not be confirmed. Olares manages Gateway automatically; do not run "openclaw gateway run". Check the app status and Gateway logs in Olares, then retry "openclaw onboard --classic". You do not need to repeat setup.');
+    }
+    try{
+     if(!fs.existsSync(complete)){
+      if(!fs.existsSync(state+'/.activation-required'))throw Error('This installation is already configured. Use openclaw configure for changes.');
+      acquire();
+      console.log('[Olares] After setup, Olares will start Gateway automatically and open chat.');
+      console.log('[Olares] If the wizard suggests "openclaw gateway run", do not run it. Wait for the Olares startup result below.');
+      const code=await run(['onboard','--classic','--skip-ui','--no-install-daemon',...process.argv.slice(2)]);
+      if(code!==0){release();console.error('[Olares] Setup did not finish. Automatic Gateway startup has not been requested. Retry "openclaw onboard --classic" to continue setup.');process.exit(code);}
+      console.log('[Olares] No manual Gateway start is needed. Validating the saved configuration...');
+      const c=JSON.parse(fs.readFileSync(state+'/openclaw.json','utf8'));const m=c.agents?.defaults?.model;
+      if(!(typeof m==='string'?m:m?.primary))throw Error('No default model saved; activation remains pending.');
+      const valid=await run(['config','validate']);if(valid!==0)throw Error('Configuration validation failed; activation remains pending.');
+      fs.writeFileSync(complete+'.pending',JSON.stringify({completedAt:new Date().toISOString()}),{mode:0o600});fs.renameSync(complete+'.pending',complete);release();
+     }
+     console.log('[Olares] Waiting for the automatically managed Gateway. No command is needed...');await ready();
+     console.log('[Olares] Gateway is ready. Opening chat; Gateway will keep running after you close this terminal.');
+     process.exitCode=await run(['tui']);
+    }catch(e){release();console.error(e.message);process.exitCode=1;}
+
+  setup-server.mjs: |
+    import http from 'node:http';
+    const page='<!doctype html><meta charset="utf-8"><title>OpenClaw setup</title><h1>OpenClaw is ready for activation</h1><p>Open OpenClaw CLI and run <code>openclaw onboard --classic</code>.</p><p>The background service will start automatically after setup succeeds.</p>';
+    const server=http.createServer((req,res)=>{
+     res.setHeader('Cache-Control','no-store');
+     if(req.url==='/olares-setup-ready'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify({phase:'awaiting-activation',gatewayReady:false}));return;}
+     if(req.url==='/'||req.url==='/index.html'){res.setHeader('Content-Type','text/html; charset=utf-8');res.end(page);return;}
+     res.writeHead(503,{'Content-Type':'application/json','Retry-After':'5'});res.end(JSON.stringify({error:'Activation required',gatewayReady:false}));
+    });
+    server.on('upgrade',(_req,socket)=>socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'));
+    server.listen(18789,'0.0.0.0');
+    process.on('SIGTERM',()=>{server.closeAllConnections();server.close(()=>process.exit(0));});
