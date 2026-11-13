@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextaidrawio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: nextaidrawio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: nextaidrawio
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.service: nextaidrawio
+    spec:
+      containers:
+        - name: nextaidrawio
+          image: "ghcr.io/dayuanjiang/next-ai-draw-io:{{ .Values.image.version }}"
+          env:
+            - name: PGID
+              value: "1000"
+            - name: PUID
+              value: "1000"
+            - name: TZ
+              value: Etc/UTC
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 3000m
+              memory: 2Gi
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          volumeMounts:
+            - name: app-data
+              mountPath: /app/data
+      volumes:
+        - name: app-data
+          hostPath:
+            type: DirectoryOrCreate
+            {{- if .Values.sysVersion }}
+              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
+            path: '{{ .Values.userspace.appData }}/app-data'
+              {{- else }}
+            path: '{{ .Values.userspace.appData }}/nextaidrawio/app-data'
+              {{- end }}
+            {{- else }}
+            path: '{{ .Values.userspace.appData }}/nextaidrawio/app-data'
+            {{- end }}
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextaidrawio
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: nextaidrawio
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+  selector:
+    io.kompose.service: nextaidrawio
