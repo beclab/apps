@@ -1,0 +1,258 @@
+{{- /*
+  nginx.conf for the `provider-inject` openresty sidecar in the Wise frontend
+  Pod (wise Deployment).
+
+  The Wise frontend nginx (wise.conf, baked into the beclab/wise image) proxies
+  its files and download calls to this sidecar over localhost:
+      /api, /upload, /videos            -> 127.0.0.1:18081  (files)
+      /api/download|user|system|url     -> 127.0.0.1:18082  (download)
+
+  PER-USER IDENTITY (why this is not a plain token-injecting proxy):
+  wisev3 is a v3 shared app — one cluster-wide frontend Pod (SA `wise-provider`)
+  serves every user. The os-framework provider-proxy derives the tenant
+  (X-BFL-USER) from the authenticated SA (UserFromServiceAccount), NOT from any
+  forwarded header. So presenting wise-provider's own token collapses every
+  caller to the shared-namespace owner (installing Admin) — all uploads /
+  downloads get mis-attributed.
+
+  Instead, for each request this sidecar:
+    1. reads the gateway-stamped `X-Bfl-User` (the real end user);
+    2. MINTS a short-lived token for that user's OWN `user-backend` SA in
+       `user-system-<user>` (a real user namespace) via the kube-apiserver
+       TokenRequest API — authenticated with the Pod's wise-provider token
+       (granted `create serviceaccounts/token` in rbac.yaml). Tokens are cached
+       per user in a shared dict (TTL < issued lifetime) so we don't mint on
+       every request;
+    3. presents that minted token as the Bearer to the provider-proxy — now
+       UserFromServiceAccount resolves the real user, and authorization comes
+       from the per-user bindings in system-server permission.yaml
+       (backend:<user>:user-backend:{download,files}-provider);
+    4. pins Host / X-Forwarded-Host / X-Provider-Proxy to the provider's
+       `provider-service-ref` (the authorizer only evaluates the ClusterRole
+       rules when these match the annotation; a browser Host -> 403);
+    5. clears the browser Cookie (identity is the minted SA token).
+
+  The mint audience / expiration mirror the knowledge backend
+  (K8sService.requestProviderToken) so the provider-proxy TokenReview accepts
+  the token identically on both paths.
+
+  We ship a full nginx.conf (not a server snippet) loaded via `openresty -c`,
+  replacing the bitnami image default (which also listens on 8080).
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wise-provider-nginx-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: wise
+data:
+  nginx.conf: |
+    worker_processes  auto;
+    error_log  "/opt/bitnami/openresty/nginx/logs/error.log";
+    pid        "/opt/bitnami/openresty/nginx/tmp/nginx.pid";
+
+    events {
+        worker_connections  1024;
+    }
+
+    http {
+        include       mime.types;
+        default_type  application/octet-stream;
+
+        client_body_temp_path  "/opt/bitnami/openresty/nginx/tmp/client_body" 1 2;
+        proxy_temp_path        "/opt/bitnami/openresty/nginx/tmp/proxy" 1 2;
+        fastcgi_temp_path      "/opt/bitnami/openresty/nginx/tmp/fastcgi" 1 2;
+        scgi_temp_path         "/opt/bitnami/openresty/nginx/tmp/scgi" 1 2;
+        uwsgi_temp_path        "/opt/bitnami/openresty/nginx/tmp/uwsgi" 1 2;
+
+        sendfile           on;
+        keepalive_timeout  65;
+        server_tokens      off;
+
+        map $http_upgrade $connection_upgrade {
+            default upgrade;
+            ''      close;
+        }
+
+        # Match wise.conf's cap so large uploads/downloads are not truncated.
+        client_max_body_size 4000M;
+
+        # Per-user minted `user-backend` tokens, keyed by X-Bfl-User. Shared by
+        # both server blocks: the token identifies the user, not the provider,
+        # so the same token authorizes files and download. ~10m holds thousands
+        # of users' tokens; entries auto-expire (see cache:set TTL below).
+        lua_shared_dict user_token_cache 10m;
+
+        # kube-apiserver upstream for the TokenRequest (mint) call. A literal
+        # upstream name resolves once at startup via cluster DNS (same as the
+        # provider-svc.os-framework hosts below), so no runtime `resolver` is
+        # needed. nginx does not verify upstream TLS by default; the call is
+        # in-cluster to kubernetes.default and is itself bearer-authenticated.
+        upstream kube_apiserver {
+            server kubernetes.default.svc:443;
+        }
+
+        # ---- files provider: /api/resources, /upload, /videos, ... ----------
+        server {
+            listen 18081;
+
+            location = /healthz {
+                access_log off;
+                add_header Content-Type text/plain;
+                return 200 'ok\n';
+            }
+
+            # Internal endpoint that performs the kube-apiserver TokenRequest.
+            # Reached only via ngx.location.capture below (subrequests must live
+            # in the same server). The trailing "/" on proxy_pass strips the
+            # /__mint/ prefix so the captured URI maps 1:1 onto the apiserver
+            # path (/api/v1/namespaces/.../serviceaccounts/user-backend/token).
+            location /__mint/ {
+                internal;
+                # Pod (wise-provider) SA token that authenticates this mint call
+                # to the apiserver. Projected at mode 0644 so the non-root worker
+                # can read it (the auto-mounted 0600 token is root-only). Only
+                # read on a cache miss (this location is hit only when minting).
+                set_by_lua_block $sa_bearer {
+                    local f = io.open("/var/run/secrets/tokens/wise-token", "r")
+                    if not f then return "" end
+                    local t = f:read("*a")
+                    f:close()
+                    if not t then return "" end
+                    return "Bearer " .. (t:gsub("%s+$", ""))
+                }
+                proxy_http_version 1.1;
+                proxy_set_header Host          kubernetes.default.svc;
+                proxy_set_header Authorization $sa_bearer;
+                proxy_set_header Content-Type  "application/json";
+                proxy_pass https://kube_apiserver/;
+            }
+
+            location / {
+                access_by_lua_block {
+                    local user = ngx.var.http_x_bfl_user
+                    if not user or user == "" then
+                        ngx.log(ngx.ERR, "provider-inject(files): missing X-Bfl-User")
+                        return ngx.exit(401)
+                    end
+
+                    local cache = ngx.shared.user_token_cache
+                    local tok = cache:get(user)
+                    if not tok then
+                        local body = '{"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","spec":{"audiences":["https://kubernetes.default.svc.cluster.local"],"expirationSeconds":3600}}'
+                        local res = ngx.location.capture(
+                            "/__mint/api/v1/namespaces/user-system-" .. user ..
+                                "/serviceaccounts/user-backend/token",
+                            { method = ngx.HTTP_POST, body = body }
+                        )
+                        if not res or (res.status ~= 200 and res.status ~= 201) then
+                            ngx.log(ngx.ERR, "provider-inject(files): mint failed user=", user,
+                                " status=", res and res.status, " body=", res and res.body)
+                            return ngx.exit(502)
+                        end
+                        local data = require("cjson.safe").decode(res.body)
+                        tok = data and data.status and data.status.token
+                        if not tok or tok == "" then
+                            ngx.log(ngx.ERR, "provider-inject(files): mint no token user=", user)
+                            return ngx.exit(502)
+                        end
+                        -- Cache below the 3600s issued TTL (mirrors knowledge's
+                        -- exp-600) so we never hand out an about-to-expire token.
+                        cache:set(user, tok, 3000)
+                    end
+
+                    ngx.req.set_header("Authorization", "Bearer " .. tok)
+                    ngx.req.set_header("X-Forwarded-Host", "files-provider-svc.os-framework:28080")
+                    ngx.req.set_header("X-Provider-Proxy", "files-provider-svc.os-framework:28080")
+                    ngx.req.clear_header("Cookie")
+                }
+                proxy_http_version 1.1;
+                proxy_set_header Host              files-provider-svc.os-framework:28080;
+                proxy_set_header X-Real-IP         $remote_addr;
+                proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Upgrade           $http_upgrade;
+                proxy_set_header Connection        $connection_upgrade;
+                proxy_pass http://files-provider-svc.os-framework:28080;
+                proxy_read_timeout 600s;
+                proxy_send_timeout 600s;
+            }
+        }
+
+        # ---- download provider: /api/download, /api/user, /api/system, /api/url
+        server {
+            listen 18082;
+
+            location = /healthz {
+                access_log off;
+                add_header Content-Type text/plain;
+                return 200 'ok\n';
+            }
+
+            location /__mint/ {
+                internal;
+                set_by_lua_block $sa_bearer {
+                    local f = io.open("/var/run/secrets/tokens/wise-token", "r")
+                    if not f then return "" end
+                    local t = f:read("*a")
+                    f:close()
+                    if not t then return "" end
+                    return "Bearer " .. (t:gsub("%s+$", ""))
+                }
+                proxy_http_version 1.1;
+                proxy_set_header Host          kubernetes.default.svc;
+                proxy_set_header Authorization $sa_bearer;
+                proxy_set_header Content-Type  "application/json";
+                proxy_pass https://kube_apiserver/;
+            }
+
+            location / {
+                access_by_lua_block {
+                    local user = ngx.var.http_x_bfl_user
+                    if not user or user == "" then
+                        ngx.log(ngx.ERR, "provider-inject(download): missing X-Bfl-User")
+                        return ngx.exit(401)
+                    end
+
+                    local cache = ngx.shared.user_token_cache
+                    local tok = cache:get(user)
+                    if not tok then
+                        local body = '{"apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest","spec":{"audiences":["https://kubernetes.default.svc.cluster.local"],"expirationSeconds":3600}}'
+                        local res = ngx.location.capture(
+                            "/__mint/api/v1/namespaces/user-system-" .. user ..
+                                "/serviceaccounts/user-backend/token",
+                            { method = ngx.HTTP_POST, body = body }
+                        )
+                        if not res or (res.status ~= 200 and res.status ~= 201) then
+                            ngx.log(ngx.ERR, "provider-inject(download): mint failed user=", user,
+                                " status=", res and res.status, " body=", res and res.body)
+                            return ngx.exit(502)
+                        end
+                        local data = require("cjson.safe").decode(res.body)
+                        tok = data and data.status and data.status.token
+                        if not tok or tok == "" then
+                            ngx.log(ngx.ERR, "provider-inject(download): mint no token user=", user)
+                            return ngx.exit(502)
+                        end
+                        cache:set(user, tok, 3000)
+                    end
+
+                    ngx.req.set_header("Authorization", "Bearer " .. tok)
+                    ngx.req.set_header("X-Forwarded-Host", "download-provider-svc.os-framework:28080")
+                    ngx.req.set_header("X-Provider-Proxy", "download-provider-svc.os-framework:28080")
+                    ngx.req.clear_header("Cookie")
+                }
+                proxy_http_version 1.1;
+                proxy_set_header Host              download-provider-svc.os-framework:28080;
+                proxy_set_header X-Real-IP         $remote_addr;
+                proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_set_header Upgrade           $http_upgrade;
+                proxy_set_header Connection        $connection_upgrade;
+                proxy_pass http://download-provider-svc.os-framework:28080;
+                proxy_read_timeout 600s;
+                proxy_send_timeout 600s;
+            }
+        }
+    }
