@@ -1,0 +1,143 @@
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: koboldcpp-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: koboldcpp-engine
+  annotations:
+    applications.app.bytetrade.io/gpu-inject: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: koboldcpp-engine
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: koboldcpp-engine
+    spec:
+      initContainers:
+        - name: init-wait-models
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -c
+            - |
+              DONE_FILES=".qwen35-4b.done .mmproj-qwen35.done .picx-real.done .whisper.done .tts-model.done .tts-tokenizer.done"
+              echo "[init] Waiting for 6 model downloads..."
+              for f in $DONE_FILES; do
+                while [ ! -f "/models/$f" ]; do
+                  sleep 10
+                done
+                echo "[init] $f OK"
+              done
+              echo "[init] All models ready."
+              mkdir -p /models/admindir
+
+              if [ ! -f /models/admindir/qwen3.5-4b.kcpps ]; then
+                echo '{"model_param":"/models/Qwen3.5-4B-UD-Q4_K_XL.gguf","port":5001,"port_param":5001,"host":"","launch":false,"threads":4,"contextsize":4096,"gpulayers":99,"usecublas":["normal","0"],"multiuser":true,"skiplauncher":true}' > /models/admindir/qwen3.5-4b.kcpps
+                echo "[init] Created qwen3.5-4b.kcpps"
+              fi
+          volumeMounts:
+            - name: model-data
+              mountPath: /models
+      containers:
+        - name: koboldcpp-engine
+          image: docker.io/beclab/harveyff-koboldcpp:1.110
+          envFrom:
+            - configMapRef:
+                name: koboldcpp-env
+          resources:
+            limits:
+              cpu: 4
+              memory: 8Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 2
+              memory: 4Gi
+              nvidia.com/gpu: 1
+          ports:
+            - containerPort: 5001
+              protocol: TCP
+          volumeMounts:
+            - name: model-data
+              mountPath: /models
+            - name: koboldcpp-data
+              mountPath: /app/data
+            - name: koboldcpp-workspace
+              mountPath: /workspace
+          startupProbe:
+            tcpSocket:
+              port: 5001
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 80
+          livenessProbe:
+            tcpSocket:
+              port: 5001
+            periodSeconds: 60
+            timeoutSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            tcpSocket:
+              port: 5001
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
+
+      restartPolicy: Always
+      volumes:
+        - name: model-data
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/koboldcpp"
+            type: DirectoryOrCreate
+        - name: koboldcpp-data
+          hostPath:
+            type: DirectoryOrCreate
+            path: '{{ .Values.userspace.appData }}'
+        - name: koboldcpp-workspace
+          hostPath:
+            path: "{{ .Values.userspace.userData }}/Huggingface/koboldcpp/workspace"
+            type: DirectoryOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: koboldcpp-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: koboldcpp-engine
+spec:
+  ports:
+    - name: api
+      port: 5001
+      targetPort: 5001
+  selector:
+    app: koboldcpp-engine
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-koboldcpp
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: koboldcpp-engine
+spec:
+  ports:
+    - name: "5001"
+      port: 80
+      targetPort: 5001
+  selector:
+    app: koboldcpp-engine
+  type: ClusterIP
