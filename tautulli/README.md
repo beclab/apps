@@ -6,7 +6,7 @@ This Olares app runs the official `tautulli/tautulli` container and persists Tau
 
 ## First Run
 
-Open Tautulli from Olares, then use Tautulli's setup wizard to connect to your Plex Media Server.
+Open Tautulli from Olares. On a new installation, retrieve the generated username and password from the Tautulli container logs, as explained in the [official login instructions](https://github.com/Tautulli/Tautulli/wiki/Installation#tautulli-login). Then use the setup wizard to connect to your Plex Media Server.
 
 Use your Plex server URL, for example:
 
@@ -18,7 +18,7 @@ Do not include `/web` in the Plex URL.
 
 ## Security
 
-The app exposes Tautulli on port `8181`. Configure a Tautulli username and password during setup.
+The app exposes Tautulli on port `8181`. Keep Tautulli authentication enabled and set your own username and password after the initial login.
 
 ## Data
 
@@ -29,5 +29,18 @@ Tautulli stores configuration, history, and its database in `/config`.
 This chart uses the official Docker image:
 
 ```text
-tautulli/tautulli:v2.17.1
+tautulli/tautulli:v2.19.1
 ```
+
+## Packaging for Olares
+
+Keep the application directory and the manifest name as `tautulli` (lowercase letters and digits only). Do not rename it to `tautulli-dev`: Olares rejects hyphens in application directory names.
+
+From the repository root, build the upload archive with Helm:
+
+```sh
+helm lint ./tautulli
+helm package ./tautulli --destination /tmp
+```
+
+The resulting archive must contain `tautulli/OlaresManifest.yaml` at its top application directory, without a `./charts/` prefix. Upload `/tmp/tautulli-2.19.1.tgz` in Olares Market.
