@@ -13,6 +13,33 @@ data:
     import urllib.parse
     import xml.etree.ElementTree as ET
     import html
+    import socket
+    import ssl
+    import fcntl
+    import struct
+    import tempfile
+
+    def local_address():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                ip = socket.inet_ntoa(fcntl.ioctl(sock.fileno(), 0x8915, struct.pack('256s', b'net1'))[20:24])
+        except OSError:
+            return {'message': 'Enable Plex in Olares Settings > Network > Overlay to get a local address.'}
+        try:
+            pem = ssl.get_server_certificate(('127.0.0.1', 32400), timeout=5)
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.pem') as certfile:
+                certfile.write(pem)
+                certfile.flush()
+                cert = ssl._ssl._test_decode_cert(certfile.name)
+            names = [value for kind, value in cert.get('subjectAltName', []) if kind == 'DNS']
+            domain = next(name for name in names if re.fullmatch(r'\*\.[a-fA-F0-9]+\.plex\.direct', name))
+            host = ip.replace('.', '-') + domain[1:]
+            with socket.create_connection(('127.0.0.1', 32400), timeout=5) as sock:
+                with ssl.create_default_context().wrap_socket(sock, server_hostname=host):
+                    pass
+            return {'url': 'https://' + host + ':32400', 'ip': ip}
+        except Exception:
+            return {'message': 'Local IP: ' + ip + '. The secure address is not ready. Connect your Plex account, then refresh.'}
 
     BASE = 'http://127.0.0.1:32400'
     ORIGIN = os.environ['ALLOWED_ORIGIN']
@@ -33,6 +60,8 @@ data:
             self.wfile.write(data)
 
         def do_GET(self):
+            if self.path == '/local-address':
+                return self.reply(200, json.dumps(local_address()))
             if self.path == '/health':
                 return self.reply(200, '{"ok":true}')
             if self.path == '/status':
@@ -57,8 +86,19 @@ data:
             <form id="form"><label for="claim">Claim token</label><br><input id="claim" type="password" autocomplete="off" placeholder="claim-…" required>
             <br><button id="submit">Connect account</button></form>
             <p><a href="WEBURL">Open Plex Web →</a></p>
-            <p>Media folders: /media/Movies and /media/Music. NVIDIA GPU is configured. Plex hardware transcoding requires Plex Pass.</p>
+            <hr><h2>Local connection</h2>
+            <p id="local-status">Checking local address…</p>
+            <div id="local-ready" hidden><label for="local-url">Secure server address</label><br>
+            <input id="local-url" readonly><br><button type="button" id="copy-url">Copy address</button>
+            <p>In Plex Web, go to Settings → your server → Network → Show Advanced. Add this address to Custom server access URLs, keeping any existing addresses separated by commas, then save.</p>
+            <p>Your phone or TV must be on the same LAN, or connected through a VPN that can reach this network.</p></div>
+            <button type="button" id="refresh-local">Refresh local address</button>
+            <p>Media folders: /media/Movies and /media/Music. Hardware-accelerated transcoding depends on the acceleration mode selected during installation and requires Plex Pass and compatible hardware.</p>
             <script>
+            async function localAddress(){let s=document.getElementById('local-status');try{let r=await fetch('/local-address');let d=await r.json();document.getElementById('local-ready').hidden=!d.url;s.textContent=d.url?'Local IP: '+d.ip+' · HTTPS certificate verified':d.message;document.getElementById('local-url').value=d.url||'';}catch(e){s.textContent='Could not check the local address. Please refresh.';}}
+            document.getElementById('refresh-local').onclick=localAddress;
+            document.getElementById('copy-url').onclick=async()=>{let i=document.getElementById('local-url');try{await navigator.clipboard.writeText(i.value);document.getElementById('copy-url').textContent='Copied';}catch(e){i.select();document.getElementById('local-status').textContent='Select and copy the address above.';}};
+            localAddress();
             async function status(){let r=await fetch('/status');let s=await r.json();document.getElementById('status').textContent=s.claimed?'Your Plex server is connected.':(s.error||'Your Plex server is not connected yet.');return s;}
             status();document.getElementById('form').onsubmit=async e=>{e.preventDefault();let b=document.getElementById('submit');b.disabled=true;let i=document.getElementById('claim');
             try{let r=await fetch('/claim',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:i.value})});i.value='';let s=await r.json();document.getElementById('status').textContent=s.message||s.error;}catch(e){document.getElementById('status').textContent='Connection failed. Please try again.';}finally{b.disabled=false;}};
