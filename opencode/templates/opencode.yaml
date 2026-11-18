@@ -5,7 +5,8 @@
 {{- $enableDind := ne (index $env "ENABLE_DIND" | default "true") "false" }}
 {{- $serverPassword := index $env "OPENCODE_SERVER_PASSWORD" | default "" }}
 {{- $serverUsername := index $env "OPENCODE_SERVER_USERNAME" | default "opencode" }}
-{{- $image := "beclab/opencode:1.19.3.0" }}
+{{- $outputTokenMax := index $env "OPENCODE_OUTPUT_TOKEN_MAX" | default "16384" }}
+{{- $image := "beclab/opencode:1.19.6.1" }}
 
 ---
 apiVersion: apps/v1
@@ -415,6 +416,11 @@ spec:
               value: /home/opencode/.profile
             - name: LD_LIBRARY_PATH
               value: /usr/glibc-compat/lib
+            # Without it OpenCode sends max_tokens 32000 to models that have no
+            # limit set, and Olares Router rejects a request above the largest
+            # output cap of the backends behind the model.
+            - name: OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX
+              value: {{ $outputTokenMax | quote }}
             {{- if $enableDind }}
             # docker CLI talks to the dockerd sidecar over the shared pod network.
             - name: DOCKER_HOST

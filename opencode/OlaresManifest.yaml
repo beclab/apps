@@ -11,7 +11,7 @@ metadata:
   description: The open source AI coding agent
   appid: opencode
   title: OpenCode
-  version: '1.0.30'
+  version: '1.0.32'
   categories:
   - Developer Tools
   - Productivity_v112
@@ -24,7 +24,7 @@ permission:
   userData:
   - Home
 spec:
-  versionName: '1.19.3'
+  versionName: '1.19.6'
   promoteImage:
   - https://app.cdn.olares.com/appstore/opencode/1.webp
   - https://app.cdn.olares.com/appstore/opencode/2.webp
@@ -44,7 +44,7 @@ spec:
     - If no provider is configured, OpenCode adds Olares Router and selects default-chat. An existing provider is left unchanged. Other providers and API keys can still be set in the Web UI.
     - Your code workspace is mounted at /home/opencode/workspace (linked to your Home/Code directory).
   upgradeDescription: |
-    Keep OpenCode at v1.19.3. Move the package OverlayFS and the Docker data directory onto node-local cache so the app can start on a multi-node cluster. JuiceFS does not support OverlayFS or Docker overlay2, which made init-overlay exit with "Not supported". Home, settings, and the Code workspace stay on shared storage. An existing single-node overlay and Docker store are copied once onto the local cache, including the containerd image store used by current Docker. Docker images already pulled in the app are included: a few GB takes several minutes, and tens of GB takes tens of minutes. The app stays unavailable until the copy finishes. Restart no longer fails when stale apk index temp files are left on JuiceFS. Package installs keep the apk download cache on node-local disk, so installing packages works on a multi-node cluster. If no provider is configured, OpenCode adds Olares Router and selects default-chat. An existing provider configuration is left unchanged.
+    Upgrade OpenCode to v1.19.6. The bundled Bun runtime is updated to 1.4.4 with security fixes. Sessions with many images no longer send oversized requests, and a request that is too large now starts compaction and a retry instead of failing. Failed TUI worker requests return an error instead of hanging. Chat with the Olares Router default-chat model no longer fails with "max_tokens 32000 is more than model default-chat can produce": OpenCode now asks for at most 16384 output tokens. The cap applies to every provider. If a model with a lower output limit fails with "max_tokens 16384 is more than model ... can produce", for example a local model with under 64K of context, set the OPENCODE_OUTPUT_TOKEN_MAX environment variable in Settings to the limit shown in the error. Release notes: https://github.com/anomalyco/opencode/releases/tag/v1.19.6
   developer: Anomaly
   website: https://opencode.ai/
   sourceCode: https://github.com/anomalyco/opencode
@@ -106,6 +106,13 @@ envs:
     editable: true
     default: "opencode"
     description: "OpenCode server basic-auth username used only when OPENCODE_SERVER_PASSWORD is set. Default: opencode."
+  - envName: OPENCODE_OUTPUT_TOKEN_MAX
+    required: false
+    applyOnChange: true
+    type: int
+    editable: true
+    default: "16384"
+    description: "Largest max_tokens OpenCode requests for one response, for every provider. Default: 16384. A model whose output limit is lower rejects the request: Olares Router reports \"max_tokens 16384 is more than model <name> can produce; its largest backend tops out at <N> output tokens\". This happens with a local model whose context is under 64K (Olares sets its output limit to a quarter of the context) or a cloud model with a smaller output limit. Set this to the <N> in the error or lower."
 options:
   apiTimeout: 0
   allowedOutboundPorts:
