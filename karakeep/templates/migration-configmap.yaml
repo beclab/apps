@@ -1,0 +1,126 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-migration
+  namespace: {{ .Release.Namespace }}
+data:
+  migrate.cjs: |
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const crypto = require('node:crypto');
+    const { spawnSync } = require('node:child_process');
+    const Database = require('/db_migrations/node_modules/better-sqlite3');
+    const root = '/var/lib/karakeep';
+    const data = path.join(root, 'data');
+    const backup = path.join(root, '.upgrade-backups', '0.35.0');
+    const archive = path.join(backup, 'data.tar.gz');
+    const staging = path.join(backup, 'restored-data');
+    const original = path.join(backup, 'original-data');
+    const journalPath = path.join(backup, 'journal.json');
+    function run(command, args, options = {}) {
+      const result = spawnSync(command, args, { encoding: 'utf8', ...options });
+      if (result.error || result.status !== 0) {
+        throw new Error(`${command} failed: ${result.error || result.stderr}`);
+      }
+    }
+    function directory(p, mode = 0o700) {
+      fs.mkdirSync(p, { recursive: true, mode });
+      fs.chownSync(p, 1000, 1000);
+      fs.chmodSync(p, mode);
+    }
+    function inventory(p, relative = '', result = []) {
+      for (const name of fs.readdirSync(p).sort()) {
+        const full = path.join(p, name);
+        const rel = path.join(relative, name);
+        const stat = fs.lstatSync(full);
+        if (stat.isDirectory()) {
+          result.push({ path: rel, directory: true, uid: stat.uid, gid: stat.gid });
+          inventory(full, rel, result);
+        } else if (stat.isFile()) {
+          const hash = crypto.createHash('sha256');
+          const fd = fs.openSync(full, 'r');
+          try {
+            const buffer = Buffer.alloc(1024 * 1024);
+            let bytes;
+            while ((bytes = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, bytes));
+          } finally { fs.closeSync(fd); }
+          result.push({ path: rel, size: stat.size, sha256: hash.digest('hex'), uid: stat.uid, gid: stat.gid });
+        } else {
+          throw new Error(`Unsupported data entry ${rel}; manual migration required`);
+        }
+      }
+      return result;
+    }
+    function validateDatabases(p, checkEmails) {
+      for (const name of ['db.db', 'queue.db']) {
+        const file = path.join(p, name);
+        if (!fs.existsSync(file)) continue;
+        const db = new Database(file, { readonly: true, fileMustExist: true });
+        try {
+          if (db.pragma('integrity_check', { simple: true }) !== 'ok') throw new Error(`${name}: integrity check failed`);
+          if (checkEmails && name === 'db.db' && db.pragma('table_info("user")').some(c => c.name === 'salt')) {
+            const conflicts = db.prepare('SELECT count(*) AS n FROM (SELECT lower(email) FROM user GROUP BY lower(email) HAVING count(*) > 1)').get().n;
+            if (conflicts) throw new Error(`${conflicts} case-insensitive email conflicts; resolve accounts before upgrading`);
+          }
+        } finally { db.close(); }
+      }
+    }
+    function saveJournal(value) {
+      const temporary = journalPath + '.tmp';
+      fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+      fs.renameSync(temporary, journalPath);
+    }
+    try {
+      directory(root, 0o750);
+      directory(path.join(root, 'meili_data'), 0o750);
+      directory(path.join(root, '.upgrade-backups'));
+      directory(backup);
+      // Recreate stops all SQLite writers before this init container starts.
+      // Recover the two atomic renames after an interrupted permission migration.
+      let journal = fs.existsSync(journalPath) ? JSON.parse(fs.readFileSync(journalPath, 'utf8')) : null;
+      if (journal && journal.phase === 'prepared' && journal.migrateOwnership) {
+        if (!fs.existsSync(original) && fs.existsSync(data) && fs.existsSync(staging)) fs.renameSync(data, original);
+        if (fs.existsSync(original) && !fs.existsSync(data) && fs.existsSync(staging)) fs.renameSync(staging, data);
+        if (!fs.existsSync(original) || !fs.existsSync(data) || fs.existsSync(staging)) throw new Error('Incomplete migration state; original data and backup preserved for recovery');
+        journal.phase = 'complete'; saveJournal(journal);
+      }
+      if (!fs.existsSync(data)) directory(data, 0o750);
+      validateDatabases(data, true);
+      if (!journal && fs.readdirSync(data).length) {
+        const before = inventory(data);
+        const migrateOwnership = before.some(e => e.uid !== 1000 || e.gid !== 1000);
+        const bytes = before.reduce((n, e) => n + (e.size || 0), 0);
+        const space = fs.statfsSync(root);
+        if (space.bavail * space.bsize < bytes * 3 + 64 * 1024 * 1024) throw new Error('Insufficient free space for backup and verified data copy');
+        if (fs.existsSync(archive) || fs.existsSync(staging) || fs.existsSync(original)) throw new Error('Unfinished previous backup; preserved for manual recovery');
+        run('tar', ['-czf', archive, '-C', data, '.']);
+        fs.chownSync(archive, 1000, 1000); fs.chmodSync(archive, 0o600);
+        if (!fs.statSync(archive).size) throw new Error('Empty backup');
+        // The listing can exceed Node's output buffer on large libraries.
+        run('tar', ['-tzf', archive], { stdio: ['ignore', 'ignore', 'pipe'] });
+        directory(staging);
+        // Extract as the final app user; never recursively chown existing data.
+        run('tar', ['-xzf', archive, '-C', staging, '--no-same-owner', '--no-same-permissions', '--mode=u+rwX,go-rwx'], { uid: 1000, gid: 1000 });
+        const restored = inventory(staging);
+        const content = entries => JSON.stringify(entries.map(({ uid, gid, ...entry }) => entry));
+        if (content(before) !== content(restored)) throw new Error('Restored file inventory/hash mismatch');
+        if (restored.some(e => e.uid !== 1000 || e.gid !== 1000)) throw new Error('Restored ownership mismatch');
+        validateDatabases(staging, true);
+        fs.writeFileSync(path.join(backup, 'file-manifest.json'), JSON.stringify(before), { mode: 0o600 });
+        journal = { phase: 'prepared', migrateOwnership, files: before.filter(e => !e.directory).length, bytes, backup: archive };
+        saveJournal(journal);
+        if (migrateOwnership) {
+          fs.renameSync(data, original);
+          fs.renameSync(staging, data);
+        } else {
+          fs.rmSync(staging, { recursive: true });
+        }
+        journal.phase = 'complete'; saveJournal(journal);
+        console.log(`Verified SQLite and ${journal.files} file hashes; backup: ${archive}; ownership migrated: ${migrateOwnership}`);
+      }
+      directory(data, 0o750);
+      console.log('Karakeep data ready for uid/gid 1000; original data and backups retained');
+    } catch (error) {
+      console.error(error.stack);
+      process.exit(1);
+    }

@@ -40,23 +40,29 @@ spec:
     spec:
       initContainers:
       - name: init-permissions
-        image: "docker.io/beclab/aboveos-busybox:1.37.0"
+        image: "docker.io/beclab/karakeep-app-karakeep:0.35.0"
         imagePullPolicy: IfNotPresent
         command:
-          - sh
-          - '-c'
-          - |
-            mkdir -p /var/lib/karakeep/data
-            mkdir -p /var/lib/karakeep/meili_data
-            chown -R 1000:1000 /var/lib/karakeep
+          - node
+          - /migration/migrate.cjs
         volumeMounts:
           - name: app-data
             mountPath: /var/lib/karakeep
+          - name: migration
+            mountPath: /migration
+            readOnly: true
         securityContext:
           runAsUser: 0
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
       containers:
       - name: karakeep
-        image: "beclab/karakeep-app-karakeep:0.33.2"
+        image: "docker.io/beclab/karakeep-app-karakeep:0.35.0"
         imagePullPolicy: IfNotPresent
         ports:
           - containerPort: 3000
@@ -126,8 +132,9 @@ spec:
             cpu: 1000m
             memory: 1500Mi
         securityContext:
-          runAsUser: 0
-          runAsNonRoot: false
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
           allowPrivilegeEscalation: false
         volumeMounts:
           - name: app-data
@@ -146,26 +153,14 @@ spec:
           periodSeconds: 15
           timeoutSeconds: 5
       - name: chrome
-        image: "beclab/zenika-hub-alpine-chrome:124"
+        image: "docker.io/beclab/karakeep-app-karakeep-chrome:157.0.8103.38-r1"
         imagePullPolicy: IfNotPresent
-        env:
-          - name: DBUS_SYSTEM_BUS_ADDRESS
-            value: "/dev/null"
-          - name: DBUS_SESSION_BUS_ADDRESS
-            value: "/dev/null"
-        command:
-          - /bin/sh
-          - '-c'
-          - |
-            exec chromium-browser \
-              --headless=new \
-              --no-sandbox \
-              --disable-gpu \
-              --disable-dev-shm-usage \
-              --disable-features=UseDBus \
-              --remote-debugging-address=0.0.0.0 \
-              --remote-debugging-port=9222 \
-              --hide-scrollbars
+        args:
+          - --disable-gpu
+          - --disable-dev-shm-usage
+          - --hide-scrollbars
+          - --disable-blink-features=AutomationControlled
+          - --window-size=1440,900
         ports:
           - containerPort: 9222
         resources:
@@ -176,6 +171,9 @@ spec:
             cpu: 1000m
             memory: 512Mi
         securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
           allowPrivilegeEscalation: false
       - name: meilisearch
         image: "getmeili/meilisearch:v1.41.0"
@@ -201,6 +199,9 @@ spec:
             mountPath: /meili_data
             subPath: meili_data
       volumes:
+      - name: migration
+        configMap:
+          name: {{ .Release.Name }}-migration
       - name: app-data
         hostPath:
           type: DirectoryOrCreate
