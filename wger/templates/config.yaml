@@ -1,0 +1,482 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wger-files
+  namespace: {{ .Release.Namespace | quote }}
+data:
+  database-env.sh: |
+    #!/bin/sh
+    set -eu
+    credentials=/run/wger-db/current
+    if [ ! -d "$credentials" ]; then
+      # Only PostgreSQL has seed credentials and a writable mount.
+      : "${WGER_DB_PASSWORD:?Database credentials have not been initialized}"
+      umask 077
+      staging=$(mktemp -d /run/wger-db/.credentials.XXXXXX)
+      trap 'rm -rf "$staging"' EXIT
+      for key in POSTGRES_PASSWORD WGER_DB_PASSWORD PS_SOURCE_PASSWORD PS_STORAGE_PASSWORD PS_DATABASE_URI PS_STORAGE_PG_URI; do
+        printenv "$key" > "$staging/$key"
+      done
+      mv "$staging" "$credentials"
+      trap - EXIT
+    fi
+    for key in POSTGRES_PASSWORD WGER_DB_PASSWORD PS_SOURCE_PASSWORD PS_STORAGE_PASSWORD PS_DATABASE_URI PS_STORAGE_PG_URI; do
+      export "$key=$(cat "$credentials/$key")"
+    done
+    exec "$@"
+  pg-bootstrap.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<'SQL'
+    \getenv app_password WGER_DB_PASSWORD
+    \getenv repl_password PS_SOURCE_PASSWORD
+    \getenv storage_password PS_STORAGE_PASSWORD
+    SELECT format('CREATE ROLE wger LOGIN PASSWORD %L', :'app_password') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='wger') \gexec
+    SELECT format('CREATE ROLE wger_repl LOGIN REPLICATION PASSWORD %L', :'repl_password') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='wger_repl') \gexec
+    SELECT format('CREATE ROLE powersync_storage LOGIN PASSWORD %L', :'storage_password') WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname='powersync_storage') \gexec
+    ALTER DATABASE wger OWNER TO wger;
+    GRANT ALL ON SCHEMA public TO wger;
+    GRANT CONNECT ON DATABASE wger TO wger_repl, powersync_storage;
+    GRANT USAGE ON SCHEMA public TO wger_repl;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO wger_repl;
+    ALTER DEFAULT PRIVILEGES FOR ROLE wger IN SCHEMA public GRANT SELECT ON TABLES TO wger_repl;
+    CREATE SCHEMA IF NOT EXISTS powersync AUTHORIZATION powersync_storage;
+    SQL
+  powersync.yaml: |
+    # yaml-language-server: $schema=../schema/schema.json
+
+    # Note that this example uses YAML custom tags for environment variable substitution.
+    # Using `!env [variable name]` will substitute the value of the environment variable named
+    # [variable name].
+    #
+    # Only environment variables with names starting with `PS_` can be substituted.
+    #
+    # e.g. With the environment variable `export PS_STORAGE_MONGO_URI=mongodb://localhost:27017`
+    # and YAML code:
+    #  uri: !env PS_STORAGE_MONGO_URI
+    # The YAML will resolve to:
+    #  uri: mongodb://localhost:27017
+    #
+    # If using VS Code see the `.vscode/settings.json` definitions which define custom tags.
+
+    # migrations:
+    #   # Migrations run automatically by default.
+    #   # Setting this to true will skip automatic migrations.
+    #   # Migrations can be triggered externally by altering the container `command`.
+    #   disable_auto_migration: true
+
+    # Settings for telemetry reporting
+    # See https://docs.powersync.com/self-hosting/telemetry
+    telemetry:
+      disable_telemetry_sharing: true
+
+      # Expose prometheus metrics on this port
+      prometheus_port: 9090
+
+    # Settings for source database replication
+    replication:
+      # Specify database connection details
+      # Note only 1 connection is currently supported
+      # Multiple connection support is on the roadmap
+      connections:
+        - type: postgresql
+          uri: !env PS_DATABASE_URI
+
+          # Or use individual params
+          # hostname: db # From the Docker Compose service name
+          # port: 5432
+          # database: postgres
+          # username: postgres
+          # password: mypassword
+
+          # SSL settings
+          sslmode: disable # 'verify-full' (default) or 'verify-ca' or 'disable'
+          # 'disable' is OK for local/private networks, not for public networks
+
+
+    # Connection settings for sync bucket storage
+    storage:
+      type: postgresql
+      uri: !env PS_STORAGE_PG_URI
+      sslmode: disable
+
+    # The port which the PowerSync API server will listen on
+    port: !env PS_PORT
+
+    # Workaround for PSYNC_S2305 bug: PowerSync counts source rows instead of DISTINCT
+    # CTE results. Users with large nutrition logs (>1000 log items) can hit the limit
+    # even though the number of distinct ingredients is well below it.
+    # See https://github.com/powersync-ja/powersync-service/issues/682
+    #     https://github.com/wger-project/flutter/issues/1237
+    api:
+      parameters:
+        max_parameter_query_results: 10000
+
+    # Specify sync rules
+    sync_rules:
+      path: sync_rules.yaml
+
+    # Client (application end user) authentication settings
+    client_auth:
+      allow_local_jwks: true
+      jwks_uri: !env PS_JWKS_URL
+
+      # JWKS audience
+      audience: ["powersync"]
+  sync_rules.yaml: |
+    # Note that changes to this file are not watched.
+    # The service needs to be restarted for changes to take effect.
+    #
+    # A column added server-side does not reach rows already in bucket storage:
+    # the queries below (SELECT * included) only run when a row is replicated, and
+    # an AddField emits no WAL. After such a migration either run a backfill that
+    # touches the rows, or bump the version line below so the changed file forces
+    # a reprocess
+    #
+    # Sync rules version: 1
+
+    # Every table referenced here must be part of the "powersync" publication, which
+    # lists its tables explicitly (see the server's core migration 0027). Reading from
+    # a table that was not synced before also needs
+    # `ALTER PUBLICATION powersync ADD TABLE <table>;`
+
+    # Warning: a user may have at most 1000 buckets, i.e. parameter-query results
+    # summed across all streams. This counts the *parameter* rows, not the data
+    # rows inside a bucket (a single bucket can hold any number of rows). For a
+    # stream with a `with:` CTE the count is the number of rows the CTE returns,
+    # so for `user_ingredients` below that is the number of distinct ingredients
+    # a user has ever referenced. Exceeding the limit is a hard error
+    # (PSYNC_S2305 "Too many parameter query results").
+    # See https://docs.powersync.com/sync/rules/parameter-queries
+    #
+    # Streams are split by update frequency (cold / medium / hot) so that
+    # bucket compaction can collapse the head of hot buckets without being
+    # blocked by long-lived rows from cold tables.
+    #
+    # For details, see the documentation:
+    # https://docs.powersync.com/sync/streams/overview
+    # https://docs.powersync.com/maintenance-ops/compacting-buckets
+
+    config:
+      edition: 3
+
+    streams:
+      # Global reference data, shared by all users, changes rarely enough
+      core:
+        auto_subscribe: true
+        queries:
+          - SELECT * FROM core_language
+          - SELECT * FROM core_license
+          - SELECT * FROM core_repetitionunit
+          - SELECT * FROM core_weightunit
+          - SELECT * FROM exercises_exercise
+          - SELECT * FROM exercises_translation
+          - SELECT * FROM exercises_alias
+          - SELECT * FROM exercises_exercisecomment
+          - SELECT * FROM exercises_muscle
+          - SELECT * FROM exercises_exercise_muscles
+          - SELECT * FROM exercises_exercise_muscles_secondary
+          - SELECT * FROM exercises_equipment
+          - SELECT * FROM exercises_exercise_equipment
+          - SELECT * FROM exercises_exercisecategory
+          - SELECT * FROM exercises_exerciseimage
+          - SELECT * FROM exercises_exercisevideo
+
+      # COLD, per-user data that almost never changes after creation.
+      user_profile:
+        auto_subscribe: true
+        queries:
+          - SELECT * FROM core_userprofile WHERE CAST(user_id AS TEXT) = auth.user_id()
+          - SELECT * FROM gallery_image WHERE CAST(user_id AS TEXT) = auth.user_id()
+
+      # COLD but potentially large, only the per-user *filter set* changes when the user logs new foods
+      user_ingredients:
+        auto_subscribe: true
+        with:
+          user_ingredients: |
+            SELECT DISTINCT nutrition_synced_ingredient.id
+            FROM nutrition_synced_ingredient
+            WHERE nutrition_synced_ingredient.id IN (
+                    SELECT nutrition_logitem.ingredient_id FROM nutrition_logitem
+                    JOIN nutrition_nutritionplan ON nutrition_logitem.plan_id = nutrition_nutritionplan.id
+                    WHERE CAST(nutrition_nutritionplan.user_id AS TEXT) = auth.user_id())
+               OR nutrition_synced_ingredient.id IN (
+                    SELECT nutrition_mealitem.ingredient_id FROM nutrition_mealitem
+                    JOIN nutrition_meal ON nutrition_mealitem.meal_id = nutrition_meal.id
+                    JOIN nutrition_nutritionplan ON nutrition_meal.plan_id = nutrition_nutritionplan.id
+                    WHERE CAST(nutrition_nutritionplan.user_id AS TEXT) = auth.user_id())
+        queries:
+          - SELECT * FROM nutrition_synced_ingredient AS nutrition_ingredient WHERE id IN user_ingredients
+          - |
+            SELECT nutrition_image.* FROM nutrition_image
+            WHERE nutrition_image.ingredient_id IN user_ingredients
+          - |
+            SELECT nutrition_ingredientweightunit.* FROM nutrition_ingredientweightunit
+            WHERE nutrition_ingredientweightunit.ingredient_id IN user_ingredients
+
+      # MEDIUM. Edited e.g. when the user builds or edits their routine or nutrition plan,
+      # but not on every workout.
+      user_planning:
+        auto_subscribe: true
+        queries:
+          # Routines (templates excluded)
+          - SELECT * FROM manager_routine WHERE CAST(user_id AS TEXT) = auth.user_id() AND is_template = FALSE
+
+          # Measurement categories (the measurements themselves are HOT, see below)
+          - SELECT * FROM measurements_category WHERE CAST(user_id AS TEXT) = auth.user_id()
+
+          # Nutrition plan structure (not the log items)
+          - SELECT * FROM nutrition_nutritionplan WHERE CAST(user_id AS TEXT) = auth.user_id()
+          - |
+            SELECT nutrition_meal.*
+            FROM nutrition_meal
+            JOIN nutrition_nutritionplan
+              ON nutrition_meal.plan_id = nutrition_nutritionplan.id
+            WHERE CAST(nutrition_nutritionplan.user_id AS TEXT) = auth.user_id()
+          - |
+            SELECT nutrition_mealitem.*
+            FROM nutrition_mealitem
+            JOIN nutrition_meal
+              ON nutrition_mealitem.meal_id = nutrition_meal.id
+            JOIN nutrition_nutritionplan
+              ON nutrition_meal.plan_id = nutrition_nutritionplan.id
+            WHERE CAST(nutrition_nutritionplan.user_id AS TEXT) = auth.user_id()
+
+
+      # HOT. Generates  one or more new rows per workout / meal. Compaction has the
+      # biggest impact here, so it must stay isolated from the other streams above
+      user_activity:
+        auto_subscribe: true
+        queries:
+          # Measurements, including body weight entries, so typically one or more new rows per day
+          - |
+            SELECT measurements_measurement.*
+            FROM measurements_measurement
+            INNER JOIN measurements_category
+              ON measurements_measurement.category_id = measurements_category.id
+            WHERE CAST(measurements_category.user_id AS TEXT) = auth.user_id()
+
+          # Workout sessions and per-set logs
+          - SELECT * FROM manager_workoutsession WHERE CAST(user_id AS TEXT) = auth.user_id()
+          - SELECT * FROM manager_workoutlog WHERE CAST(user_id AS TEXT) = auth.user_id()
+
+          # Nutrition log entries
+          - |
+            SELECT nutrition_logitem.*
+            FROM nutrition_logitem
+            JOIN nutrition_nutritionplan
+              ON nutrition_logitem.plan_id = nutrition_nutritionplan.id
+            WHERE CAST(nutrition_nutritionplan.user_id AS TEXT) = auth.user_id()
+  launch.py: |
+    """Olares launcher: stable signing keys and transactional first-install fixtures."""
+    import base64
+    import json
+    import os
+    from pathlib import Path
+    import sys
+
+    # Database credentials live alongside the data, surviving namespace removal.
+    import time
+    db_password = Path('/home/wger/state/database/current/WGER_DB_PASSWORD')
+    for attempt in range(120):
+        if db_password.exists():
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError('Persistent database credentials are not ready')
+    os.environ['DJANGO_DB_PASSWORD'] = db_password.read_text().strip()
+
+    os.umask(0o077)
+    keys = Path('/home/wger/state/signing.private')
+    if not keys.exists():
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from jwt.algorithms import RSAAlgorithm
+        private = json.loads(RSAAlgorithm.to_jwk(rsa.generate_private_key(public_exponent=65537, key_size=2048)))
+        private.update(alg='RS256', kid='wger')
+        public = {k: private[k] for k in ('kty', 'n', 'e', 'alg', 'kid')}
+        values = {name: base64.urlsafe_b64encode(json.dumps(value).encode()).decode()
+                  for name, value in [('JWT_PRIVATE_KEY', private), ('JWT_PUBLIC_KEY', public)]}
+        temporary = keys.with_suffix('.tmp')
+        temporary.write_text(json.dumps(values))
+        temporary.replace(keys)
+    os.environ.update(json.loads(keys.read_text()))
+    os.umask(0o022)
+
+    if sys.argv[1] == 'init':
+        import django
+        django.setup()
+        from django.core.management import call_command
+        from django.contrib.auth import get_user_model
+        from django.db import transaction
+        import time
+        from django.db import connection
+        for attempt in range(90):
+            try:
+                connection.ensure_connection()
+                break
+            except Exception:
+                connection.close()
+                time.sleep(2)
+        else:
+            raise RuntimeError('Private PostgreSQL not ready')
+        call_command('migrate', interactive=False)
+        with transaction.atomic():
+            if not get_user_model().objects.exists():
+                fixtures = ['gym.json', 'languages.json', 'groups.json', 'users.json',
+                            'licenses.json', 'setting_repetition_units.json', 'setting_weight_units.json',
+                            'gym_config.json', 'equipment.json', 'muscles.json', 'categories.json',
+                            'exercise-base-data.json', 'translations.json', 'gym-config.json', 'gym-adminconfig.json']
+                for fixture in fixtures:
+                    call_command('loaddata', fixture, verbosity=0)
+                user = get_user_model().objects.get(username='admin')
+                user.set_password(os.environ['ADMIN_PASSWORD'])
+                user.save(update_fields=['password'])
+        # Fixtures bypass the profile-created signal; ensure its official category
+        # through the upstream idempotent API without replacing user measurements.
+        from wger.measurements.models import Category
+        for user in get_user_model().objects.select_related('userprofile').all():
+            Category.get_or_create_body_weight(user, unit=user.userprofile.weight_unit)
+        call_command('set-site-url')
+        call_command('collectstatic', interactive=False, verbosity=0)
+        marker = Path('/home/wger/state/catalog-sync.complete')
+        if not marker.exists():
+            try:
+                call_command('sync-exercises', dont_delete=True, verbosity=0)
+                marker.touch()
+            except Exception as error:
+                print('Initial exercise catalog sync failed; retry at next startup:', type(error).__name__, flush=True)
+        # App-owned credentials stay in a private, persistent file, never stdout.
+        import secrets
+        from rest_framework.authtoken.models import Token
+        auth_path = Path('/home/wger/state/mcp-credentials/auth.private')
+        auth_path.parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(auth_path.parent, 0o700)
+        token, _ = Token.objects.get_or_create(user=get_user_model().objects.get(username='admin'))
+        if not auth_path.exists():
+            with open(auth_path, 'x', opener=lambda path, flags: os.open(path, flags, 0o600)) as output:
+                json.dump({'WGER_API_KEY': token.key, 'MCP_STATIC_TOKEN': secrets.token_urlsafe(48)}, output)
+        os.chmod(auth_path, 0o600)
+        print('INITIALIZATION_COMPLETE', flush=True)
+    else:
+        os.environ.pop('ADMIN_PASSWORD', None)
+        os.execvp(sys.argv[1], sys.argv[1:])
+  mcp-launch.py: |
+    """Load private app credentials and narrow the official MCP tool surface."""
+    import json
+    import os
+    import time
+    import urllib.request
+    from pathlib import Path
+
+    os.environ.update(json.loads(Path('/run/wger-mcp/auth.private').read_text()))
+    for attempt in range(90):
+        try:
+            urllib.request.urlopen('http://127.0.0.1:8000/api/v2/version/', timeout=2).close()
+            break
+        except Exception:
+            time.sleep(2)
+    else:
+        raise RuntimeError('wger API did not become ready')
+
+    import wger_mcp.server as server
+
+    READ = {
+        'list_routines', 'get_routine', 'get_workout_for_date', 'list_routine_days',
+        'get_routine_day', 'list_slots', 'list_slot_entries', 'get_slot_entry',
+        'list_slot_entry_configs', 'search_exercises', 'get_exercise',
+        'search_ingredients', 'get_ingredient', 'list_workout_logs', 'get_workout_log',
+        'list_workout_sessions', 'get_workout_session', 'get_body_weight_history',
+        'list_measurement_categories', 'list_measurements', 'get_measurement',
+        'summarize_measurements', 'list_nutrition_plans', 'get_nutrition_plan',
+        'list_log_items', 'nutrition_summary', 'weekly_summary', 'exercise_history',
+        'personal_records', 'volume_trend', 'compare_periods',
+    }
+    APPEND = {'log_body_weight', 'log_set', 'log_workout_session',
+              'create_nutrition_plan', 'log_ingredient'}
+    original = server.build_server
+
+    def restricted(*args, **kwargs):
+        result = original(*args, **kwargs)
+        for name in list(result.mcp._tool_manager._tools):
+            if name not in READ | APPEND:
+                result.mcp.remove_tool(name)
+        return result
+
+    server.build_server = restricted
+    server.main()
+  nginx.conf: |
+    pid /tmp/nginx.pid;
+    worker_processes auto;
+    events { worker_connections 1024; }
+    http {
+      include /etc/nginx/mime.types;
+      default_type application/octet-stream;
+      access_log /dev/stdout;
+      error_log /dev/stderr warn;
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path /tmp/proxy_temp;
+      fastcgi_temp_path /tmp/fastcgi_temp;
+      uwsgi_temp_path /tmp/uwsgi_temp;
+      scgi_temp_path /tmp/scgi_temp;
+      map $http_x_forwarded_proto $forwarded_proto { default $http_x_forwarded_proto; '' $scheme; }
+      server {
+        listen 8080;
+        client_max_body_size 100m;
+        location /static/ { alias /home/wger/static/; expires 7d; }
+        location /media/ { alias /home/wger/media/; }
+        location /ps/ {
+          proxy_pass http://wgersync:8080/;
+          proxy_http_version 1.1;
+          proxy_buffering off;
+          proxy_request_buffering off;
+          proxy_read_timeout 86400s;
+          proxy_send_timeout 86400s;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-Proto $forwarded_proto;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          add_header X-Accel-Buffering no always;
+        }
+        location / {
+          proxy_pass http://127.0.0.1:8000;
+          proxy_set_header Host $http_host;
+          proxy_set_header X-Forwarded-Proto $forwarded_proto;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_read_timeout 300s;
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wger-env
+  namespace: {{ .Release.Namespace | quote }}
+data:
+  DJANGO_SETTINGS_MODULE: settings.main
+  PYTHONPATH: /home/wger/src
+  DJANGO_DB_ENGINE: django.db.backends.postgresql
+  DJANGO_DB_HOST: wgerdb
+  DJANGO_DB_PORT: '5432'
+  DJANGO_DB_DATABASE: wger
+  DJANGO_DB_USER: wger
+  DJANGO_CACHE_BACKEND: django_redis.cache.RedisCache
+  DJANGO_CACHE_LOCATION: {{ printf "redis://%s:%v/0" .Values.redis.host .Values.redis.port | quote }}
+  DJANGO_CACHE_CLIENT_CLASS: django_redis.client.DefaultClient
+  DJANGO_CACHE_TIMEOUT: '300'
+  SITE_URL: 'https://{{ .Values.domain.mobile }}'
+  POWERSYNC_URL: 'https://{{ .Values.domain.mobile }}/ps/'
+  CSRF_TRUSTED_ORIGINS: 'https://{{ .Values.domain.wger }},https://{{ .Values.domain.mobile }}'
+  X_FORWARDED_PROTO_HEADER_SET: 'True'
+  USE_X_FORWARDED_HOST: 'True'
+  DJANGO_DEBUG: 'False'
+  ALLOW_REGISTRATION: 'False'
+  ALLOW_GUEST_USERS: 'False'
+  WGER_SHOW_APP_STORE_LINKS: 'False'
+  USE_CELERY: 'True'
+  SYNC_EXERCISES_CELERY: 'False'
+  SYNC_EXERCISE_IMAGES_CELERY: 'True'
+  CACHE_API_EXERCISES_CELERY: 'True'
+  ENABLE_EMAIL: 'False'
+  TIME_ZONE: UTC
