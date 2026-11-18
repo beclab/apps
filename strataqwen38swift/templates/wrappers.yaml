@@ -103,6 +103,49 @@ data:
     }
 
 
+    def prepare_drafting(cfg, data, root, family):
+        # Swift is not supported by the 0.2.13 DFlash2 drafter.
+        cfg['drafting'] = 'mtp'
+        if family == 'swift':
+            print('[strata] Swift keeps MTP: DFlash2 is unsupported by this engine version', flush=True)
+            return
+        try:
+            sys.path.insert(0, str(root))
+            from strata_control import drafting, drafting_fetch
+            from serve.server import drafting_vram_mib
+            backend, archs = drafting.detect_hardware()
+            vram = drafting_vram_mib(cfg, backend, archs)
+            sa = [str(a) for a in cfg.get('args') or []]
+            slots = next((int(sa[sa.index(k) + 1]) for k in ('--batch', '--slots', '--parallel')
+                          if k in sa and sa.index(k) + 1 < len(sa) and sa[sa.index(k) + 1].isdigit()), 1)
+            choice = drafting.choice_of('auto', model_name=cfg.get('model_name'), family=family,
+                                        backend=backend, archs=archs, args=sa, vram_mib=vram)
+            if choice != 'dflash2' or slots > 1:
+                print('[strata] Auto keeps MTP for this hardware or parallel configuration', flush=True)
+                return
+            # Stable within this app's persistent volume, across engine cache keys.
+            shared = data.parent / 'dflash2'
+            shared.mkdir(exist_ok=True)
+            link = data / 'dflash2'
+            if not link.exists():
+                link.symlink_to(shared, target_is_directory=True)
+            pack = drafting_fetch.ensure_for(
+                data, model_name=cfg.get('model_name'), backend=backend, archs=archs,
+                args=sa, vram_mib=vram, throttle=True,
+                progress=lambda msg, _done, _total: print(f'[strata] {msg}', flush=True))
+            if pack is None:
+                print('[strata] DFlash2 download unavailable; keeping MTP', flush=True)
+                return
+            candidate = dict(cfg, args=list(sa), drafting='auto')
+            dec = drafting.apply(candidate, klass=drafting.card_class(archs), data_dir=data,
+                                 family=family, backend=backend, archs=archs, vram_mib=vram,
+                                 slots=slots, engine=str(root / 'engine' / 'strata'))
+            cfg.update(candidate)
+            print(f'[strata] drafting {dec.asked} -> {dec.drafter} note={dec.note}', flush=True)
+        except Exception as exc:
+            print(f'[strata] DFlash2 preparation failed ({exc}); keeping MTP', flush=True)
+
+
     def setup_args(raw):
         args = shlex.split(raw)
         for arg in args:
@@ -169,8 +212,8 @@ data:
                    '--family', 'swift', '--model', 'IQ3_S', '--backend', 'cuda',
                    '--gpu', '0', '--vision', 'cpu', '--data-dir', str(data),
                    '--gguf-dir', str(gguf), '--host', '0.0.0.0', '--port', port,
-                   '--context', '32768', '--parallel', '1',
-                   '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'off',
+                   '--context', '262144', '--parallel', '1',
+                   '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'auto',
                    '--vram-reserve-mib', '1024', *args]
         print('[strata] preparing GGUF and MTP cache; first start can take several minutes', flush=True)
         run_setup(command, root)
@@ -180,7 +223,9 @@ data:
                 raise FileNotFoundError(f'setup.py wrote no strata-*.json under {root}')
             generated = candidates[0]
         cfg = json.loads(generated.read_text())
-        cfg['model_name'] = os.environ['MODEL_NAME']  # /v1/models must match Model Console.
+        public_name = os.environ['MODEL_NAME']
+        if public_name != cfg.get('model_name'):
+            cfg['aliases'] = list(dict.fromkeys([*(cfg.get('aliases') or []), public_name]))
         cfg['log'] = str(data / 'engine.log')
         cfg['open_browser'] = False
         # DNS-rebinding guard (server.py host_allowed): the Olares entrance sends
@@ -189,34 +234,7 @@ data:
         # already gated: the engine binds to the pod network, and the entrance
         # requires an Olares session (authLevel internal) before it proxies.
         cfg['allowed_hosts'] = ['*']
-        # Strata 0.2.10: DFlash2 is the default drafter. setup.py regenerates this
-        # config every boot and leaves drafting ABSENT (which keeps the legacy MTP
-        # args); "auto" = both drafters current, each request picks one (rule df2).
-        # Packs fetched once with the terminal's `strata drafting fetch` (pinned
-        # download, SHA-256 checked): arena dflash2/ holds q4_0 + converted selq4.
-        cfg['drafting'] = 'auto'
-        # Apply the drafting choice to the engine arguments HERE, the way `strata
-        # launch` does: setup.py only writes legacy MTP args, and server.py merely
-        # consumes args + restart-fallbacks (it never applies). Pack already sits
-        # at <data>/dflash2/ (fetched once, sha-pinned). Loud on failure: staying
-        # on MTP is a safe fallback but must be visible in the log.
-        try:
-            sys.path.insert(0, str(root))
-            from strata_control import drafting
-            eb = json.loads((root / 'engine' / 'BUILD.json').read_text())
-            archs = [int(a) for a in str(eb.get('archs', '')).replace(',', ';').split(';') if a.strip().isdigit()]
-            # slots as server.py reads them: --batch/--slots/--parallel in the engine
-            # args (0/absent = one at a time). Dormant while parallel cannot run
-            # DFlash2; correct the day upstream removes that limit (coldniko on X).
-            sa = [str(a) for a in cfg.get('args') or []]
-            slots = next((int(sa[sa.index(k) + 1]) for k in ('--batch', '--slots', '--parallel')
-                          if k in sa and sa.index(k) + 1 < len(sa) and sa[sa.index(k) + 1].isdigit()), 1)
-            dec = drafting.apply(cfg, klass=drafting.card_class(archs), data_dir=drafting.data_dir_of(cfg['args']),
-                                 family='qwen', backend='cuda', archs=archs, vram_mib=24453.0, slots=slots,
-                                 engine=str(root / 'engine' / 'strata'))
-            print(f"[strata] drafting {dec.asked} -> {dec.drafter} flags={list(dec.flags)}{' note=' + dec.note if dec.note else ''}", flush=True)
-        except Exception as exc:
-            print(f'[strata] drafting apply FAILED ({exc}); engine stays on the args setup.py wrote', flush=True)
+        prepare_drafting(cfg, data, root, 'swift')
         cfg.pop('api_key', None)  # internal ClusterIP only; Olares authenticates the entrance.
         target = data / 'server.json'
         temporary = target.with_suffix('.tmp')
