@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wger
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: {{ .Values.workloads.wger.replicaCount }}
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app: wger}}
+  template:
+    metadata:
+      labels: {app: wger}
+      annotations:
+        olares.com/chart-version: {{ .Chart.Version | quote }}
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      initContainers:
+      - name: init-permissions
+        image: docker.io/beclab/aboveos-busybox:1.37.0
+        securityContext: {runAsUser: 0}
+        command: [sh, -ec, 'mkdir -p /data/media /data/state /home/wger/static; chown 1000:1000 /data /data/media /data/state /home/wger/static']
+        volumeMounts:
+        - {name: data, mountPath: /data}
+        - {name: static, mountPath: /home/wger/static}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {cpu: 100m, memory: 64Mi}
+      - name: initialize
+        image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+        command: [python3, /olares/launch.py, init]
+        workingDir: /home/wger/src
+        envFrom: [{configMapRef: {name: wger-env}}, {secretRef: {name: wger-auth}}]
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits: {cpu: '2', memory: 2Gi}
+        volumeMounts:
+        - {name: scripts, mountPath: /olares, readOnly: true}
+        - {name: data, mountPath: /home/wger/media, subPath: media}
+        - {name: data, mountPath: /home/wger/state, subPath: state}
+        - {name: static, mountPath: /home/wger/static}
+      containers:
+      - name: web
+        image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+        command: [python3, /olares/launch.py, gunicorn, 'wger.wsgi:application', --bind, '0.0.0.0:8000', --workers, '2', --threads, '2', --timeout, '240']
+        workingDir: /home/wger/src
+        envFrom: [{configMapRef: {name: wger-env}}, {secretRef: {name: wger-auth}}]
+        ports: [{name: web, containerPort: 8000}]
+        startupProbe: {httpGet: {path: /api/v2/version/, port: web}, periodSeconds: 10, failureThreshold: 60}
+        readinessProbe: {httpGet: {path: /api/v2/version/, port: web}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 200m, memory: 512Mi}
+          limits: {cpu: '2', memory: 2Gi}
+        volumeMounts:
+        - {name: scripts, mountPath: /olares, readOnly: true}
+        - {name: data, mountPath: /home/wger/media, subPath: media}
+        - {name: data, mountPath: /home/wger/state, subPath: state}
+        - {name: static, mountPath: /home/wger/static}
+      - name: worker
+        image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+        command: [python3, /olares/launch.py, celery, -A, wger, worker, -l, INFO, --concurrency, '2']
+        workingDir: /home/wger/src
+        envFrom: [{configMapRef: {name: wger-env}}, {secretRef: {name: wger-auth}}]
+        resources:
+          requests: {cpu: 100m, memory: 320Mi}
+          limits: {cpu: '1', memory: 1280Mi}
+        volumeMounts:
+        - {name: scripts, mountPath: /olares, readOnly: true}
+        - {name: data, mountPath: /home/wger/media, subPath: media}
+        - {name: data, mountPath: /home/wger/state, subPath: state}
+      - name: beat
+        image: docker.io/wger/server:2.7@sha256:1c5789b93bfe5eed0b7287255782d9177027b255de2b22b59f511a693a48db04
+        command: [python3, /olares/launch.py, celery, -A, wger, beat, -l, INFO, --schedule, /home/wger/state/celerybeat-schedule, --pidfile, /tmp/celerybeat.pid]
+        workingDir: /home/wger/src
+        envFrom: [{configMapRef: {name: wger-env}}, {secretRef: {name: wger-auth}}]
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+        volumeMounts:
+        - {name: scripts, mountPath: /olares, readOnly: true}
+        - {name: data, mountPath: /home/wger/media, subPath: media}
+        - {name: data, mountPath: /home/wger/state, subPath: state}
+      - name: nginx
+        image: docker.io/nginxinc/nginx-unprivileged:1.28.0-alpine
+        command: [nginx, -g, 'daemon off;']
+        ports: [{name: http, containerPort: 8080}]
+        readinessProbe: {httpGet: {path: /api/v2/version/, port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        volumeMounts:
+        - {name: scripts, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+        - {name: data, mountPath: /home/wger/media, subPath: media, readOnly: true}
+        - {name: static, mountPath: /home/wger/static, readOnly: true}
+      - name: mcp
+        image: ghcr.io/wger-project/mcp-server@sha256:783494cb4c0ad94f18a5e654e41f617c58c8af2dabbc0f7106ea07db1688d685
+        command: [python, /olares/mcp-launch.py, --transport, http]
+        env:
+        - {name: WGER_BASE_URL, value: 'http://127.0.0.1:8000'}
+        - {name: MCP_AUTH, value: static_token}
+        - {name: HOST, value: '0.0.0.0'}
+        - {name: PORT, value: '8765'}
+        - {name: MCP_TOOLS, value: 'routines_read,workout_logs,workout_sessions,body_weight,measurements,nutrition,exercises,analytics'}
+        - {name: ALLOWED_HOSTS, value: 'localhost,localhost:*,127.0.0.1,127.0.0.1:*,wger,wger:*,{{ .Values.domain.mcp }},{{ .Values.domain.mcp }}:*'}
+        ports: [{name: mcp, containerPort: 8765}]
+        startupProbe: {httpGet: {path: /health, port: mcp}, periodSeconds: 10, failureThreshold: 30}
+        readinessProbe: {httpGet: {path: /health, port: mcp}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 512Mi}
+        volumeMounts:
+        - {name: scripts, mountPath: /olares, readOnly: true}
+        - {name: data, mountPath: /run/wger-mcp, subPath: state/mcp-credentials, readOnly: true}
+      volumes:
+      - name: data
+        hostPath: {path: '{{ .Values.userspace.appData }}/data', type: DirectoryOrCreate}
+      - name: static
+        emptyDir: {}
+      - name: scripts
+        configMap: {name: wger-files}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wger
+  namespace: {{ .Release.Namespace | quote }}
+spec:
+  selector: {app: wger}
+  ports:
+  - {name: http, port: 8080, targetPort: http}
+  - {name: mcp, port: 8765, targetPort: mcp}
