@@ -17,8 +17,6 @@ spec:
     metadata:
       labels:
         io.kompose.service: strata
-        # Only the engine Pod carries the target label for llm-init's affinity.
-        app.kubernetes.io/instance: '{{ .Release.Name }}'
       annotations:
         checksum/wrappers: {{ include (print $.Template.BasePath "/wrappers.yaml") . | sha256sum }}
     spec:
@@ -43,6 +41,10 @@ spec:
             # the shared HF cache remains read-only in the engine container.
             path: "{{ .Values.userspace.appCommon }}/huggingface/models--unsloth--Qwen3.8-Flash-Next-GGUF/mtp"
             type: DirectoryOrCreate
+        - name: dflash2
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface/models--unsloth--Qwen3.8-Flash-Next-GGUF/dflash2"
+            type: DirectoryOrCreate
         - name: wrappers
           configMap:
             name: llm-init-wrappers
@@ -50,10 +52,11 @@ spec:
       initContainers:
         - name: init-permissions
           image: docker.io/beclab/aboveos-busybox:1.37.0
-          command: [sh, -ec, "chown 1000:1000 /data"]
+          command: [sh, -ec, "chown 1000:1000 /data /dflash2"]
           securityContext: {runAsUser: 0}
           volumeMounts:
             - {name: strata-data, mountPath: /data}
+            - {name: dflash2, mountPath: /dflash2}
           resources:
             requests: {cpu: 10m, memory: 16Mi}
             limits: {cpu: 100m, memory: 64Mi}
@@ -119,6 +122,7 @@ spec:
             - {name: hf-cache, mountPath: {{ include "strata.hfPath" . }}, readOnly: true}
             - {name: run-state, mountPath: /run/llm-init, readOnly: true}
             - {name: strata-data, mountPath: /data}
+            - {name: dflash2, mountPath: /dflash2}
             - {name: wrappers, mountPath: /llm-init/wrappers, readOnly: true}
           resources:
             requests:
@@ -126,7 +130,7 @@ spec:
               memory: {{ $oe.STRATA_MEMORY_REQUEST | default "64Gi" | quote }}
               nvidia.com/gpumem: {{ $gpuMiB }}
             limits:
-              cpu: {{ $oe.STRATA_CPU_LIMIT | default "12" | quote }}
+              cpu: {{ $oe.STRATA_CPU_LIMIT | default "18" | quote }}
               memory: {{ $oe.STRATA_MEMORY_LIMIT | default "80Gi" | quote }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 ---
