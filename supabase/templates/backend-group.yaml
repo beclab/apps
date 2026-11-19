@@ -1,0 +1,1120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    supabase-group: backend
+spec:
+  replicas: {{ .Values.workloads.backend.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: backend
+  template:
+    metadata:
+      labels:
+        supabase-group: backend
+        io.kompose.service: backend
+      annotations:
+        checksum/runtime: '{{ include (print $.Template.BasePath "/runtime.yaml") . | sha256sum }}'
+        checksum/environment: '{{ include (print $.Template.BasePath "/environment.yaml") . | sha256sum }}'
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: auth-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /credentials; chmod 700 /credentials; chown 1000:1000 /runtime
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: auth-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: auth-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: auth-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: auth-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id001
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: auth-runtime
+          mountPath: /runtime
+        - name: auth-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: rest-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime
+        volumeMounts:
+        - name: rest-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: rest-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: rest-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: rest-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id003
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: rest-runtime
+          mountPath: /runtime
+        - name: rest-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: realtime-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime
+        volumeMounts:
+        - name: realtime-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: realtime-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: realtime-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: realtime-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id005
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: realtime-runtime
+          mountPath: /runtime
+        - name: realtime-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: storage-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime; chown 1000:1000 /prepare/storage
+        volumeMounts:
+        - name: storage-runtime
+          mountPath: /runtime
+        - name: storage-data-storage
+          mountPath: /prepare/storage
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: storage-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: storage-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: storage-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id007
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: storage-runtime
+          mountPath: /runtime
+        - name: storage-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: imgproxy-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime; chown 1000:1000 /prepare/storage
+        volumeMounts:
+        - name: imgproxy-runtime
+          mountPath: /runtime
+        - name: imgproxy-data-storage
+          mountPath: /prepare/storage
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: imgproxy-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: imgproxy-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: imgproxy-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id009
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: imgproxy-runtime
+          mountPath: /runtime
+        - name: imgproxy-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: meta-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime
+        volumeMounts:
+        - name: meta-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: meta-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: meta-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: meta-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id011
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: meta-runtime
+          mountPath: /runtime
+        - name: meta-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: functions-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime; chown 1000:1000 /prepare/functions; chown 1000:1000 /prepare/deno-cache
+        volumeMounts:
+        - name: functions-runtime
+          mountPath: /runtime
+        - name: functions-data-functions
+          mountPath: /prepare/functions
+        - name: functions-data-deno-cache
+          mountPath: /prepare/deno-cache
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: functions-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: functions-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: functions-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id013
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: functions-runtime
+          mountPath: /runtime
+        - name: functions-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: functions-seed-functions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - mkdir -p /functions/main /functions/hello; cp /config/main.ts /functions/main/index.ts; if [ ! -e /functions/hello/index.ts ]; then
+          cp /config/hello.ts /functions/hello/index.ts; fi
+        volumeMounts:
+        - name: functions-data-functions
+          mountPath: /functions
+        - name: functions-functions-config
+          mountPath: /config
+          readOnly: true
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      containers:
+      - name: auth
+        image: supabase/gotrue:v2.197.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export GOTRUE_API_HOST="0.0.0.0"
+
+          export GOTRUE_API_PORT="9999"
+
+          export API_EXTERNAL_URL="${API_EXTERNAL_URL}"
+
+          export GOTRUE_DB_DRIVER="postgres"
+
+          export GOTRUE_DB_DATABASE_URL="postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+
+          export GOTRUE_SITE_URL="${SITE_URL}"
+
+          export GOTRUE_URI_ALLOW_LIST="${ADDITIONAL_REDIRECT_URLS}"
+
+          export GOTRUE_DISABLE_SIGNUP="${DISABLE_SIGNUP}"
+
+          export GOTRUE_JWT_ADMIN_ROLES="service_role"
+
+          export GOTRUE_JWT_AUD="authenticated"
+
+          export GOTRUE_JWT_DEFAULT_GROUP_NAME="authenticated"
+
+
+          export GOTRUE_JWT_EXP="${JWT_EXPIRY}"
+
+          export GOTRUE_JWT_SECRET="${JWT_SECRET}"
+
+          export GOTRUE_JWT_ISSUER="${API_EXTERNAL_URL}"
+
+          export GOTRUE_EXTERNAL_EMAIL_ENABLED="${ENABLE_EMAIL_SIGNUP}"
+
+          export GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED="${ENABLE_ANONYMOUS_USERS}"
+
+          export GOTRUE_MAILER_AUTOCONFIRM="${ENABLE_EMAIL_AUTOCONFIRM}"
+
+          export GOTRUE_SMTP_ADMIN_EMAIL="${SMTP_ADMIN_EMAIL}"
+
+          export GOTRUE_SMTP_HOST="${SMTP_HOST}"
+
+          export GOTRUE_SMTP_PORT="${SMTP_PORT}"
+
+          export GOTRUE_SMTP_USER="${SMTP_USER}"
+
+          export GOTRUE_SMTP_PASS="${SMTP_PASS}"
+
+          export GOTRUE_SMTP_SENDER_NAME="${SMTP_SENDER_NAME}"
+
+          export GOTRUE_MAILER_URLPATHS_INVITE="${MAILER_URLPATHS_INVITE}"
+
+          export GOTRUE_MAILER_URLPATHS_CONFIRMATION="${MAILER_URLPATHS_CONFIRMATION}"
+
+          export GOTRUE_MAILER_URLPATHS_RECOVERY="${MAILER_URLPATHS_RECOVERY}"
+
+          export GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE="${MAILER_URLPATHS_EMAIL_CHANGE}"
+
+          export GOTRUE_EXTERNAL_PHONE_ENABLED="${ENABLE_PHONE_SIGNUP}"
+
+          export GOTRUE_SMS_AUTOCONFIRM="${ENABLE_PHONE_AUTOCONFIRM}"
+
+          exec auth'
+        envFrom: *id001
+        ports:
+        - containerPort: 9999
+          name: service
+        volumeMounts:
+        - name: auth-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet: &id002
+            path: /health
+            port: 9999
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: *id002
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: *id002
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: rest
+        image: postgrest/postgrest:v14.18
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export PGRST_DB_URI="postgres://authenticator:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+
+          export PGRST_DB_SCHEMAS="${PGRST_DB_SCHEMAS}"
+
+          export PGRST_DB_MAX_ROWS="${PGRST_DB_MAX_ROWS:-1000}"
+
+          export PGRST_DB_EXTRA_SEARCH_PATH="${PGRST_DB_EXTRA_SEARCH_PATH:-public}"
+
+          export PGRST_DB_ANON_ROLE="anon"
+
+          export PGRST_ADMIN_SERVER_PORT="3001"
+
+          export PGRST_ADMIN_SERVER_HOST="localhost"
+
+          export PGRST_JWT_SECRET="${JWT_SECRET}"
+
+          export PGRST_DB_USE_LEGACY_GUCS="false"
+
+          export PGRST_APP_SETTINGS_JWT_EXP="${JWT_EXPIRY}"
+
+          exec /bin/postgrest'
+        envFrom: *id003
+        ports:
+        - containerPort: 3000
+          name: service
+        volumeMounts:
+        - name: rest-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id004
+            port: 3000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id004
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id004
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: realtime
+        image: supabase/realtime:v2.143.3
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export PORT="4000"
+
+          export DB_HOST="${POSTGRES_HOST}"
+
+          export DB_PORT="${POSTGRES_PORT}"
+
+          export DB_USER="supabase_admin"
+
+          export DB_PASSWORD="${POSTGRES_PASSWORD}"
+
+          export DB_NAME="${POSTGRES_DB}"
+
+          export DB_AFTER_CONNECT_QUERY="SET search_path TO _realtime"
+
+          export DB_ENC_KEY="${REALTIME_DB_ENC_KEY:-supabaserealtime}"
+
+          export API_JWT_SECRET="${JWT_SECRET}"
+
+          export SECRET_KEY_BASE="${SECRET_KEY_BASE}"
+
+          export METRICS_JWT_SECRET="${JWT_SECRET}"
+
+          export ERL_AFLAGS="-proto_dist inet_tcp"
+
+          export DNS_NODES="''''"
+
+          export RLIMIT_NOFILE="10000"
+
+          export APP_NAME="realtime"
+
+          export SEED_SELF_HOST="true"
+
+          export RUN_JANITOR="true"
+
+          export DISABLE_HEALTHCHECK_LOGGING="true"
+
+          export REGION="us-east-1"
+
+          export ERL_MAX_PORTS="65536"
+
+          export ERL_FLAGS="+S 2:2"
+
+          export ECTO_IPV6="false"
+
+          exec /usr/bin/tini -s -g -- /app/run.sh /app/bin/server'
+        envFrom: *id005
+        ports:
+        - containerPort: 4000
+          name: service
+        volumeMounts:
+        - name: realtime-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id006
+            port: 4000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id006
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id006
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: storage
+        image: supabase/storage-api:v1.81.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export ANON_KEY="${ANON_KEY}"
+
+          export SERVICE_KEY="${SERVICE_ROLE_KEY}"
+
+          export POSTGREST_URL="http://rest:3000"
+
+          export AUTH_JWT_SECRET="${JWT_SECRET}"
+
+          export DATABASE_URL="postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+
+          export STORAGE_PUBLIC_URL="${SUPABASE_PUBLIC_URL}"
+
+          export REQUEST_ALLOW_X_FORWARDED_PATH="true"
+
+          export FILE_SIZE_LIMIT="52428800"
+
+          export STORAGE_BACKEND="file"
+
+          export GLOBAL_S3_BUCKET="${GLOBAL_S3_BUCKET}"
+
+          export FILE_STORAGE_BACKEND_PATH="/var/lib/storage"
+
+          export TENANT_ID="${STORAGE_TENANT_ID}"
+
+          export REGION="${REGION}"
+
+          export ENABLE_IMAGE_TRANSFORMATION="true"
+
+          export IMGPROXY_URL="http://imgproxy:5001"
+
+          export S3_PROTOCOL_ACCESS_KEY_ID="${S3_PROTOCOL_ACCESS_KEY_ID}"
+
+          export S3_PROTOCOL_ACCESS_KEY_SECRET="${S3_PROTOCOL_ACCESS_KEY_SECRET}"
+
+          exec docker-entrypoint.sh node dist/start/server.js'
+        envFrom: *id007
+        ports:
+        - containerPort: 5000
+          name: service
+        volumeMounts:
+        - name: storage-runtime
+          mountPath: /runtime
+        - name: storage-data-storage
+          mountPath: /var/lib/storage
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet: &id008
+            path: /status
+            port: 5000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: *id008
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: *id008
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: imgproxy
+        image: darthsim/imgproxy:v3.31.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export IMGPROXY_BIND=":5001"
+
+          export IMGPROXY_LOCAL_FILESYSTEM_ROOT="/"
+
+          export IMGPROXY_USE_ETAG="true"
+
+          export IMGPROXY_AUTO_WEBP="${IMGPROXY_AUTO_WEBP}"
+
+          export IMGPROXY_MAX_SRC_RESOLUTION="16.8"
+
+          exec entrypoint.sh imgproxy'
+        envFrom: *id009
+        ports:
+        - containerPort: 5001
+          name: service
+        volumeMounts:
+        - name: imgproxy-runtime
+          mountPath: /runtime
+        - name: imgproxy-data-storage
+          mountPath: /var/lib/storage
+        resources:
+          requests:
+            cpu: 25m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id010
+            port: 5001
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id010
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id010
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: meta
+        image: supabase/postgres-meta:v0.100.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export PG_META_PORT="8080"
+
+          export PG_META_DB_HOST="${POSTGRES_HOST}"
+
+          export PG_META_DB_PORT="${POSTGRES_PORT}"
+
+          export PG_META_DB_NAME="${POSTGRES_DB}"
+
+          export PG_META_DB_USER="postgres"
+
+          export PG_META_DB_PASSWORD="${POSTGRES_PASSWORD}"
+
+          export CRYPTO_KEY="${PG_META_CRYPTO_KEY}"
+
+          exec docker-entrypoint.sh node dist/server/server.js'
+        envFrom: *id011
+        ports:
+        - containerPort: 8080
+          name: service
+        volumeMounts:
+        - name: meta-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 50m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id012
+            port: 8080
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id012
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id012
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: functions
+        image: supabase/edge-runtime:v1.77.4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export JWT_SECRET="${JWT_SECRET}"
+
+          export SUPABASE_URL="http://api-gw:8000"
+
+          export SUPABASE_PUBLIC_URL="${SUPABASE_PUBLIC_URL}"
+
+          export SUPABASE_ANON_KEY="${ANON_KEY}"
+
+          export SUPABASE_SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY}"
+
+          export SUPABASE_PUBLISHABLE_KEYS="{\"default\":\"${SUPABASE_PUBLISHABLE_KEY:-}\"}"
+
+          export SUPABASE_SECRET_KEYS="{\"default\":\"${SUPABASE_SECRET_KEY:-}\"}"
+
+          export SUPABASE_DB_URL="postgresql://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
+
+          export VERIFY_JWT="${FUNCTIONS_VERIFY_JWT}"
+
+          export HOME="/tmp"
+
+          export DENO_DIR="/tmp/deno-cache"
+
+          export TMPDIR="/tmp"
+
+          exec edge-runtime start --user-worker-request-idle-timeout 150000 --main-service /home/deno/functions/main'
+        envFrom: *id013
+        ports:
+        - containerPort: 9000
+          name: service
+        volumeMounts:
+        - name: functions-runtime
+          mountPath: /runtime
+        - name: functions-data-functions
+          mountPath: /home/deno/functions
+        - name: functions-data-deno-cache
+          mountPath: /tmp/deno-cache
+        resources:
+          requests:
+            cpu: 75m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id014
+            port: 9000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id014
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id014
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: credentials
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/credentials'
+          type: DirectoryOrCreate
+      - name: auth-runtime
+        emptyDir: {}
+      - name: auth-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: rest-runtime
+        emptyDir: {}
+      - name: rest-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: realtime-runtime
+        emptyDir: {}
+      - name: realtime-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: storage-runtime
+        emptyDir: {}
+      - name: storage-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: storage-data-storage
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/storage'
+          type: DirectoryOrCreate
+      - name: imgproxy-runtime
+        emptyDir: {}
+      - name: imgproxy-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: imgproxy-data-storage
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/storage'
+          type: DirectoryOrCreate
+      - name: meta-runtime
+        emptyDir: {}
+      - name: meta-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: functions-runtime
+        emptyDir: {}
+      - name: functions-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: functions-data-functions
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/functions'
+          type: DirectoryOrCreate
+      - name: functions-data-deno-cache
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/deno-cache'
+          type: DirectoryOrCreate
+      - name: functions-functions-config
+        configMap:
+          name: supabase-functions

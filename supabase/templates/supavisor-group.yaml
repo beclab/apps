@@ -1,0 +1,203 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: supavisor
+  labels:
+    supabase-group: supavisor
+spec:
+  replicas: {{ .Values.workloads.supavisor.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: supavisor
+  template:
+    metadata:
+      labels:
+        supabase-group: supavisor
+        io.kompose.service: supavisor
+      annotations:
+        checksum/runtime: '{{ include (print $.Template.BasePath "/runtime.yaml") . | sha256sum }}'
+        checksum/environment: '{{ include (print $.Template.BasePath "/environment.yaml") . | sha256sum }}'
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: supavisor-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /credentials; chmod 700 /credentials; chown 1000:1000 /runtime
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: supavisor-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: supavisor-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: supavisor-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: supavisor-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id001
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: supavisor-runtime
+          mountPath: /runtime
+        - name: supavisor-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      containers:
+      - name: supavisor
+        image: supabase/supavisor:2.9.13
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export PORT="4000"
+
+          export POSTGRES_PORT="${POSTGRES_PORT}"
+
+          export POSTGRES_HOST="${POSTGRES_HOST}"
+
+          export POSTGRES_DB="${POSTGRES_DB}"
+
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+
+          export DATABASE_URL="ecto://supabase_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/_supabase"
+
+          export CLUSTER_POSTGRES="true"
+
+          export SECRET_KEY_BASE="${SECRET_KEY_BASE}"
+
+          export VAULT_ENC_KEY="${VAULT_ENC_KEY}"
+
+          export API_JWT_SECRET="${JWT_SECRET}"
+
+          export METRICS_JWT_SECRET="${JWT_SECRET}"
+
+          export REGION="local"
+
+          export ERL_AFLAGS="-proto_dist inet_tcp"
+
+          export POOLER_TENANT_ID="${POOLER_TENANT_ID}"
+
+          export POOLER_DEFAULT_POOL_SIZE="${POOLER_DEFAULT_POOL_SIZE}"
+
+          export POOLER_MAX_CLIENT_CONN="${POOLER_MAX_CLIENT_CONN}"
+
+          export POOLER_POOL_MODE="transaction"
+
+          export DB_POOL_SIZE="${POOLER_DB_POOL_SIZE}"
+
+          export ERL_FLAGS="+S 2:2"
+
+          export RLIMIT_NOFILE="10000"
+
+          export ECTO_IPV6="false"
+
+          exec /usr/bin/tini -s -g -- /app/limits.sh /bin/sh -c ''/app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)"
+          && /app/bin/server'''
+        envFrom: *id001
+        ports:
+        - containerPort: 5432
+          name: service
+        volumeMounts:
+        - name: supavisor-runtime
+          mountPath: /runtime
+        - name: supavisor-pooler
+          mountPath: /etc/pooler
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet: &id002
+            path: /api/health
+            port: 4000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: *id002
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: *id002
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: credentials
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/credentials'
+          type: DirectoryOrCreate
+      - name: supavisor-runtime
+        emptyDir: {}
+      - name: supavisor-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: supavisor-pooler
+        configMap:
+          name: supabase-pooler

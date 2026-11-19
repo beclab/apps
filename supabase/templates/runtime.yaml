@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supabase-runtime
+data:
+  keys.js: |
+    const fs=require('node:fs'), crypto=require('node:crypto');
+    // Keep installation credentials with the database, across namespace deletion.
+    // Kubernetes Secret values bootstrap a new data directory or an in-place upgrade.
+    const names=['POSTGRES_PASSWORD','JWT_SECRET','SECRET_KEY_BASE','REALTIME_DB_ENC_KEY','VAULT_ENC_KEY','PG_META_CRYPTO_KEY','DASHBOARD_PASSWORD','S3_PROTOCOL_ACCESS_KEY_SECRET'];
+    const file='/credentials/installation.json';
+    const validate=values=>{
+      for(const name of names) if(typeof values[name]!=='string'||!values[name]) throw new Error('Missing installation credential: '+name);
+      return Object.fromEntries(names.map(name=>[name,values[name]]));
+    };
+    if(!fs.existsSync(file)) {
+      const temporary=file+'.'+crypto.randomUUID();
+      fs.writeFileSync(temporary,JSON.stringify(validate(process.env)),{mode:0o600,flag:'wx'});
+      try { fs.linkSync(temporary,file); }
+      catch(error) { if(error.code!=='EEXIST') throw error; }
+      finally { fs.unlinkSync(temporary); }
+    }
+    const credentials=validate(JSON.parse(fs.readFileSync(file,'utf8')));
+    Object.assign(process.env,credentials);
+    const b=x=>Buffer.from(JSON.stringify(x)).toString('base64url');
+    const token=role=>{const h=b({alg:'HS256',typ:'JWT'})+'.'+b({role,iss:'supabase',iat:1700000000,exp:2147483647});return h+'.'+crypto.createHmac('sha256',process.env.JWT_SECRET).update(h).digest('base64url')};
+    const values={...credentials,ANON_KEY:token('anon'),SERVICE_ROLE_KEY:token('service_role')};
+    const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
+    fs.writeFileSync('/runtime/keys.env',Object.entries(values).map(([k,v])=>`export ${k}=${quote(v)}`).join('\n')+'\n',{mode:0o600});
+    if(process.env.GATEWAY==='true') {
+     let text=fs.readFileSync('/config/lds.template.yaml','utf8');
+     const all={...process.env,...values,DASHBOARD_BASIC_AUTH:process.env.DASHBOARD_USERNAME+':{SHA}'+crypto.createHash('sha1').update(process.env.DASHBOARD_PASSWORD).digest('base64')};
+     text=text.replace(/\$\{([A-Z_]+)\}/g,(_,k)=>all[k]||'');
+     fs.writeFileSync('/runtime/lds.yaml',text,{mode:0o600});
+    }

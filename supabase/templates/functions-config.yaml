@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supabase-functions
+data:
+  main.ts: |
+    const enc=new TextEncoder();
+    const decode=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
+    async function valid(token){try{
+     const [a,b,c]=token.split('.'); if(!a||!b||!c||JSON.parse(new TextDecoder().decode(decode(a))).alg!=='HS256')return false;
+     const key=await crypto.subtle.importKey('raw',enc.encode(Deno.env.get('JWT_SECRET')),{name:'HMAC',hash:'SHA-256'},false,['verify']);
+     if(!await crypto.subtle.verify('HMAC',key,decode(c),enc.encode(a+'.'+b)))return false;
+     const p=JSON.parse(new TextDecoder().decode(decode(b))),now=Date.now()/1000;
+     return typeof p.exp==='number' && p.exp>now && (!p.nbf||p.nbf<=now);
+    }catch{return false}}
+    Deno.serve(async req=>{
+     const slug=new URL(req.url).pathname.split('/')[1];
+     if(!slug||!/^[a-zA-Z0-9_-]+$/.test(slug)||slug==='main')return new Response('Not found',{status:404});
+     if(req.method==='OPTIONS')return new Response(null,{headers:{'Access-Control-Allow-Origin':'*','Access-Control-Allow-Headers':'authorization,apikey,content-type,x-client-info','Access-Control-Allow-Methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS'}});
+     if(!await valid((req.headers.get('Authorization')||'').replace(/^Bearer /i,'')))return new Response('Unauthorized',{status:401});
+     try { const worker=await EdgeRuntime.userWorkers.create({servicePath:'/home/deno/functions/'+slug,memoryLimitMb:150,workerTimeoutMs:400000,noModuleCache:false,envVars:Object.entries({...Deno.env.toObject(),SUPABASE_FUNCTION_SLUG:slug})});
+     return await worker.fetch(req);
+     }catch(e){console.error('Function startup failed',slug,e);return new Response('Function failed',{status:503})}
+    });
+  hello.ts: |
+    Deno.serve(async req=>{
+    const data=await req.json().catch(()=>({}));
+    return Response.json({message:'Hello '+(data.name||'from Olares')+'!',runtime:'Supabase Edge Runtime'},{headers:{'Access-Control-Allow-Origin':'*'}});
+    });
