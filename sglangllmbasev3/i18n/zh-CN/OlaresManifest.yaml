@@ -4,19 +4,24 @@ metadata:
 
 spec:
   upgradeDescription: |
-    将 SGLang 从 v0.5.21-cu130 升级至 v0.5.22-cu130。Chart 1.2.34。
+    将 SGLang 从 v0.5.22-cu130 升级至 v0.5.23。Chart 1.2.35。官方 NVIDIA 镜像标签现为 `v0.5.23`，仍使用 CUDA 13。
 
-    **更新内容**（v0.5.21 → v0.5.22）
+    **更新内容**（v0.5.22 → v0.5.23）
 
-    - 新增模型支持：Clef / Clef Flash、PPLX-Decider v1 / v1.1、EmbeddingGemma 2、LLaDA2.2，以及 HunyuanImage-3.0-Instruct、Kandinsky 6 / 6 SR、Wan-Animate-2、SANA-Video 2.0、LLaDA-Image / LLaDA-Image-Turbo 等扩散模型
-    - DeepSeek-V4.1 在 H200 上单卡吞吐最高提升到 2.3 倍。Qwen3.8-Flash-Next 在 B200 上 decode 快 12%，GLM-5.3-Flash 配合 DFlash 在 B300 上快 10%，MiMo-V2.6-Pro 配合 DFlash 在 B300 上 decode 吞吐提升到 1.85 倍。GLM-5.2 与 GLM-5.3 可将 decode 上下文并行与 MTP 一起使用，GLM-5.3 的 decode 最高快 2.1 倍
-    - InstantTensor 加载器可将模型加载加快约 10 倍（8 张 H200 上的 DeepSeek-R1，从 50 GB/s 存储加载由 160 秒降到 15.3 秒）。PD 分离在长提示词场景下吞吐最高提升 27%，p95 TTFT 大约减半。HiSparse 现支持 EAGLE 与 MTP，KV cache 可放在 CPU 内存中
-    - 修复：混合线性模型在同时使用投机解码和结构化输出时，可能从错误的 Mamba 状态恢复
-    - CUDA 镜像升级到 PyTorch 2.14.1、Transformers 5.19.0 和 FlashInfer 0.7.1
-    - 破坏性变更：要求 Python 3.11 或更新版本（本 CUDA 13 镜像已内置 Python 3.12）。`--enable-dp-attention` 已废弃，请改用 `--attn-dp-size N`，`--dp-size` 现在只表示模型副本数。`--disaggregation-decode-host-receive-threshold` 含义对调：`1`（新默认值）关闭 host 接收，`0` 表示始终在 host 上接收。移除 `ChunkCache`。移除 `tc_piecewise` prefill CUDA graph 后端。OpenAI 聊天响应有三处变化：`tool_choice: "none"` 不再向 DeepSeek 模型展示工具 schema；缺失的 `tool_calls` 字段改为省略，不再返回 `null`；同一次流式响应全程使用同一个 `created` 时间戳。`--enable-layernorm-sp` 不能再与流水线并行一起使用
+    - 新增语言/视觉模型：Muse Spark Open、Beam-1.0、MiniMax-M3.1-Flash、MiniCPM-V 4.7 和 Kev。上游还新增 Cosmos3-Nano-Sim、FLUX.3 Image Klein 等扩散模型；本 Chart 未配置扩散模型服务。
+    - 提升 GB300 上 DeepSeek-V4.1 的预填充性能并降低首 token 延迟，同时加速 H200 上的 MoE 预填充。可选 NVIDIA megakernel 可加速 DeepSeek-V4.1-Flash 解码，仅在受支持配置上通过 `--enable-nvidia-megakernel` 启用。收益取决于硬件和负载。
+    - 新增可选 Paged Experts，用于运行超出 GPU 显存容量的 MoE 模型；新增支持 FP8/NVFP4 MoE 模型的可选 LoRA 引擎。MLA 解码上下文并行支持 HiCache 文件型 L3 前缀存储。改进推测解码、Gemma 4 草稿计算图及 DFlash/DFlash2 attention 数据并行。
+    - 移除旧版 tar 格式 `.pt` 检查点的不安全 pickle 回退加载，需离线转换为 safetensors 或 zip 格式 `.pt`。TCP ZMQ IPC 增加对端白名单校验。修复多 tokenizer 的 embedding 输出重新打包问题。
 
+    **升级注意事项**
+    - DeepSeek-V4/V4.1 的提示词与输出解析改用 deepseek-recipe。客户端需拼接流式工具调用参数片段；工具调用 ID 使用 `call_00_...` 格式。V4 的数字型 `reasoning_effort`，以及同时使用 `tools` 和 `continue_final_message` 的请求会返回 HTTP 400。请检查自定义解析器和集成。
+    - 受支持 CUDA 配置默认启用 DeepSeek-V4.1 decoder SWA bounded replay，其数值结果不完全等同于完整预填充。如需一致性，请设置 `--no-enable-decoder-swa-bounded-replay`。SM100/SM103 的 PD 部署默认使用 MegaAttention，预填充和解码需同步升级并使用匹配的后端。
+    - 从 ENGINE_ARGS 移除 `--speculative-skip-dp-mlp-sync`，否则启动失败。`tokenspeed_mla` 改为 `cutedsl_mla` 的废弃别名；迁移时设置 `--attention-backend cutedsl_mla --kv-cache-dtype fp8_e4m3`，推测解码还需 `--speculative-attention-mode decode`。
+    - FlashInfer CUTLASS MoE 自动调优增加预填充尺寸，首次启动可能耗时更长。后续启动复用已保存结果；可通过 `--disable-flashinfer-autotune` 跳过调优。
+
+    以上为上游引擎能力，需要匹配模型并进行运行验证。llm-init 保持 `v1.5.0`。
     详细发布说明请访问：
-    https://github.com/sgl-project/sglang/releases
+    https://github.com/sgl-project/sglang/releases/tag/v0.5.23
   fullDescription: |
     **重要提示**  
     此应用是一个模板，不能单独使用。请按下方环境变量设置模型后，方可使用本应用提供模型服务。
