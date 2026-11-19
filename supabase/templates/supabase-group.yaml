@@ -1,0 +1,371 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: supabase
+  labels:
+    supabase-group: supabase
+spec:
+  replicas: {{ .Values.workloads.supabase.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: supabase
+  template:
+    metadata:
+      labels:
+        supabase-group: supabase
+        io.kompose.service: supabase
+      annotations:
+        checksum/gateway: '{{ include (print $.Template.BasePath "/gateway-config.yaml") . | sha256sum }}'
+        checksum/runtime: '{{ include (print $.Template.BasePath "/runtime.yaml") . | sha256sum }}'
+        checksum/environment: '{{ include (print $.Template.BasePath "/environment.yaml") . | sha256sum }}'
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: studio-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /credentials; chmod 700 /credentials; chown 1000:1000 /runtime; chown 1000:1000 /prepare/snippets; chown 1000:1000 /prepare/functions
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: studio-runtime
+          mountPath: /runtime
+        - name: studio-data-snippets
+          mountPath: /prepare/snippets
+        - name: studio-data-functions
+          mountPath: /prepare/functions
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: studio-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: studio-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: studio-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id001
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: studio-runtime
+          mountPath: /runtime
+        - name: studio-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: api-gw-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /runtime
+        volumeMounts:
+        - name: api-gw-runtime
+          mountPath: /runtime
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: api-gw-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: api-gw-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: api-gw-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id003
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: api-gw-runtime
+          mountPath: /runtime
+        - name: api-gw-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        - name: api-gw-gateway
+          mountPath: /config/lds.template.yaml
+          subPath: lds.template.yaml
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+        env:
+        - name: GATEWAY
+          value: 'true'
+      containers:
+      - name: studio
+        image: supabase/studio:2026.10.12-sha-3699278
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export HOSTNAME="0.0.0.0"
+
+          export STUDIO_PG_META_URL="http://meta:8080"
+
+          export POSTGRES_PORT="${POSTGRES_PORT}"
+
+          export POSTGRES_HOST="${POSTGRES_HOST}"
+
+          export POSTGRES_DB="${POSTGRES_DB}"
+
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+
+          export POSTGRES_USER_READ_WRITE="postgres"
+
+          export PG_META_CRYPTO_KEY="${PG_META_CRYPTO_KEY}"
+
+          export PGRST_DB_SCHEMAS="${PGRST_DB_SCHEMAS}"
+
+          export PGRST_DB_MAX_ROWS="${PGRST_DB_MAX_ROWS:-1000}"
+
+          export PGRST_DB_EXTRA_SEARCH_PATH="${PGRST_DB_EXTRA_SEARCH_PATH:-public}"
+
+          export DEFAULT_ORGANIZATION_NAME="${STUDIO_DEFAULT_ORGANIZATION}"
+
+          export DEFAULT_PROJECT_NAME="${STUDIO_DEFAULT_PROJECT}"
+
+          export OPENAI_API_KEY="${OPENAI_API_KEY}"
+
+          export SUPABASE_URL="http://api-gw:8000"
+
+          export SUPABASE_PUBLIC_URL="${SUPABASE_PUBLIC_URL}"
+
+          export SUPABASE_ANON_KEY="${ANON_KEY}"
+
+          export SUPABASE_SERVICE_KEY="${SERVICE_ROLE_KEY}"
+
+          export AUTH_JWT_SECRET="${JWT_SECRET}"
+
+          export SUPABASE_PUBLISHABLE_KEY="${SUPABASE_PUBLISHABLE_KEY}"
+
+          export SUPABASE_SECRET_KEY="${SUPABASE_SECRET_KEY}"
+
+          export ENABLED_FEATURES_LOGS_ALL="false"
+
+          export SNIPPETS_MANAGEMENT_FOLDER="/app/snippets"
+
+          export EDGE_FUNCTIONS_MANAGEMENT_FOLDER="/app/edge-functions"
+
+          export NEXT_TELEMETRY_DISABLED="1"
+
+          export HOME="/tmp"
+
+          exec docker-entrypoint.sh node apps/studio/server.js'
+        envFrom: *id001
+        ports:
+        - containerPort: 3000
+          name: service
+        volumeMounts:
+        - name: studio-runtime
+          mountPath: /runtime
+        - name: studio-data-snippets
+          mountPath: /app/snippets
+        - name: studio-data-functions
+          mountPath: /app/edge-functions
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          httpGet: &id002
+            path: /api/platform/profile
+            port: 3000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          httpGet: *id002
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet: *id002
+          periodSeconds: 30
+          failureThreshold: 5
+      - name: gateway
+        image: envoyproxy/envoy:v1.39.1
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export ANON_KEY="${ANON_KEY}"
+
+          export SERVICE_ROLE_KEY="${SERVICE_ROLE_KEY}"
+
+          export SUPABASE_PUBLISHABLE_KEY="${SUPABASE_PUBLISHABLE_KEY:-}"
+
+          export SUPABASE_SECRET_KEY="${SUPABASE_SECRET_KEY:-}"
+
+          export ANON_KEY_ASYMMETRIC="${ANON_KEY_ASYMMETRIC:-}"
+
+          export SERVICE_ROLE_KEY_ASYMMETRIC="${SERVICE_ROLE_KEY_ASYMMETRIC:-}"
+
+          export SUPABASE_PUBLIC_URL="${SUPABASE_PUBLIC_URL}"
+
+          export DASHBOARD_USERNAME="${DASHBOARD_USERNAME}"
+
+          export DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD}"
+
+          exec envoy -c /config/envoy.yaml --concurrency 2'
+        envFrom: *id003
+        ports:
+        - containerPort: 8000
+          name: service
+        volumeMounts:
+        - name: api-gw-runtime
+          mountPath: /runtime
+        - name: api-gw-gateway
+          mountPath: /config
+          readOnly: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: '2'
+            memory: 2Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          tcpSocket: &id004
+            port: 8000
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          tcpSocket: *id004
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket: *id004
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: credentials
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/credentials'
+          type: DirectoryOrCreate
+      - name: studio-runtime
+        emptyDir: {}
+      - name: studio-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: studio-data-snippets
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/snippets'
+          type: DirectoryOrCreate
+      - name: studio-data-functions
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/functions'
+          type: DirectoryOrCreate
+      - name: api-gw-runtime
+        emptyDir: {}
+      - name: api-gw-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: api-gw-gateway
+        configMap:
+          name: supabase-gateway

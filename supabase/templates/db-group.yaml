@@ -1,0 +1,268 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  labels:
+    supabase-group: db
+spec:
+  replicas: {{ .Values.workloads.db.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      io.kompose.service: db
+  template:
+    metadata:
+      labels:
+        supabase-group: db
+        io.kompose.service: db
+      annotations:
+        checksum/runtime: '{{ include (print $.Template.BasePath "/runtime.yaml") . | sha256sum }}'
+        checksum/environment: '{{ include (print $.Template.BasePath "/environment.yaml") . | sha256sum }}'
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: db-init-permissions
+        image: beclab/aboveos-busybox:1.37.0
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -ec
+        - chown 1000:1000 /credentials; chmod 700 /credentials; chown 1000:1000 /runtime; chown 1000:1000 /prepare/postgres; chown 1000:1000 /prepare/postgres-config; chown 1000:1000 /prepare/pg-run;
+          chown 1000:1000 /prepare/pg-log
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: db-runtime
+          mountPath: /runtime
+        - name: db-data-postgres
+          mountPath: /prepare/postgres
+        - name: db-data-postgres-config
+          mountPath: /prepare/postgres-config
+        - name: db-pg-run
+          mountPath: /prepare/pg-run
+        - name: db-pg-log
+          mountPath: /prepare/pg-log
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: db-prepare-shell
+        image: busybox:1.37.0-musl
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cp /bin/busybox /runtime/busybox; chmod 755 /runtime/busybox
+        volumeMounts:
+        - name: db-runtime
+          mountPath: /runtime
+        resources:
+          requests:
+            cpu: 10m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+      - name: db-prepare-keys
+        image: supabase/studio:2026.10.12-sha-3699278
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - node
+        - /config/keys.js
+        envFrom: &id001
+        - configMapRef:
+            name: supabase-environment
+        - secretRef:
+            name: supabase-secrets
+        volumeMounts:
+        - name: credentials
+          mountPath: /credentials
+        - name: db-runtime
+          mountPath: /runtime
+        - name: db-runtime-config
+          mountPath: /config/keys.js
+          subPath: keys.js
+          readOnly: true
+        resources:
+          limits:
+            cpu: 500m
+            memory: 128Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      - name: db-prepare-postgres-config
+        image: supabase/postgres:17.6.1.136
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        command:
+        - sh
+        - -ec
+        - cd /etc/postgresql-custom; find . -type f | while IFS= read -r f; do mkdir -p "/prepare/config/$(dirname "$f")"; if [ ! -e "/prepare/config/$f"
+          ]; then cp "$f" "/prepare/config/$f"; fi; done; ls -l /prepare/config/*.conf
+        volumeMounts:
+        - name: db-data-postgres-config
+          mountPath: /prepare/config
+        resources:
+          limits:
+            cpu: 100m
+            memory: 64Mi
+          requests:
+            cpu: 10m
+            memory: 32Mi
+      containers:
+      - name: db
+        image: supabase/postgres:17.6.1.136
+        imagePullPolicy: IfNotPresent
+        command:
+        - /runtime/busybox
+        - sh
+        - -ec
+        - 'set -a
+
+          . /runtime/keys.env
+
+          export POSTGRES_HOST="/var/run/postgresql"
+
+          export PGPORT="${POSTGRES_PORT}"
+
+          export POSTGRES_PORT="${POSTGRES_PORT}"
+
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD}"
+
+          export PGDATABASE="${POSTGRES_DB}"
+
+          export POSTGRES_DB="${POSTGRES_DB}"
+
+          export JWT_EXP="3600"
+
+          export PGDATA="/var/lib/postgresql/data/pgdata"
+
+          export POSTGRES_USER="supabase_admin"
+
+          exec docker-entrypoint.sh postgres -c config_file=/etc/postgresql/postgresql.conf -c data_directory=/var/lib/postgresql/data/pgdata
+          -c hba_file=/var/lib/postgresql/data/pgdata/pg_hba.conf -c log_min_messages=warning'
+        envFrom: *id001
+        ports:
+        - containerPort: 5432
+          name: service
+        volumeMounts:
+        - name: db-runtime
+          mountPath: /runtime
+        - name: db-data-postgres
+          mountPath: /var/lib/postgresql/data
+        - name: db-data-postgres-config
+          mountPath: /etc/postgresql-custom
+        - name: db-pg-run
+          mountPath: /var/run/postgresql
+        - name: db-pg-log
+          mountPath: /var/log/postgresql
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/migrations/99-realtime.sql
+          subPath: realtime.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/init-scripts/98-webhooks.sql
+          subPath: webhooks.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/init-scripts/99-roles.sql
+          subPath: roles.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/init-scripts/99-jwt.sql
+          subPath: jwt.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/migrations/97-_supabase.sql
+          subPath: _supabase.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/migrations/99-logs.sql
+          subPath: logs.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /docker-entrypoint-initdb.d/migrations/99-pooler.sql
+          subPath: pooler.sql
+          readOnly: true
+        - name: db-db-init
+          mountPath: /etc/passwd
+          subPath: passwd
+          readOnly: true
+        resources:
+          requests:
+            cpu: 300m
+            memory: 1Gi
+          limits:
+            cpu: '2'
+            memory: 3Gi
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          exec: &id002
+            command:
+            - pg_isready
+            - -U
+            - supabase_admin
+            - -d
+            - postgres
+            - -h
+            - 127.0.0.1
+          timeoutSeconds: 5
+          periodSeconds: 5
+          failureThreshold: 120
+        readinessProbe:
+          exec: *id002
+          timeoutSeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          exec: *id002
+          timeoutSeconds: 5
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      - name: credentials
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/credentials'
+          type: DirectoryOrCreate
+      - name: db-runtime
+        emptyDir: {}
+      - name: db-runtime-config
+        configMap:
+          name: supabase-runtime
+      - name: db-data-postgres
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/postgres'
+          type: DirectoryOrCreate
+      - name: db-data-postgres-config
+        hostPath:
+          path: '{{ .Values.userspace.appData }}/postgres-config'
+          type: DirectoryOrCreate
+      - name: db-pg-run
+        emptyDir: {}
+      - name: db-pg-log
+        emptyDir: {}
+      - name: db-db-init
+        configMap:
+          name: supabase-db-init
