@@ -7,7 +7,7 @@ metadata:
   description: "FreeToken-powered Qwen3.6-35B-A3B for text, image understanding, and tool calling"
   appid: freetokenqwen3635ba3bnvfp4
   title: Qwen3.6-35B-A3B (FreeToken)
-  version: '1.0.4'
+  version: '1.0.8'
   categories:
   - AI
   - models
@@ -48,6 +48,22 @@ spec:
 
     [Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) · [NVFP4](https://huggingface.co/nvidia/Qwen3.6-35B-A3B-NVFP4) · [FreeToken](https://github.com/FlashML-org/FreeToken)
 
+  upgradeDescription: |
+    **1.0.8**
+
+    - When the GPU is shared by time slicing, this app now gives its GPU memory back to other apps on the same GPU, so their models no longer slow to about one token per second after this one runs. Prompt processing is slower in this mode; dedicated and memory-sliced GPUs are unaffected.
+    - Raised the memory limit to 48 GiB to hold the GPU memory moved to system memory while another app uses the GPU.
+
+    v1.0.7: Store runtime state in Common for cross-node operation. Prefer existing Common configuration; otherwise migrate local legacy Cache or initialize in Common. Retry shared helper reads during engine startup.
+
+    **1.0.6**
+
+    - Fixed the engine service address so Model Console can detect when FreeToken is ready.
+
+    **1.0.5**
+
+    - The app no longer stays unavailable or restarts while the model is downloading or being converted to FreeToken's weight format.
+    - Model Console now identifies the engine as FreeToken.
   developer: Alibaba
   website: https://qwen.ai/home
   sourceCode: https://github.com/FlashML-org/FreeToken
@@ -74,16 +90,18 @@ spec:
       requiredDisk: 50Mi
       limitedDisk: 500Gi
       # Engine MEMORY_REQUEST 24Gi + llm-init 256Mi <= requiredMemory 25Gi;
-      # MEMORY_LIMIT 32Gi + llm-init 2Gi <= limitedMemory 34Gi.
+      # MEMORY_LIMIT 48Gi + llm-init 2Gi <= limitedMemory 50Gi.
       #
       # The request has to cover the model itself: under MoE offload the NVFP4
       # expert banks (21.8Gi, measured) sit in host RAM for the life of the
       # process -- they are the model, not a transient. Steady state is ~25Gi
       # with the ~3Gi python/torch/CUDA context on top, and --expert-load
-      # serial keeps the startup read bounded, so there is no load-time spike
-      # to leave room for: the 32Gi cap is ~7Gi of headroom over steady state,
-      # and an OOMKill under it would mean something is actually growing.
-      limitedMemory: "34Gi"
+      # serial keeps the startup read bounded, so there is no load-time spike.
+      # The limit is higher because of GPU time slicing: while another app
+      # holds the GPU, this engine's GPU memory (~21Gi) is evicted to host RAM
+      # and charged to this container. 32Gi was OOMKilled on the first switch;
+      # the measured peak with a 24Gi GPU is ~36Gi.
+      limitedMemory: "50Gi"
       requiredMemory: "25Gi"
       requiredGPUMemory: "23Gi"
       limitedGPUMemory: "24Gi"
@@ -199,9 +217,9 @@ envs:
     type: string
     editable: false
     applyOnChange: false
-  - envName: FREETOKEN_MEMORY_LIMIT # 32Gi + llm-init 2Gi <= limitedMemory 34Gi
+  - envName: FREETOKEN_MEMORY_LIMIT # 48Gi + llm-init 2Gi <= limitedMemory 50Gi
     required: true
-    default: "32Gi"
+    default: "48Gi"
     type: string
     editable: false
     applyOnChange: false

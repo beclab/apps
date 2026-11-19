@@ -6,26 +6,18 @@
 {{- $cpuRequest := trim ($oe.FREETOKEN_CPU_REQUEST | default "500m") -}}
 {{- $memRequest := trim ($oe.FREETOKEN_MEMORY_REQUEST | default "24Gi") -}}
 {{- $cpuLimit := trim ($oe.FREETOKEN_CPU_LIMIT | default "8") -}}
-{{- $memLimit := trim ($oe.FREETOKEN_MEMORY_LIMIT | default "32Gi") -}}
+{{- $memLimit := trim ($oe.FREETOKEN_MEMORY_LIMIT | default "48Gi") -}}
 {{- /* nvidia.com/gpumem needs a BARE MiB int. This chart has one accelerator
        mode (nvidia): the FreeToken image is amd64 CUDA-13 only, so there is no
        gb10 unified-memory branch and no CPU branch — FreeToken requires a GPU. */ -}}
 {{- $gpuMiB := include "llmbase.gpuMiB" ($oe.FREETOKEN_REQUIRED_GPU_MEMORY | default "23552") -}}
-{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
 # FreeToken engine Deployment. wrappers/freetoken.sh blocks on the sentinel
 # (download ready), prepares/reuses FTW, then starts `ft serve`.
 #
-# SERVICE NAME: llm-init derives the engine URL from ITS OWN ENGINE_KIND and
-# has no `freetoken` kind yet (v1.7.21 knows ollama/vllm/llamacpp/sglang/...),
-# so llm-init.yaml sets ENGINE_KIND=sglang and its derived URL is
-# http://sglang:30000 — the Service below MUST stay named "sglang" on port
-# 30000, and the engine binds that port. The sglang flag table is also the
-# closest fit: --max-running-requests is spelled identically in both engines,
-# and --context-length is accepted by the wrapper as an alias for FreeToken's
-# --max-seq-len-override (see wrappers.yaml). This container's own ENGINE_KIND
-# below stays `freetoken`: it is what wrappers/freetoken.sh reports, and it is
-# never used to derive a URL.
+# Model Console derives http://freetoken:1919 from ENGINE_KIND=freetoken.
+# The Service maps that endpoint to the engine listening on port 30000.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,10 +43,6 @@ spec:
       labels:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: freetoken
-        # Target of the llm-init Pod's podAffinity (it must run on this Pod's
-        # node to hand over run-state). Keep this label OFF the llm-init Pod
-        # template - see the note there.
-        app.kubernetes.io/instance: '{{ .Release.Name }}'
     spec:
       restartPolicy: Always
       volumes:
@@ -102,8 +90,7 @@ spec:
               value: /run/llm-init/wrappers/common.sh
             - name: MODEL_NAME
               value: "{{ $modelName }}"
-            # Must match the Service port below (== llm-init's derived
-            # http://sglang:30000).
+            # Must match the Service targetPort and containerPort below.
             - name: FREETOKEN_PORT
               value: "30000"
             - name: WAIT_TIMEOUT
@@ -148,28 +135,10 @@ spec:
           ports:
             - name: freetoken
               containerPort: 30000
-          # /health returns HTTP 200 even while loading or after an error.
-          # The chart carries the script so fixes do not require an image rebuild.
-          # Initial downloads/conversion may be long: only gate traffic until ready.
-          startupProbe:
-            exec:
-              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py"]
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 8640
-          readinessProbe:
-            exec:
-              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py"]
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 1
-          livenessProbe:
-            exec:
-              command: ["/opt/venv/bin/python", "/llm-init/wrappers/freetoken-healthcheck.py", "--live"]
-            periodSeconds: 30
-            timeoutSeconds: 5
-            # Allow a Model Console relaunch to prepare a different FTW layout.
-            failureThreshold: 10
+          # Match the llama.cpp app: container startup makes the application
+          # Ready while the wrapper waits for downloads and FTW preparation.
+          # Model availability is tracked separately by llm-init; engine health
+          # probes here would block app readiness or restart long downloads.
           volumeMounts:
             - name: ftw-cache
               mountPath: /cache/freetoken-ftw
@@ -209,9 +178,8 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  # Named "sglang" on purpose — see the Deployment comment above. Renaming it
-  # silently breaks llm-init's reverse proxy.
-  name: sglang
+  # Matches Model Console's derived URL for ENGINE_KIND=freetoken.
+  name: freetoken
   namespace: {{ .Release.Namespace }}
   labels:
     io.kompose.service: freetoken
@@ -220,6 +188,6 @@ spec:
     io.kompose.service: freetoken
   ports:
     - name: freetoken
-      port: 30000
+      port: 1919
       targetPort: 30000
   type: ClusterIP
