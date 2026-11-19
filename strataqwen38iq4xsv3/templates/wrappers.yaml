@@ -12,16 +12,23 @@ data:
 
     ENGINE=strata
     WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    # Snapshot the shared helper locally; a cross-node update may briefly fail to open.
+    _common_copy=$(mktemp "${TMPDIR:-/tmp}/strata-common.XXXXXX")
     _wc=0
-    while [ ! -f "$WRAPPER_COMMON" ] && [ "$_wc" -lt "${WRAPPER_COMMON_WAIT:-3600}" ]; do
+    while ! cp "$WRAPPER_COMMON" "$_common_copy" 2>/dev/null; do
+        if [ "$_wc" -ge "${WRAPPER_COMMON_WAIT:-3600}" ]; then
+            rm -f "$_common_copy"
+            printf '[wrapper] %s could not be read\n' "$WRAPPER_COMMON" >&2
+            exit 1
+        fi
         printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
         sleep 5
         _wc=$((_wc + 5))
     done
-    [ -f "$WRAPPER_COMMON" ] || { printf '[wrapper] %s never appeared\n' "$WRAPPER_COMMON" >&2; exit 1; }
-    unset _wc
     # shellcheck source=common.sh
-    . "$WRAPPER_COMMON"
+    . "$_common_copy"
+    rm -f "$_common_copy"
+    unset _wc _common_copy
 
     wait_for_sentinel
     wait_for_engine_args_handoff
@@ -45,6 +52,7 @@ data:
     import os
     from pathlib import Path
     import shlex
+    import shutil
     import signal
     import subprocess
     import sys
@@ -56,6 +64,95 @@ data:
         '--build', '--setup', '--yes', '--no-start', '--check', '--update', '--inspect',
         '--browser', '--no-browser', '--skip-build', '--rollback-engine', '--cuda',
     }
+
+
+    def drop_pool_workers(argv):
+        # setup.py counts host P+E cores and writes --pool-workers 15. This
+        # container's CPU limit is lower, so those extra threads are throttled
+        # together. The engine sizes the pool to the cgroup when the flag is
+        # absent, which is the count its own startup warning asks for.
+        out = []
+        skip = False
+        for arg in argv:
+            if skip:
+                skip = False
+                continue
+            if arg == '--pool-workers':
+                skip = True
+                continue
+            if arg.startswith('--pool-workers='):
+                continue
+            out.append(arg)
+        return out
+
+
+    def publish_model_name(cfg):
+        # Strata only enables DFlash2 for qwen3.8-flash-next-unsloth-*.
+        # Model Console and Router keep the public id, published as an alias.
+        public = os.environ.get('MODEL_NAME', '').strip()
+        native = str(cfg.get('model_name') or '').strip()
+        if not native:
+            native = 'qwen3.8-flash-next-unsloth-ud-iq4_xs-v31'
+        cfg['model_name'] = native
+        if public and public != native:
+            cfg['aliases'] = [public]
+
+
+    def persist_dflash2(data, drafting, shared=Path('/dflash2')):
+        shared.mkdir(parents=True, exist_ok=True)
+        # Reuse a verified pack from an earlier engine-version cache before downloading.
+        def ready(folder):
+            return drafting.pack_ready(folder) or drafting.tuned_ok(folder) or drafting.converted_ok(folder)
+
+        if not ready(shared.parent):
+            for previous in sorted(data.parent.glob('*/dflash2')):
+                if previous.is_dir() and not previous.is_symlink() and ready(previous.parent):
+                    shutil.copytree(previous, shared, dirs_exist_ok=True)
+                    print(f'[strata] reused DFlash2 cache from {previous}', flush=True)
+                    break
+        link = data / 'dflash2'
+        if link.is_symlink():
+            if link.resolve() == shared.resolve():
+                return
+            link.unlink()
+        elif link.exists():
+            # Preserve the old files; never delete a model directory during migration.
+            link.rename(data / 'dflash2.legacy')
+        link.symlink_to(shared, target_is_directory=True)
+
+
+    def enable_dflash2(cfg, data, root):
+        # Direct setup/server launches bypass the Terminal's drafter preparation.
+        # The pack is checked and reused; a failed download leaves MTP in place.
+        cfg['drafting'] = 'mtp'
+        sys.path.insert(0, str(root))
+        try:
+            from strata_control import drafting, drafting_fetch
+            from serve.server import drafting_vram_mib
+        except Exception as exc:
+            print(f'[strata] DFlash2 drafter was not prepared ({exc}). This start keeps MTP.', flush=True)
+            return
+
+        def progress(msg, _done, _total):
+            print(f'[strata] {msg}', flush=True)
+
+        try:
+            persist_dflash2(data, drafting)
+            backend, archs = drafting.detect_hardware()
+            pack = drafting_fetch.ensure_for(
+                data, model_name=cfg.get('model_name'), backend=backend,
+                archs=archs, args=cfg.get('args') or [],
+                vram_mib=drafting_vram_mib(cfg, backend, archs),
+                progress=progress, throttle=True)
+            if pack is None:
+                print('[strata] DFlash2 drafter unavailable. This start keeps MTP.', flush=True)
+                return
+        except Exception as exc:
+            print(f'[strata] DFlash2 drafter was not prepared ({exc}). This start keeps MTP.', flush=True)
+            return
+        # Auto applies upstream card-specific defaults and permits MTP retry on startup failure.
+        cfg['drafting'] = 'auto'
+        print(f'[strata] DFlash2 drafter ready: {pack}', flush=True)
 
 
     def setup_args(raw):
@@ -95,14 +192,20 @@ data:
             source = source.parent
         if not source.is_dir() or not list(source.glob('*.gguf')):
             raise ValueError(f'No GGUF shards in {source}; MODEL_SOURCE must select the UD-IQ4_XS subdir')
-        expected = [f'Qwen3.8-Flash-Next-UD-IQ4_XS-{i:05d}-of-00003.gguf' for i in range(1, 4)]
+        expected = [f'Qwen3.8-Flash-Next-UD-IQ4_XS-{i:05d}-of-00004.gguf' for i in range(1, 5)]
         missing = [name for name in expected if not (source / name).is_file()]
         if missing:
             raise ValueError(f'Incomplete GGUF snapshot; llm-init must download missing shards: {missing}')
+        revision = 'd96201194f103c906994f283f504209dc8d2a10c'
+        # Check the snapshot directory before resolving individual HF blob links.
+        # An upgrade can briefly leave llm-init's previous model_path handoff.
+        if source.parent.parent.name == 'snapshots' and source.parent.name != revision:
+            raise ValueError(f'Wrong HF revision {source.parent.name}; expected {revision}. '
+                             'Download the pinned v31 model in Model Console before starting.')
         args = setup_args(os.environ.get('ENGINE_ARGS', ''))
-        defaults = ['--context', '32768', '--parallel', '1',
+        defaults = ['--context', '131072', '--parallel', '1',
                     '--resident-budget-gib', '56', '--kv', 'int8',
-                    '--kv-streaming', 'off', '--vram-reserve-mib', '1024']
+                    '--kv-streaming', 'auto', '--vram-reserve-mib', '1024']
         # Never reuse a derived pack after changing the downloaded HF snapshot.
         identity = str(source.resolve()) + (root / 'engine/BUILD.json').read_text()
         key = hashlib.sha256(identity.encode()).hexdigest()[:20]
@@ -112,27 +215,30 @@ data:
         # shared HF blobs read-only, with writable links/markers in our cache.
         gguf = data / 'gguf'
         gguf.mkdir(exist_ok=True)
-        for shard in sorted(source.glob('*.gguf')):
+        for name in expected:
+            shard = source / name
             link = gguf / shard.name
             if not link.is_symlink() or link.resolve() != shard.resolve():
                 link.unlink(missing_ok=True)
                 link.with_name(link.name + '.done').unlink(missing_ok=True)
                 link.symlink_to(shard.resolve())
         port = os.environ.get('STRATA_PORT', '8080')
-        generated = root / 'strata-unsloth-ud-iq4_xs.json'
+        generated = root / 'strata-unsloth-ud-iq4_xs-v31.json'
         # This file is generated by us, not an operator-owned model configuration.
         # Avoid upstream's merge of old settings (e.g. a removed parallel flag).
         generated.unlink(missing_ok=True)
         command = [sys.executable, str(root / 'setup.py'),
                    '--setup', '--yes', '--no-start', '--no-browser',
-                   '--family', 'unsloth', '--model', 'UD-IQ4_XS', '--backend', 'cuda',
+                   '--family', 'unsloth', '--model', 'UD-IQ4_XS-v31', '--backend', 'cuda',
                    '--gpu', '0', '--vision', 'no', '--data-dir', str(data),
                    '--gguf-dir', str(gguf), '--host', '0.0.0.0', '--port', port,
                    *defaults, *args]
         print('[strata] preparing GGUF and MTP cache; first start can take several minutes', flush=True)
         run_setup(command, root)
         cfg = json.loads(generated.read_text())
-        cfg['model_name'] = os.environ['MODEL_NAME']  # /v1/models must match Model Console.
+        cfg['args'] = drop_pool_workers(cfg.get('args') or [])
+        publish_model_name(cfg)
+        enable_dflash2(cfg, data, root)
         cfg['log'] = str(data / 'engine.log')
         cfg['open_browser'] = False
         cfg.pop('api_key', None)  # internal ClusterIP only; Olares authenticates the entrance.

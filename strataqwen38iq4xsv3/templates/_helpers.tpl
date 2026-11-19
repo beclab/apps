@@ -22,6 +22,17 @@
 /cache/hf/hub
 {{- end -}}
 
+{{- define "strata.runStateSubpath" -}}
+{{- /* Readiness, model_path and model-spec belong to one model identity.
+       Include MODEL_SOURCE (and its pinned revision) so an upgrade cannot
+       inherit an old ready sentinel or model card. Keep ENGINE_ARGS out:
+       tuning/restarts must preserve the user's card for the same model.
+       Both Deployments share this identity; legacy migration uses it too. */ -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $identity := list ($oe.MODEL_NAME | default "") ($oe.MODEL_SOURCE | default "") | toJson | sha256sum | trunc 20 -}}
+{{- printf "llm-init-run/%s/model-%s" .Release.Name $identity -}}
+{{- end -}}
+
 {{- define "strata.runStateHostPath" -}}
-{{- printf "%s/llm-init-run/%s" .Values.userspace.appCache .Release.Name -}}
+{{- printf "%s/%s" .Values.userspace.appCommon (include "strata.runStateSubpath" .) -}}
 {{- end -}}

@@ -70,21 +70,6 @@ spec:
         io.kompose.service: llm-init
     spec:
       restartPolicy: Always
-      # Both pods share run-state and model hostPath mounts; follow the engine onto its node.
-      # Keep the target instance label off this Pod to prevent self-affinity
-      # from allowing llm-init to schedule before the engine on another node.
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - topologyKey: kubernetes.io/hostname
-            labelSelector:
-              matchExpressions:
-              - key: app.kubernetes.io/instance
-                operator: In
-                values:
-                - '{{ .Release.Name }}'
-            namespaces:
-            - {{ .Release.Namespace }}
       enableServiceLinks: false
       securityContext:
         runAsUser: 1000
@@ -98,7 +83,40 @@ spec:
           hostPath:
             path: "{{ $runStateHostPath }}"
             type: DirectoryOrCreate
+        - name: legacy-run-state
+          hostPath:
+            path: {{ printf "%s/%s" .Values.userspace.appCache (include "strata.runStateSubpath" .) | quote }}
+            type: DirectoryOrCreate
       initContainers:
+        # The first migration must run on the node holding this model's old Cache.
+        - name: migrate-run-state
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /run/llm-init
+              chown 1000:1000 /run/llm-init
+              if [ -f /run/llm-init/model-spec.json ]; then
+                exit 0
+              fi
+              if [ -f /legacy-run-state/model-spec.json ]; then
+                # Publish the config last so an interrupted copy can be retried.
+                stage=/run/llm-init/.legacy-migration
+                mkdir -p "$stage"
+                cp -a /legacy-run-state/. "$stage/"
+                mv "$stage/model-spec.json" /run/llm-init/.model-spec.migrating
+                cp -a "$stage/." /run/llm-init/
+                rm -rf "$stage"
+                mv /run/llm-init/.model-spec.migrating /run/llm-init/model-spec.json
+              fi
+          volumeMounts:
+            - {name: legacy-run-state, mountPath: /legacy-run-state, readOnly: true}
+            - {name: run-state, mountPath: /run/llm-init}
+          securityContext: {runAsUser: 0}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
         # hostPath dirs are created root-owned; llm-init runs as UID 1000.
         - name: init-chown
           image: docker.io/beclab/aboveos-busybox:1.37.0
@@ -202,7 +220,7 @@ spec:
             limits:
               # The GGUF shards stream to disk with a bounded footprint,
               # but `hf download` still runs a python subprocess in this cgroup;
-              # 2Gi gives the huggingface_hub CLI headroom on a 3-shard repo.
+              # 2Gi gives the huggingface_hub CLI headroom on a 4-shard repo.
               cpu: "1"
               memory: 2Gi
 ---
