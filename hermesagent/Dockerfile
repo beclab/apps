@@ -22,11 +22,11 @@
 #
 # Build (all args optional; defaults shown):
 #   docker buildx build \
-#     --build-arg HERMES_VERSION=v0.23.2 \
+#     --build-arg HERMES_VERSION=v0.23.3 \
 #     --build-arg TARGET_UID=1000 \
 #     --build-arg TARGET_GID=1000 \
 #     --platform linux/amd64,linux/arm64 \
-#     -t harveyff/hermes-agent:v0.23.2-uid1000-multiarch --push .
+#     -t harveyff/hermes-agent:v0.23.3-uid1000-multiarch --push .
 # Then transfer the source image to beclab through the Olares image-locker API.
 #
 # Upgrades: pass the target --build-arg HERMES_VERSION and review upstream
@@ -34,7 +34,7 @@
 # ---------------------------------------------------------------------------
 
 # Global ARG consumed by FROM. Must be declared before the first FROM.
-ARG HERMES_VERSION=v0.23.2
+ARG HERMES_VERSION=v0.23.3
 FROM nousresearch/hermes-agent:${HERMES_VERSION}
 
 # Re-declare after FROM to make these usable inside RUN below.
