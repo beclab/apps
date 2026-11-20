@@ -7,7 +7,7 @@ metadata:
   description: "Qwen3.8-Flash-Next for text generation, reasoning, and tool calling, powered locally by Strata"
   appid: strataqwen38iq3sv3
   title: Qwen3.8-Flash-Next IQ3_S
-  version: 0.0.19
+  version: 0.0.24
   categories:
   - models
   tags:
@@ -30,6 +30,8 @@ entrances:
   authLevel: internal
 - name: strataui
   port: 8080
+  # Keep the route available without blocking initialization on model loading.
+  skip: true
   host: strata
   title: Strata UI — Qwen3.8 IQ3_S
   icon: https://app.cdn.olares.com/appstore/strata/strata_qwen.png
@@ -42,7 +44,12 @@ spec:
   onlyAdmin: true
   versionName: "0.2.13"
   upgradeDescription: |
-    - Strata 0.2.13 (engine 0.1.59): new per-card DFlash2 drafting defaults — on 48 GB+ Blackwell cards IQ3_S drafts with a wider window at higher confidence (measured +2.8% decode on an RTX PRO 5000 72 GB; all other cards keep their 0.2.12 values); the app fetches the tuned drafter by itself when Auto picks it; plain engine starts now match the app's settings on Linux CUDA; on Linux the expert store loads through the file cache again when free RAM, the file cache, or huge pages can cover a shortfall (#5327); and the app opens noticeably faster. The model, the 262K context and image input are unchanged.
+    - Keeps the required CPU at 1300m. The app CPU limit is 20 cores, and the engine CPU limit defaults to 19 cores so all containers stay within that limit.
+    - Raises the app memory limit to 78 GiB and the engine memory limit to 75 GiB.
+    - Selects DFlash2 after its pack is downloaded and verified. Existing caches stay in the persistent /dflash2 directory. If preparation fails, the engine keeps MTP and records the reason.
+    - Keeps Strata UI on port 8080 without blocking startup. Model Console can open before the model finishes downloading and loading; Strata UI becomes available afterward.
+    - Downloads models directly from Hugging Face with Xet, so a large file is no longer stopped by the internal HTTP mirror’s per-file transfer limit.
+    - Set expert workers with --pool-workers in ENGINE_ARGS. They are no longer capped to the container CPU budget. Saved engine arguments are kept; set --kv-streaming auto in Model Console to use automatic KV streaming.
   fullDescription: |
     Qwen3.8-Flash-Next is an experimental AI model from Alibaba's Qwen team for answering questions and generating text, with support for thinking and tool calling in compatible applications. This app runs ISTA-DASLab's GSQ-RCO IQ3_S quantized edition locally using Strata.
 
@@ -94,12 +101,12 @@ spec:
     url: https://github.com/Niko1221/Strata/blob/main/LICENSE
   accelerator:
   - mode: nvidia
-    limitedCpu: '14'
+    limitedCpu: '20'
     requiredCpu: 1300m
     requiredDisk: 120Gi
     limitedDisk: 200Gi
-    requiredMemory: 65Gi
-    limitedMemory: 83Gi
+    requiredMemory: 57Gi
+    limitedMemory: 78Gi
     requiredGPUMemory: 23Gi
     limitedGPUMemory: 24Gi
   supportArch:
@@ -162,20 +169,16 @@ envs:
   type: string
   editable: true
   applyOnChange: true
-  default: --context 262144 --parallel 1 --resident-budget-gib 48 --kv int8 --kv-streaming off --vram-reserve-mib 1024
-  description: Strata setup.py options. Model/source/host/port/GPU/vision are managed by the chart. Saving engine_args
+  default: --context 262144 --parallel 1 --resident-budget-gib 48 --kv int8 --kv-streaming auto --vram-reserve-mib 1024
+  description: Strata setup.py options. Model/source/host/port/GPU/vision are managed by the chart. Add --pool-workers here to set the CPU expert-worker count; without it, Strata chooses from the CPUs visible in the container, which can exceed STRATA_CPU_LIMIT. Saving engine_args
     in Model Console relaunches setup and the server; existing packs and MTP files are reused.
+    Existing installations retain saved arguments; set --kv-streaming auto to enable the new default.
 - envName: LOG_LEVEL
   required: true
   type: string
   editable: true
   applyOnChange: true
   default: info
-- envName: HF_ENDPOINT
-  required: false
-  applyOnChange: true
-  valueFrom:
-    envName: OLARES_SYSTEM_HUGGINGFACE_SERVICE
 - envName: HF_TOKEN
   required: false
   applyOnChange: true
@@ -192,19 +195,20 @@ envs:
   type: string
   editable: false
   applyOnChange: false
-  default: 64Gi
+  default: 56Gi
 - envName: STRATA_CPU_LIMIT
   required: true
   type: string
-  editable: false
-  applyOnChange: false
-  default: '12'
+  editable: true
+  applyOnChange: true
+  default: '19'
+  description: Engine container CPU limit in cores. Defaults to 19 so the total container CPU limit stays within the app ceiling (20). Saving restarts the engine. Expert workers are set with --pool-workers in ENGINE_ARGS.
 - envName: STRATA_MEMORY_LIMIT
   required: true
   type: string
   editable: false
   applyOnChange: false
-  default: 80Gi
+  default: 75Gi
 - envName: STRATA_REQUIRED_GPU_MEMORY
   required: true
   type: string
