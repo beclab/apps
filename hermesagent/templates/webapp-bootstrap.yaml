@@ -5,53 +5,98 @@ metadata:
   namespace: "{{ .Release.Namespace }}"
 data:
   bootstrap.py: |
-    import os, secrets, shutil, subprocess
+    import os
+    import secrets
+    import shutil
+    import subprocess
     from pathlib import Path
     from hermes_cli.config import require_readable_config_before_write, save_config
     from plugins.dashboard_auth.basic import hash_password
 
-    home = Path('/opt/data')
-    config = home / 'config.yaml'
+    HOME = Path('/opt/data')
+    MANAGED_PLUGINS = [
+        ('advanced-delegation', 'NousResearch/hermes-official-plugins#advanced-delegation',
+         'e404b6816b20237a82f6fbe2749b5a576cf75dba'),
+    ]
+
+
+    def backup_config(config):
+        directory = config.parent / 'olares-webapp-backup'
+        directory.mkdir(mode=0o700, exist_ok=True)
+        backup = directory / config.name
+        if config.exists() and not backup.exists():
+            shutil.copy2(config, backup)
+            backup.chmod(0o600)
+
+
+    def plugin_present(path):
+        # A dangling symlink is user-owned too. Propagate access errors.
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+
+    def seed_optional_plugins(default_config):
+        profile = '<unresolved>'
+        try:
+            from hermes_cli.profiles import get_active_profile, resolve_profile_env
+            profile = get_active_profile()
+            home = Path(resolve_profile_env(profile))
+            settings = default_config
+            if home != HOME:
+                settings = require_readable_config_before_write(home / 'config.yaml')
+            disabled = settings.get('plugins', {}).get('disabled', [])
+            if not isinstance(disabled, list):
+                raise ValueError('plugins.disabled must be a list')
+        except (Exception, SystemExit) as exc:
+            print(f'[init-webapp] Cannot read plugin settings for {profile}: {exc}', flush=True)
+            return
+
+        for name, source, revision in MANAGED_PLUGINS:
+            try:
+                if name in disabled or plugin_present(home / 'plugins' / name):
+                    continue
+                subprocess.run([
+                    '/opt/hermes/bin/hermes', '--profile', profile, 'plugins', 'install',
+                    source, '--ref', revision, '--enable', '--yes-deps',
+                ], check=True, timeout=360)
+            except Exception as exc:
+                print(f'[init-webapp] Skipping optional plugin {name} in {profile}: {exc}', flush=True)
+
+
+    def configure_webapp(raw):
+        webapp = raw.setdefault('webapp', {})
+        webapp.setdefault('enabled', True)
+        # This packaged listener has a stable port; non-loopback engages Hermes sign-in.
+        webapp['host'] = '0.0.0.0'
+        webapp['port'] = 19120
+        auth = raw.setdefault('dashboard', {}).setdefault('basic_auth', {})
+        login_dir = HOME / 'webapp'
+        login_dir.mkdir(mode=0o700, exist_ok=True)
+        login_file = login_dir / 'olares-login.txt'
+        if not auth.get('username') or not (auth.get('password_hash') or auth.get('password')):
+            password = secrets.token_urlsafe(24)
+            auth.update(username='hermes', password_hash=hash_password(password))
+            # Persist before config: a startup interruption must not leave an unknown password.
+            fd = os.open(login_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, 'w') as f:
+                f.write('Hermes Webapp login (private; do not share)\nUsername: hermes\nPassword: ' + password + '\n')
+        if not auth.get('secret'):
+            auth['secret'] = secrets.token_urlsafe(48)
+
+
+    config = HOME / 'config.yaml'
     raw = require_readable_config_before_write(config)
     if not isinstance(raw, dict):
         raise ValueError('config.yaml must be a mapping')
-    backup = home / 'olares-webapp-backup'
-    backup.mkdir(mode=0o700, exist_ok=True)
-    if config.exists() and not (backup / 'config.yaml').exists():
-        shutil.copy2(config, backup / 'config.yaml')
-        (backup / 'config.yaml').chmod(0o600)
+    backup_config(config)
+    seed_optional_plugins(raw)
 
-    plugin = home / 'plugins/advanced-delegation'
-    disabled = (raw.get('plugins') or {}).get('disabled') or []
-    if not plugin.exists() and 'advanced-delegation' not in disabled:
-        # Install an immutable official revision. Preserve existing installations and opt-outs.
-        subprocess.run([
-            '/opt/hermes/bin/hermes', 'plugins', 'install',
-            'NousResearch/hermes-official-plugins#advanced-delegation',
-            '--ref', 'e404b6816b20237a82f6fbe2749b5a576cf75dba',
-            '--enable', '--yes-deps',
-        ], check=True, timeout=360)
-        # The official installer writes plugin state. Reload it before saving Webapp defaults.
-        raw = require_readable_config_before_write(config)
-
-    webapp = raw.setdefault('webapp', {})
-    webapp.setdefault('enabled', True)
-    # This packaged listener has a stable port; non-loopback engages Hermes sign-in.
-    webapp['host'] = '0.0.0.0'
-    webapp['port'] = 19120
-    auth = raw.setdefault('dashboard', {}).setdefault('basic_auth', {})
-    login_dir = home / 'webapp'
-    login_dir.mkdir(mode=0o700, exist_ok=True)
-    login_file = login_dir / 'olares-login.txt'
-    if not auth.get('username') or not (auth.get('password_hash') or auth.get('password')):
-        password = secrets.token_urlsafe(24)
-        auth.update(username='hermes', password_hash=hash_password(password))
-        # Persist before config: a startup interruption must not leave an unknown password.
-        fd = os.open(login_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'w') as f:
-            f.write('Hermes Webapp login (private; do not share)\nUsername: hermes\nPassword: ' + password + '\n')
-    if not auth.get('secret'):
-        auth['secret'] = secrets.token_urlsafe(48)
+    # The installer may have updated the config, even if enabling a plugin failed.
+    raw = require_readable_config_before_write(config)
+    configure_webapp(raw)
     save_config(raw, strip_defaults=False)
     print('[init-webapp] Webapp configured; private login: /opt/data/webapp/olares-login.txt')
