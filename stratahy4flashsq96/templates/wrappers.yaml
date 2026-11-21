@@ -1,0 +1,714 @@
+# Scripts are embedded here, matching the Beclab Strata chart layout.
+# The ConfigMap mounts them under /llm-init/wrappers in the engine container.
+# Supports BOTH container layouts out of the box:
+#   a) Beclab layout:   /opt/strata/.venv/bin/python + /opt/strata/{setup.py,serve/server.py}
+#   b) Upstream ghcr.io: /opt/strata/terminal/python/bin/python3 + /opt/strata/terminal/{setup.py,serve/server.py}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+data:
+  strata.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=strata
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    # Snapshot the shared helper locally; a cross-node update may briefly fail to open.
+    _common_copy=$(mktemp "${TMPDIR:-/tmp}/strata-common.XXXXXX")
+    _wc=0
+    while ! cp "$WRAPPER_COMMON" "$_common_copy" 2>/dev/null; do
+        if [ "$_wc" -ge "${WRAPPER_COMMON_WAIT:-3600}" ]; then
+            rm -f "$_common_copy"
+            printf '[wrapper] %s could not be read\n' "$WRAPPER_COMMON" >&2
+            exit 1
+        fi
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    # shellcheck source=common.sh
+    . "$_common_copy"
+    rm -f "$_common_copy"
+    unset _wc _common_copy
+
+    python_usable() {
+        [ -f "$1" ] || return 1
+        [ -x "$1" ] && return 0
+        "$1" -c 'pass' 2>/dev/null
+    }
+
+    resolve_python() {
+        if [ -n "${STRATA_PYTHON:-}" ] && python_usable "$STRATA_PYTHON"; then
+            printf '%s\n' "$STRATA_PYTHON"
+            return 0
+        fi
+        for cand in \
+            /opt/strata/.venv/bin/python \
+            /opt/strata/.venv/bin/python3 \
+            /opt/strata/terminal/python/bin/python3 \
+            /opt/strata/python/bin/python3 \
+            "$(command -v python3 2>/dev/null || true)"; do
+            if [ -n "$cand" ] && python_usable "$cand"; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: no usable Python interpreter found under /opt/strata\n' >&2
+        return 1
+    }
+
+    resolve_root() {
+        if [ -n "${STRATA_ROOT:-}" ] && [ -f "$STRATA_ROOT/setup.py" ]; then
+            printf '%s\n' "$STRATA_ROOT"
+            return 0
+        fi
+        for cand in /opt/strata /opt/strata/terminal; do
+            if [ -f "$cand/setup.py" ] && [ -f "$cand/serve/server.py" ]; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: neither /opt/strata nor /opt/strata/terminal contains setup.py + serve/server.py\n' >&2
+        return 1
+    }
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+    STRATA_PYTHON=$(resolve_python)
+    STRATA_ROOT=$(resolve_root)
+    export MODEL_PATH STRATA_PYTHON STRATA_ROOT
+
+    run_strata() {
+        load_engine_args_from_handoff
+        export ENGINE_ARGS
+        exec "$STRATA_PYTHON" \
+            "${STRATA_LAUNCHER:-/llm-init/wrappers/prepare-strata.py}" "$@"
+    }
+
+    supervise_engine run_strata "$@"
+  prepare-strata.py: |
+    #!/usr/bin/env python3
+    """Prepare Tencent Hy4-Flash SQ-96 (.strata v1.0) across Beclab & upstream Strata layouts, then exec serve/server.py."""
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import shlex
+    import signal
+    import subprocess
+    import sys
+
+    STRATA_MAGICS = (b'STRATA\x00\x01', b'STRATA1\x00')
+    STRATA_MAGIC = STRATA_MAGICS[0]
+
+    # Exact byte sizes and whole-file SHA-256 digests from Strata 0.2.18 (strata_control/hy4_family.py).
+    EXPECTED_FILES = {
+        'Hy4-Flash-SQ-96.strata': (89_577_742_336, '3b1c5755a220c69892b3d2dbad506b8593a30be24b17a390ecbd1642c0c1e14c'),
+        'Hy4-Flash-Engram-Q8.strata': (67_584_905_216, 'ab0cf9b3f9c64bd25f6212d4508e7443ab8b9bc133fbccc7bdfb83510a20c2c1'),
+        'Hy4-Flash-Vision.strata': (934_092_800, 'ef09bceff8f01b8d226d2dc56aef09cec719b21b45783ee9b5d64e7241b72a09'),
+    }
+
+    # Optional HF commit SHA pin; set once strata-engine/Hy4-Flash-Strata revision is frozen.
+    EXPECTED_REVISION = os.environ.get('STRATA_EXPECTED_REVISION', '').strip()
+
+    # Flags owned by the chart's download, networking, and model contract.
+    MANAGED = {
+        '--family', '--model', '--native', '--engram', '--data-dir', '--models-dir',
+        '--gguf-dir', '--host', '--port', '--api-key', '--backend', '--vision',
+        '--gpu', '--gpus', '--prebuilt', '--build', '--setup', '--yes', '--no-start',
+        '--check', '--update', '--inspect', '--browser', '--no-browser', '--skip-build',
+        '--rollback-engine', '--cuda', '--serve', '--export-tokenizer', '--info',
+    }
+
+    # Direct strata-hy4 runtime flags that are merged into server.json's args/drafting
+    # rather than passed to setup.py's ArgumentParser.
+    HY4_VALUE_FLAGS = {
+        '--draft', '--max-context', '--ctx', '--chunk', '--spec-k', '--spec-cut',
+        '--spec-rv', '--spec-inv', '--spec-exact', '--det', '--mla-blocks', '--mla-inv',
+        '--session-reuse', '--image-max-pixels', '--index-topk', '--tail-skip',
+        '--vram-experts-gb', '--ram-experts-gb', '--engram-cache-mib',
+    }
+    HY4_BOOL_FLAGS = {
+        '--spec-fixed', '--spec-debug', '--spec-check', '--spec-nodraft',
+        '--no-index', '--no-engram', '--knobs16', '--dfly-warm',
+    }
+
+
+    def resolve_strata_root(env=None):
+        """Locate setup.py + serve/server.py across Beclab (/opt/strata) and upstream (/opt/strata/terminal) layouts."""
+        env = os.environ if env is None else env
+        explicit = env.get('STRATA_ROOT', '').strip()
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        candidates = []
+        if explicit:
+            p = Path(explicit)
+            candidates.extend([p, p / 'terminal'])
+        candidates.extend([app_base, app_base / 'terminal'])
+        seen = set()
+        for cand in candidates:
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (cand / 'setup.py').is_file() and (cand / 'serve' / 'server.py').is_file():
+                return cand
+        raise FileNotFoundError(
+            f'Could not locate Strata setup.py + serve/server.py under {[str(c) for c in candidates]}')
+
+
+    def bridge_components_dir(app_base, data_root, env=None):
+        """Create a writable STRATA_COMPONENTS_DIR under /data/components linked to read-only image components."""
+        env = os.environ if env is None else env
+        writable = Path(data_root) / 'components'
+        writable.mkdir(parents=True, exist_ok=True)
+        src_candidates = []
+        if env.get('STRATA_COMPONENTS_DIR'):
+            src_candidates.append(Path(env['STRATA_COMPONENTS_DIR']))
+        src_candidates.append(Path(app_base) / 'components')
+        for src in src_candidates:
+            try:
+                if not src.is_dir() or src.resolve() == writable.resolve():
+                    continue
+            except OSError:
+                continue
+            eng_src = src / 'engine'
+            eng_dst = writable / 'engine'
+            if eng_src.is_dir() and not eng_dst.exists():
+                eng_dst.symlink_to(eng_src, target_is_directory=True)
+            shapes_src = src / 'shapes'
+            if shapes_src.is_dir():
+                for shape_dir in sorted(shapes_src.iterdir()):
+                    if not shape_dir.is_dir():
+                        continue
+                    dst_pkg_parent = writable / 'shapes' / shape_dir.name / 'engine'
+                    src_pkg_parent = shape_dir / 'engine'
+                    if src_pkg_parent.is_dir():
+                        dst_pkg_parent.mkdir(parents=True, exist_ok=True)
+                        for pkg in sorted(src_pkg_parent.iterdir()):
+                            if pkg.is_dir():
+                                link = dst_pkg_parent / pkg.name
+                                if not link.exists():
+                                    link.symlink_to(pkg, target_is_directory=True)
+        return writable
+
+
+    def find_hy4_engine(root, components_dir, app_base):
+        """Locate strata-hy4 across signed shape components and flat Beclab /opt/strata/engine layouts.
+
+        Returns (exe_path_or_None, is_shape_component, lib_dirs).
+        """
+        exe_names = ('strata-hy4.exe', 'strata-hy4') if os.name == 'nt' else ('strata-hy4',)
+        # 1. Signed/packaged shape component: <components>/shapes/hy4/engine/<pkg>/strata-hy4
+        for comp_root in (Path(components_dir), Path(app_base) / 'components', Path(root) / 'components'):
+            shape_eng = comp_root / 'shapes' / 'hy4' / 'engine'
+            if shape_eng.is_dir():
+                for pkg in sorted(shape_eng.iterdir(), reverse=True):
+                    if not pkg.is_dir():
+                        continue
+                    for ename in exe_names:
+                        cand = pkg / ename
+                        if cand.is_file():
+                            has_manifest = (pkg / 'engine-component.json').is_file()
+                            libs = [str(pkg)] + [str(d) for d in sorted(pkg.iterdir()) if d.is_dir()]
+                            return cand, has_manifest, libs
+
+        # 2. Bundled inside <components>/engine/<pkg>/strata-hy4 or flat <root>/engine/strata-hy4
+        flat_dirs = []
+        for comp_root in (Path(components_dir), Path(app_base) / 'components', Path(root) / 'components'):
+            eng_dir = comp_root / 'engine'
+            if eng_dir.is_dir():
+                flat_dirs.extend(sorted((d for d in eng_dir.iterdir() if d.is_dir()), reverse=True))
+                flat_dirs.append(eng_dir)
+        flat_dirs.extend([Path(root) / 'engine', Path(app_base) / 'engine'])
+
+        seen = set()
+        for d in flat_dirs:
+            key = str(d)
+            if key in seen or not d.is_dir():
+                continue
+            seen.add(key)
+            for ename in exe_names:
+                cand = d / ename
+                if cand.is_file():
+                    libs = [str(d)] + [str(sub) for sub in sorted(d.iterdir()) if sub.is_dir()]
+                    return cand, False, libs
+
+        return None, False, []
+
+
+    def verify_snapshot(model_path, expected_files=None, expected_revision=None):
+        """Verify all 3 .strata files exist in the HF snapshot with exact byte sizes and STRATA1\\0 magic."""
+        expected_files = EXPECTED_FILES if expected_files is None else expected_files
+        expected_revision = EXPECTED_REVISION if expected_revision is None else expected_revision
+        source = Path(model_path)
+        if source.is_file():
+            source = source.parent
+        if not source.is_dir():
+            raise ValueError(f'MODEL_PATH directory does not exist: {source}')
+
+        if expected_revision:
+            # Handle both snapshots/<rev>/file and snapshots/<rev>/subdir/file
+            snap_name = None
+            if source.parent.name == 'snapshots':
+                snap_name = source.name
+            elif source.parent.parent.name == 'snapshots':
+                snap_name = source.parent.name
+            if snap_name and snap_name != expected_revision:
+                raise ValueError(
+                    f'Wrong HF revision {snap_name}; expected {expected_revision}. '
+                    'Download the pinned Hy4-Flash model in Model Console before starting.')
+
+        missing = [name for name in expected_files if not (source / name).is_file()]
+        if missing:
+            raise ValueError(
+                f'Incomplete Hy4-Flash snapshot in {source}; llm-init must download all 3 .strata files. Missing: {missing}')
+
+        for name, spec in expected_files.items():
+            exp_size = spec[0] if isinstance(spec, tuple) else int(spec)
+            fpath = source / name
+            actual_size = fpath.stat().st_size
+            if actual_size != exp_size:
+                raise ValueError(
+                    f'Size mismatch for {name} in {source}: got {actual_size:,} bytes, expected {exp_size:,} bytes')
+            if actual_size >= len(STRATA_MAGIC):
+                with fpath.open('rb') as fp:
+                    head = fp.read(len(STRATA_MAGIC))
+                if head not in STRATA_MAGICS:
+                    raise ValueError(
+                        f'Invalid .strata header in {fpath}: expected {STRATA_MAGIC!r}, got {head!r}')
+
+        return source
+
+
+    def parse_engine_args(raw):
+        """Validate ENGINE_ARGS against MANAGED flags and split into setup.py flags vs strata-hy4 overrides."""
+        tokens = shlex.split(raw or '')
+        for tok in tokens:
+            flag = tok.split('=', 1)[0]
+            if flag in MANAGED:
+                raise ValueError(f'{tok}: managed by the Strata chart, not ENGINE_ARGS')
+
+        setup_flags = []
+        hy4_args = []
+        draft_override = None
+        has_context = False
+
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            flag, eq, inline_val = tok.partition('=')
+
+            def take_val():
+                nonlocal i
+                if eq:
+                    return inline_val
+                if i + 1 >= len(tokens):
+                    raise ValueError(f'{flag} in ENGINE_ARGS requires a value')
+                i += 1
+                return tokens[i]
+
+            if flag == '--context':
+                val = take_val()
+                if not val.isdigit() or int(val) <= 0:
+                    raise ValueError(f'--context requires a positive integer, got {val!r}')
+                setup_flags.extend(['--context', val])
+                has_context = True
+            elif flag in ('--max-context', '--ctx'):
+                val = take_val()
+                if not val.isdigit() or int(val) <= 0:
+                    raise ValueError(f'{flag} requires a positive integer, got {val!r}')
+                setup_flags.extend(['--context', val])
+                hy4_args.extend(['--max-context', val])
+                has_context = True
+            elif flag in ('--draft', '--drafting'):
+                val = take_val().lower()
+                if val not in ('off', 'dfly2', 'auto'):
+                    raise ValueError(f'{flag} for Hy4-Flash must be one of off, dfly2, auto (got {val!r})')
+                draft_override = val
+                hy4_args.extend(['--draft', val])
+            elif flag == '--parallel':
+                val = take_val()
+                if val != '1':
+                    raise ValueError(
+                        f'--parallel {val}: strata-hy4 processes one request at a time (--parallel 1 only)')
+            elif flag in HY4_VALUE_FLAGS:
+                val = take_val()
+                hy4_args.extend([flag, val])
+            elif flag in HY4_BOOL_FLAGS:
+                if eq:
+                    raise ValueError(f'{tok}: boolean flag takes no value')
+                hy4_args.append(flag)
+            else:
+                # Pass other non-managed setup.py flags through (e.g. --kv fp16).
+                if eq:
+                    setup_flags.append(tok)
+                else:
+                    setup_flags.append(tok)
+                    if i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+                        i += 1
+                        setup_flags.append(tokens[i])
+            i += 1
+
+        if not has_context:
+            setup_flags = ['--context', '131072', *setup_flags]
+
+        return setup_flags, hy4_args, draft_override
+
+
+    def merge_hy4_args(base_args, overrides):
+        """Merge strata-hy4 override flags over setup.py's generated args without duplicating single-value flags."""
+        out = list(base_args or [])
+        i = 0
+        while i < len(overrides):
+            flag = overrides[i]
+            if flag in HY4_VALUE_FLAGS and i + 1 < len(overrides):
+                val = overrides[i + 1]
+                if flag in out:
+                    idx = out.index(flag)
+                    if idx + 1 < len(out):
+                        out[idx + 1] = val
+                    else:
+                        out.append(val)
+                else:
+                    out.extend([flag, val])
+                i += 2
+            else:
+                if flag not in out:
+                    out.append(flag)
+                i += 1
+        return out
+
+
+    def engine_build_identity(root, app_base, hy4_exe):
+        """Read engine build metadata so cache keys rotate cleanly on image/engine upgrades."""
+        candidates = []
+        if hy4_exe is not None:
+            candidates.extend([hy4_exe.parent / 'engine-component.json', hy4_exe.parent / 'BUILD.json'])
+        candidates.extend([
+            Path(root) / 'engine' / 'BUILD.json',
+            Path(app_base) / 'engine' / 'BUILD.json',
+            Path(root) / 'VERSION',
+            Path(root) / 'COMMIT',
+        ])
+        comp_eng = Path(app_base) / 'components' / 'engine'
+        if comp_eng.is_dir():
+            for pkg in sorted(comp_eng.iterdir()):
+                if pkg.is_dir():
+                    candidates.extend([pkg / 'engine-component.json', pkg / 'BUILD.json'])
+        parts = []
+        for c in candidates:
+            if c.is_file():
+                try:
+                    parts.append(c.read_text(encoding='utf-8', errors='replace').strip())
+                except OSError:
+                    pass
+        return '|'.join(parts) if parts else 'strata-0.2.18-hy4'
+
+
+    def link_model_files(source, hy4_dir, expected_files=None):
+        """Symlink the 3 read-only HF .strata blobs into writable <data>/models/hy4-flash/."""
+        expected_files = EXPECTED_FILES if expected_files is None else expected_files
+        hy4_dir.mkdir(parents=True, exist_ok=True)
+        paths = {}
+        for name, spec in expected_files.items():
+            exp_sha = spec[1] if isinstance(spec, tuple) and len(spec) > 1 else None
+            target_blob = (source / name).resolve()
+            link = hy4_dir / name
+            done_mark = hy4_dir / (name + '.done')
+            if not link.is_symlink() or link.resolve() != target_blob:
+                link.unlink(missing_ok=True)
+                done_mark.unlink(missing_ok=True)
+                link.symlink_to(target_blob)
+            # When huggingface_hub content-addressed the blob under blobs/<sha256> matching
+            # Strata's pinned SHA-256, prime the .done marker so first start skips redundant
+            # 158 GB re-hashing; otherwise setup.py hashes once and writes .done itself.
+            if exp_sha and not done_mark.is_file() and target_blob.name.lower() == exp_sha.lower():
+                done_mark.write_text(f'sha256 {exp_sha}\n', encoding='utf-8')
+            paths[name] = link
+        return paths
+
+
+    def ensure_tokenizer(root, model_file, tok_dir, hy4_exe, lib_dirs):
+        """Ensure serve's tokenizer directory contains vocab.json + chat_template.jinja."""
+        if (tok_dir / 'vocab.json').is_file() and (tok_dir / 'chat_template.jinja').is_file():
+            return tok_dir
+        tok_dir.parent.mkdir(parents=True, exist_ok=True)
+        tools_dir = str(Path(root) / 'tools')
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import hy4_tokenizer  # bundled in Strata 0.2.18 terminal/tools/hy4_tokenizer.py
+        try:
+            hy4_tokenizer.convert_manifest(hy4_tokenizer.read_manifest(model_file), tok_dir)
+            return tok_dir
+        except RuntimeError:
+            pass
+        if hy4_exe is None or not Path(hy4_exe).is_file():
+            raise RuntimeError(
+                'Tokenizer extraction requires either Python zstd or strata-hy4 --export-tokenizer, '
+                'but strata-hy4 was not found')
+        raw = tok_dir.with_name(tok_dir.name + '-export')
+        raw.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ)
+        if lib_dirs:
+            var = 'PATH' if os.name == 'nt' else 'LD_LIBRARY_PATH'
+            existing = [d for d in lib_dirs if Path(d).is_dir()]
+            if existing:
+                env[var] = os.pathsep.join(existing + ([env[var]] if env.get(var) else []))
+        res = subprocess.run(
+            [str(hy4_exe), '--export-tokenizer', str(model_file), str(raw)],
+            env=env, cwd=str(Path(hy4_exe).parent), check=False)
+        if res.returncode != 0:
+            raise RuntimeError(f'strata-hy4 --export-tokenizer exited with status {res.returncode}')
+        hy4_tokenizer.convert_files(raw / 'tokenizer.hf.json', raw / 'chat_template.jinja', tok_dir)
+        return tok_dir
+
+
+    def tune_cpu_threads_for_cgroup(env=None):
+        """Cap HY4_CPU_THREADS and OMP_NUM_THREADS if the user lowered STRATA_CPU_LIMIT in Model Console."""
+        env = os.environ if env is None else env
+        configured = int(env.get('HY4_CPU_THREADS') or env.get('OMP_NUM_THREADS') or '16')
+        cgroup_cores = None
+        cpu_max = Path('/sys/fs/cgroup/cpu.max')
+        if cpu_max.is_file():
+            try:
+                parts = cpu_max.read_text(encoding='utf-8').strip().split()
+                if len(parts) == 2 and parts[0] != 'max':
+                    quota, period = int(parts[0]), int(parts[1])
+                    if quota > 0 and period > 0:
+                        cgroup_cores = max(1, quota // period)
+            except (OSError, ValueError):
+                pass
+        if cgroup_cores is not None:
+            # Leave up to 2 cores for CUDA dispatch/HTTP server when >=4 cores are assigned.
+            safe_cap = max(1, cgroup_cores - 2) if cgroup_cores >= 4 else cgroup_cores
+            effective = min(configured, safe_cap)
+        else:
+            effective = configured
+        return str(max(1, effective))
+
+
+    def run_setup(command, cwd, env):
+        """Run setup.py in its own process group so SIGTERM stops any child helper cleanly."""
+        kwargs = {'cwd': str(cwd), 'env': env}
+        if os.name != 'nt':
+            kwargs['start_new_session'] = True
+        child = subprocess.Popen(command, **kwargs)
+
+        def stop(signum, _frame):
+            if os.name != 'nt':
+                os.killpg(child.pid, signal.SIGTERM)
+            else:
+                child.terminate()
+            try:
+                child.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name != 'nt':
+                    os.killpg(child.pid, signal.SIGKILL)
+                else:
+                    child.kill()
+                child.wait()
+            raise SystemExit(128 + signum)
+
+        signals = [signal.SIGTERM, signal.SIGINT]
+        old = {sig: signal.signal(sig, stop) for sig in signals}
+        try:
+            if child.wait() != 0:
+                raise RuntimeError('Strata setup failed; refusing to start with stale configuration')
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
+
+
+    def publish_model_name(cfg, env=None):
+        """Publish canonical model_name and Model Console's public MODEL_NAME alias."""
+        env = os.environ if env is None else env
+        public = env.get('MODEL_NAME', '').strip() or 'hy4-flash-sq-96'
+        native = str(cfg.get('model_name') or '').strip() or 'hy4-flash-sq-96'
+        cfg['model_name'] = native
+        cfg['aliases'] = [public]
+
+
+    def prepare_server_config(env=None, expected_files=None):
+        """Validate snapshot, run setup.py in writable /data, and write /data/<key>/server.json.
+
+        Returns (root, target_config_path, port, exec_argv).
+        """
+        env = dict(os.environ if env is None else env)
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        root = resolve_strata_root(env)
+        source = verify_snapshot(env['MODEL_PATH'], expected_files=expected_files)
+        setup_flags, hy4_overrides, draft_override = parse_engine_args(env.get('ENGINE_ARGS', ''))
+
+        data_base = Path(env.get('STRATA_DATA', '/data'))
+        data_base.mkdir(parents=True, exist_ok=True)
+        components_dir = bridge_components_dir(app_base, data_base, env=env)
+        hy4_exe, is_shape_component, lib_dirs = find_hy4_engine(root, components_dir, app_base)
+
+        identity = str(source.resolve()) + '|' + engine_build_identity(root, app_base, hy4_exe)
+        key = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]
+        data = data_base / key
+        models_dir = data / 'models'
+        hy4_dir = models_dir / 'hy4-flash'
+        install_dir = data / 'install'
+        for d in (data, models_dir, hy4_dir, install_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        linked = link_model_files(source, hy4_dir, expected_files=expected_files)
+        port = env.get('STRATA_PORT', '8080').strip() or '8080'
+
+        generated = install_dir / 'strata-hy4-flash-sq-96.json'
+        generated.unlink(missing_ok=True)
+        (root / 'strata-hy4-flash-sq-96.json').unlink(missing_ok=True) if os.access(root, os.W_OK) else None
+
+        setup_env = dict(env)
+        setup_env['STRATA_CONTROL_INSTALL'] = '1'
+        setup_env['STRATA_INSTALL_DIR'] = str(install_dir)
+        setup_env['STRATA_COMPONENTS_DIR'] = str(components_dir)
+        if hy4_exe is not None and not is_shape_component:
+            # Flat /opt/strata/engine/strata-hy4 layout: skip network feed lookup in setup.py
+            # and bind the resolved binary directly into server.json below.
+            setup_env['STRATA_ALLOW_NO_ENGINE'] = '1'
+
+        command = [
+            sys.executable, str(root / 'setup.py'),
+            '--setup', '--yes', '--no-start', '--no-browser',
+            '--family', 'hy4-flash', '--model', 'SQ-96', '--backend', 'cuda',
+            '--gpu', '0', '--vision', 'yes', '--data-dir', str(data),
+            '--models-dir', str(models_dir), '--host', '0.0.0.0', '--port', port,
+            *setup_flags,
+        ]
+        print('[strata] preparing Hy4-Flash SQ-96 (.strata v1.0) runtime configuration', flush=True)
+        run_setup(command, root, setup_env)
+
+        # Refresh engine discovery in case setup.py fetched shapes/hy4 into writable components_dir.
+        if hy4_exe is None:
+            hy4_exe, is_shape_component, lib_dirs = find_hy4_engine(root, components_dir, app_base)
+        if hy4_exe is None:
+            raise FileNotFoundError(
+                f'strata-hy4 engine binary not found under {components_dir}, {app_base}, or {root}')
+
+        cfg_candidates = [
+            generated,
+            root / 'strata-hy4-flash-sq-96.json',
+            *sorted(install_dir.glob('strata-*.json'), key=lambda p: p.stat().st_mtime, reverse=True),
+        ]
+        cfg_file = next((p for p in cfg_candidates if p.is_file()), None)
+        if cfg_file is not None:
+            cfg = json.loads(cfg_file.read_text(encoding='utf-8-sig'))
+        else:
+            ctx_val = setup_flags[setup_flags.index('--context') + 1] if '--context' in setup_flags else '131072'
+            cfg = {
+                'exe': 'component:strata-hy4' if is_shape_component else str(hy4_exe),
+                'args': [
+                    '--native', str(linked['Hy4-Flash-SQ-96.strata']),
+                    '--engram', str(linked['Hy4-Flash-Engram-Q8.strata']),
+                    '--max-context', str(ctx_val),
+                    '--vision', str(linked['Hy4-Flash-Vision.strata']),
+                ],
+                'cwd': str(root),
+                'tokenizer': str(data / 'packs' / 'hy4-flash-sq-96' / 'tokenizer'),
+                'model_name': 'hy4-flash-sq-96',
+                'arch': 'hy4flash',
+                'port': int(port),
+                'drafting': 'dfly2',
+            }
+
+        # Ensure tokenizer exists (covers flat engine layout when Python lacks zstd).
+        tok_dir = Path(cfg.get('tokenizer') or (data / 'packs' / 'hy4-flash-sq-96' / 'tokenizer'))
+        if (Path(root) / 'tools' / 'hy4_tokenizer.py').is_file():
+            ensure_tokenizer(root, linked['Hy4-Flash-SQ-96.strata'], tok_dir, hy4_exe, lib_dirs)
+        cfg['tokenizer'] = str(tok_dir)
+
+        # Bind executable & library search paths cleanly for both layouts.
+        if is_shape_component:
+            cfg['exe'] = 'component:strata-hy4'
+        else:
+            cfg['exe'] = str(hy4_exe)
+        if lib_dirs:
+            cfg['lib_dirs'] = lib_dirs
+
+        cfg['arch'] = 'hy4flash'
+        cfg['args'] = merge_hy4_args(cfg.get('args') or [], hy4_overrides)
+        if hy4_overrides:
+            cfg['user_args'] = list(hy4_overrides)
+        cfg['drafting'] = draft_override if draft_override is not None else (cfg.get('drafting') or 'dfly2')
+        publish_model_name(cfg, env=env)
+        cfg['log'] = str(data / 'engine.log')
+        cfg['open_browser'] = False
+        cfg['allowed_hosts'] = ['*']
+        cfg.pop('api_key', None)  # internal ClusterIP only; Olares authenticates the entrance.
+
+        threads = tune_cpu_threads_for_cgroup(env=env)
+        cfg_env = dict(cfg.get('env') or {})
+        cfg_env.setdefault('STRATA_CPUEXP_COLLAPSE', env.get('STRATA_CPUEXP_COLLAPSE', '1'))
+        cfg_env.setdefault('STRATA_CPUEXP_COLD_IO', env.get('STRATA_CPUEXP_COLD_IO', 'direct'))
+        cfg_env['HY4_CPU_THREADS'] = threads
+        cfg_env['OMP_NUM_THREADS'] = threads
+        cfg['env'] = cfg_env
+
+        target = data / 'server.json'
+        temporary = target.with_suffix('.tmp')
+        temporary.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+        temporary.replace(target)
+
+        os.environ['STRATA_COMPONENTS_DIR'] = str(components_dir)
+        os.environ['HY4_CPU_THREADS'] = threads
+        os.environ['OMP_NUM_THREADS'] = threads
+
+        exec_argv = [
+            sys.executable, str(root / 'serve' / 'server.py'),
+            '--engine', 'strata', '--config', str(target),
+            '--host', '0.0.0.0', '--port', port,
+        ]
+        return root, target, port, exec_argv
+
+
+    def main():
+        root, _target, _port, exec_argv = prepare_server_config()
+        os.chdir(root)
+        os.execv(sys.executable, exec_argv)
+
+
+    if __name__ == '__main__':
+        main()
+  strata-healthcheck.sh: |
+    #!/bin/sh
+    set -eu
+    for cand in \
+        "${STRATA_PYTHON:-}" \
+        /opt/strata/.venv/bin/python \
+        /opt/strata/.venv/bin/python3 \
+        /opt/strata/terminal/python/bin/python3 \
+        /opt/strata/python/bin/python3 \
+        "$(command -v python3 2>/dev/null || true)"; do
+        if [ -n "$cand" ] && [ -f "$cand" ]; then
+            exec "$cand" /llm-init/wrappers/strata-healthcheck.py
+        fi
+    done
+    exit 1
+  strata-healthcheck.py: |
+    #!/usr/bin/env python3
+    import json
+    import os
+    import sys
+    import urllib.request
+
+
+    def healthy(state):
+        return isinstance(state, dict) and state.get('status') == 'ok' and state.get('loaded') is True
+
+
+    def main():
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open('http://127.0.0.1:' + os.environ.get('STRATA_PORT', '8080') + '/health', timeout=3) as response:
+                return 0 if healthy(json.load(response)) else 1
+        except (OSError, ValueError):
+            return 1
+
+
+    if __name__ == '__main__':
+        sys.exit(main())

@@ -1,0 +1,263 @@
+{{- $dom := .Values.domain | default dict -}}
+{{- $us := .Values.userspace | default dict -}}
+{{- $appCommon := $us.appCommon | default "/olares/common" -}}
+{{- $appCache := $us.appCache | default "/olares/cache" -}}
+{{- $strataclientDomainENV := split "," ($dom.strataclient | default "localhost") -}}
+{{- $strataclientDomain := index $strataclientDomainENV "_0" -}}
+{{- $oe := .Values.olaresEnv | default dict -}}
+{{- $modelSource := $oe.MODEL_SOURCE | default "" -}}
+{{- $modelName := $oe.MODEL_NAME | default "" -}}
+{{- $modelMode := $oe.MODEL_MODE | default "" -}}
+{{- /* MODEL_SUPPORTS is a multi-select of coarse capability GROUPS (vision /
+       tools / thinking). Expand each group one-to-many into the supports_*
+       keys llm-init validates against its gateway AllSupports mirror, then
+       re-join into the CSV the container env expects. "none" is the
+       required-field fallback (no extra capabilities); the legacy "embedding"
+       token is kept as an alias for it. Unknown tokens pass through verbatim
+       so a raw supports_* key still works. */ -}}
+{{- $supportsGroups := dict
+      "vision" "supports_vision"
+      "tools" "supports_function_calling,supports_parallel_function_calling,supports_tool_choice"
+      "thinking" "supports_reasoning,supports_reasoning_effort"
+      "none" ""
+      "embedding" "" -}}
+{{- $modelSupports := $oe.MODEL_SUPPORTS | default "" -}}
+{{- $expandedSupports := list -}}
+{{- range $tok := splitList "," $modelSupports -}}
+{{- $tok = trim $tok -}}
+{{- if $tok -}}
+{{- if hasKey $supportsGroups $tok -}}
+{{- $mapped := index $supportsGroups $tok -}}
+{{- if $mapped -}}
+{{- $expandedSupports = append $expandedSupports $mapped -}}
+{{- end -}}
+{{- else -}}
+{{- $expandedSupports = append $expandedSupports $tok -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $modelSupports = join "," $expandedSupports -}}
+{{- /* Publish reasoning levels and the default on the model card for Router. */ -}}
+{{- $reasoningEffort := $oe.MODEL_REASONING_EFFORT | default "" -}}
+{{- $reasoningEffortDefault := $oe.MODEL_REASONING_EFFORT_DEFAULT | default "" -}}
+{{- $engineArgs := $oe.ENGINE_ARGS | default "" -}}
+{{- $logLevel := $oe.LOG_LEVEL | default "debug" -}}
+{{- $hfEndpoint := $oe.HF_ENDPOINT | default "" -}}
+{{- $hfToken := $oe.HF_TOKEN | default "" -}}
+{{- $runStateHostPath := include "strata.runStateHostPath" . -}}
+---
+# llm-init Pod (no GPU). Downloads the checkpoint, writes sentinel + model_path,
+# serves progress UI + OpenAI /v1/* proxy on :8090, and reverse-proxies the
+# engine at the URL it derives from ENGINE_KIND.
+#
+# ENGINE_KIND=strata routes to the strata Service on port 8080.
+# The sidecar image must include native Strata support.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # Static name — engine Deployment uses {{ .Release.Name }} for allowMultipleInstall.
+  name: llminit
+  namespace: '{{ .Release.Namespace }}'
+  labels:
+    io.kompose.service: llm-init
+spec:
+  replicas: {{ .Values.workloads.llminit.replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: llm-init
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        io.kompose.network/chrome-default: "true"
+        io.kompose.service: llm-init
+    spec:
+      restartPolicy: Always
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      volumes:
+        - name: hf-cache
+          hostPath:
+            path: "{{ $appCommon }}/huggingface"
+            type: DirectoryOrCreate
+        - name: run-state
+          hostPath:
+            path: "{{ $runStateHostPath }}"
+            type: DirectoryOrCreate
+        - name: legacy-run-state
+          hostPath:
+            path: {{ printf "%s/%s" $appCache (include "strata.runStateSubpath" .) | quote }}
+            type: DirectoryOrCreate
+      initContainers:
+        # The first migration must run on the node holding this model's old Cache.
+        - name: migrate-run-state
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /run/llm-init
+              chown 1000:1000 /run/llm-init
+              if [ -f /run/llm-init/model-spec.json ]; then
+                exit 0
+              fi
+              if [ -f /legacy-run-state/model-spec.json ]; then
+                # Publish the config last so an interrupted copy can be retried.
+                stage=/run/llm-init/.legacy-migration
+                mkdir -p "$stage"
+                cp -a /legacy-run-state/. "$stage/"
+                mv "$stage/model-spec.json" /run/llm-init/.model-spec.migrating
+                cp -a "$stage/." /run/llm-init/
+                rm -rf "$stage"
+                mv /run/llm-init/.model-spec.migrating /run/llm-init/model-spec.json
+              fi
+          volumeMounts:
+            - {name: legacy-run-state, mountPath: /legacy-run-state, readOnly: true}
+            - {name: run-state, mountPath: /run/llm-init}
+          securityContext: {runAsUser: 0}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+        # hostPath dirs are created root-owned; llm-init runs as UID 1000.
+        - name: init-chown
+          image: docker.io/beclab/aboveos-busybox:1.37.0
+          command:
+            - sh
+            - -ec
+            - |
+              hub={{ include "strata.hfPath" . | quote }}
+              repo="$hub/models--strata-engine--Hy4-Flash-Strata"
+              # The engine's nested strata-data hostPath can create this parent as root.
+              # Fix only these known directories, never recursively chown shared models.
+              mkdir -p "$hub/.locks/models--strata-engine--Hy4-Flash-Strata" "$repo/blobs" "$repo/refs" "$repo/snapshots"
+              chown 1000:1000 "$hub" "$hub/.locks" "$hub/.locks/models--strata-engine--Hy4-Flash-Strata" "$repo" "$repo/blobs" "$repo/refs" "$repo/snapshots" /run/llm-init
+          volumeMounts:
+            - name: hf-cache
+              mountPath: {{ include "strata.hfPath" . }}
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: llm-init
+          # Built with native ENGINE_KIND=strata support.
+          image: {{ .Values.images.llmInit | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HF_HUB_CACHE
+              value: {{ include "strata.hfPath" . | quote }}
+            - name: ENGINE_KIND
+              value: strata
+            - name: MODEL_NAME
+              value: "{{ $modelName }}"
+            - name: MODEL_SOURCE
+              value: {{ $modelSource | quote }}
+            - name: MODEL_MODE
+              value: "{{ $modelMode }}"
+{{- if $modelSupports }}
+            - name: MODEL_SUPPORTS
+              value: "{{ $modelSupports }}"
+{{- end }}
+{{- if $reasoningEffort }}
+            - name: MODEL_REASONING_EFFORT
+              value: "{{ $reasoningEffort }}"
+{{- end }}
+{{- if $reasoningEffortDefault }}
+            - name: MODEL_REASONING_EFFORT_DEFAULT
+              value: "{{ $reasoningEffortDefault }}"
+{{- end }}
+            - name: ENGINE_ARGS
+              value: {{ $engineArgs | quote }}
+            # Enable Hugging Face Xet for >50 GB single-file .strata downloads (SQ-96 89.6 GB, Engram-Q8 67.6 GB).
+            - name: HF_ENABLE_XET
+              value: "true"
+{{- if $hfEndpoint }}
+            - name: HF_ENDPOINT
+              value: "{{ $hfEndpoint }}"
+{{- end }}
+{{- if $hfToken }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HF_TOKEN
+{{- end }}
+            - name: RUN_DIR
+              value: /run/llm-init
+            - name: PORT
+              value: "8090"
+            - name: LOG_LEVEL
+              value: "{{ $logLevel }}"
+            - name: LOG_FORMAT
+              value: json
+            - name: APP_URL
+              value: "https://{{ $strataclientDomain }}"
+          ports:
+            - name: http
+              containerPort: 8090
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /livez
+              port: 8090
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: hf-cache
+              mountPath: {{ include "strata.hfPath" . }}
+            - name: run-state
+              mountPath: /run/llm-init
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # The .strata files stream to disk with a bounded footprint,
+              # while huggingface_hub / Xet runs inside this 2Gi cgroup.
+              cpu: "1"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: download-svc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sharedentrances-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    io.kompose.service: llm-init
+spec:
+  selector:
+    io.kompose.service: llm-init
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8090
+  type: ClusterIP
