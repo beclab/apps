@@ -43,6 +43,10 @@ spec:
             # the shared HF cache remains read-only in the engine container.
             path: "{{ .Values.userspace.appCommon }}/huggingface/models--ukisai--Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/mtp"
             type: DirectoryOrCreate
+        - name: dflash2
+          hostPath:
+            path: "{{ .Values.userspace.appCommon }}/huggingface/models--ukisai--Swift-1.5-Qwen3.8-Flash-Next-GSQ-RCO-GGUF/dflash2"
+            type: DirectoryOrCreate
         - name: wrappers
           configMap:
             name: llm-init-wrappers
@@ -50,44 +54,14 @@ spec:
       initContainers:
         - name: init-permissions
           image: docker.io/beclab/aboveos-busybox:1.37.0
-          command: [sh, -ec, "chown 1000:1000 /data"]
+          command: [sh, -ec, "chown 1000:1000 /data /dflash2"]
           securityContext: {runAsUser: 0}
           volumeMounts:
             - {name: strata-data, mountPath: /data}
+            - {name: dflash2, mountPath: /dflash2}
           resources:
             requests: {cpu: 10m, memory: 16Mi}
             limits: {cpu: 100m, memory: 64Mi}
-{{- if .Values.calibrate.enabled }}
-        - name: strata-calibrate
-          image: {{ .Values.images.strata | quote }}
-          imagePullPolicy: IfNotPresent
-          # Measure hardware-dependent engine settings on this PC (PCIe share,
-          # CPU expert workers, draft floor, adaptive tier); writes them into
-          # the run config + settings file, which the engine container reuses.
-          command: [/data/root/python/bin/python3, /data/root/setup.py, --calibrate, --model, {{ .Values.calibrate.model | quote }}, --yes]
-          workingDir: /data/root
-          env:
-            - {name: STRATA_DATA, value: /data}
-            - {name: XDG_CONFIG_HOME, value: /data/config}
-            - {name: XDG_CACHE_HOME, value: /data/cache}
-            - {name: HOME, value: /data/root}
-            - {name: PYTHONUNBUFFERED, value: "1"}
-            - name: OMP_NUM_THREADS
-              value: {{ .Values.strata.cpuThreads | quote }}
-          volumeMounts:
-            - {name: hf-cache, mountPath: /cache/hf/hub, readOnly: true}
-            - {name: strata-data, mountPath: /data}
-          resources:
-            requests:
-              cpu: "1"
-              memory: 64Gi
-              nvidia.com/gpumem: {{ $gpuMiB }}
-            limits:
-              cpu: "12"
-              memory: 80Gi
-              nvidia.com/gpu: "1"
-              nvidia.com/gpumem: {{ $gpuMiB }}
-{{- end }}
       containers:
         - name: strata
           image: {{ .Values.images.strata | quote }}
@@ -114,10 +88,6 @@ spec:
               value: {{ $oe.ENGINE_ARGS | quote }}
             - name: OMP_NUM_THREADS
               value: {{ .Values.strata.cpuThreads | quote }}
-{{- if $oe.HF_ENDPOINT }}
-            - name: HF_ENDPOINT
-              value: {{ $oe.HF_ENDPOINT | quote }}
-{{- end }}
 {{- if $oe.HF_TOKEN }}
             - name: HF_TOKEN
               valueFrom:
@@ -145,14 +115,15 @@ spec:
             - {name: hf-cache, mountPath: /cache/hf/hub, readOnly: true}
             - {name: run-state, mountPath: /run/llm-init, readOnly: true}
             - {name: strata-data, mountPath: /data}
+            - {name: dflash2, mountPath: /dflash2}
             - {name: wrappers, mountPath: /llm-init/wrappers, readOnly: true}
           resources:
             requests:
               cpu: {{ $oe.STRATA_CPU_REQUEST | default "1" | quote }}
-              memory: {{ $oe.STRATA_MEMORY_REQUEST | default "4Gi" | quote }}
+              memory: {{ $oe.STRATA_MEMORY_REQUEST | default "56Gi" | quote }}
               nvidia.com/gpumem: {{ $gpuMiB }}
             limits:
-              cpu: {{ $oe.STRATA_CPU_LIMIT | default "12" | quote }}
+              cpu: {{ $oe.STRATA_CPU_LIMIT | default "19" | quote }}
               memory: {{ $oe.STRATA_MEMORY_LIMIT | default "80Gi" | quote }}
               nvidia.com/gpumem: {{ $gpuMiB }}
 ---

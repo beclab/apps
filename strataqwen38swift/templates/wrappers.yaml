@@ -90,6 +90,7 @@ data:
     import os
     from pathlib import Path
     import shlex
+    import shutil
     import signal
     import subprocess
     import sys
@@ -101,6 +102,71 @@ data:
         '--build', '--setup', '--yes', '--no-start', '--check', '--update', '--inspect',
         '--browser', '--no-browser', '--skip-build', '--rollback-engine', '--cuda',
     }
+
+
+    def persist_dflash2(data, shared=Path('/dflash2')):
+        shared.mkdir(parents=True, exist_ok=True)
+        link = data / 'dflash2'
+        if link.is_symlink() and link.resolve() == shared.resolve():
+            return
+        # Import an old cache only into an empty mount; ensure_for validates it below.
+        if not any(shared.iterdir()):
+            candidates = [link, data.parent / 'dflash2', *sorted(data.parent.glob('*/dflash2'))]
+            for previous in candidates:
+                if previous.is_dir() and previous.resolve() != shared.resolve():
+                    shutil.copytree(previous, shared, dirs_exist_ok=True)
+                    print(f'[strata] imported DFlash2 cache from {previous}', flush=True)
+                    break
+        if link.is_symlink():
+            link.unlink()
+        elif link.exists():
+            backup = data / 'dflash2.legacy'
+            if backup.exists():
+                raise FileExistsError(f'Refusing to overwrite previous Draft cache: {backup}')
+            link.rename(backup)
+        link.symlink_to(shared, target_is_directory=True)
+
+
+    def prepare_drafting(cfg, data, root, family):
+        # Swift runs DFlash2 via the 'auto' request shape (the 1.0.4-proven recipe):
+        # a STRICT dflash2 request trips the engine's name gate ("DFlash2 is for
+        # Qwen3.8-Flash-Next only") and downgrades to MTP; 'auto' routes per-request
+        # (rule df2) and runs the drafter for the Swift set.
+        model_name = os.environ.get('MODEL_NAME') or cfg.get('model_name')
+        cfg['drafting'] = 'mtp'
+        try:
+            sys.path.insert(0, str(root))
+            from strata_control import drafting, drafting_fetch
+            from serve.server import drafting_vram_mib
+            backend, archs = drafting.detect_hardware()
+            vram = drafting_vram_mib(cfg, backend, archs)
+            sa = [str(a) for a in cfg.get('args') or []]
+            slots = next((int(sa[sa.index(k) + 1]) for k in ('--batch', '--slots', '--parallel')
+                          if k in sa and sa.index(k) + 1 < len(sa) and sa[sa.index(k) + 1].isdigit()), 1)
+            choice = drafting.choice_of('dflash2', model_name=model_name, family=family,
+                                        backend=backend, archs=archs, args=sa, vram_mib=vram)
+            if choice != 'dflash2' or slots > 1:
+                print('[strata] DFlash2 is incompatible with this hardware or parallel configuration; keeping MTP', flush=True)
+                return
+            persist_dflash2(data)
+            print('[strata] preparing verified DFlash2 pack in /dflash2 before engine launch', flush=True)
+            pack = drafting_fetch.ensure_for(
+                data, model_name=model_name, backend=backend, archs=archs,
+                args=sa, vram_mib=vram, throttle=True,
+                progress=lambda msg, _done, _total: print(f'[strata] {msg}', flush=True))
+            if pack is None:
+                print('[strata] DFlash2 download unavailable; keeping MTP', flush=True)
+                return
+            candidate = dict(cfg, args=list(sa), drafting='auto')
+            dec = drafting.apply(candidate, klass=drafting.card_class(archs), data_dir=drafting.data_dir_of(sa),
+                                 family='qwen', backend=backend, archs=archs, vram_mib=24453.0, slots=slots,
+                                 engine=str(root / 'engine' / 'strata'))
+            if dec.drafter != 'dflash2':
+                raise RuntimeError(f'DFlash2 could not be enabled: {dec.note}')
+            cfg.update(candidate)
+            print(f'[strata] drafting {dec.asked} -> {dec.drafter} note={dec.note}', flush=True)
+        except Exception as exc:
+            print(f'[strata] DFlash2 preparation failed ({exc}); keeping MTP', flush=True)
 
 
     def setup_args(raw):
@@ -131,6 +197,56 @@ data:
         finally:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
+
+    def prime_pip_stamp(root):
+        # 0.2.16+ images ship the pinned wheels inside the bundled python, but pip AND
+        # ensurepip's bundled wheel are stripped from them, and containers on this host
+        # have no PyPI. Every bridge rebuild wipes the .strata-pip.json stamp, so setup's
+        # step 3 (pip_install(runtime_packages())) computes need=all and dies at
+        # 'No module named pip' — the real 0.2.17 killer (2026-11-20/21, both cycles).
+        # Pre-write setup's own stamp listing (its requirement_lines: split '#', strip,
+        # non-empty; requirements.txt + requirements-monitor.txt) so pip_install sees
+        # need=[] and skips pip; the packages import fine from bundled site-packages.
+        try:
+            req = root / 'requirements.txt'
+            if not req.exists():
+                hits = sorted(root.glob('*/requirements.txt'))
+                req = hits[0] if hits else None
+            mon = (req.parent / 'requirements-monitor.txt') if req else None
+            lines = []
+            for f in (req, mon):
+                if not f or not f.exists():
+                    continue
+                for raw in f.read_text(encoding='utf-8').splitlines():
+                    line = raw.split('#', 1)[0].strip()
+                    if line and line not in lines:
+                        lines.append(line)
+            # The ready-made engine component carries libcublas/libcublasLt/libcudart
+            # itself (SYSTEM-LIBS.txt), so setup's pip CUDA-wheel step (added in 0.2.16+)
+            # is redundant on the bridge path — stamp its wheel lines too (parsed from
+            # setup.py so future pin bumps keep tracking) and it prints 'already installed'.
+            sup = root / 'setup.py'
+            if not sup.exists():
+                hits = sorted(root.glob('*/setup.py'))
+                sup = hits[0] if hits else None
+            if sup and sup.exists():
+                import re as _re
+                txt = sup.read_text(encoding='utf-8', errors='replace')
+                for var in ('CUDA_WHEELS', 'CUDA12_WHEELS'):
+                    m = _re.search(var + r'\s*=\s*\[([^\]]*)\]', txt)
+                    if m:
+                        for w in (s.strip().strip('\'"') for s in m.group(1).split(',')):
+                            if w and w not in lines:
+                                lines.append(w)
+            if not lines:
+                print('[strata] no requirements files under', root, '- pip stamp left as-is', flush=True)
+                return
+            stamp = Path(sys.executable).resolve().parent.parent
+            (stamp / '.strata-pip.json').write_text(json.dumps(sorted(set(lines))), encoding='utf-8')
+            (stamp / '.strata-pip.json.os').write_text(sys.platform, encoding='utf-8')
+            print(f'[strata] pip stamp primed: {len(set(lines))} pinned lines (offline: setup step 3 skips pip)', flush=True)
+        except OSError as exc:
+            print(f'[strata] pip stamp prime skipped: {exc}', flush=True)
 
 
     def main():
@@ -169,10 +285,11 @@ data:
                    '--family', 'swift', '--model', 'IQ3_S', '--backend', 'cuda',
                    '--gpu', '0', '--vision', 'cpu', '--data-dir', str(data),
                    '--gguf-dir', str(gguf), '--host', '0.0.0.0', '--port', port,
-                   '--context', '32768', '--parallel', '1',
-                   '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'off',
+                   '--context', '262144', '--parallel', '1',
+                   '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'auto',
                    '--vram-reserve-mib', '1024', *args]
         print('[strata] preparing GGUF and MTP cache; first start can take several minutes', flush=True)
+        prime_pip_stamp(root)
         run_setup(command, root)
         if not generated.exists():
             candidates = sorted(root.glob('strata-*.json'), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -189,34 +306,7 @@ data:
         # already gated: the engine binds to the pod network, and the entrance
         # requires an Olares session (authLevel internal) before it proxies.
         cfg['allowed_hosts'] = ['*']
-        # Strata 0.2.10: DFlash2 is the default drafter. setup.py regenerates this
-        # config every boot and leaves drafting ABSENT (which keeps the legacy MTP
-        # args); "auto" = both drafters current, each request picks one (rule df2).
-        # Packs fetched once with the terminal's `strata drafting fetch` (pinned
-        # download, SHA-256 checked): arena dflash2/ holds q4_0 + converted selq4.
-        cfg['drafting'] = 'auto'
-        # Apply the drafting choice to the engine arguments HERE, the way `strata
-        # launch` does: setup.py only writes legacy MTP args, and server.py merely
-        # consumes args + restart-fallbacks (it never applies). Pack already sits
-        # at <data>/dflash2/ (fetched once, sha-pinned). Loud on failure: staying
-        # on MTP is a safe fallback but must be visible in the log.
-        try:
-            sys.path.insert(0, str(root))
-            from strata_control import drafting
-            eb = json.loads((root / 'engine' / 'BUILD.json').read_text())
-            archs = [int(a) for a in str(eb.get('archs', '')).replace(',', ';').split(';') if a.strip().isdigit()]
-            # slots as server.py reads them: --batch/--slots/--parallel in the engine
-            # args (0/absent = one at a time). Dormant while parallel cannot run
-            # DFlash2; correct the day upstream removes that limit (coldniko on X).
-            sa = [str(a) for a in cfg.get('args') or []]
-            slots = next((int(sa[sa.index(k) + 1]) for k in ('--batch', '--slots', '--parallel')
-                          if k in sa and sa.index(k) + 1 < len(sa) and sa[sa.index(k) + 1].isdigit()), 1)
-            dec = drafting.apply(cfg, klass=drafting.card_class(archs), data_dir=drafting.data_dir_of(cfg['args']),
-                                 family='qwen', backend='cuda', archs=archs, vram_mib=24453.0, slots=slots,
-                                 engine=str(root / 'engine' / 'strata'))
-            print(f"[strata] drafting {dec.asked} -> {dec.drafter} flags={list(dec.flags)}{' note=' + dec.note if dec.note else ''}", flush=True)
-        except Exception as exc:
-            print(f'[strata] drafting apply FAILED ({exc}); engine stays on the args setup.py wrote', flush=True)
+        prepare_drafting(cfg, data, root, 'qwen')
         cfg.pop('api_key', None)  # internal ClusterIP only; Olares authenticates the entrance.
         target = data / 'server.json'
         temporary = target.with_suffix('.tmp')
