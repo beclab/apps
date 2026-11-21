@@ -5,6 +5,7 @@ apiVersion: v3
 workloadReplicas:
   hindsight: 1
   hindsight-control-plane: 1
+  hindsight-worker: 1
 
 metadata:
   name: hindsight
@@ -12,7 +13,7 @@ metadata:
   title: Hindsight
   description: Persistent memory for AI agents
   icon: https://cdn.olares.com/images/2026/10/ef713eea84bc4fbe32cc61b06f92d54d.png
-  version: 0.0.18
+  version: 1.2.6
   categories:
   - agents
   tags:
@@ -71,9 +72,20 @@ spec:
     or project. Retain and reflect speed depends on your configured models;
     background memory processing also consumes model capacity.
 
-    This package runs Hindsight 0.10.2 with separate API and control-plane
+    This package runs Hindsight 1.2.3 with separate API, worker and control-plane
     services, supports amd64 and arm64, and sends one text per embedding request.
-  versionName: 0.10.2
+  upgradeDescription: |
+    Hindsight 1.2.3. The Memories, Experience and Observations tabs show data again, and knowledge
+    files that are malformed, unusual or large are ingested without failing, without needless
+    retries, and without exhausting memory.
+    Memory processing now runs in its own worker service, so background consolidation no longer
+    competes with the requests your agents send through the API.
+    Chat and embedding use is tunable in Settings: 32 values cover concurrency, retries, backoff
+    and time limits for retain, recall, reflect and consolidation, so a busy model endpoint slows
+    the app down instead of making memory operations fail.
+    Existing memories are migrated in place at startup. The app still needs a chat model and an
+    embedding model served by one OpenAI-compatible endpoint.
+  versionName: 1.2.3
   runAsUser: true
   supportArch:
   - amd64
@@ -81,8 +93,8 @@ spec:
   accelerator:
   - mode: cpu
     requiredCpu: "1"
-    limitedCpu: "2"
-    requiredMemory: 2Gi
+    limitedCpu: "3"
+    requiredMemory: 512Mi
     limitedMemory: 4Gi
     requiredDisk: 1Gi
     limitedDisk: 5Gi
@@ -133,3 +145,207 @@ envs:
   applyOnChange: true
   default: default-embedding
   description: Embedding model name on the same base URL.
+- envName: HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: Embedding requests Hindsight keeps in flight at once. Match it to the embedding model's AT ONCE in Router (router model list) — the EmbeddingGemma engine serves 1, so a wider caller is refused with 503 model_at_capacity.
+- envName: HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: Texts per embedding request. Local Olares embedding engines take one text per request and answer 400 batch_size_exceeded above 1; raise it only for a cloud embedding endpoint that supports batching.
+- envName: HINDSIGHT_API_EMBEDDINGS_MAX_RETRIES
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '6'
+  description: Client-side attempts per embedding request before its task is rescheduled.
+- envName: HINDSIGHT_API_EMBEDDINGS_INITIAL_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '0.5'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: First retry delay for an embedding request, in seconds.
+- envName: HINDSIGHT_API_EMBEDDINGS_MAX_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '15'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: Ceiling on the embedding retry delay, in seconds. The embedding engine is a CPU ONNX server serving one request at a time, so collisions between the retain and consolidation paths need a wider backoff than the upstream 8.
+- envName: HINDSIGHT_API_EMBEDDINGS_RETRY_BUDGET
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '120'
+  description: Total time one embedding operation may spend retrying, in seconds. Keep it above the time a queued embedding call waits behind a CPU-serialized lane; 30 was short enough that a 503 failed the whole task and the worker parked it for 30 minutes.
+- envName: HINDSIGHT_API_CONSOLIDATION_LLM_PARALLELISM
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: Tag groups consolidated concurrently, i.e. concurrent chat calls. The chat model serves its slot count at a time (now two, via --parallel 2), so keep this at or below that; the upstream default of 4 produces refused chat calls.
+- envName: HINDSIGHT_API_LLM_MAX_CONCURRENT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: General chat calls in flight at once. The chat model serves two requests at a time and shares them with interactive callers, so one keeps Hindsight polite; the upstream default is 8.
+- envName: HINDSIGHT_API_LLM_MAX_RETRIES
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '6'
+  description: Retries per general chat call. Wide enough to ride out a queued slot, where a long agent generation can hold the model for minutes.
+- envName: HINDSIGHT_API_LLM_INITIAL_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '2.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: First retry delay for general chat calls, in seconds.
+- envName: HINDSIGHT_API_LLM_MAX_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '30.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: Ceiling on the general chat retry delay, in seconds.
+- envName: HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: Retain (memory ingest) chat calls in flight at once. This is the path that produced the standing failure stream; keep it at one call.
+- envName: HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '6'
+  description: Retries per retain chat call.
+- envName: HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '2.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: First retry delay for retain chat calls, in seconds.
+- envName: HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '30.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: Ceiling on the retain chat retry delay, in seconds.
+- envName: HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1'
+  description: Reflect (recall/query) chat calls in flight at once. Keep it at one so a recall burst cannot occupy the whole lane.
+- envName: HINDSIGHT_API_REFLECT_LLM_MAX_RETRIES
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '6'
+  description: Retries per reflect chat call.
+- envName: HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '2.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: First retry delay for reflect chat calls, in seconds.
+- envName: HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '30.0'
+  regex: '^[0-9]+(\.[0-9]+)?$'
+  description: Ceiling on the reflect chat retry delay, in seconds.
+- envName: HINDSIGHT_API_WORKER_MAX_SLOTS
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '4'
+  description: Background tasks running concurrently. The upstream default of 10 lets task fan-out outrun a two-slot chat lane; four bounds it while keeping ingest throughput.
+- envName: HINDSIGHT_API_REFLECT_WALL_TIMEOUT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1800'
+  description: Wall-clock ceiling for reflect work, in seconds. Mental-model refresh shares this ceiling, and both issue runs of LLM calls; a refresh queued behind a long agent generation on the shared two-slot lane can pass 900s while healthy, so give a legitimately long job the room it needs. Set 0 to disable the limit.
+- envName: HINDSIGHT_API_CONSOLIDATION_WALL_TIMEOUT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '900'
+  description: Wall-clock ceiling for consolidation, in seconds. One consolidation round makes many chat calls, so it is the task class most exposed to a queued slot. Set 0 to disable the limit.
+- envName: HINDSIGHT_API_CONSOLIDATION_LLM_MAX_RETRIES
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '2'
+  description: Retries per consolidation chat call. Low so a saturated lane fails fast instead of cycling for hours.
+- envName: HINDSIGHT_API_CONSOLIDATION_MAX_ATTEMPTS
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '2'
+  description: Outer attempts for a consolidation round. After these, the operation becomes failed and stops re-claiming the reserved slot.
+- envName: HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '180'
+  description: Per-request timeout in seconds for consolidation chat calls, so queued requests give up instead of holding the lane queue.
+- envName: HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '1024'
+  description: Cap on consolidation output length. Unbounded output holds a model slot for minutes; this bounds it.
+- envName: HINDSIGHT_API_CONSOLIDATION_LLM_REASONING_EFFORT
+  type: string
+  required: false
+  editable: true
+  applyOnChange: true
+  default: 'low'
+  description: Reasoning effort for consolidation. Low stops background fact merging from spending thinking tokens on a reasoning model.
+- envName: HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS
+  type: int
+  required: false
+  editable: true
+  applyOnChange: true
+  default: '0'
+  description: Worker slots reserved for consolidation. Each round embeds a search query, and the embedding engine is a CPU ONNX server serving one request, so the upstream 2 reserves room for two rounds to collide with retain's embed. One serializes consolidation by default; it still borrows shared slots when they are free.
