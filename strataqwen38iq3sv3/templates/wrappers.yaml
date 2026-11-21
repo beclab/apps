@@ -197,6 +197,57 @@ data:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
 
+    def prime_pip_stamp(root):
+        # 0.2.16+ images ship the pinned wheels inside the bundled python, but pip AND
+        # ensurepip's bundled wheel are stripped from them, and containers on this host
+        # have no HuggingFace/GitHub (PyPI reachable, pip absent). Every bridge rebuild
+        # wipes the .strata-pip.json stamp, so setup's step 3 (pip_install(runtime_
+        # packages())) computes need=all and dies at 'No module named pip' — the real
+        # 0.2.17 killer (2026-11-20/21 swift cycles; same wall awaits any 0.2.17+ bump).
+        # Pre-write setup's own stamp listing (its requirement_lines: split '#', strip,
+        # non-empty; requirements.txt + requirements-monitor.txt) so pip_install sees
+        # need=[] and skips pip; the packages import fine from bundled site-packages.
+        try:
+            req = root / 'requirements.txt'
+            if not req.exists():
+                hits = sorted(root.glob('*/requirements.txt'))
+                req = hits[0] if hits else None
+            mon = (req.parent / 'requirements-monitor.txt') if req else None
+            lines = []
+            for f in (req, mon):
+                if not f or not f.exists():
+                    continue
+                for raw in f.read_text(encoding='utf-8').splitlines():
+                    line = raw.split('#', 1)[0].strip()
+                    if line and line not in lines:
+                        lines.append(line)
+            # The ready-made engine component carries libcublas/libcublasLt/libcudart
+            # itself (SYSTEM-LIBS.txt), so setup's pip CUDA-wheel step (added in 0.2.16+)
+            # is redundant on the bridge path — stamp its wheel lines too (parsed from
+            # setup.py so future pin bumps keep tracking) and it prints 'already installed'.
+            sup = root / 'setup.py'
+            if not sup.exists():
+                hits = sorted(root.glob('*/setup.py'))
+                sup = hits[0] if hits else None
+            if sup and sup.exists():
+                import re as _re
+                txt = sup.read_text(encoding='utf-8', errors='replace')
+                for var in ('CUDA_WHEELS', 'CUDA12_WHEELS'):
+                    m = _re.search(var + r'\s*=\s*\[([^\]]*)\]', txt)
+                    if m:
+                        for w in (s.strip().strip('\'"') for s in m.group(1).split(',')):
+                            if w and w not in lines:
+                                lines.append(w)
+            if not lines:
+                print('[strata] no requirements files under', root, '- pip stamp left as-is', flush=True)
+                return
+            stamp = Path(sys.executable).resolve().parent.parent
+            (stamp / '.strata-pip.json').write_text(json.dumps(sorted(set(lines))), encoding='utf-8')
+            (stamp / '.strata-pip.json.os').write_text(sys.platform, encoding='utf-8')
+            print(f'[strata] pip stamp primed: {len(set(lines))} pinned lines (offline: setup skips pip)', flush=True)
+        except OSError as exc:
+            print(f'[strata] pip stamp prime skipped: {exc}', flush=True)
+
 
     def main():
         root = Path(os.environ.get('STRATA_ROOT', '/opt/strata'))
@@ -238,6 +289,7 @@ data:
                    '--resident-budget-gib', '48', '--kv', 'int8', '--kv-streaming', 'auto',
                    '--vram-reserve-mib', '1024', *args]
         print('[strata] preparing GGUF and MTP cache; first start can take several minutes', flush=True)
+        prime_pip_stamp(root)
         run_setup(command, root)
         if not generated.exists():
             candidates = sorted(root.glob('strata-*.json'), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -245,9 +297,7 @@ data:
                 raise FileNotFoundError(f'setup.py wrote no strata-*.json under {root}')
             generated = candidates[0]
         cfg = json.loads(generated.read_text())
-        public_name = os.environ['MODEL_NAME']
-        if public_name != cfg.get('model_name'):
-            cfg['aliases'] = list(dict.fromkeys([*(cfg.get('aliases') or []), public_name]))
+        cfg['model_name'] = os.environ['MODEL_NAME']  # /v1/models must match Model Console.
         cfg['log'] = str(data / 'engine.log')
         cfg['open_browser'] = False
         # DNS-rebinding guard (server.py host_allowed): the Olares entrance sends
