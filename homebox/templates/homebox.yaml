@@ -17,9 +17,24 @@ spec:
       labels:
         app: homebox
     spec:
+      initContainers:
+        - name: init-permissions
+          image: beclab/aboveos-busybox:1.37.0
+          command: ["chown", "1000:1000", "/data", "/cache"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: cache
+              mountPath: /cache
       containers:
-        - image: aboveos/aby913-homebox:1.0.0
+        - image: beclab/sysadminsmedia-homebox:0.27.1
           name: homebox
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
           ports:
             - containerPort: 7745
           resources:
@@ -28,7 +43,7 @@ spec:
               memory: 20Mi
             limits:
               cpu: 100m
-              memory: 100Mi
+              memory: 1Gi
           volumeMounts:
             - mountPath: /data
               name: data
@@ -47,6 +62,11 @@ spec:
               value: "file:///?no_tmp_dir=true"
             - name: HBOX_STORAGE_PREFIX_PATH
               value: "data"
+            - name: HBOX_AUTH_API_KEY_PEPPER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: HBOX_AUTH_API_KEY_PEPPER
             - name: HBOX_DATABASE_DRIVER
               value: "postgres"
             - name: HBOX_DATABASE_HOST
