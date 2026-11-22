@@ -1,0 +1,454 @@
+# Scripts embedded in ConfigMap matching Beclab Strata chart layout.
+# Supports both Beclab (/opt/strata/.venv/bin/python) and upstream ghcr.io (/opt/strata/terminal/python/bin/python3) layouts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+data:
+  strata.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=strata
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _common_copy=$(mktemp "${TMPDIR:-/tmp}/strata-common.XXXXXX")
+    _wc=0
+    while ! cp "$WRAPPER_COMMON" "$_common_copy" 2>/dev/null; do
+        if [ "$_wc" -ge "${WRAPPER_COMMON_WAIT:-3600}" ]; then
+            rm -f "$_common_copy"
+            printf '[wrapper] %s could not be read\n' "$WRAPPER_COMMON" >&2
+            exit 1
+        fi
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    . "$_common_copy"
+    rm -f "$_common_copy"
+    unset _wc _common_copy
+
+    python_usable() {
+        [ -f "$1" ] || return 1
+        [ -x "$1" ] && return 0
+        "$1" -c 'pass' 2>/dev/null
+    }
+
+    resolve_python() {
+        if [ -n "${STRATA_PYTHON:-}" ] && python_usable "$STRATA_PYTHON"; then
+            printf '%s\n' "$STRATA_PYTHON"
+            return 0
+        fi
+        for cand in \
+            /opt/strata/.venv/bin/python \
+            /opt/strata/.venv/bin/python3 \
+            /opt/strata/terminal/python/bin/python3 \
+            /opt/strata/python/bin/python3 \
+            "$(command -v python3 2>/dev/null || true)"; do
+            if [ -n "$cand" ] && python_usable "$cand"; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: no usable Python interpreter found under /opt/strata\n' >&2
+        return 1
+    }
+
+    resolve_root() {
+        if [ -n "${STRATA_ROOT:-}" ] && [ -f "$STRATA_ROOT/setup.py" ]; then
+            printf '%s\n' "$STRATA_ROOT"
+            return 0
+        fi
+        for cand in /opt/strata /opt/strata/terminal; do
+            if [ -f "$cand/setup.py" ] && [ -f "$cand/serve/server.py" ]; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: neither /opt/strata nor /opt/strata/terminal contains setup.py + serve/server.py\n' >&2
+        return 1
+    }
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+    STRATA_PYTHON=$(resolve_python)
+    STRATA_ROOT=$(resolve_root)
+    export MODEL_PATH STRATA_PYTHON STRATA_ROOT
+
+    run_strata() {
+        load_engine_args_from_handoff
+        export ENGINE_ARGS
+        exec "$STRATA_PYTHON" \
+            "${STRATA_LAUNCHER:-/llm-init/wrappers/prepare-strata.py}" "$@"
+    }
+
+    supervise_engine run_strata "$@"
+  prepare-strata.py: |
+    #!/usr/bin/env python3
+    """Prepare Inkling-2-Mini SQ-20 (.strata v1.1) across Beclab & upstream Strata layouts, then exec serve/server.py."""
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import shlex
+    import signal
+    import subprocess
+    import sys
+
+    STRATA_MAGIC = b'STRATA\x00\x01'
+
+    # Exact byte sizes and SHA-256 digests from verified .strata v1.1 checkpoints (strata_control/inkling_family.py).
+    EXPECTED_FILES = {
+        'Inkling-2-Mini-SQ-20.strata': (19_346_685_952, '0bbfd52344f0dd4779a7807b5f73554a812f24c035e6877b63cd0d499f7e1b97'),
+        'Inkling-2-Mini-Vision.strata': (636_526_592, '6589eff47f9c20bc3a032faa3d449f10bf4f04a84cc6b2ee8a44d51d2b6fc677'),
+    }
+    OPTIONAL_TOKENIZER_FILES = ('tokenizer.json', 'chat_template.jinja')
+
+    MANAGED = {
+        '--family', '--model', '--native', '--data-dir', '--models-dir',
+        '--gguf-dir', '--host', '--port', '--api-key', '--backend', '--vision',
+        '--gpu', '--gpus', '--prebuilt', '--build', '--setup', '--yes', '--no-start',
+        '--check', '--update', '--inspect', '--browser', '--no-browser', '--skip-build',
+        '--rollback-engine', '--cuda', '--serve', '--export-tokenizer', '--info',
+    }
+
+    INKLING_VALUE_FLAGS = {
+        '--draft', '--max-context', '--ctx', '--parallel', '--batch', '--slots',
+        '--kv-dtype', '--chunk', '--vram-experts-gb', '--ram-experts-gb', '--threads',
+    }
+    INKLING_BOOL_FLAGS = {'--selfcheck'}
+
+
+    def resolve_strata_root(env=None):
+        env = os.environ if env is None else env
+        explicit = env.get('STRATA_ROOT', '').strip()
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        candidates = []
+        if explicit:
+            p = Path(explicit)
+            candidates.extend([p, p / 'terminal'])
+        candidates.extend([app_base, app_base / 'terminal'])
+        seen = set()
+        for cand in candidates:
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (cand / 'setup.py').is_file() and (cand / 'serve' / 'server.py').is_file():
+                return cand
+        raise FileNotFoundError(f'Could not locate Strata setup.py + serve/server.py under {[str(c) for c in candidates]}')
+
+
+    def bridge_components_dir(app_base, data_root, env=None):
+        env = os.environ if env is None else env
+        writable = Path(data_root) / 'components'
+        writable.mkdir(parents=True, exist_ok=True)
+        src_candidates = []
+        if env.get('STRATA_COMPONENTS_DIR'):
+            src_candidates.append(Path(env['STRATA_COMPONENTS_DIR']))
+        src_candidates.append(Path(app_base) / 'components')
+        for src in src_candidates:
+            try:
+                if not src.is_dir() or src.resolve() == writable.resolve():
+                    continue
+            except OSError:
+                continue
+            eng_src = src / 'engine'
+            eng_dst = writable / 'engine'
+            if eng_src.is_dir() and not eng_dst.exists():
+                eng_dst.symlink_to(eng_src, target_is_directory=True)
+            shapes_src = src / 'shapes'
+            if shapes_src.is_dir():
+                for shape_dir in sorted(shapes_src.iterdir()):
+                    if not shape_dir.is_dir():
+                        continue
+                    dst_pkg_parent = writable / 'shapes' / shape_dir.name / 'engine'
+                    src_pkg_parent = shape_dir / 'engine'
+                    if src_pkg_parent.is_dir():
+                        dst_pkg_parent.mkdir(parents=True, exist_ok=True)
+                        for pkg in sorted(src_pkg_parent.iterdir()):
+                            if pkg.is_dir():
+                                link = dst_pkg_parent / pkg.name
+                                if not link.exists():
+                                    link.symlink_to(pkg, target_is_directory=True)
+        return writable
+
+
+    def find_inkling_engine(root, components_dir, app_base):
+        exe_names = ('strata-inkling.exe', 'strata-inkling') if os.name == 'nt' else ('strata-inkling',)
+        for comp_root in (Path(components_dir), Path(app_base) / 'components', Path(root) / 'components'):
+            shape_eng = comp_root / 'shapes' / 'inkling2' / 'engine'
+            if shape_eng.is_dir():
+                for pkg in sorted(shape_eng.iterdir(), reverse=True):
+                    if not pkg.is_dir():
+                        continue
+                    for ename in exe_names:
+                        cand = pkg / ename
+                        if cand.is_file():
+                            has_manifest = (pkg / 'engine-component.json').is_file()
+                            libs = [str(pkg)] + [str(d) for d in sorted(pkg.iterdir()) if d.is_dir()]
+                            return cand, has_manifest, libs
+        flat_dirs = [Path(root) / 'engine', Path(app_base) / 'engine']
+        for d in flat_dirs:
+            if not d.is_dir():
+                continue
+            for ename in exe_names:
+                cand = d / ename
+                if cand.is_file():
+                    libs = [str(d)] + [str(sub) for sub in sorted(d.iterdir()) if sub.is_dir()]
+                    return cand, False, libs
+        return None, False, []
+
+
+    def verify_snapshot(model_path, expected_files=None):
+        expected_files = EXPECTED_FILES if expected_files is None else expected_files
+        source = Path(model_path)
+        if source.is_file():
+            source = source.parent
+        if not source.is_dir():
+            raise ValueError(f'MODEL_PATH directory does not exist: {source}')
+        missing = [name for name in expected_files if not (source / name).is_file()]
+        if missing:
+            raise ValueError(f'Incomplete Inkling-2-Mini snapshot in {source}; missing: {missing}')
+        for name, spec in expected_files.items():
+            exp_size = spec[0] if isinstance(spec, tuple) else int(spec)
+            fpath = source / name
+            actual_size = fpath.stat().st_size
+            if actual_size != exp_size:
+                raise ValueError(f'Size mismatch for {name}: got {actual_size:,} B, expected {exp_size:,} B')
+            with fpath.open('rb') as fp:
+                head = fp.read(len(STRATA_MAGIC))
+            if head != STRATA_MAGIC:
+                raise ValueError(f'Invalid .strata v1.1 magic in {fpath}: got {head!r}')
+        return source
+
+
+    def parse_engine_args(raw):
+        tokens = shlex.split(raw or '')
+        for tok in tokens:
+            flag = tok.split('=', 1)[0]
+            if flag in MANAGED:
+                raise ValueError(f'{tok}: managed by the Strata chart, not ENGINE_ARGS')
+        setup_flags = []
+        ink_args = []
+        draft_override = None
+        parallel_override = None
+        has_context = False
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            flag, eq, inline_val = tok.partition('=')
+            def take_val():
+                nonlocal i
+                if eq:
+                    return inline_val
+                if i + 1 >= len(tokens):
+                    raise ValueError(f'{flag} in ENGINE_ARGS requires a value')
+                i += 1
+                return tokens[i]
+            if flag in ('--context', '--max-context', '--ctx'):
+                val = take_val()
+                if not val.isdigit() or int(val) <= 0:
+                    raise ValueError(f'{flag} requires a positive integer, got {val!r}')
+                setup_flags.extend(['--context', val])
+                ink_args.extend(['--max-context', val])
+                has_context = True
+            elif flag in ('--parallel', '--batch', '--slots'):
+                val = take_val()
+                if not val.isdigit() or not (1 <= int(val) <= 64):
+                    raise ValueError(f'{flag} for Inkling-2-Mini must be 1..64 (got {val!r})')
+                parallel_override = int(val)
+                ink_args.extend(['--parallel', val])
+            elif flag in ('--draft', '--drafting'):
+                val = take_val().lower()
+                if val not in ('off', 'dspark', 'auto'):
+                    raise ValueError(f'{flag} for Inkling-2-Mini must be off, dspark, or auto (got {val!r})')
+                draft_override = val
+                ink_args.extend(['--draft', val])
+            elif flag in INKLING_VALUE_FLAGS:
+                ink_args.extend([flag, take_val()])
+            elif flag in INKLING_BOOL_FLAGS:
+                ink_args.append(flag)
+            else:
+                setup_flags.append(tok)
+                if not eq and i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+                    i += 1
+                    setup_flags.append(tokens[i])
+            i += 1
+        if not has_context:
+            setup_flags = ['--context', '32768', *setup_flags]
+        return setup_flags, ink_args, draft_override, parallel_override
+
+
+    def link_model_files(source, ink_dir, expected_files=None):
+        expected_files = EXPECTED_FILES if expected_files is None else expected_files
+        ink_dir.mkdir(parents=True, exist_ok=True)
+        paths = {}
+        all_names = list(expected_files.keys()) + [n for n in OPTIONAL_TOKENIZER_FILES if (source / n).is_file()]
+        for name in all_names:
+            spec = expected_files.get(name)
+            exp_sha = spec[1] if isinstance(spec, tuple) and len(spec) > 1 else None
+            target_blob = (source / name).resolve()
+            link = ink_dir / name
+            done_mark = ink_dir / (name + '.done')
+            if not link.is_symlink() or link.resolve() != target_blob:
+                link.unlink(missing_ok=True)
+                done_mark.unlink(missing_ok=True)
+                link.symlink_to(target_blob)
+            if exp_sha and not done_mark.is_file() and target_blob.name.lower() == exp_sha.lower():
+                done_mark.write_text(f'sha256 {exp_sha}\n', encoding='utf-8')
+            paths[name] = link
+        return paths
+
+
+    def ensure_tokenizer(root, model_file, source, tok_dir, ink_exe, lib_dirs):
+        if (tok_dir / 'vocab.json').is_file() and (tok_dir / 'chat_template.jinja').is_file():
+            return tok_dir
+        tok_dir.parent.mkdir(parents=True, exist_ok=True)
+        tools_dir = str(Path(root) / 'tools')
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import inkling_tokenizer
+        hf_tok = source / 'tokenizer.json'
+        hf_tpl = source / 'chat_template.jinja'
+        if hf_tok.is_file() and hf_tpl.is_file():
+            inkling_tokenizer.convert_files(hf_tok, hf_tpl, tok_dir)
+            return tok_dir
+        try:
+            inkling_tokenizer.convert_manifest(
+                inkling_tokenizer.read_manifest(model_file),
+                tok_dir,
+                tokenizer_json_path=hf_tok if hf_tok.is_file() else None,
+            )
+            return tok_dir
+        except RuntimeError:
+            pass
+        if ink_exe is not None and Path(ink_exe).is_file():
+            raw = tok_dir.with_name(tok_dir.name + '-export')
+            raw.mkdir(parents=True, exist_ok=True)
+            subprocess.run([str(ink_exe), '--export-tokenizer', str(model_file), str(raw)], check=True)
+            inkling_tokenizer.convert_files(
+                raw / 'tokenizer.hf.json' if (raw / 'tokenizer.hf.json').is_file() else hf_tok,
+                raw / 'chat_template.jinja' if (raw / 'chat_template.jinja').is_file() else hf_tpl,
+                tok_dir,
+            )
+            return tok_dir
+        raise RuntimeError('Tokenizer preparation failed: tokenizer.json + chat_template.jinja not found')
+
+
+    def prepare_server_config(env=None, expected_files=None):
+        env = dict(os.environ if env is None else env)
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        root = resolve_strata_root(env)
+        source = verify_snapshot(env['MODEL_PATH'], expected_files=expected_files)
+        setup_flags, ink_overrides, draft_override, parallel_override = parse_engine_args(env.get('ENGINE_ARGS', ''))
+        data_base = Path(env.get('STRATA_DATA', '/data'))
+        data_base.mkdir(parents=True, exist_ok=True)
+        components_dir = bridge_components_dir(app_base, data_base, env=env)
+        ink_exe, is_shape_component, lib_dirs = find_inkling_engine(root, components_dir, app_base)
+        if ink_exe is None:
+            raise FileNotFoundError(f'strata-inkling engine binary not found under {components_dir}, {app_base}, or {root}')
+        key = hashlib.sha256(str(source.resolve()).encode('utf-8')).hexdigest()[:20]
+        data = data_base / key
+        ink_dir = data / 'models' / 'inkling-2-mini'
+        ink_dir.mkdir(parents=True, exist_ok=True)
+        linked = link_model_files(source, ink_dir, expected_files=expected_files)
+        port = env.get('STRATA_PORT', '8080').strip() or '8080'
+        tok_dir = ensure_tokenizer(root, linked['Inkling-2-Mini-SQ-20.strata'], source, data / 'packs' / 'inkling-2-mini-sq-20' / 'tokenizer', ink_exe, lib_dirs)
+        ctx_val = setup_flags[setup_flags.index('--context') + 1] if '--context' in setup_flags else '32768'
+        parallel_val = parallel_override if parallel_override is not None else 8
+        args = [
+            '--native', str(linked['Inkling-2-Mini-SQ-20.strata']),
+            '--vision', str(linked['Inkling-2-Mini-Vision.strata']),
+            '--max-context', str(ctx_val),
+            '--parallel', str(parallel_val),
+        ]
+        # Apply extra user overrides without duplicating flags
+        i = 0
+        while i < len(ink_overrides):
+            f = ink_overrides[i]
+            if f in INKLING_VALUE_FLAGS and i + 1 < len(ink_overrides):
+                v = ink_overrides[i + 1]
+                if f in args:
+                    args[args.index(f) + 1] = v
+                else:
+                    args.extend([f, v])
+                i += 2
+            else:
+                if f not in args:
+                    args.append(f)
+                i += 1
+        public = env.get('MODEL_NAME', '').strip() or 'inkling-2-mini-sq-20'
+        cfg = {
+            'exe': 'component:strata-inkling' if is_shape_component else str(ink_exe),
+            'args': args,
+            'cwd': str(root),
+            'tokenizer': str(tok_dir),
+            'model_name': 'inkling-2-mini-sq-20',
+            'aliases': [public],
+            'arch': 'inkling2_loop',
+            'port': int(port),
+            'parallel': parallel_val,
+            'drafting': draft_override if draft_override is not None else 'dspark',
+            'lib_dirs': lib_dirs,
+            'log': str(data / 'engine.log'),
+            'open_browser': False,
+            'allowed_hosts': ['*'],
+        }
+        target = data / 'server.json'
+        tmp = target.with_suffix('.tmp')
+        tmp.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+        tmp.replace(target)
+        os.environ['STRATA_COMPONENTS_DIR'] = str(components_dir)
+        exec_argv = [
+            sys.executable, str(root / 'serve' / 'server.py'),
+            '--engine', 'strata', '--config', str(target),
+            '--host', '0.0.0.0', '--port', port,
+        ]
+        return root, target, port, exec_argv
+
+
+    def main():
+        root, _target, _port, exec_argv = prepare_server_config()
+        os.chdir(root)
+        os.execv(sys.executable, exec_argv)
+
+
+    if __name__ == '__main__':
+        main()
+  strata-healthcheck.sh: |
+    #!/bin/sh
+    set -eu
+    for cand in \
+        "${STRATA_PYTHON:-}" \
+        /opt/strata/.venv/bin/python \
+        /opt/strata/.venv/bin/python3 \
+        /opt/strata/terminal/python/bin/python3 \
+        /opt/strata/python/bin/python3 \
+        "$(command -v python3 2>/dev/null || true)"; do
+        if [ -n "$cand" ] && [ -f "$cand" ]; then
+            exec "$cand" /llm-init/wrappers/strata-healthcheck.py
+        fi
+    done
+    exit 1
+  strata-healthcheck.py: |
+    #!/usr/bin/env python3
+    import json
+    import os
+    import sys
+    import urllib.request
+
+    def healthy(state):
+        return isinstance(state, dict) and state.get('status') == 'ok' and state.get('loaded') is True
+
+    def main():
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open('http://127.0.0.1:' + os.environ.get('STRATA_PORT', '8080') + '/health', timeout=3) as response:
+                return 0 if healthy(json.load(response)) else 1
+        except (OSError, ValueError):
+            return 1
+
+    if __name__ == '__main__':
+        sys.exit(main())
