@@ -1,0 +1,346 @@
+# One Pod, three containers talking over localhost:
+#   web      nginx: the only entrance; shell page, Easy UI, /console/ and /comfy/ proxies
+#   console  llm-init comfyui mode: downloads models, probes ComfyUI, /api/status
+#   comfyui  ComfyUI, the only container with a GPU: FlowStudio's CUDA engine
+#            for nvidia, Intel's XPU engine for intel-gpu (.Values.GPU.Type,
+#            the compute mode chosen at install)
+# Models live in the cluster-wide appCommon tree FlowStudio uses, so weights
+# are shared with it and with every other comfyapp app; outputs go to appData
+# so they show up in Files. Studio apps keep uploads and outputs in
+# Common/Studio/<app>/.users/<user>/ instead: a tree per app, because
+# ComfyUI's asset scanner walks its whole input and output directories.
+{{- $xpu := eq (.Values.GPU.Type | default .Values.gpu | default "nvidia") "intel-gpu" }}
+{{- $root := ternary "/llm/ComfyUI" "/opt/ComfyUI" $xpu }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imageqwenimage21studio
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # app-service's gpu-limit webhook reads this from the Deployment's own
+    # metadata (not the pod template) and, for the compute mode chosen at
+    # install, writes the GPU limits into this container: nvidia.com/gpu +
+    # nvidia.com/gpumem + runtimeClassName nvidia, or intel.com/vgpu +
+    # intel.com/vgpumem. gpumem is the manifest's requiredGPUMemory. The
+    # chart declares no GPU resource of its own.
+    applications.app.bytetrade.io/gpu-inject: "comfyui"
+spec:
+  replicas: {{ (index .Values.workloads "imageqwenimage21studio").replicaCount }}
+  # hostPath volumes and a single GPU cannot roll.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: imageqwenimage21studio
+  template:
+    metadata:
+      labels:
+        app: imageqwenimage21studio
+      annotations:
+        checksum/files: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 15
+      initContainers:
+      # The platform creates these roots as root:root; the console and ComfyUI
+      # run as uid 1000. Never chown -R: subdirectories another app already
+      # owns would fail with EPERM and wedge the Pod in Init.
+      - name: fix-perms
+        image: {{ .Values.images.busybox }}
+        securityContext:
+          runAsUser: 0
+        command:
+        - sh
+        - -c
+        - |
+          root=/data/appCommon/comfyui/model
+          mkdir -p "$root" && chown 1000:1000 "$root"
+          for d in clip diffusion_models vae .llm-init-verified; do
+            mkdir -p "$root/$d" && chown 1000:1000 "$root/$d"
+          done
+          for d in output db studio console; do
+            mkdir -p /data/appData/$d && chown 1000:1000 /data/appData/$d
+          done
+          mkdir -p /data/appCommon/Studio/imageqwenimage21studio && chown 1000:1000 /data/appCommon/Studio/imageqwenimage21studio
+        volumeMounts:
+        - name: app-common
+          mountPath: /data/appCommon
+        - name: app-data
+          mountPath: /data/appData
+      containers:
+      - name: web
+        image: {{ .Values.images.web }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 20m
+            memory: 32Mi
+          limits:
+            cpu: "1"
+            memory: 256Mi
+        volumeMounts:
+        - name: files
+          mountPath: /etc/nginx/conf.d/default.conf
+          subPath: nginx.conf
+        - name: studio
+          mountPath: /usr/share/nginx/html/studio
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          periodSeconds: 10
+      - name: console
+        image: {{ .Values.images.console }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        args: ["comfyui"]
+        env:
+        - name: COMFY_APP_CONFIG
+          value: /etc/comfy-app/app-config.json
+        - name: COMFY_MODELS_DIR
+          value: /data/appCommon/comfyui/model
+        - name: COMFYUI_URL
+          value: http://127.0.0.1:8188
+        - name: PORT
+          value: "8090"
+        {{- $hfToken := (.Values.olaresEnv | default dict).HF_TOKEN | default "" }}
+        {{- if $hfToken }}
+        - name: HF_TOKEN
+          value: {{ $hfToken | quote }}
+        {{- end }}
+        {{- $hfEndpoint := (.Values.olaresEnv | default dict).HF_ENDPOINT | default "" }}
+        {{- if $hfEndpoint }}
+        - name: HF_ENDPOINT
+          value: {{ $hfEndpoint | quote }}
+        {{- end }}
+        - name: COMFY_GROUPS
+          value: {{ .Values.olaresEnv.PRECISION | default "int8" | quote }}
+        - name: COMFY_SELECTION_FILE
+          value: /data/appData/console/model-groups.json
+        ports:
+        - containerPort: 8090
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: "2"
+            memory: 512Mi
+        volumeMounts:
+        - name: app-common
+          mountPath: /data/appCommon
+        - name: app-data
+          mountPath: /data/appData
+        - name: files
+          mountPath: /etc/comfy-app/app-config.json
+          subPath: app-config.json
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 8090
+          periodSeconds: 20
+      - name: comfyui
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        {{- if $xpu }}
+        image: {{ .Values.images.comfyuiXpu }}
+        # Runs as the image's own user (root): /dev/dri/renderD* belongs to
+        # the host's render group, whose gid varies per machine. No explicit
+        # runAsUser: OPA denies an explicit UID 0 for images outside
+        # docker.io/beclab. torch.xpu.device_count() reads 0 before XPU init
+        # in a HAMi Pod (Level Zero Sysman cannot start), which would send
+        # ComfyUI down its CUDA path, so XPU is initialized before main.py.
+        workingDir: /llm/ComfyUI
+        command:
+        - sh
+        - -c
+        - >-
+          mkdir -p /run/comfyui/input /run/comfyui/temp /run/comfyui/user
+          && exec python -c "import sys,runpy,torch; torch.xpu.init(); sys.argv=['main.py']+sys.argv[1:]; runpy.run_path('main.py', run_name='__main__')"
+          --listen 0.0.0.0 --port 8188 --disable-auto-launch --cache-none
+          --extra-model-paths-config /etc/comfyapp/extra_model_paths.yaml
+          --output-directory /data/studio --input-directory /data/studio --max-upload-size 512
+          --temp-directory /run/comfyui/temp --user-directory /run/comfyui/user
+          --enable-assets --database-url sqlite:////data/appData/db/comfyui.db
+        {{- else }}
+        image: {{ .Values.images.comfyui }}
+        securityContext:
+          runAsUser: 1000
+        workingDir: /opt/ComfyUI
+        # Same flags as FlowStudio's NVIDIA engine; /opt/ComfyUI is root-owned,
+        # so writable dirs live on emptyDir and outputs on appData. The assets
+        # database sits on appData too, so the editor's Generated list and the
+        # Easy UI library survive restarts (the in-memory /history does not).
+        # In HAMi time slicing (GPU mode 2) only managed memory can be evicted
+        # while another app holds the GPU. libvgpu turns cuMemAlloc into managed
+        # memory; cudaMallocAsync pools and expandable segments stay resident.
+        # comfy-aimdo's VMM memory stays resident too, so comfy-ext unloads the
+        # models whenever the queue goes idle.
+        # HAMi's preloaded libvgpu.so exports a function named log_level; unless
+        # aimdo.so is loaded with RTLD_DEEPBIND, comfy-aimdo's log_level variable
+        # binds to that function and dynamic VRAM segfaults on its first write.
+        command:
+        - sh
+        - -c
+        - >-
+          mkdir -p /run/comfyui/input /run/comfyui/temp /run/comfyui/user
+          && if [ "${CUDA_DEVICE_GPU_MODE_0:-}" = 2 ]; then set -- --disable-cuda-malloc; else set --; fi
+          && exec python3 -c "import ctypes,os,runpy,sys; i=ctypes.CDLL.__init__; ctypes.CDLL.__init__=lambda s,n,mode=ctypes.DEFAULT_MODE,*a,**k: i(s,n,mode|os.RTLD_DEEPBIND if str(n).endswith('/aimdo.so') else mode,*a,**k); sys.argv=['main.py']+sys.argv[1:]; runpy.run_path('main.py',run_name='__main__')"
+          --listen 0.0.0.0 --port 8188 --disable-auto-launch
+          --use-ck-attention "$@"
+          --extra-model-paths-config /opt/ComfyUI/extra_model_paths.yaml /etc/comfyapp/extra_model_paths.yaml
+          --output-directory /data/studio --input-directory /data/studio --max-upload-size 512
+          --temp-directory /run/comfyui/temp --user-directory /run/comfyui/user
+          --enable-assets --database-url sqlite:////data/appData/db/comfyui.db
+        {{- end }}
+        env:
+        - name: HOME
+          value: /run/comfyui
+        - name: USER
+          value: comfyui
+        - name: LOGNAME
+          value: comfyui
+        {{- $precision := .Values.olaresEnv.PRECISION | default "int8" }}
+        - name: STUDIO_VARIANT
+          value: {{ if eq $precision "all" }}"int8"{{ else }}{{ $precision | quote }}{{ end }}
+        - name: STUDIO_DATA
+          value: /data/appData
+        - name: STUDIO_DEVICE
+          value: {{ .Values.deviceName | default "" | quote }}
+        # Owns jobs that arrive without X-Bfl-User; decides admin rights
+        # while LLDAP is unreachable.
+        - name: STUDIO_ADMIN
+          value: {{ .Values.admin | default (.Values.bfl | default dict).username | default "" | quote }}
+        # Olares users and lldap_admin, read like Router (studio-rbac.yaml).
+        - name: STUDIO_LLDAP_URL
+          value: http://lldap-provider-svc.os-framework:28080
+        - name: STUDIO_SA_TOKEN
+          value: /var/run/secrets/kubernetes.io/serviceaccount/token
+        {{- $oe := .Values.olaresEnv | default dict }}
+        - name: STUDIO_LLM_BASE_URL
+          value: {{ $oe.STUDIO_LLM_BASE_URL | default (printf "https://router.%s/v1" (.Values.user | default dict).zone) | quote }}
+        - name: STUDIO_LLM_MODEL
+          value: {{ $oe.STUDIO_LLM_MODEL | default "default-chat" | quote }}
+        {{- if $oe.STUDIO_LLM_API_KEY }}
+        - name: STUDIO_LLM_API_KEY
+          value: {{ $oe.STUDIO_LLM_API_KEY | quote }}
+        {{- end }}
+        {{- if not $xpu }}
+        # graphics mounts the NVIDIA EGL/Vulkan libraries. GLSLShader nodes
+        # (ComfyUI's image-operation blueprints) render through ANGLE on
+        # Vulkan, which also needs /dev/nvidia-modeset; HAMi does not expose
+        # it (display capability or not), so those nodes still fail.
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: compute,utility,graphics
+        {{- end }}
+        ports:
+        - containerPort: 8188
+        resources:
+          requests:
+            cpu: "1"
+            memory: 31Gi
+          limits:
+            cpu: "12"
+            memory: 46Gi
+        volumeMounts:
+        - name: app-common
+          mountPath: /data/appCommon
+        - name: app-data
+          mountPath: /data/appData
+        - name: comfy-run
+          mountPath: /run/comfyui
+        - name: studio-files
+          mountPath: /data/studio
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/app.json
+          subPath: app.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/__init__.py
+          subPath: comfy-ext-init.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/ts_idle.py
+          subPath: comfy-ext-ts_idle.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/comfyapp.js
+          subPath: comfy-ext.js
+        - name: files
+          mountPath: /etc/comfyapp/extra_model_paths.yaml
+          subPath: extra-model-paths.yaml
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio.json
+          subPath: studio.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/workflow.json
+          subPath: workflow.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/flows/t2i.json
+          subPath: workflow.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/__init__.py
+          subPath: studio-__init__.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/directory.py
+          subPath: studio-directory.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/graph.py
+          subPath: studio-graph.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/llm.py
+          subPath: studio-llm.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/media.py
+          subPath: studio-media.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/projects.py
+          subPath: studio-projects.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/store.py
+          subPath: studio-store.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/studio/app_hooks.py
+          subPath: studio-app_hooks.py
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/flows/t2i.api.json
+          subPath: flow-t2i.api.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/flows/edit.api.json
+          subPath: flow-edit.api.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/flows/edit.json
+          subPath: flow-edit.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/flows/edit_fast.api.json
+          subPath: flow-edit_fast.api.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/flows/edit_fast.json
+          subPath: flow-edit_fast.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/flows/ref.api.json
+          subPath: flow-ref.api.json
+        - name: files
+          mountPath: {{ $root }}/custom_nodes/comfyapp/web/flows/ref.json
+          subPath: flow-ref.json
+      volumes:
+      - name: files
+        configMap:
+          name: imageqwenimage21studio-files
+      - name: app-common
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}
+          type: DirectoryOrCreate
+      - name: app-data
+        hostPath:
+          path: {{ .Values.userspace.appData }}
+          type: DirectoryOrCreate
+      - name: comfy-run
+        emptyDir: {}
+      - name: studio
+        configMap:
+          name: imageqwenimage21studio-studio
+      # kubelet creates this as root; fix-perms gives it to uid 1000 (app-service
+      # only does that for spec.runAsUser apps).
+      - name: studio-files
+        hostPath:
+          path: {{ .Values.userspace.appCommon }}/Studio/imageqwenimage21studio
+          type: DirectoryOrCreate
