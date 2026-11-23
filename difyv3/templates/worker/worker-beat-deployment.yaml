@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: workerbeat
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.workloads.workerbeat.replicaCount }}
+  selector:
+    matchLabels:
+      app: dify-worker-beat
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: dify-worker-beat
+    spec:
+      initContainers:
+        - name: wait-for-api
+          image: "docker.io/beclab/wait-for:0.1.0"
+          args: ["-it", "api.{{ .Release.Namespace }}:5001"]
+      containers:
+        - name: worker-beat
+          image: "docker.io/langgenius/dify-api:1.20.0"
+          envFrom:
+            - configMapRef:
+                name: dify-api-env
+            - secretRef:
+                name: dify-api-secrets
+          env:
+            - name: MODE
+              value: "beat"
+            - name: MIGRATION_ENABLED
+              value: "false"
+            - name: DB_EXTRAS
+              value: "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=3"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

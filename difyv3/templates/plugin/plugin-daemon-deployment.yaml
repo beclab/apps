@@ -60,6 +60,39 @@ spec:
               readOnly: true
             - name: plugin-daemon-claim0
               mountPath: /new-data
+        - name: prepare-plugin-storage
+          image: "docker.io/beclab/busybox:1.37"
+          command: ["sh", "-ec"]
+          args:
+            - |
+              chown 1001:1001 /app/storage
+              # The older daemon created these directories and their contents as root.
+              # Migrate its files without following symlinks or changing permission bits.
+              for directory in assets cwd persistence plugin plugin_packages; do
+                path="/app/storage/${directory}"
+                if [ -L "$path" ] || [ ! -d "$path" ]; then continue; fi
+                find "$path" -xdev \( -type d -o -type f \) -user 0 \
+                  -exec chown -h 1001:1001 {} +
+              done
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: plugin-daemon-claim0
+              mountPath: /app/storage
+        - name: wait-for-redis
+          image: "docker.io/beclab/redis:7.0.4"
+          command: ["sh", "-ec"]
+          args:
+            - |
+              until [ "$(timeout 3 redis-cli -h redis ping 2>/dev/null)" = PONG ]; do
+                sleep 2
+              done
+          env:
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: dify-api-secrets
+                  key: REDIS_PASSWORD
       containers:
         - name: plugin-daemon
           envFrom:
@@ -101,7 +134,7 @@ spec:
               value: "http://ssrfproxy:3128"
             - name: HTTPS_PROXY
               value: "http://ssrfproxy:3128"
-          image: "docker.io/beclab/langgenius-dify-plugin-daemon:0.5.3-local"
+          image: "docker.io/langgenius/dify-plugin-daemon:0.6.15-local"
           ports:
             - containerPort: 5002
               protocol: TCP
@@ -124,7 +157,6 @@ spec:
           readinessProbe:
             tcpSocket:
               port: 5002
-            initialDelaySeconds: 60
             periodSeconds: 20
             timeoutSeconds: 10
             failureThreshold: 5
