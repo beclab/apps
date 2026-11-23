@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-thumbnail-recovery
+data:
+  recover.cjs: |
+    const { setTimeout: sleep } = require('node:timers/promises');
+    const load = require('node:module').createRequire('/usr/src/app/server/package.json');
+    const postgres = load('postgres');
+    const { Queue } = load('bullmq');
+    const env = process.env;
+    const pageSize = 256;
+    const batchSize = 4;
+    const batchDelay = 30000;
+    const queue = new Queue('thumbnailGeneration', {
+      prefix: 'immich_bull',
+      connection: { host: 'redis-svc', maxRetriesPerRequest: 1 },
+    });
+    const Redis = load('ioredis');
+    const redis = new Redis({ host: 'redis-svc', lazyConnect: true, maxRetriesPerRequest: 1 });
+    redis.on('error', error => console.error('Recovery state:', error.message));
+    const checkpoint = 'olares:thumbnail-recovery:v2';
+    const pool = postgres({
+      host: env.DB_HOSTNAME, username: env.DB_USERNAME, password: env.DB_PASSWORD,
+      database: env.DB_DATABASE_NAME, max: 1, connect_timeout: 10,
+      connection: { application_name: 'thumbnail-recovery', statement_timeout: 10000,
+                    default_transaction_read_only: 'on' },
+    });
+    queue.on('error', (error) => console.error('Thumbnail queue:', error.message));
+
+    async function waitForCapacity() {
+      for (;;) {
+        const counts = await queue.getJobCounts('active', 'waiting', 'prioritized', 'delayed');
+        const pending = Object.values(counts).reduce((sum, count) => sum + count, 0);
+        if (pending === 0 && !(await queue.isPaused()) && (await queue.getWorkers()).length > 0) return;
+        await sleep(batchDelay);
+      }
+    }
+
+    async function missing(db, ids) {
+      return db`SELECT a.id, ((a.type = 'VIDEO' OR lower(a."originalFileName") LIKE '%.gif') AND NOT EXISTS (
+          SELECT 1 FROM asset_video v WHERE v."assetId" = a.id)) AS "needsVideoMetadata"
+        FROM asset a WHERE a.id IN ${db(ids)}
+        AND a."deletedAt" IS NULL AND a.type IN ('IMAGE','VIDEO')
+        AND a.visibility <> 'hidden' AND NOT a."isOffline"
+        AND NOT EXISTS (SELECT 1 FROM asset_file f WHERE f."assetId" = a.id
+          AND f.type = 'thumbnail' AND NOT f."isEdited")`;
+    }
+
+    async function recover(db) {
+      // Restrict the sweep to assets present when the migration started.
+
+      const saved = await redis.get(checkpoint);
+      const state = saved ? JSON.parse(saved) : {
+        cutoff: (await db`SELECT clock_timestamp()::text AS cutoff`)[0].cutoff,
+        cursor: null, submitted: 0, unresolved: 0, consecutiveFailures: 0,
+      };
+      if (state.done || state.halted) {
+        console.log('Recovery already stopped:', JSON.stringify(state));
+        return;
+      }
+      const save = () => redis.set(checkpoint, JSON.stringify(state));
+      await save();
+      const { cutoff } = state;
+      for (;;) {
+        // Page the primary key first so anti-joins never scan an unbounded candidate set.
+        const page = await db`SELECT id FROM asset
+          WHERE ${state.cursor ? db`id > ${state.cursor}::uuid` : db`true`}
+          AND "createdAt" <= ${cutoff}::timestamptz ORDER BY id LIMIT ${pageSize}`;
+        if (!page.length) break;
+        const missingRows = await missing(db, page.map(row => row.id));
+        const deferred = missingRows.filter(row => row.needsVideoMetadata);
+        if (deferred.length) {
+          state.unresolved += deferred.length;
+          console.warn('Refresh video or GIF metadata before regenerating thumbnails:', deferred.map(row => row.id).join(','));
+        }
+        const candidates = missingRows.filter(row => !row.needsVideoMetadata);
+        for (let i = 0; i < candidates.length; i += batchSize) {
+          await waitForCapacity();
+          const batch = await missing(db, candidates.slice(i, i + batchSize).map(row => row.id));
+          if (!batch.length) continue;
+          for (const { id } of batch) {
+            await queue.add('AssetGenerateThumbnails', { id }, {
+              jobId: 'olares-thumbnail-recovery-v2-' + id, priority: 2097151,
+              removeOnComplete: true, removeOnFail: { age: 86400, count: 100 },
+            });
+          }
+          state.submitted += batch.length;
+          await sleep(batchDelay);
+          // A slow video or a user-paused queue must never trigger another submission.
+          for (;;) {
+            const states = await Promise.all(batch.map(({ id }) =>
+              queue.getJobState('olares-thumbnail-recovery-v2-' + id)));
+            if (states.every(state => ['unknown','completed','failed'].includes(state))) break;
+            await sleep(batchDelay);
+          }
+          const remaining = await missing(db, batch.map(row => row.id));
+          state.unresolved += remaining.length;
+          state.consecutiveFailures = remaining.length === batch.length ? state.consecutiveFailures + 1 : 0;
+          console.log('submitted=%d unresolved=%d', state.submitted, state.unresolved);
+          if (remaining.length) console.warn('Unresolved asset IDs:', remaining.map(row => row.id).join(','));
+          if (state.consecutiveFailures >= 3) {
+            state.halted = true;
+            await save();
+            console.error('Stopped after three unsuccessful batches. Check worker logs and media storage.');
+            return;
+          }
+        }
+        state.cursor = page.at(-1).id;
+        await save();
+        if (page.length < pageSize) break;
+        await sleep(1000);
+      }
+      console.log('Sweep finished: submitted=%d unresolved=%d', state.submitted, state.unresolved);
+      state.done = true;
+      await save();
+    }
+
+    async function start() {
+      // The init container repaired /data; retry a previously failed snapshot once.
+      try {
+        const info = await redis.info('persistence');
+        if (/^rdb_last_bgsave_status:err\r?$/m.test(info) && /^rdb_bgsave_in_progress:0\r?$/m.test(info)) {
+          await redis.bgsave();
+          console.log('Requested Redis snapshot after directory permission repair');
+        }
+      } catch (error) {
+        console.warn('Redis snapshot check:', error.message);
+      }
+
+      // Startup and migration must finish before inspecting the application schema.
+      for (;;) {
+        try {
+          const response = await fetch('http://127.0.0.1:3001/api/server/ping', { signal: AbortSignal.timeout(5000) });
+          if (response.ok) break;
+        } catch { /* The main container is still starting. */ }
+        await sleep(10000);
+      }
+      const db = await pool.reserve();
+      try {
+        // A dedicated session releases the singleton lock automatically on disconnect.
+        const [lock] = await db`SELECT pg_try_advisory_lock(1835943529, 1) AS acquired`;
+        if (!lock.acquired) throw new Error('Another recovery process has the lock. Retrying later.');
+        await recover(db);
+      } finally {
+        db.release();
+      }
+    }
+
+    start().catch(error => { console.error(error.message); process.exitCode = 1; })
+      .finally(async () => { redis.disconnect(); await Promise.allSettled([pool.end(), queue.close()]); });

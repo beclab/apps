@@ -10,11 +10,8 @@ data:
     {
       oauth: {
         autoLaunch: false,
-        autoRegister: true,
-        clientId: "{{ .Values.oidc.client.id }}",
-        clientSecret: "",
-        enabled: true,
-        issuerUrl: "{{ .Values.oidc.issuer }}",
+        autoRegister: false,
+        enabled: false,
         scope: "openid email profile"
       }
     }
@@ -40,6 +37,8 @@ spec:
     type: Recreate
   template:
     metadata:
+      annotations:
+        checksum/thumbnail-recovery: {{ include (print $.Template.BasePath "/thumbnail-recovery.yaml") . | sha256sum }}
       creationTimestamp: null
       labels:
         io.kompose.network/chrome-default: "true"
@@ -50,13 +49,15 @@ spec:
           image: "docker.io/beclab/aboveos-busybox:1.37.0"
           command:
             - sh
-            - "-c"
+            - "-ec"
             - |
-              chown 1000:1000 /app-data-root
+              chown 1000:1000 /app-data-root /redis-data
           resources: {}
           volumeMounts:
             - name: app-data-root
               mountPath: /app-data-root
+            - name: redis-data
+              mountPath: /redis-data
           terminationMessagePath: /dev/termination-log
           terminationMessagePolicy: File
           imagePullPolicy: IfNotPresent
@@ -120,19 +121,8 @@ spec:
             - name: IMMICH_MACHINE_LEARNING_URL
               value: "http://immich-machine-learning:3003"
             - name: OAUTH_ENABLED
-              value: "true"
-            - name: OAUTH_CLIENT_ID
-              value: "{{ .Values.oidc.client.id }}"
-            - name: OAUTH_CLIENT_SECRET
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Release.Name }}-secrets
-                  key: OAUTH_CLIENT_SECRET
-            - name: OAUTH_ISSUER_URL
-              value: "{{ .Values.oidc.issuer }}"
-            - name: OAUTH_SCOPE
-              value: "openid,profile,email"
-          image: "beclab/immich-app-immich-server:v3.3.5"
+              value: "false"
+          image: "beclab/immich-app-immich-server:v3.4.2"
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 3001
@@ -186,48 +176,62 @@ spec:
             runAsUser: 1000
             runAsGroup: 1000
             {{- end }}
+        - name: thumbnail-recovery
+          image: beclab/immich-app-immich-server:v3.4.2
+          # Keep recovery failures independent of Immich readiness and release Node memory when done.
+          command: ["sh", "-ec", "until node /recovery/recover.cjs; do sleep 120; done; exec sleep infinity"]
+          env:
+            - name: DB_HOSTNAME
+              value: {{ .Values.postgres.host }}
+            - name: DB_USERNAME
+              value: {{ .Values.postgres.username }}
+            - name: DB_DATABASE_NAME
+              value: {{ .Values.postgres.databases.immich }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: DB_PASSWORD
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { cpu: 100m, memory: 128Mi }
+          volumeMounts:
+            - name: recovery-script
+              mountPath: /recovery
+              readOnly: true
       restartPolicy: Always
       volumes:
+        - name: recovery-script
+          configMap:
+            name: {{ .Release.Name }}-thumbnail-recovery
         - name: appcache
           hostPath:
             {{- if $uploadLocation }}
             path: {{ printf "%s/%s" (trimSuffix "/" (required "NAS storage requires the Olares external-storage mount" .Values.sharedlib | toString)) (trimPrefix "/external_storage/" $uploadLocation) | quote }}
             type: Directory
             {{- else }}
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appData }}/data/upload'
-              {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/data/upload'
-              {{- end }}
-            {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/data/upload'
-            {{- end }}
             type: DirectoryOrCreate
             {{- end }}
         - name: learningcache
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appData }}/machine-learning'
-              {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/machine-learning'
-              {{- end }}
-            {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich/machine-learning'
-            {{- end }}
             type: DirectoryOrCreate
         - name: app-data-root
           hostPath:
-            {{- if .Values.sysVersion }}
-              {{- if semverCompare ">=1.12.3-0" (toString .Values.sysVersion) }}
             path: '{{ .Values.userspace.appData }}'
-              {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich'
-              {{- end }}
-            {{- else }}
-            path: '{{ .Values.userspace.appData }}/immich'
-            {{- end }}
+            type: DirectoryOrCreate
+        - name: redis-data
+          hostPath:
+            path: '{{ .Values.userspace.appData }}/redis'
             type: DirectoryOrCreate
         - name: home
           hostPath:
