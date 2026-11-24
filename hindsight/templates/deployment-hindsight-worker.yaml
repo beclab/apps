@@ -1,0 +1,202 @@
+{{- $oe := .Values.olaresEnv | default dict }}
+{{- $apiKey := index $oe "HINDSIGHT_API_LLM_API_KEY" | default "not-required" }}
+{{- $base := index $oe "HINDSIGHT_API_LLM_BASE_URL" | default (printf "https://router.%s/v1" .Values.user.zone) }}
+{{- $model := index $oe "HINDSIGHT_API_LLM_MODEL" | default "default-chat" }}
+{{- $embed := index $oe "HINDSIGHT_API_EMBEDDINGS_MODEL" | default "default-embedding" }}
+{{- $embedBatch := index $oe "HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE" | default "1" }}
+{{- $embedMaxConcurrent := index $oe "HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS" | default "1" }}
+{{- $embedMaxRetries := index $oe "HINDSIGHT_API_EMBEDDINGS_MAX_RETRIES" | default "6" }}
+{{- $embedInitialBackoff := index $oe "HINDSIGHT_API_EMBEDDINGS_INITIAL_BACKOFF" | default "0.5" }}
+{{- $embedMaxBackoff := index $oe "HINDSIGHT_API_EMBEDDINGS_MAX_BACKOFF" | default "15" }}
+{{- $embedRetryBudget := index $oe "HINDSIGHT_API_EMBEDDINGS_RETRY_BUDGET" | default "120" }}
+{{- $consolidationParallelism := index $oe "HINDSIGHT_API_CONSOLIDATION_LLM_PARALLELISM" | default "1" }}
+{{- $llmMaxConcurrent := index $oe "HINDSIGHT_API_LLM_MAX_CONCURRENT" | default "1" }}
+{{- $llmMaxRetries := index $oe "HINDSIGHT_API_LLM_MAX_RETRIES" | default "6" }}
+{{- $llmInitialBackoff := index $oe "HINDSIGHT_API_LLM_INITIAL_BACKOFF" | default "2.0" }}
+{{- $llmMaxBackoff := index $oe "HINDSIGHT_API_LLM_MAX_BACKOFF" | default "30.0" }}
+{{- $retainLlmMaxConcurrent := index $oe "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT" | default "1" }}
+{{- $retainLlmMaxRetries := index $oe "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES" | default "6" }}
+{{- $retainLlmInitialBackoff := index $oe "HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF" | default "2.0" }}
+{{- $retainLlmMaxBackoff := index $oe "HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF" | default "30.0" }}
+{{- $reflectLlmMaxConcurrent := index $oe "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT" | default "1" }}
+{{- $reflectLlmMaxRetries := index $oe "HINDSIGHT_API_REFLECT_LLM_MAX_RETRIES" | default "6" }}
+{{- $reflectLlmInitialBackoff := index $oe "HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF" | default "2.0" }}
+{{- $reflectLlmMaxBackoff := index $oe "HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF" | default "30.0" }}
+{{- $workerMaxSlots := index $oe "HINDSIGHT_API_WORKER_MAX_SLOTS" | default "4" }}
+{{- $reflectWallTimeout := index $oe "HINDSIGHT_API_REFLECT_WALL_TIMEOUT" | default "1800" }}
+{{- $consolidationWallTimeout := index $oe "HINDSIGHT_API_CONSOLIDATION_WALL_TIMEOUT" | default "900" }}
+{{- $consolidationReservedSlots := index $oe "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS" | default "1" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hindsight-worker
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    app: hindsight-worker
+    io.kompose.service: hindsight-worker
+spec:
+  replicas: {{ (index .Values.workloads "hindsight-worker").replicaCount }}
+  selector:
+    matchLabels:
+      io.kompose.service: hindsight-worker
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: hindsight-worker
+        io.kompose.service: hindsight-worker
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+      - name: hindsight-worker
+        image: ghcr.io/vectorize-io/hindsight-api:1.2.3
+        command: ["hindsight-worker"]
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8889
+          protocol: TCP
+        env:
+        - name: HINDSIGHT_API_DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: hindsight-secrets
+              key: DATABASE_URL
+        - name: HINDSIGHT_API_WORKER_ID
+          value: hindsight-worker
+        - name: HINDSIGHT_API_WORKER_ENABLED
+          value: "true"
+        - name: HINDSIGHT_API_LLM_PROVIDER
+          value: openai
+        - name: HINDSIGHT_API_LLM_BASE_URL
+          value: {{ $base | quote }}
+        - name: HINDSIGHT_API_LLM_MODEL
+          value: {{ $model | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_PROVIDER
+          value: openai
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL
+          value: {{ $base | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_MODEL
+          value: {{ $embed | quote }}
+        # The embedding endpoint accepts one text per request, and the embedding
+        # engine serves one request at a time (model card
+        # extensions.capacity.max_concurrency = 1). Sending more than one
+        # embedding call in flight therefore gets 503 model_at_capacity from
+        # Router, and Hindsight's 60s worker retry turns that into a standing
+        # stream of failures. Keep the caller's width at the engine's width.
+        - name: HINDSIGHT_API_EMBEDDINGS_OPENAI_BATCH_SIZE
+          value: {{ $embedBatch | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_MAX_CONCURRENT_REQUESTS
+          value: {{ $embedMaxConcurrent | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_MAX_RETRIES
+          value: {{ $embedMaxRetries | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_INITIAL_BACKOFF
+          value: {{ $embedInitialBackoff | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_MAX_BACKOFF
+          value: {{ $embedMaxBackoff | quote }}
+        - name: HINDSIGHT_API_EMBEDDINGS_RETRY_BUDGET
+          value: {{ $embedRetryBudget | quote }}
+        # default-chat is a one-slot engine too: consolidating four tag groups at
+        # once means three refused calls per round, so serialize it by default.
+        - name: HINDSIGHT_API_CONSOLIDATION_LLM_PARALLELISM
+          value: {{ $consolidationParallelism | quote }}
+        # Chat-side queue discipline. default-chat serves --parallel 2, and
+        # Hindsight's defaults (8 concurrent per category, 10 worker slots) let
+        # retain/reflect/consolidation bursts outrun a two-slot lane, which
+        # Router answers with 503 model_at_capacity. One call in flight per
+        # category, with retries and backoff wide enough to ride out a queued
+        # slot (a long agent generation can hold a slot for minutes).
+        - name: HINDSIGHT_API_LLM_MAX_CONCURRENT
+          value: {{ $llmMaxConcurrent | quote }}
+        - name: HINDSIGHT_API_LLM_MAX_RETRIES
+          value: {{ $llmMaxRetries | quote }}
+        - name: HINDSIGHT_API_LLM_INITIAL_BACKOFF
+          value: {{ $llmInitialBackoff | quote }}
+        - name: HINDSIGHT_API_LLM_MAX_BACKOFF
+          value: {{ $llmMaxBackoff | quote }}
+        - name: HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT
+          value: {{ $retainLlmMaxConcurrent | quote }}
+        - name: HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES
+          value: {{ $retainLlmMaxRetries | quote }}
+        - name: HINDSIGHT_API_RETAIN_LLM_INITIAL_BACKOFF
+          value: {{ $retainLlmInitialBackoff | quote }}
+        - name: HINDSIGHT_API_RETAIN_LLM_MAX_BACKOFF
+          value: {{ $retainLlmMaxBackoff | quote }}
+        - name: HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT
+          value: {{ $reflectLlmMaxConcurrent | quote }}
+        - name: HINDSIGHT_API_REFLECT_LLM_MAX_RETRIES
+          value: {{ $reflectLlmMaxRetries | quote }}
+        - name: HINDSIGHT_API_REFLECT_LLM_INITIAL_BACKOFF
+          value: {{ $reflectLlmInitialBackoff | quote }}
+        - name: HINDSIGHT_API_REFLECT_LLM_MAX_BACKOFF
+          value: {{ $reflectLlmMaxBackoff | quote }}
+        - name: HINDSIGHT_API_WORKER_MAX_SLOTS
+          value: {{ $workerMaxSlots | quote }}
+        # Wall-clock ceilings for the long task classes. refresh_mental_model
+        # shares the reflect ceiling (worker/poller.py), and both reflect and
+        # consolidation issue a run of LLM calls; on a two-slot lane shared with
+        # long agent generations the 300s default cancels healthy work. Retain is
+        # left at its default because its ceiling restarts on each committed
+        # batch, which a 671s retain proved is enough.
+        - name: HINDSIGHT_API_REFLECT_WALL_TIMEOUT
+          value: {{ $reflectWallTimeout | quote }}
+        - name: HINDSIGHT_API_CONSOLIDATION_WALL_TIMEOUT
+          value: {{ $consolidationWallTimeout | quote }}
+        - name: HINDSIGHT_API_CONSOLIDATION_LLM_MAX_RETRIES
+          value: "2"
+        - name: HINDSIGHT_API_CONSOLIDATION_MAX_ATTEMPTS
+          value: "2"
+        - name: HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT
+          value: "180"
+        - name: HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS
+          value: "1024"
+        - name: HINDSIGHT_API_CONSOLIDATION_LLM_REASONING_EFFORT
+          value: "low"
+        # Consolidation reserves 2 worker slots by default, and each round embeds a
+        # search query. The embedding engine is a CPU ONNX server serving one
+        # request, so two consolidation rounds alongside retain's own embed is the
+        # collision that produced the embedding 503s. One reserved slot serializes
+        # consolidation by default; it can still borrow shared slots when idle.
+        - name: HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS
+          value: "0"
+        - name: HINDSIGHT_API_RERANKER_PROVIDER
+          value: rrf
+        {{- if $apiKey }}
+        - name: HINDSIGHT_API_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: hindsight-secrets
+              key: HINDSIGHT_API_LLM_API_KEY
+        {{- end }}
+        startupProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 10
+          failureThreshold: 30
+        # /health/live on the worker's http port: no database access, so a slow
+        # database requeues work instead of restarting the worker.
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: http
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      restartPolicy: Always
