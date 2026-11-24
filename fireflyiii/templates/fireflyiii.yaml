@@ -231,34 +231,66 @@ status:
   loadBalancer: {}
 
 ---
-apiVersion: batch/v1
-kind: CronJob
+apiVersion: apps/v1
+kind: Deployment
 metadata:
-  name: fireflyiii-cron
+  name: fireflyiiicron
   namespace: {{ .Release.Namespace }}
   labels:
     app: fireflyiii-cron
 spec:
-  schedule: "0 3 * * *"
-  jobTemplate:
+  replicas: {{ .Values.workloads.fireflyiiicron.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: fireflyiii-cron
+  template:
+    metadata:
+      labels:
+        app: fireflyiii-cron
     spec:
-      template:
-        metadata:
-          labels:
-            app: fireflyiii-cron
-        spec:
-          containers:
-            - name: cron
-              image: alpine
-              command: [
-                "sh",
-                "-c",
-                "wget -qO- http://fireflyiii:8080/api/v1/cron/$STATIC_CRON_TOKEN"
-              ]
-              env:
-                - name: STATIC_CRON_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: fireflyiii-secrets
-                      key: STATIC_CRON_TOKEN
-          restartPolicy: OnFailure
+      containers:
+        - name: cron
+          image: docker.io/library/nginx:1.30.8-alpine3.24
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          command:
+            - sh
+            - -ec
+            - |
+              case "$TZ" in
+                ""|/*|*..*) TZ=UTC ;;
+              esac
+              if [ ! -f "/usr/share/zoneinfo/$TZ" ]; then
+                echo "Unknown scheduler time zone; using UTC" >&2
+                TZ=UTC
+              fi
+              export TZ
+              mkdir -p /tmp/firefly-crontabs
+              cat > /tmp/firefly-cron-request <<'REQUEST'
+              status=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 120 \
+                "http://fireflyiii:{{ .Values.port | default 3000 }}/api/v1/cron/$STATIC_CRON_TOKEN")
+              result=$?
+              case "$result:$status" in
+                0:2??) exit 0 ;;
+                *) echo "Firefly III cron request failed (curl=$result, HTTP=$status)" >&2; exit 1 ;;
+              esac
+              REQUEST
+              cat > /tmp/firefly-crontabs/root <<'CRONTAB'
+              0 3 * * * sh /tmp/firefly-cron-request >>/proc/1/fd/2 2>&1
+              CRONTAB
+              exec crond -f -L /dev/stderr -c /tmp/firefly-crontabs
+          env:
+            - name: TZ
+              value: {{ (default dict .Values.olaresEnv).APP_TIMEZONE | default "UTC" | quote }}
+            - name: STATIC_CRON_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fireflyiii-secrets
+                  key: STATIC_CRON_TOKEN
