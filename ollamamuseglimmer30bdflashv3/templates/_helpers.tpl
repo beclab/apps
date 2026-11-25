@@ -40,8 +40,8 @@
 {{- define "ollamamuseglimmer30bdflashv3.engineArgsForLlminit" -}}
 {{- $in := . -}}
 {{- $args := trim ($in.Args | default "") -}}
-{{- $args = regexReplaceAll ` ?OLLAMA_KEEP_ALIVE=[^ ]+` "" $args -}}
-{{- $args = regexReplaceAll ` +` " " $args -}}
+{{- $args = regexReplaceAll ` ?OLLAMA_KEEP_ALIVE=[^ ]+` $args "" -}}
+{{- $args = regexReplaceAll ` +` $args " " -}}
 {{- $args = trim $args -}}
 {{- $args -}}
 {{- end -}}
