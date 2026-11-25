@@ -4,22 +4,33 @@ metadata:
   name: cloudreve-config
   namespace: {{ .Release.Namespace }}
 data:
-  conf.ini: |-
-    [Database]
-    Type = postgres
-    Port = {{ .Values.postgres.port }}
-    User = {{ .Values.postgres.username }}
-    Password = {{ .Values.postgres.password }}
-    Host = {{ .Values.postgres.host }}
-    Name = {{ .Values.postgres.databases.cloudreve }}
-    TablePrefix = cd_
-    Charset = utf8
-    [CORS]
-    AllowOrigins = *
-    AllowMethods = OPTIONS,GET,POST
-    AllowHeaders = *
-    AllowCredentials = false
-    SameSite = Default
-    Secure = lse
-
-  cloudreve.db: |-
+  select-database.sh: |-
+    set -eu
+    umask 077
+    sqlite=/stored/cloudreve.db
+    pg_tables=$(psql -XAtw -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND schemaname !~ '^pg_(temp|toast)'")
+    case "$pg_tables" in
+      ''|*[!0-9]*) echo "Cannot determine PostgreSQL state" >&2; exit 1 ;;
+    esac
+    if [ -s "$sqlite" ]; then
+      signature=$(od -An -tx1 -N16 "$sqlite" | tr -d ' \n')
+      if [ "$signature" != "53514c69746520666f726d6174203300" ]; then
+        echo "Unrecognized legacy database. Inspect the backup before continuing." >&2
+        exit 1
+      fi
+      if [ "$pg_tables" != 0 ]; then
+        echo "Both SQLite and PostgreSQL contain database state. Back up both stores and resolve the conflict before starting Cloudreve." >&2
+        exit 1
+      fi
+      test -s /stored/conf.ini || { echo "Missing legacy SQLite configuration" >&2; exit 1; }
+      cp /stored/conf.ini /selected/conf.ini
+      echo "Using the existing SQLite database"
+    else
+      if [ -s "$sqlite-wal" ] || [ -s "$sqlite-journal" ]; then
+        echo "Incomplete legacy SQLite database. Inspect the backup before continuing." >&2
+        exit 1
+      fi
+      cp /postgres/conf.ini /selected/conf.ini
+      echo "Using PostgreSQL"
+    fi
+    chmod 0444 /selected/conf.ini
