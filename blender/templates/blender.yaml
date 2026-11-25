@@ -58,7 +58,7 @@ spec:
               mountPath: /mcp-exchange
       containers:
         - name: blender
-          image: docker.io/linuxserver/blender:5.2.3
+          image: docker.io/linuxserver/blender:5.3.0
           imagePullPolicy: IfNotPresent
           env:
             - name: PUID
@@ -145,6 +145,12 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /config
+            {{- if $isNvidiaMode }}
+            - name: blender-launcher
+              mountPath: /usr/local/bin/blender
+              subPath: blender-launcher
+              readOnly: true
+            {{- end }}
             - name: userdata
               mountPath: /config/Home
             - name: dshm
@@ -202,7 +208,34 @@ spec:
               # mcp-proxy starts its stdio child with a reduced environment,
               # so pass security and privacy settings explicitly to the
               # actual blender-mcp process.
-              exec uvx --with "mcp<2.0.0" mcp-proxy --host 0.0.0.0 --port 8765 --stateless -- \
+              set --
+              {{- $domains := list }}
+              {{- range splitList "," (get (.Values.domain | default dict) "blendermcp" | default "") }}
+              {{- if trim . }}
+              {{- $domains = append $domains (trim .) }}
+              {{- end }}
+              {{- end }}
+              {{- $user := get (.Values.bfl | default dict) "username" }}
+              {{- $zone := get (.Values.user | default dict) "zone" | trim }}
+              {{- if and $user $domains }}
+              {{- $routes := $domains }}
+              {{- if not $zone }}
+              {{- $routes = list (last $domains) }}
+              {{- end }}
+              {{- range $host := $routes }}
+              {{- $prefix := first (splitList "." $host) }}
+              {{- if or (not $zone) (eq $host (printf "%s.%s" $prefix $zone)) }}
+              {{- $domains = append $domains (printf "%s.%s.olares.local" $prefix $user) }}
+              {{- end }}
+              {{- end }}
+              {{- end }}
+              {{- range $host := uniq $domains }}
+              {{- if not (regexMatch "^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$" $host) }}
+              {{- fail "Invalid Blender MCP entrance hostname" }}
+              {{- end }}
+              set -- "$@" --allowed-host '{{ $host }}' --allowed-host '{{ $host }}:*'
+              {{- end }}
+              exec uvx --with "mcp<2.0.0" mcp-proxy==0.15.0 --host 0.0.0.0 --port 8765 --stateless "$@" -- \
                 env BLENDER_HOST=127.0.0.1 BLENDER_PORT=9876 \
                     BLENDER_MCP_SAFE_MODE=1 DISABLE_TELEMETRY=true \
                     BLENDER_MCP_DISABLE_TELEMETRY=true \
@@ -254,6 +287,18 @@ spec:
           configMap:
             name: blender-mcp-scripts
             defaultMode: 0755
+            items:
+              - key: mcp-install
+                path: mcp-install
+        {{- if $isNvidiaMode }}
+        - name: blender-launcher
+          configMap:
+            name: blender-mcp-scripts
+            defaultMode: 0755
+            items:
+              - key: blender-launcher
+                path: blender-launcher
+        {{- end }}
         - name: uv-cache
           emptyDir: {}
         - name: mcp-exchange

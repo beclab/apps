@@ -10,6 +10,16 @@ data:
     # browser-visible Blender loads it and auto-starts port 9876, so agents and
     # the Selkies UI share one scene.
     set -euo pipefail
+    # The NVIDIA chart mounts this launcher. Both desktop menus use /usr/bin/blender.
+    if [[ -x /usr/local/bin/blender ]]; then
+      if [[ -f /usr/bin/blender && ! -L /usr/bin/blender ]]; then
+        # The ARM64 image installs the distro executable at the menu path.
+        mv /usr/bin/blender /usr/bin/blender.real
+      fi
+      if [[ -x /usr/bin/blender.real || "$(readlink /usr/bin/blender || true)" == /blender/blender ]]; then
+        ln -sfn /usr/local/bin/blender /usr/bin/blender
+      fi
+    fi
     mkdir -p /config/mcp-scripts/startup
     curl -fsSL --max-time 60 -o /config/mcp-scripts/startup/blender_mcp.py \
       https://raw.githubusercontent.com/ahujasid/blender-mcp/main/addon.py
@@ -17,3 +27,22 @@ data:
       /config/mcp-scripts \
       /config/mcp-scripts/startup \
       /config/mcp-scripts/startup/blender_mcp.py
+  blender-launcher: |
+    #!/bin/bash
+    # Keep the desktop capture library out of Blender's GPU process.
+    IFS=' :' read -r -a libraries <<< "${LD_PRELOAD:-}"
+    keep=()
+    for library in "${libraries[@]}"; do
+      if [[ -n "$library" && "$library" != /usr/lib/selkies_v4l2_interposer.so ]]; then
+        keep+=("$library")
+      fi
+    done
+    if (( ${#keep[@]} )); then
+      export LD_PRELOAD="${keep[*]}"
+    else
+      unset LD_PRELOAD
+    fi
+    if [[ -x /usr/bin/blender.real ]]; then
+      exec /usr/bin/blender.real "$@"
+    fi
+    exec /blender/blender "$@"
