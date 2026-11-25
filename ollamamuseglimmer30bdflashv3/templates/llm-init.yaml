@@ -45,8 +45,8 @@
 {{- /* User ENGINE_ARGS for llm-init: never OLLAMA_KEEP_ALIVE (see engineArgsForLlminit).
        Empty when user leaves ENGINE_ARGS blank — keep_alive is ollama-daemon-only. */ -}}
 {{- $engineArgs := include "ollamamuseglimmer30bdflashv3.engineArgsForLlminit" (dict "Args" ($oe.ENGINE_ARGS | default "")) -}}
-{{- /* Shared Common RUN_DIR host path for cross-node runtime state,
-       namespaced per release.
+{{- /* Shared RUN_DIR host path. Same convention as llamacppllmbasev3:
+       appCache (run/scratch state, not user data), namespaced per release.
        Declared in both templates -- helm renders each file on its own. */ -}}
 {{- $runStateHostPath := printf "%s/llm-init-run/%s" .Values.userspace.appCommon .Release.Name -}}
 ---
@@ -79,6 +79,10 @@ spec:
     spec:
       restartPolicy: Always
       volumes:
+        - name: legacy-run-state
+          hostPath:
+            path: "{{ .Values.userspace.appCache }}/llm-init-run/{{ .Release.Name }}"
+            type: DirectoryOrCreate
         # Shared RUN_DIR: the one-way handoff channel to the ollama daemon
         # (engine_args, engine_restart, wrappers/common.sh). llm-init and the
         # daemon are separate Deployments, so an emptyDir cannot carry it --
@@ -93,10 +97,6 @@ spec:
         - name: run-state
           hostPath:
             path: "{{ $runStateHostPath }}"
-            type: DirectoryOrCreate
-        - name: legacy-run-state
-          hostPath:
-            path: "{{ .Values.userspace.appCache }}/llm-init-run/{{ .Release.Name }}"
             type: DirectoryOrCreate
       initContainers:
         - name: migrate-run-state
@@ -145,7 +145,7 @@ spec:
             runAsUser: 0
       containers:
         - name: llm-init
-          image: docker.io/beclab/llm-init:v1.7.21
+          image: docker.io/beclab/llm-init:v1.7.26
           imagePullPolicy: IfNotPresent
           env:
             - name: ENGINE_KIND
