@@ -1,4 +1,4 @@
-﻿apiVersion: apps/v1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
@@ -18,8 +18,49 @@ spec:
         io.kompose.network/chrome-default: "true"
         io.kompose.service: cloudreve
     spec:
+      initContainers:
+        - name: select-database
+          image: docker.io/beclab/postgres:17.5-alpine
+          command: ["sh", "/scripts/select-database.sh"]
+          securityContext:
+            runAsUser: 0
+          env:
+            - name: PGHOST
+              value: {{ .Values.postgres.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.port | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.databases.cloudreve | quote }}
+            - name: PGUSER
+              value: {{ .Values.postgres.username | quote }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-secrets
+                  key: PGPASSWORD
+            - name: PGCONNECT_TIMEOUT
+              value: "10"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          volumeMounts:
+            - name: db-selector
+              mountPath: /scripts
+              readOnly: true
+            - name: pg-config
+              mountPath: /postgres
+              readOnly: true
+            - name: backend-data
+              mountPath: /stored
+              readOnly: true
+            - name: config
+              mountPath: /selected
       containers:
-        - image: cloudreve/cloudreve:4.18.0
+        - image: cloudreve/cloudreve:4.19.1
           name: cloudreve
           ports:
             - containerPort: 5212
@@ -34,22 +75,6 @@ spec:
               value: ':0'
             - name: CR_CONF_Redis.Server
               value: "redis-svc:6379"
-            - name: CR_CONF_Database.Type
-              value: postgres
-            - name: CR_CONF_Database.Port
-              value: "{{ .Values.postgres.port }}"
-            - name: CR_CONF_Database.User
-              value: "{{ .Values.postgres.username }}"
-            - name: CR_CONF_Database.Password
-              value: "{{ .Values.postgres.password }}"
-            - name: CR_CONF_Database.Host
-              value: "{{ .Values.postgres.host }}"
-            - name: CR_CONF_Database.Name
-              value: "{{ .Values.postgres.databases.cloudreve }}"
-            - name: CR_CONF_Database.TablePrefix
-              value: cd_
-            - name: CR_CONF_Database.Charset
-              value: utf8
           resources:
             requests:
               cpu: 250m
@@ -61,9 +86,6 @@ spec:
             - name: config
               mountPath: /cloudreve/data/conf.ini
               subPath: conf.ini
-            - name: db
-              mountPath: /cloudreve/cloudreve.db
-              subPath: cloudreve.db
             - name: uploads
               mountPath: /cloudreve/uploads
             - name: avatar
@@ -106,17 +128,16 @@ spec:
         - name: temp-data
           emptyDir: { }
         - name: config
+          emptyDir: {}
+        - name: db-selector
           configMap:
             name: cloudreve-config
+        - name: pg-config
+          secret:
+            secretName: {{ .Release.Name }}-secrets
             items:
               - key: conf.ini
                 path: conf.ini
-        - name: db
-          configMap:
-            name: cloudreve-config
-            items:
-              - key: cloudreve.db
-                path: cloudreve.db
         - name: uploads
           hostPath:
             type: DirectoryOrCreate
