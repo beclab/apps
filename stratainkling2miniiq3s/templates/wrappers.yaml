@@ -1,0 +1,609 @@
+# Scripts embedded in ConfigMap matching Beclab Strata chart layout.
+# Supports both Beclab (/opt/strata/.venv/bin/python) and upstream ghcr.io (/opt/strata/terminal/python/bin/python3) layouts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-init-wrappers
+  namespace: {{ .Release.Namespace }}
+data:
+  strata.sh: |
+    #!/bin/sh
+    set -eu
+
+    ENGINE=strata
+    WRAPPER_COMMON=${WRAPPER_COMMON:-"$(dirname "$0")/common.sh"}
+    _common_copy=$(mktemp "${TMPDIR:-/tmp}/strata-common.XXXXXX")
+    _wc=0
+    while ! cp "$WRAPPER_COMMON" "$_common_copy" 2>/dev/null; do
+        if [ "$_wc" -ge "${WRAPPER_COMMON_WAIT:-3600}" ]; then
+            rm -f "$_common_copy"
+            printf '[wrapper] %s could not be read\n' "$WRAPPER_COMMON" >&2
+            exit 1
+        fi
+        printf '[wrapper] waiting for %s (elapsed=%ss)\n' "$WRAPPER_COMMON" "$_wc"
+        sleep 5
+        _wc=$((_wc + 5))
+    done
+    . "$_common_copy"
+    rm -f "$_common_copy"
+    unset _wc _common_copy
+
+    python_usable() {
+        [ -f "$1" ] || return 1
+        [ -x "$1" ] && return 0
+        "$1" -c 'pass' 2>/dev/null
+    }
+
+    resolve_python() {
+        if [ -n "${STRATA_PYTHON:-}" ] && python_usable "$STRATA_PYTHON"; then
+            printf '%s\n' "$STRATA_PYTHON"
+            return 0
+        fi
+        for cand in \
+            /opt/strata/.venv/bin/python \
+            /opt/strata/.venv/bin/python3 \
+            /opt/strata/terminal/python/bin/python3 \
+            /opt/strata/python/bin/python3 \
+            "$(command -v python3 2>/dev/null || true)"; do
+            if [ -n "$cand" ] && python_usable "$cand"; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: no usable Python interpreter found under /opt/strata\n' >&2
+        return 1
+    }
+
+    resolve_root() {
+        if [ -n "${STRATA_ROOT:-}" ] && [ -f "$STRATA_ROOT/setup.py" ]; then
+            printf '%s\n' "$STRATA_ROOT"
+            return 0
+        fi
+        for cand in /opt/strata /opt/strata/terminal; do
+            if [ -f "$cand/setup.py" ] && [ -f "$cand/serve/server.py" ]; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+        printf '[wrapper] FATAL: neither /opt/strata nor /opt/strata/terminal contains setup.py + serve/server.py\n' >&2
+        return 1
+    }
+
+    wait_for_sentinel
+    wait_for_engine_args_handoff
+    MODEL_PATH=$(read_model_path)
+    STRATA_PYTHON=$(resolve_python)
+    STRATA_ROOT=$(resolve_root)
+    export MODEL_PATH STRATA_PYTHON STRATA_ROOT
+
+    run_strata() {
+        load_engine_args_from_handoff
+        export ENGINE_ARGS
+        exec "$STRATA_PYTHON" \
+            "${STRATA_LAUNCHER:-/llm-init/wrappers/prepare-strata.py}" "$@"
+    }
+
+    supervise_engine run_strata "$@"
+  prepare-strata.py: |
+    #!/usr/bin/env python3
+    """Prepare Inkling-2-Mini GSQ-RCO IQ3_S (GGUF) across Beclab & upstream Strata layouts, then exec serve/server.py."""
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+    import shlex
+    import signal
+    import subprocess
+    import sys
+
+    GGUF_MAGIC = b'GGUF'
+    STRATA_MAGIC = b'STRATA\x00\x01'
+
+    # The model: one GGUF from ISTA-DASLab at a pinned commit. Size and SHA-256 are the Hugging Face LFS values (strata_control/inkling_family.py, GSQ_IQ3S_PIN).
+    MODEL_REPO = 'ISTA-DASLab/Inkling-2-Mini-GSQ-RCO-GGUF'
+    MODEL_REVISION = '357051619a8805c032e58a9976cea9bddb0832cd'
+    MODEL_FILE = 'Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf'
+    MODEL_SIZE = 11_425_259_648
+    MODEL_SHA256 = '8a3515374c3cd9b65a1677b17e805bb1e32df8e98756e5f0d2fe1837d62aa4cb'
+
+    # Files of the Strata pack repository at the commit Strata 0.2.23 pins. The tokenizer files are used for the chat template and vocabulary; the Vision shard is the
+    # picture reader and is optional: it is passed to the engine only when MODEL_SOURCE downloads it (the default MODEL_SOURCE of this chart does not).
+    PACK_REPO = 'strata-engine/Inkling-2-Mini-Strata'
+    PACK_REVISION = '5623ceb47d7a01db827460ce1c23e7818a75661b'
+    VISION_FILE = 'Inkling-2-Mini-Vision-v2.strata'
+    VISION_SIZE = 636_551_168
+    VISION_SHA256 = '34a176505276729b58744fc9ee40a5005bbff9a590d8e1f7dbe82baf33ef07d5'
+    # `strata serve` makes no network call on start and the GGUF-side tokenizer is not used: these two files MUST sit beside the model before the engine starts.
+    # Size and SHA-256 are those of the files at the pinned pack commit.
+    TOKENIZER_PINS = {
+        'tokenizer.json': (26_178_678, '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6'),
+        'chat_template.jinja': (6_868, '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc'),
+    }
+
+    # The DFlash 2 drafter: one extra file from a second repository, linked beside the model as dflash2.safetensors (the name the engine looks for).
+    # Optional: without it the engine runs with no drafter.
+    DFLASH2_REPO = 'strata-engine/Inkling-2-Mini-DFlash2'
+    DFLASH2_REVISION = '04ecd36faef74e696f0a7b6b3c119264442a6234'
+    DFLASH2_FILE = 'Inkling-2-Mini-DFlash2-mix.safetensors'
+    DFLASH2_LINK = 'dflash2.safetensors'
+    DFLASH2_SIZE = 551_600_700
+    DFLASH2_SHA256 = 'cf7dbb08560dfd99544af0cdbab2915406fc571f516b19aff0fe113b9458d387'
+
+    MANAGED = {
+        '--family', '--model', '--native', '--data-dir', '--models-dir',
+        '--gguf-dir', '--host', '--port', '--api-key', '--backend', '--vision',
+        '--gpu', '--gpus', '--prebuilt', '--build', '--setup', '--yes', '--no-start',
+        '--check', '--update', '--inspect', '--browser', '--no-browser', '--skip-build',
+        '--rollback-engine', '--cuda', '--serve', '--export-tokenizer', '--info',
+    }
+
+    INKLING_VALUE_FLAGS = {
+        '--draft', '--max-context', '--ctx', '--parallel', '--batch', '--slots',
+        '--kv-dtype', '--chunk', '--vram-experts-gb', '--ram-experts-gb', '--threads',
+    }
+    INKLING_BOOL_FLAGS = {'--selfcheck'}
+
+
+    def resolve_strata_root(env=None):
+        env = os.environ if env is None else env
+        explicit = env.get('STRATA_ROOT', '').strip()
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        candidates = []
+        if explicit:
+            p = Path(explicit)
+            candidates.extend([p, p / 'terminal'])
+        candidates.extend([app_base, app_base / 'terminal'])
+        seen = set()
+        for cand in candidates:
+            key = str(cand)
+            if key in seen:
+                continue
+            seen.add(key)
+            if (cand / 'setup.py').is_file() and (cand / 'serve' / 'server.py').is_file():
+                return cand
+        raise FileNotFoundError(f'Could not locate Strata setup.py + serve/server.py under {[str(c) for c in candidates]}')
+
+
+    def bridge_components_dir(app_base, data_root, env=None):
+        env = os.environ if env is None else env
+        writable = Path(data_root) / 'components'
+        writable.mkdir(parents=True, exist_ok=True)
+        src_candidates = []
+        if env.get('STRATA_COMPONENTS_DIR'):
+            src_candidates.append(Path(env['STRATA_COMPONENTS_DIR']))
+        src_candidates.append(Path(app_base) / 'components')
+        for src in src_candidates:
+            try:
+                if not src.is_dir() or src.resolve() == writable.resolve():
+                    continue
+            except OSError:
+                continue
+            eng_src = src / 'engine'
+            eng_dst = writable / 'engine'
+            if eng_src.is_dir() and not eng_dst.exists():
+                eng_dst.symlink_to(eng_src, target_is_directory=True)
+            shapes_src = src / 'shapes'
+            if shapes_src.is_dir():
+                for shape_dir in sorted(shapes_src.iterdir()):
+                    if not shape_dir.is_dir():
+                        continue
+                    dst_pkg_parent = writable / 'shapes' / shape_dir.name / 'engine'
+                    src_pkg_parent = shape_dir / 'engine'
+                    if src_pkg_parent.is_dir():
+                        dst_pkg_parent.mkdir(parents=True, exist_ok=True)
+                        for pkg in sorted(src_pkg_parent.iterdir()):
+                            if pkg.is_dir():
+                                link = dst_pkg_parent / pkg.name
+                                if not link.exists():
+                                    link.symlink_to(pkg, target_is_directory=True)
+        return writable
+
+
+    def find_inkling_engine(root, components_dir, app_base):
+        exe_names = ('strata-inkling.exe', 'strata-inkling') if os.name == 'nt' else ('strata-inkling',)
+        for comp_root in (Path(components_dir), Path(app_base) / 'components', Path(root) / 'components'):
+            shape_eng = comp_root / 'shapes' / 'inkling2' / 'engine'
+            if shape_eng.is_dir():
+                for pkg in sorted(shape_eng.iterdir(), reverse=True):
+                    if not pkg.is_dir():
+                        continue
+                    for ename in exe_names:
+                        cand = pkg / ename
+                        if cand.is_file():
+                            has_manifest = (pkg / 'engine-component.json').is_file()
+                            libs = [str(pkg)] + [str(d) for d in sorted(pkg.iterdir()) if d.is_dir()]
+                            return cand, has_manifest, libs
+        flat_dirs = [Path(root) / 'engine', Path(app_base) / 'engine']
+        for d in flat_dirs:
+            if not d.is_dir():
+                continue
+            for ename in exe_names:
+                cand = d / ename
+                if cand.is_file():
+                    libs = [str(d)] + [str(sub) for sub in sorted(d.iterdir()) if sub.is_dir()]
+                    return cand, False, libs
+        return None, False, []
+
+
+    def hub_candidates(model_path, env=None):
+        """Folders that can hold the shared Hugging Face cache: HF_HUB_CACHE, and the folder above the models--* directory of MODEL_PATH."""
+        env = os.environ if env is None else env
+        hubs = []
+        if env.get('HF_HUB_CACHE'):
+            hubs.append(Path(env['HF_HUB_CACHE']))
+        try:
+            for parent in Path(model_path).resolve().parents:
+                if parent.name.startswith('models--'):
+                    hubs.append(parent.parent)
+                    break
+        except OSError:
+            pass
+        return hubs
+
+
+    def pinned_file(hubs, repo, revision, name):
+        """Path of `name` in the snapshot of `revision` of `repo` in the shared cache, or None."""
+        rel = Path('models--' + repo.replace('/', '--')) / 'snapshots' / revision / name
+        for hub in hubs:
+            cand = hub / rel
+            try:
+                if cand.is_file():
+                    return cand
+            except OSError:
+                pass
+        return None
+
+
+    def fetch_pinned(repo, revision, name, size, sha256, dest_dir, env=None):
+        """Last resort for a pinned file that Model Console did not put in the shared cache: download it once into the writable data folder (a public file: no token is sent,
+        HF_ENDPOINT is honored), checked by size and SHA-256. Returns the path, or None after one line that says why."""
+        import urllib.request
+        env = os.environ if env is None else env
+        dest_dir = Path(dest_dir)
+        dest = dest_dir / name
+        try:
+            if dest.is_file() and dest.stat().st_size == size:
+                return dest
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            base = (env.get('HF_ENDPOINT') or 'https://huggingface.co').rstrip('/')
+            url = f'{base}/{repo}/resolve/{revision}/{name}'
+            print(f'[strata] {name} is not in the model cache; downloading it once from {url}', flush=True)
+            part = dest.with_name(name + '.part')
+            digest = hashlib.sha256()
+            with urllib.request.build_opener().open(urllib.request.Request(url), timeout=60) as resp, part.open('wb') as out:
+                while True:
+                    block = resp.read(1 << 20)
+                    if not block:
+                        break
+                    digest.update(block)
+                    out.write(block)
+            if part.stat().st_size != size or (sha256 and digest.hexdigest() != sha256):
+                part.unlink(missing_ok=True)
+                raise ValueError('its size or SHA-256 differs from the pin')
+            part.replace(dest)
+            return dest
+        except (OSError, ValueError) as exc:
+            print(f'[strata] could not download {name}: {exc}', flush=True)
+            return None
+
+
+    def file_matches(path, size, sha256):
+        """True when `path` has the pinned size and SHA-256."""
+        try:
+            if Path(path).stat().st_size != size:
+                return False
+            digest = hashlib.sha256()
+            with Path(path).open('rb') as fp:
+                for block in iter(lambda: fp.read(1 << 20), b''):
+                    digest.update(block)
+            return digest.hexdigest() == sha256
+        except OSError:
+            return False
+
+
+    def check_file(path, size, magic=None):
+        """Raises when the size (or the first bytes) of a downloaded file is not the pinned one."""
+        actual = Path(path).stat().st_size
+        if actual != size:
+            raise ValueError(f'Size mismatch for {Path(path).name}: got {actual:,} B, expected {size:,} B')
+        if magic is not None:
+            with Path(path).open('rb') as fp:
+                head = fp.read(len(magic))
+            if head != magic:
+                raise ValueError(f'Invalid file header in {path}: got {head!r}, expected {magic!r}')
+
+
+    def find_model(model_path, env=None):
+        """The pinned GGUF: next to MODEL_PATH (llm-init's handoff), else in the pinned snapshot of the shared cache. Checked by size and by the GGUF magic."""
+        source = Path(model_path)
+        if source.is_file():
+            source = source.parent
+        found = source / MODEL_FILE if source.is_dir() else None
+        if found is None or not found.is_file():
+            found = pinned_file(hub_candidates(model_path, env), MODEL_REPO, MODEL_REVISION, MODEL_FILE)
+        if found is None:
+            # An upgrade can briefly leave llm-init's previous model_path handoff: name the pinned file instead of listing what is missing.
+            raise ValueError(f'{MODEL_FILE} (commit {MODEL_REVISION[:12]} of {MODEL_REPO}) is not in the model cache yet; Model Console must finish the download before the engine starts.')
+        check_file(found, MODEL_SIZE, GGUF_MAGIC)
+        return found
+
+
+    def find_optional(model_path, repo, revision, name, size, magic=None, env=None):
+        """A pinned extra file (picture reader, tokenizer file, drafter), or None when it is not in the cache or has the wrong size. Never raises."""
+        found = pinned_file(hub_candidates(model_path, env), repo, revision, name)
+        if found is None:
+            return None
+        try:
+            check_file(found, size, magic)
+        except (OSError, ValueError) as exc:
+            print(f'[strata] {name} is not used: {exc}', flush=True)
+            return None
+        return found
+
+
+    def parse_engine_args(raw):
+        tokens = shlex.split(raw or '')
+        for tok in tokens:
+            flag = tok.split('=', 1)[0]
+            if flag in MANAGED:
+                raise ValueError(f'{tok}: managed by the Strata chart, not ENGINE_ARGS')
+        setup_flags = []
+        ink_args = []
+        draft_override = None
+        parallel_override = None
+        has_context = False
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            flag, eq, inline_val = tok.partition('=')
+            def take_val():
+                nonlocal i
+                if eq:
+                    return inline_val
+                if i + 1 >= len(tokens):
+                    raise ValueError(f'{flag} in ENGINE_ARGS requires a value')
+                i += 1
+                return tokens[i]
+            if flag in ('--context', '--max-context', '--ctx'):
+                val = take_val()
+                if not val.isdigit() or int(val) <= 0:
+                    raise ValueError(f'{flag} requires a positive integer, got {val!r}')
+                setup_flags.extend(['--context', val])
+                ink_args.extend(['--max-context', val])
+                has_context = True
+            elif flag in ('--parallel', '--batch', '--slots'):
+                val = take_val()
+                if not val.isdigit() or not (1 <= int(val) <= 16):
+                    raise ValueError(f'{flag} for Inkling-2-Mini on this app must be 1..16 (got {val!r}): beyond 16 slots the default memory plan moves experts to host RAM (measured with SQ-20 on the Olares One)')
+                parallel_override = int(val)
+                ink_args.extend(['--parallel', val])
+            elif flag in ('--draft', '--drafting'):
+                val = take_val().lower()
+                if val not in ('off', 'on', 'dflash2', 'dspark', 'auto'):
+                    raise ValueError(f'{flag} for Inkling-2-Mini must be off, on, or dflash2 (got {val!r})')
+                # DFlash 2 is the only drafter of 0.2.23; the 0.2.19 words dspark and auto mean the same as dflash2.
+                if val in ('dspark', 'auto'):
+                    val = 'dflash2'
+                draft_override = val
+                # dflash2 is added by the server itself (with its window options) when the sidecar file is there; off and on go to the engine as written.
+                if val in ('off', 'on'):
+                    ink_args.extend(['--draft', val])
+            elif flag in INKLING_VALUE_FLAGS:
+                ink_args.extend([flag, take_val()])
+            elif flag in INKLING_BOOL_FLAGS:
+                ink_args.append(flag)
+            else:
+                setup_flags.append(tok)
+                if not eq and i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+                    i += 1
+                    setup_flags.append(tokens[i])
+            i += 1
+        if not has_context:
+            setup_flags = ['--context', '16384', *setup_flags]
+        return setup_flags, ink_args, draft_override, parallel_override
+
+
+    def link_into(ink_dir, name, target, sha256=None):
+        """Symlink `name` in the writable model folder to a (read-only) cache file; the .done marker tells Strata's setup code the SHA-256 is already checked."""
+        link = ink_dir / name
+        target = Path(target).resolve()
+        done_mark = ink_dir / (name + '.done')
+        if not link.is_symlink() or link.resolve() != target:
+            link.unlink(missing_ok=True)
+            done_mark.unlink(missing_ok=True)
+            link.symlink_to(target)
+        if sha256 and not done_mark.is_file() and target.name.lower() == sha256.lower():
+            done_mark.write_text(f'sha256 {sha256}\n', encoding='utf-8')
+        return link
+
+
+    def drop_link(ink_dir, name):
+        """Removes a stale link (a file that is no longer in the model cache)."""
+        link = ink_dir / name
+        if link.is_symlink():
+            link.unlink()
+        (ink_dir / (name + '.done')).unlink(missing_ok=True)
+
+
+    def ensure_tokenizer(root, model_file, source, tok_dir, ink_exe, lib_dirs):
+        if (tok_dir / 'vocab.json').is_file() and (tok_dir / 'chat_template.jinja').is_file():
+            return tok_dir
+        tok_dir.parent.mkdir(parents=True, exist_ok=True)
+        tools_dir = str(Path(root) / 'tools')
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import inkling_tokenizer
+        hf_tok = source / 'tokenizer.json'
+        hf_tpl = source / 'chat_template.jinja'
+        if hf_tok.is_file() and hf_tpl.is_file():
+            inkling_tokenizer.convert_files(hf_tok, hf_tpl, tok_dir)
+            return tok_dir
+        try:
+            inkling_tokenizer.convert_manifest(
+                inkling_tokenizer.read_manifest(model_file),
+                tok_dir,
+                tokenizer_json_path=hf_tok if hf_tok.is_file() else None,
+            )
+            return tok_dir
+        except (RuntimeError, ValueError):
+            pass
+        if ink_exe is not None and Path(ink_exe).is_file():
+            raw = tok_dir.with_name(tok_dir.name + '-export')
+            raw.mkdir(parents=True, exist_ok=True)
+            subprocess.run([str(ink_exe), '--export-tokenizer', str(model_file), str(raw)], check=True)
+            inkling_tokenizer.convert_files(
+                raw / 'tokenizer.hf.json' if (raw / 'tokenizer.hf.json').is_file() else hf_tok,
+                raw / 'chat_template.jinja' if (raw / 'chat_template.jinja').is_file() else hf_tpl,
+                tok_dir,
+            )
+            return tok_dir
+        raise RuntimeError('Tokenizer preparation failed: tokenizer.json + chat_template.jinja not found')
+
+
+    def prepare_server_config(env=None):
+        env = dict(os.environ if env is None else env)
+        app_base = Path(env.get('STRATA_APP', '/opt/strata'))
+        root = resolve_strata_root(env)
+        model_path = env['MODEL_PATH']
+        model = find_model(model_path, env)
+        vision = find_optional(model_path, PACK_REPO, PACK_REVISION, VISION_FILE, VISION_SIZE, STRATA_MAGIC, env)
+        setup_flags, ink_overrides, draft_override, parallel_override = parse_engine_args(env.get('ENGINE_ARGS', ''))
+        data_base = Path(env.get('STRATA_DATA', '/data'))
+        data_base.mkdir(parents=True, exist_ok=True)
+        # MODEL_SOURCE lists the tokenizer files and the drafter, but a Model Console that skipped the extra repositories must not cost them: fetch each missing one once into /data.
+        tokenizer_files = {}
+        for n, (s, sha) in TOKENIZER_PINS.items():
+            cached = pinned_file(hub_candidates(model_path, env), PACK_REPO, PACK_REVISION, n)
+            if cached is not None and not file_matches(cached, s, sha):
+                print(f'[strata] {n} in the model cache does not match the pinned size/SHA-256: not used', flush=True)
+                cached = None
+            found = cached or fetch_pinned(PACK_REPO, PACK_REVISION, n, s, sha, data_base / 'pinned' / PACK_REVISION[:12], env)
+            if found is None:
+                raise ValueError(f'{n} (commit {PACK_REVISION[:12]} of {PACK_REPO}) is neither in the model cache nor downloadable; the engine cannot start without it.')
+            tokenizer_files[n] = found
+        dflash2 = find_optional(model_path, DFLASH2_REPO, DFLASH2_REVISION, DFLASH2_FILE, DFLASH2_SIZE, None, env)
+        if dflash2 is None and draft_override != 'off':
+            dflash2 = fetch_pinned(DFLASH2_REPO, DFLASH2_REVISION, DFLASH2_FILE, DFLASH2_SIZE, DFLASH2_SHA256, data_base / 'pinned' / DFLASH2_REVISION[:12], env)
+        components_dir = bridge_components_dir(app_base, data_base, env=env)
+        ink_exe, is_shape_component, lib_dirs = find_inkling_engine(root, components_dir, app_base)
+        if ink_exe is None:
+            raise FileNotFoundError(f'strata-inkling engine binary not found under {components_dir}, {app_base}, or {root}')
+        key = hashlib.sha256(str(model.resolve()).encode('utf-8')).hexdigest()[:20]
+        data = data_base / key
+        ink_dir = data / 'models' / 'inkling-2-mini'
+        ink_dir.mkdir(parents=True, exist_ok=True)
+        model_link = link_into(ink_dir, MODEL_FILE, model, MODEL_SHA256)
+        if vision is not None:
+            vision_link = link_into(ink_dir, VISION_FILE, vision, VISION_SHA256)
+        else:
+            vision_link = None
+            drop_link(ink_dir, VISION_FILE)
+            print('[strata] pictures: off, the Vision shard is not in the model cache (MODEL_SOURCE does not download it)', flush=True)
+        for name, found in tokenizer_files.items():
+            link_into(ink_dir, name, found)
+        # DFlash 2 sidecar beside the model: the server and the engine look for dflash2.safetensors there.
+        if dflash2 is not None and draft_override != 'off':
+            link_into(ink_dir, DFLASH2_LINK, dflash2)
+            print(f'[strata] drafting: DFlash 2 sidecar {DFLASH2_FILE} -> {dflash2.resolve()}', flush=True)
+        else:
+            drop_link(ink_dir, DFLASH2_LINK)
+            if draft_override == 'off':
+                print('[strata] drafting: off (ENGINE_ARGS --draft off)', flush=True)
+            else:
+                print(f'[strata] drafting: off, {DFLASH2_FILE} (commit {DFLASH2_REVISION[:12]} of {DFLASH2_REPO}) is not in the model cache; the engine runs with no drafter', flush=True)
+        port = env.get('STRATA_PORT', '8080').strip() or '8080'
+        tok_dir = ensure_tokenizer(root, model_link, ink_dir, data / 'packs' / 'inkling-2-mini-gsq-rco-iq3_s' / 'tokenizer', ink_exe, lib_dirs)
+        ctx_val = setup_flags[setup_flags.index('--context') + 1] if '--context' in setup_flags else '16384'
+        parallel_val = parallel_override if parallel_override is not None else 8
+        args = ['--native', str(model_link)]
+        if vision_link is not None:
+            args.extend(['--vision', str(vision_link)])
+        args.extend(['--max-context', str(ctx_val), '--parallel', str(parallel_val)])
+        # Apply extra user overrides without duplicating flags
+        i = 0
+        while i < len(ink_overrides):
+            f = ink_overrides[i]
+            if f in INKLING_VALUE_FLAGS and i + 1 < len(ink_overrides):
+                v = ink_overrides[i + 1]
+                if f in args:
+                    args[args.index(f) + 1] = v
+                else:
+                    args.extend([f, v])
+                i += 2
+            else:
+                if f not in args:
+                    args.append(f)
+                i += 1
+        public = env.get('MODEL_NAME', '').strip() or 'inkling-2-mini-gsq-rco-iq3_s'
+        cfg = {
+            'exe': 'component:strata-inkling' if is_shape_component else str(ink_exe),
+            'args': args,
+            'cwd': str(root),
+            'tokenizer': str(tok_dir),
+            'model_name': 'inkling-2-mini-gsq-rco-iq3_s',
+            'aliases': [public],
+            'arch': 'inkling2_loop',
+            'port': int(port),
+            'parallel': parallel_val,
+            'drafting': 'off' if draft_override == 'off' else 'dflash2',
+            'lib_dirs': lib_dirs,
+            'log': str(data / 'engine.log'),
+            'open_browser': False,
+            'allowed_hosts': ['*'],
+        }
+        target = data / 'server.json'
+        tmp = target.with_suffix('.tmp')
+        tmp.write_text(json.dumps(cfg, indent=2), encoding='utf-8')
+        tmp.replace(target)
+        os.environ['STRATA_COMPONENTS_DIR'] = str(components_dir)
+        exec_argv = [
+            sys.executable, str(root / 'serve' / 'server.py'),
+            '--engine', 'strata', '--config', str(target),
+            '--host', '0.0.0.0', '--port', port,
+        ]
+        return root, target, port, exec_argv
+
+
+    def main():
+        root, _target, _port, exec_argv = prepare_server_config()
+        os.chdir(root)
+        os.execv(sys.executable, exec_argv)
+
+
+    if __name__ == '__main__':
+        main()
+  strata-healthcheck.sh: |
+    #!/bin/sh
+    set -eu
+    for cand in \
+        "${STRATA_PYTHON:-}" \
+        /opt/strata/.venv/bin/python \
+        /opt/strata/.venv/bin/python3 \
+        /opt/strata/terminal/python/bin/python3 \
+        /opt/strata/python/bin/python3 \
+        "$(command -v python3 2>/dev/null || true)"; do
+        if [ -n "$cand" ] && [ -f "$cand" ]; then
+            exec "$cand" /llm-init/wrappers/strata-healthcheck.py
+        fi
+    done
+    exit 1
+  strata-healthcheck.py: |
+    #!/usr/bin/env python3
+    import json
+    import os
+    import sys
+    import urllib.request
+
+    def healthy(state):
+        return isinstance(state, dict) and state.get('status') == 'ok' and state.get('loaded') is True
+
+    def main():
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open('http://127.0.0.1:' + os.environ.get('STRATA_PORT', '8080') + '/health', timeout=3) as response:
+                return 0 if healthy(json.load(response)) else 1
+        except (OSError, ValueError):
+            return 1
+
+    if __name__ == '__main__':
+        sys.exit(main())
