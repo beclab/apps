@@ -7,7 +7,7 @@ metadata:
   description: "Thinking Machines Inkling-2-Mini SQ-20 for multimodal agentic coding, tool use, and concurrent serving, powered locally by Strata"
   appid: stratainkling2minisq20
   title: Inkling-2-Mini SQ-20 (Strata)
-  version: 0.0.1
+  version: 0.0.2
   categories:
   - AI
   - models
@@ -45,38 +45,38 @@ spec:
   onlyAdmin: true
   versionName: Inkling-2-Mini SQ-20
   upgradeDescription: |
-    Initial release of Thinking Machines Inkling-2-Mini SQ-20 on Strata v0.2.19 (`strata-inkling`) and Model Console (`llm-init` v1.7.26), sized for 24 GiB NVIDIA GPUs including Olares One.
+    Updates Inkling-2-Mini SQ-20 to Strata v0.2.23 (`strata-inkling`) with Model Console (`llm-init` v1.7.26).
 
-    - Runs native `.strata` v1.1 lossless `SQ-20` weights (`19.35 GB` / `18.02 GiB`, bit-exact `0.00000` KLD native `SF4+MX8` LLM + embedded `DSpark` Block-8 Recurrent Markov drafter) and lossless `BF16` Vision shard (`0.64 GB`) 100% resident in 24 GiB VRAM.
-    - Supports direct low-latency responses, built-in multimodal image reading, OpenAI-compatible tool calling, and continuous batching (`--parallel 1..64`, default `8`).
-    - Zero GGUF conversion wait on first startup: proceeds straight from Hugging Face download to serving.
-
-    [Strata v0.2.19](https://github.com/Niko1221/Strata/releases/tag/v0.2.19)
+    - New model file `Inkling-2-Mini-SQv2-20.strata` (`19.37 GB`): the SQ-20 build in the re-adjusted 16 KiB file layout, with the new picture file `Inkling-2-Mini-Vision-v2.strata` (`0.64 GB`). Both are pinned to one Hugging Face commit and checked by size.
+    - DFlash 2 replaces DSpark as the drafter. It is one extra file, `Inkling-2-Mini-DFlash2-mix.safetensors` (`0.55 GB`), downloaded next to the model. The engine decides per card and per number of parallel requests whether to use it; `--draft off` in ENGINE_ARGS turns it off. Without the file the model runs with no drafter.
+    - The first start after this update downloads the new files (`20.6 GB` in total) before the model loads.
   fullDescription: |
     Thinking Machines Inkling-2-Mini is a 26.4B-parameter looped Mixture-of-Experts multimodal model (3.4B active per pass / 5.4B looped-active across 48 virtual visits) engineered for agentic software engineering, tool use, fast direct responses, and visual understanding. This app runs Strata's native `.strata` v1.1 bit-exact lossless `SQ-20` edition locally using the dedicated `strata-inkling` C++/CUDA engine.
 
-    Strata is an open-source inference engine for running frontier AI models locally. For Inkling-2-Mini `SQ-20`, the entire 18.02 GiB lossless checkpoint and embedded `DSpark` Block-8 speculative drafter fit 100% inside a 24 GiB GPU, leaving headroom for paged SWA-1024 + compact 8-visit Global KV cache across multiple concurrent requests. Model Console connects the engine to Olares.
+    Strata is an open-source inference engine for running frontier AI models locally. For Inkling-2-Mini `SQ-20`, the 18.04 GiB lossless checkpoint fits inside a 24 GiB GPU, leaving room for the paged SWA-1024 + compact 8-visit Global KV cache across multiple concurrent requests. Model Console connects the engine to Olares.
 
     **Key features**
 
-    - Generate direct responses from text and image inputs (`Inkling-2-Mini-Vision.strata`, 0.64 GB lossless BF16) with OpenAI-compatible tool calling.
-    - Accelerate generation with the embedded 3-layer `DSpark` Block-8 Recurrent Markov speculative drafter.
-    - Serve multiple requests concurrently via continuous batching (`--parallel 1..64`, default `8`).
+    - Generate direct responses from text and image inputs (`Inkling-2-Mini-Vision-v2.strata`, 0.64 GB lossless BF16) with OpenAI-compatible tool calling.
+    - Speed up generation with the DFlash 2 drafter (`Inkling-2-Mini-DFlash2-mix.safetensors`, 0.55 GB): a small second model that guesses the next tokens, which the main model then checks. The engine turns it on per card and per number of parallel requests; `--draft off` disables it.
+    - Serve multiple requests concurrently via continuous batching (`--parallel 1..16`, default `8`).
     - Use Model Console to download the model, monitor readiness, and adjust engine settings.
     - Connect compatible applications through Olares Router or the OpenAI-compatible chat API.
 
     **This edition**
 
-    This edition (`SQ-20`) runs 100% VRAM-resident on 24 GiB GPUs (including Olares One) with bit-exact native `SF4+MX8` weights (`0.00000` KLD). Default context is 32,768 tokens (configurable up to 1,048,576 tokens) with 8 concurrent request slots by default.
+    This edition (`SQ-20`, file `Inkling-2-Mini-SQv2-20.strata`, 19.37 GB) uses bit-exact native `SF4+MX8` weights. Default context is 16,384 tokens per request with 8 concurrent request slots (`--parallel 1..16`); one request (`--parallel 1`) runs 32,768 tokens. On the Olares One the engine uses DFlash 2 for one request and at 16 parallel requests, and loads no drafter for 2 to 15 (the default 8 slots run without it). A single request can use 131,072 tokens (`--parallel 1 --context 131072`): all 3,072 experts stay on the card and the K/V cache is split between GPU and system memory automatically.
 
     **Before first use**
 
-    First startup downloads 20.0 GB across `Inkling-2-Mini-SQ-20.strata`, `Inkling-2-Mini-Vision.strata`, `tokenizer.json`, and `chat_template.jinja`. Because `.strata` v1.1 loads directly without GGUF repacking, startup proceeds straight to model loading once the download completes.
+    First startup downloads 20.6 GB across `Inkling-2-Mini-SQv2-20.strata`, `Inkling-2-Mini-Vision-v2.strata`, `Inkling-2-Mini-DFlash2-mix.safetensors`, `tokenizer.json`, and `chat_template.jinja`. Because `.strata` v1.1 loads directly without GGUF repacking, startup proceeds straight to model loading once the download completes.
 
     On amd64, an AVX2-capable CPU and an NVIDIA driver from the R580 series or newer (22+ GiB GPU memory) are required.
 
-    [Model documentation](https://huggingface.co/thinkingmachines/Inkling-2-Mini) · [Quantized model](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) · [Strata documentation](https://github.com/Niko1221/Strata)
-  developer: Thinking Machines (model); Niko1221 (Strata engine)
+    Credits: Inkling-2-Mini by Thinking Machines (Apache-2.0). DFlash 2 drafter weights by Inco AI / z-lab (Apache-2.0); the file used here is Strata's converted copy of them (8-bit and 4-bit matrices), with a statement of changes in its repository.
+
+    [Model documentation](https://huggingface.co/thinkingmachines/Inkling-2-Mini) · [Quantized model](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) · [DFlash 2 drafter](https://huggingface.co/strata-engine/Inkling-2-Mini-DFlash2) · [Strata documentation](https://github.com/Niko1221/Strata)
+  developer: Thinking Machines (model); Niko1221 (Strata engine); Inco AI and z-lab (DFlash 2 drafter)
   website: https://huggingface.co/thinkingmachines/Inkling-2-Mini
   sourceCode: https://github.com/Niko1221/Strata
   doc: https://github.com/Niko1221/Strata#readme
@@ -96,17 +96,23 @@ spec:
   license:
   - text: Apache-2.0 (model)
     url: https://www.apache.org/licenses/LICENSE-2.0
+  - text: Apache-2.0 (DFlash 2 drafter weights, Strata's converted copy)
+    url: https://huggingface.co/strata-engine/Inkling-2-Mini-DFlash2
   - text: MIT (Strata engine)
     url: https://github.com/Niko1221/Strata/blob/main/LICENSE
   accelerator:
   - mode: nvidia
     limitedCpu: '12'
     requiredCpu: 1300m
+    # llm-init (beclab/model-console, internal/lifecycle/ensure.go) removes no Hugging Face snapshot, so an upgrade from 0.0.1 keeps the old SQ-20 files (19,346,685,952 B + 636,526,592 B)
+    # beside the new five files (20,589,105,542 B): about 37.8 GiB. limitedDisk 48Gi leaves about 10 GiB over that; a fresh install needs 19.2 GiB (requiredDisk 24Gi).
     requiredDisk: 24Gi
-    limitedDisk: 40Gi
+    limitedDisk: 48Gi
+    # OLARES-0223 (Olares One, SQ-20 v2 + DFlash 2): all 3,072 experts stay on the card from 22,016 MiB; the prefill chunk is 1,024 from 23,552 MiB (= 23Gi, the value here) and 512 below it
+    # (9K prompt: 3,655 against 3,100 tok/s). At 21.5 GiB the experts go hybrid and decode falls to 47 tok/s. Engine RSS under 3 GB at 32K single stream; 8 slots at 16K put about 3.1 GiB of KV in host RAM (16 slots 3.9 GiB): 8Gi request / 24Gi limit kept.
     requiredMemory: 8Gi
     limitedMemory: 24Gi
-    requiredGPUMemory: 22Gi
+    requiredGPUMemory: 23Gi
     limitedGPUMemory: 24Gi
   supportArch:
   - amd64
@@ -129,8 +135,8 @@ envs:
   type: string
   editable: false
   applyOnChange: false
-  default: hf://strata-engine/Inkling-2-Mini-Strata --include Inkling-2-Mini-SQ-20.strata,hf://strata-engine/Inkling-2-Mini-Strata --include Inkling-2-Mini-Vision.strata,hf://strata-engine/Inkling-2-Mini-Strata --include tokenizer.json,hf://strata-engine/Inkling-2-Mini-Strata --include chat_template.jinja
-  description: Native .strata v1.1 lossless SQ-20 checkpoint, BF16 Vision shard, and o200k tokenizer/template sharing one HF snapshot.
+  default: hf://strata-engine/Inkling-2-Mini-Strata --revision 5623ceb47d7a01db827460ce1c23e7818a75661b --include Inkling-2-Mini-SQv2-20.strata,hf://strata-engine/Inkling-2-Mini-Strata --revision 5623ceb47d7a01db827460ce1c23e7818a75661b --include Inkling-2-Mini-Vision-v2.strata,hf://strata-engine/Inkling-2-Mini-Strata --revision 5623ceb47d7a01db827460ce1c23e7818a75661b --include tokenizer.json,hf://strata-engine/Inkling-2-Mini-Strata --revision 5623ceb47d7a01db827460ce1c23e7818a75661b --include chat_template.jinja,hf://strata-engine/Inkling-2-Mini-DFlash2 --revision 04ecd36faef74e696f0a7b6b3c119264442a6234 --include Inkling-2-Mini-DFlash2-mix.safetensors
+  description: Native .strata v1.1 lossless SQ-20 v2 checkpoint (sha256 429671f8eb5b50e593856e6eb82ebb7da9d1f07e99b553438b196f72cc86a6d6), BF16 Vision v2 shard and o200k tokenizer/template sharing one pinned HF snapshot, plus the DFlash 2 drafter file (sha256 cf7dbb08560dfd99544af0cdbab2915406fc571f516b19aff0fe113b9458d387) from a second pinned repository; the main model is listed first.
 - envName: MODEL_NAME
   required: true
   type: string
@@ -154,8 +160,10 @@ envs:
   type: string
   editable: true
   applyOnChange: true
-  default: --context 32768 --parallel 8
-  description: Strata setup.py / strata-inkling options. Model/source/host/port/GPU/vision are managed by the chart. Supports --context up to 1048576, --parallel 1..64, --kv-dtype auto|fp16|fp8, and --draft dspark|off. Saving engine_args in Model Console relaunches without re-downloading weights.
+  # OLARES-0223, Olares One, 0.2.23 tip engine: 8 slots at 16K context 226 tok/s end to end, 16 slots 234 tok/s (DFlash 2 loaded, all experts on the card); 32 slots moves about 300 experts to host RAM (112 tok/s)
+  # and 64 slots about 1,382 (58 tok/s), so 16 is the largest offered. On this card (23.4 GiB reported, under the 24 GiB class) the engine loads no drafter for 2 to 15 slots; one slot and 16 slots draft.
+  default: --context 16384 --parallel 8
+  description: Strata setup.py / strata-inkling options. Model/source/host/port/GPU/vision are managed by the chart. Supports --context per request slot (16384 at 8 to 16 slots, 32768 for one request, or 131072 for one request with all experts still on the card), --parallel 1..16, --kv-dtype auto|fp16|fp8, and --draft off|dflash2 (--draft on loads DFlash 2 past the engine's memory check). Saving engine_args in Model Console relaunches without re-downloading weights.
 - envName: LOG_LEVEL
   required: true
   type: string
@@ -202,4 +210,4 @@ envs:
   type: string
   editable: false
   applyOnChange: false
-  default: 22Gi
+  default: 23Gi

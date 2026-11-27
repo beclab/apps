@@ -86,7 +86,7 @@ data:
     supervise_engine run_strata "$@"
   prepare-strata.py: |
     #!/usr/bin/env python3
-    """Prepare Inkling-2-Mini SQ-20 (.strata v1.1) across Beclab & upstream Strata layouts, then exec serve/server.py."""
+    """Prepare Inkling-2-Mini SQ-20 v2 (.strata v1.1, 16 KiB layout) across Beclab & upstream Strata layouts, then exec serve/server.py."""
     import hashlib
     import json
     import os
@@ -98,12 +98,31 @@ data:
 
     STRATA_MAGIC = b'STRATA\x00\x01'
 
-    # Exact byte sizes and SHA-256 digests from verified .strata v1.1 checkpoints (strata_control/inkling_family.py).
+    MODEL_FILE = 'Inkling-2-Mini-SQv2-20.strata'
+    VISION_FILE = 'Inkling-2-Mini-Vision-v2.strata'
+
+    # Exact byte sizes and SHA-256 digests of the files pinned by Strata 0.2.23 (strata_control/inkling_family.py), commit PACK_REVISION of PACK_REPO.
     EXPECTED_FILES = {
-        'Inkling-2-Mini-SQ-20.strata': (19_346_685_952, '0bbfd52344f0dd4779a7807b5f73554a812f24c035e6877b63cd0d499f7e1b97'),
-        'Inkling-2-Mini-Vision.strata': (636_526_592, '6589eff47f9c20bc3a032faa3d449f10bf4f04a84cc6b2ee8a44d51d2b6fc677'),
+        MODEL_FILE: (19_374_768_128, '429671f8eb5b50e593856e6eb82ebb7da9d1f07e99b553438b196f72cc86a6d6'),
+        VISION_FILE: (636_551_168, '34a176505276729b58744fc9ee40a5005bbff9a590d8e1f7dbe82baf33ef07d5'),
     }
-    OPTIONAL_TOKENIZER_FILES = ('tokenizer.json', 'chat_template.jinja')
+    # The SQ-20 v2 pack embeds no tokenizer_json and `strata serve` makes no network call on start, so these two files MUST sit beside the model before the engine starts.
+    # They come from the pinned pack commit (size and SHA-256 are those of that commit's files).
+    TOKENIZER_PINS = {
+        'tokenizer.json': (26_178_678, '7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6'),
+        'chat_template.jinja': (6_868, '53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc'),
+    }
+    PACK_REPO = 'strata-engine/Inkling-2-Mini-Strata'
+    PACK_REVISION = '5623ceb47d7a01db827460ce1c23e7818a75661b'
+
+    # The DFlash 2 drafter: one extra file from a second repository, linked beside the model as dflash2.safetensors (the name the engine looks for).
+    # Optional: without it the engine runs with no drafter.
+    DFLASH2_REPO = 'strata-engine/Inkling-2-Mini-DFlash2'
+    DFLASH2_REVISION = '04ecd36faef74e696f0a7b6b3c119264442a6234'
+    DFLASH2_FILE = 'Inkling-2-Mini-DFlash2-mix.safetensors'
+    DFLASH2_LINK = 'dflash2.safetensors'
+    DFLASH2_SIZE = 551_600_700
+    DFLASH2_SHA256 = 'cf7dbb08560dfd99544af0cdbab2915406fc571f516b19aff0fe113b9458d387'
 
     MANAGED = {
         '--family', '--model', '--native', '--data-dir', '--models-dir',
@@ -208,6 +227,9 @@ data:
             source = source.parent
         if not source.is_dir():
             raise ValueError(f'MODEL_PATH directory does not exist: {source}')
+        # An upgrade can briefly leave llm-init's previous model_path handoff: say which revision is wrong instead of listing missing files.
+        if source.parent.name == 'snapshots' and source.name != PACK_REVISION:
+            raise ValueError(f'Wrong HF revision {source.name} of {PACK_REPO}; expected {PACK_REVISION}. Model Console must finish downloading the pinned files before the engine starts.')
         missing = [name for name in expected_files if not (source / name).is_file()]
         if missing:
             raise ValueError(f'Incomplete Inkling-2-Mini snapshot in {source}; missing: {missing}')
@@ -256,16 +278,21 @@ data:
                 has_context = True
             elif flag in ('--parallel', '--batch', '--slots'):
                 val = take_val()
-                if not val.isdigit() or not (1 <= int(val) <= 64):
-                    raise ValueError(f'{flag} for Inkling-2-Mini must be 1..64 (got {val!r})')
+                if not val.isdigit() or not (1 <= int(val) <= 16):
+                    raise ValueError(f'{flag} for Inkling-2-Mini on this app must be 1..16 (got {val!r}): at 32 slots about 300 experts move to host RAM and at 64 slots about 1,382 (measured on the Olares One)')
                 parallel_override = int(val)
                 ink_args.extend(['--parallel', val])
             elif flag in ('--draft', '--drafting'):
                 val = take_val().lower()
-                if val not in ('off', 'dspark', 'auto'):
-                    raise ValueError(f'{flag} for Inkling-2-Mini must be off, dspark, or auto (got {val!r})')
+                if val not in ('off', 'on', 'dflash2', 'dspark', 'auto'):
+                    raise ValueError(f'{flag} for Inkling-2-Mini must be off, on, or dflash2 (got {val!r})')
+                # DFlash 2 is the only drafter of 0.2.23; the 0.2.19 words dspark and auto mean the same as dflash2.
+                if val in ('dspark', 'auto'):
+                    val = 'dflash2'
                 draft_override = val
-                ink_args.extend(['--draft', val])
+                # dflash2 is added by the server itself (with its window options) when the sidecar file is there; off and on go to the engine as written.
+                if val in ('off', 'on'):
+                    ink_args.extend(['--draft', val])
             elif flag in INKLING_VALUE_FLAGS:
                 ink_args.extend([flag, take_val()])
             elif flag in INKLING_BOOL_FLAGS:
@@ -277,7 +304,7 @@ data:
                     setup_flags.append(tokens[i])
             i += 1
         if not has_context:
-            setup_flags = ['--context', '32768', *setup_flags]
+            setup_flags = ['--context', '16384', *setup_flags]
         return setup_flags, ink_args, draft_override, parallel_override
 
 
@@ -285,7 +312,7 @@ data:
         expected_files = EXPECTED_FILES if expected_files is None else expected_files
         ink_dir.mkdir(parents=True, exist_ok=True)
         paths = {}
-        all_names = list(expected_files.keys()) + [n for n in OPTIONAL_TOKENIZER_FILES if (source / n).is_file()]
+        all_names = list(expected_files.keys())
         for name in all_names:
             spec = expected_files.get(name)
             exp_sha = spec[1] if isinstance(spec, tuple) and len(spec) > 1 else None
@@ -300,6 +327,135 @@ data:
                 done_mark.write_text(f'sha256 {exp_sha}\n', encoding='utf-8')
             paths[name] = link
         return paths
+
+
+    def hub_candidates(model_path, env=None):
+        """Folders that can hold the shared Hugging Face cache: HF_HUB_CACHE, and the folder above the models--* directory of MODEL_PATH."""
+        env = os.environ if env is None else env
+        hubs = []
+        if env.get('HF_HUB_CACHE'):
+            hubs.append(Path(env['HF_HUB_CACHE']))
+        try:
+            for parent in Path(model_path).resolve().parents:
+                if parent.name.startswith('models--'):
+                    hubs.append(parent.parent)
+                    break
+        except OSError:
+            pass
+        return hubs
+
+
+    def resolve_source(model_path, env=None):
+        """The pinned snapshot folder of the pack repository: the folder of llm-init's MODEL_PATH when it is that snapshot, else the pinned snapshot in the shared cache
+        (llm-init may hand over the folder of another repository of MODEL_SOURCE). Falls back to MODEL_PATH, so verify_snapshot names what is wrong."""
+        source = Path(model_path)
+        if source.is_file():
+            source = source.parent
+        if source.parent.name == 'snapshots' and source.name == PACK_REVISION and source.parent.parent.name == 'models--' + PACK_REPO.replace('/', '--'):
+            return source
+        for hub in hub_candidates(model_path, env):
+            cand = hub / ('models--' + PACK_REPO.replace('/', '--')) / 'snapshots' / PACK_REVISION
+            if cand.is_dir():
+                return cand
+        return source
+
+
+    def find_dflash2(source, env=None):
+        """The pinned DFlash 2 file in the shared HF cache (second repository, commit DFLASH2_REVISION), or None. Size-checked; never raises."""
+        hubs = hub_candidates(source, env)
+        rel =Path('models--' + DFLASH2_REPO.replace('/', '--')) / 'snapshots' / DFLASH2_REVISION / DFLASH2_FILE
+        for hub in hubs:
+            cand = hub / rel
+            try:
+                if cand.is_file():
+                    size = cand.stat().st_size
+                    if size == DFLASH2_SIZE:
+                        return cand
+                    print(f'[strata] DFlash 2 file {cand} is {size:,} B, expected {DFLASH2_SIZE:,} B: not used', flush=True)
+            except OSError:
+                pass
+        return None
+
+
+    def fetch_pinned(repo, revision, name, size, sha256, dest_dir, env=None):
+        """Last resort for a pinned file that Model Console did not put in the shared cache: download it once into the writable data folder (a public file: no token is sent,
+        HF_ENDPOINT is honored), checked by size and SHA-256. Returns the path, or None after one line that says why."""
+        import urllib.request
+        env = os.environ if env is None else env
+        dest_dir = Path(dest_dir)
+        dest = dest_dir / name
+        try:
+            if dest.is_file() and dest.stat().st_size == size:
+                return dest
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            base = (env.get('HF_ENDPOINT') or 'https://huggingface.co').rstrip('/')
+            url = f'{base}/{repo}/resolve/{revision}/{name}'
+            print(f'[strata] {name} is not in the model cache; downloading it once from {url}', flush=True)
+            part = dest.with_name(name + '.part')
+            digest = hashlib.sha256()
+            with urllib.request.build_opener().open(urllib.request.Request(url), timeout=60) as resp, part.open('wb') as out:
+                while True:
+                    block = resp.read(1 << 20)
+                    if not block:
+                        break
+                    digest.update(block)
+                    out.write(block)
+            if part.stat().st_size != size or (sha256 and digest.hexdigest() != sha256):
+                part.unlink(missing_ok=True)
+                raise ValueError('its size or SHA-256 differs from the pin')
+            part.replace(dest)
+            return dest
+        except (OSError, ValueError) as exc:
+            print(f'[strata] could not download {name}: {exc}', flush=True)
+            return None
+
+
+    def file_matches(path, size, sha256):
+        """True when `path` has the pinned size and SHA-256."""
+        try:
+            if Path(path).stat().st_size != size:
+                return False
+            digest = hashlib.sha256()
+            with Path(path).open('rb') as fp:
+                for block in iter(lambda: fp.read(1 << 20), b''):
+                    digest.update(block)
+            return digest.hexdigest() == sha256
+        except OSError:
+            return False
+
+
+    def ensure_tokenizer_files(ink_dir, source, data_base, env=None):
+        """tokenizer.json and chat_template.jinja beside the model, checked by size and SHA-256: the copy in the model snapshot, else a one-time download of the pinned
+        commit into /data/pinned. Raises when a file can be had from neither (the engine cannot start without them)."""
+        for name, (size, sha) in TOKENIZER_PINS.items():
+            link = ink_dir / name
+            if link.exists() and file_matches(link, size, sha):
+                continue
+            found = None
+            for cand in (Path(source) / name,):
+                if cand.is_file() and file_matches(cand, size, sha):
+                    found = cand
+                    break
+            if found is None:
+                found = fetch_pinned(PACK_REPO, PACK_REVISION, name, size, sha, data_base / 'pinned' / PACK_REVISION[:12], env)
+            if found is None:
+                raise ValueError(f'{name} (commit {PACK_REVISION[:12]} of {PACK_REPO}) is neither in the model cache nor downloadable; the SQ-20 v2 file has no embedded tokenizer, so the engine cannot start without it.')
+            link.unlink(missing_ok=True)
+            link.symlink_to(found.resolve())
+
+
+    def link_dflash2(ink_dir, dflash2):
+        """dflash2.safetensors beside the model (the engine and the server look for that name). Removes a stale link when the file is gone."""
+        link = ink_dir / DFLASH2_LINK
+        if dflash2 is None:
+            if link.is_symlink():
+                link.unlink()
+            return None
+        target = dflash2.resolve()
+        if not link.is_symlink() or link.resolve() != target:
+            link.unlink(missing_ok=True)
+            link.symlink_to(target)
+        return link
 
 
     def ensure_tokenizer(root, model_file, source, tok_dir, ink_exe, lib_dirs):
@@ -322,7 +478,7 @@ data:
                 tokenizer_json_path=hf_tok if hf_tok.is_file() else None,
             )
             return tok_dir
-        except RuntimeError:
+        except (RuntimeError, ValueError):
             pass
         if ink_exe is not None and Path(ink_exe).is_file():
             raw = tok_dir.with_name(tok_dir.name + '-export')
@@ -341,7 +497,7 @@ data:
         env = dict(os.environ if env is None else env)
         app_base = Path(env.get('STRATA_APP', '/opt/strata'))
         root = resolve_strata_root(env)
-        source = verify_snapshot(env['MODEL_PATH'], expected_files=expected_files)
+        source = verify_snapshot(resolve_source(env['MODEL_PATH'], env), expected_files=expected_files)
         setup_flags, ink_overrides, draft_override, parallel_override = parse_engine_args(env.get('ENGINE_ARGS', ''))
         data_base = Path(env.get('STRATA_DATA', '/data'))
         data_base.mkdir(parents=True, exist_ok=True)
@@ -354,13 +510,25 @@ data:
         ink_dir = data / 'models' / 'inkling-2-mini'
         ink_dir.mkdir(parents=True, exist_ok=True)
         linked = link_model_files(source, ink_dir, expected_files=expected_files)
+        ensure_tokenizer_files(ink_dir, source, data_base, env)
         port = env.get('STRATA_PORT', '8080').strip() or '8080'
-        tok_dir = ensure_tokenizer(root, linked['Inkling-2-Mini-SQ-20.strata'], source, data / 'packs' / 'inkling-2-mini-sq-20' / 'tokenizer', ink_exe, lib_dirs)
-        ctx_val = setup_flags[setup_flags.index('--context') + 1] if '--context' in setup_flags else '32768'
+        found = find_dflash2(source, env)
+        if found is None and draft_override != 'off':
+            # MODEL_SOURCE lists the file, but a Model Console that skipped the second repository must not cost the drafter: fetch it once into /data.
+            found = fetch_pinned(DFLASH2_REPO, DFLASH2_REVISION, DFLASH2_FILE, DFLASH2_SIZE, DFLASH2_SHA256, data_base / 'pinned' / DFLASH2_REVISION[:12], env)
+        dflash2 = link_dflash2(ink_dir, found)
+        if draft_override == 'off':
+            print('[strata] drafting: off (ENGINE_ARGS --draft off)', flush=True)
+        elif dflash2 is not None:
+            print(f'[strata] drafting: DFlash 2 sidecar {dflash2.name} -> {dflash2.resolve()}', flush=True)
+        else:
+            print(f'[strata] drafting: off, {DFLASH2_FILE} (commit {DFLASH2_REVISION[:12]} of {DFLASH2_REPO}) is not in the model cache; the engine runs with no drafter', flush=True)
+        tok_dir = ensure_tokenizer(root, linked[MODEL_FILE], ink_dir, data / 'packs' / 'inkling-2-mini-sq-20' / 'tokenizer', ink_exe, lib_dirs)
+        ctx_val = setup_flags[setup_flags.index('--context') + 1] if '--context' in setup_flags else '16384'
         parallel_val = parallel_override if parallel_override is not None else 8
         args = [
-            '--native', str(linked['Inkling-2-Mini-SQ-20.strata']),
-            '--vision', str(linked['Inkling-2-Mini-Vision.strata']),
+            '--native', str(linked[MODEL_FILE]),
+            '--vision', str(linked[VISION_FILE]),
             '--max-context', str(ctx_val),
             '--parallel', str(parallel_val),
         ]
@@ -390,7 +558,7 @@ data:
             'arch': 'inkling2_loop',
             'port': int(port),
             'parallel': parallel_val,
-            'drafting': draft_override if draft_override is not None else 'dspark',
+            'drafting': 'off' if draft_override == 'off' else 'dflash2',
             'lib_dirs': lib_dirs,
             'log': str(data / 'engine.log'),
             'open_browser': False,
