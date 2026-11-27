@@ -3,34 +3,34 @@ metadata:
   description: "通过 Strata 本地运行的 Thinking Machines Inkling-2-Mini SQ-20，支持多模态智能体编程、工具调用与多请求并发服务"
 spec:
   upgradeDescription: |
-    基于 Strata v0.2.19（`strata-inkling`）与 Model Console（`llm-init` v1.7.26）首发 Thinking Machines Inkling-2-Mini SQ-20，专为包含 Olares One 在内的 24 GiB NVIDIA 显卡优化。
+    将 Inkling-2-Mini SQ-20 更新至 Strata v0.2.23（`strata-inkling`），并搭配 Model Console（`llm-init` v1.7.26）。
 
-    - 原生加载 `.strata` v1.1 无损 `SQ-20` 权重（`19.35 GB` / `18.02 GiB`，比特精确 `0.00000` KLD 原生 `SF4+MX8` 模型 + 内置 `DSpark` Block-8 循环马尔可夫草稿器）与无损 `BF16` 视觉分片（`0.64 GB`），100% 常驻 24 GiB 显存。
-    - 支持快速直接响应、内置多模态图像理解、兼容 OpenAI 的工具调用以及连续批处理并发（`--parallel 1..64`，默认 `8`）。
-    - 首次启动零 GGUF 转换等待：从 Hugging Face 下载完成后直接进入模型加载与服务状态。
-
-    [Strata v0.2.19](https://github.com/Niko1221/Strata/releases/tag/v0.2.19)
+    - 新模型文件 `Inkling-2-Mini-SQv2-20.strata`（`19.37 GB`）：采用重新调整的 16 KiB 文件布局的 SQ-20 版本，并配有新的图像文件 `Inkling-2-Mini-Vision-v2.strata`（`0.64 GB`）。两者均固定到同一个 Hugging Face 提交，并按文件大小校验。
+    - 草稿模型由 DSpark 改为 DFlash 2。它是一个额外文件 `Inkling-2-Mini-DFlash2-mix.safetensors`（`0.55 GB`），下载在模型文件旁边。是否使用由引擎按显卡和并行请求数决定；在 ENGINE_ARGS 中加入 `--draft off` 可关闭。没有该文件时，模型不使用草稿模型运行。
+    - 更新后的首次启动会先下载新文件（共 `20.6 GB`），再加载模型。
   fullDescription: |
     Thinking Machines Inkling-2-Mini 是一款 26.4B 总参数的循环混合专家（Looped MoE）多模态模型（单轮激活 3.4B 参数，48 次虚拟层访问等效激活 5.4B），专为智能体软件工程、工具调用、快速直接响应与视觉理解打造。本应用通过专用 C++/CUDA 引擎 `strata-inkling` 在本地运行 Strata 原生 `.strata` v1.1 比特无损 `SQ-20` 版本。
 
-    Strata 是用于在本地运行前沿 AI 模型的开源推理引擎。针对 Inkling-2-Mini `SQ-20`，完整的 18.02 GiB 无损权重与内置 `DSpark` Block-8 投机解码草稿器可 100% 驻留于 24 GiB 显卡显存中，并为分页 SWA-1024 与紧凑 8 次全局 KV 缓存留出充足余量以支撑多路并发请求。Model Console 负责将引擎接入 Olares。
+    Strata 是用于在本地运行前沿 AI 模型的开源推理引擎。针对 Inkling-2-Mini `SQ-20`，18.04 GiB 的无损权重可放入 24 GiB 显卡显存，并为分页 SWA-1024 与紧凑 8 次全局 KV 缓存留出空间以支撑多路并发请求。Model Console 负责将引擎接入 Olares。
 
     **主要功能**
 
-    - 支持文本与图像多模态输入（`Inkling-2-Mini-Vision.strata`，0.64 GB 无损 BF16）以及兼容 OpenAI 的工具调用。
-    - 内置 3 层 `DSpark` Block-8 循环马尔可夫投机解码草稿器，显著加速生成吞吐。
-    - 支持连续批处理并发服务（`--parallel 1..64`，默认 `8`）。
+    - 支持文本与图像输入（`Inkling-2-Mini-Vision-v2.strata`，0.64 GB 无损 BF16）以及兼容 OpenAI 的工具调用。
+    - DFlash 2 草稿模型（`Inkling-2-Mini-DFlash2-mix.safetensors`，0.55 GB）：一个小型的第二模型，负责猜测后续 token，再由主模型校验。引擎按显卡和并行请求数决定是否启用；`--draft off` 可关闭。
+    - 支持连续批处理并发服务（`--parallel 1..16`，默认 `8`）。
     - 通过 Model Console 下载模型、监控就绪状态并调整引擎参数。
     - 通过 Olares Router 或兼容 OpenAI 的聊天 API 连接各类兼容应用。
 
     **本版本说明**
 
-    本版本（`SQ-20`）在 24 GiB 显卡（含 Olares One）上 100% 显存常驻，采用比特无损原生 `SF4+MX8` 权重（`0.00000` KLD）。默认上下文为 32,768 tokens（最高可配置至 1,048,576 tokens），默认开启 8 路并发请求槽位。
+    本版本（`SQ-20`，文件 `Inkling-2-Mini-SQv2-20.strata`，19.37 GB）采用比特无损的原生 `SF4+MX8` 权重。默认上下文为每个请求 16,384 tokens，默认 8 路并发请求槽位（`--parallel 1..16`）；单个请求（`--parallel 1`）可用 32,768 tokens。在 Olares One 上，引擎对单个请求和 16 路并发使用 DFlash 2，2 至 15 路并发时不加载草稿模型（默认的 8 路不使用）。单个请求可使用 131,072 tokens（`--parallel 1 --context 131072`）：全部 3,072 个专家仍留在显卡上，K/V 缓存自动在显存与内存之间拆分。
 
     **首次使用前**
 
-    首次启动将下载共约 20.0 GB 的文件（`Inkling-2-Mini-SQ-20.strata`、`Inkling-2-Mini-Vision.strata`、`tokenizer.json` 与 `chat_template.jinja`）。由于 `.strata` v1.1 无需 GGUF 重打包，下载完成后即可直接加载运行。
+    首次启动将下载共约 20.6 GB 的文件（`Inkling-2-Mini-SQv2-20.strata`、`Inkling-2-Mini-Vision-v2.strata`、`Inkling-2-Mini-DFlash2-mix.safetensors`、`tokenizer.json` 与 `chat_template.jinja`）。由于 `.strata` v1.1 无需 GGUF 重打包，下载完成后即可直接加载运行。
 
     在 amd64 平台上，需要支持 AVX2 的 CPU 以及 R580 或更新版本的 NVIDIA 驱动（22+ GiB 显存）。
 
-    [模型文档](https://huggingface.co/thinkingmachines/Inkling-2-Mini) · [量化模型](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) · [Strata 文档](https://github.com/Niko1221/Strata)
+    致谢：Inkling-2-Mini 由 Thinking Machines 开发（Apache-2.0）。DFlash 2 草稿模型权重来自 Inco AI / z-lab（Apache-2.0）；此处使用的文件是 Strata 转换后的副本，修改说明见其仓库。
+
+    [模型文档](https://huggingface.co/thinkingmachines/Inkling-2-Mini) · [量化模型](https://huggingface.co/strata-engine/Inkling-2-Mini-Strata) · [DFlash 2 草稿模型](https://huggingface.co/strata-engine/Inkling-2-Mini-DFlash2) · [Strata 文档](https://github.com/Niko1221/Strata)
