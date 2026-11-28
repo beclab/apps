@@ -3,11 +3,9 @@ metadata:
   description: "通过 Strata 本地运行的 Thinking Machines Inkling-2-Mini 3.5 位 GSQ-RCO IQ3_S 版本，适用于编程与工具调用"
 spec:
   upgradeDescription: |
-    基于 Strata v0.2.23（`strata-inkling`）与 Model Console（`llm-init` v1.7.26）首发 Thinking Machines Inkling-2-Mini 的 GSQ-RCO IQ3_S 版本。
+    将 Inkling 引擎更新至 0.1.71（镜像标签 `0.2.23-inkling0.1.71-cuda13`，Strata 0.2.23）：包含 IQ3_S 预填充内核、多用户等待时回复更早开始和 K/V 自动放置。加入用此文件在 Olares One（RTX 5090 Laptop，24 GB）上的实测数值以及实测的最低 GPU 显存请求量。模型文件和设置无变化。
 
-    - 运行 ISTA-DASLab 的 3.5 位 GGUF `GSQ-RCO IQ3_S`（`11.43 GB`），固定到一个 Hugging Face 提交，并按文件大小校验。
-    - 使用 DFlash 2（`Inkling-2-Mini-DFlash2-mix.safetensors`，`0.55 GB`）作为草稿模型，下载在模型文件旁边。是否使用由引擎按显卡和并行请求数决定；在 ENGINE_ARGS 中加入 `--draft off` 可关闭。
-    - 支持兼容 OpenAI 的工具调用与连续批处理（`--parallel 1..16`，默认 `8`）。首次启动下载 `12.0 GB`。
+    [Strata v0.2.23](https://github.com/Niko1221/Strata/releases/tag/v0.2.23)
   fullDescription: |
     Thinking Machines Inkling-2-Mini 是一款 26.4B 总参数的循环混合专家（Looped MoE）模型（单轮激活 3.4B 参数，48 次虚拟层访问等效激活 5.4B），专为智能体软件工程、工具调用与快速直接响应打造。本应用通过专用 C++/CUDA 引擎 `strata-inkling` 在本地运行 ISTA-DASLab 的 GSQ-RCO IQ3_S GGUF。
 
@@ -23,7 +21,11 @@ spec:
 
     **本版本说明**
 
-    本版本（`GSQ-RCO IQ3_S`，文件 `Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf`，11.43 GB）为有损量化。其模型卡报告达到基础模型任务平均分的 99.2%（作者给出的数字，Strata 未重新测量）。Strata 尚未在此版本上运行其工具调用、编程与长上下文测试集。本应用仅支持文本。默认上下文为每个请求 16,384 tokens，默认 8 路并发请求槽位（`--parallel 1..16`）。
+    本版本（`GSQ-RCO IQ3_S`，文件 `Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf`，11.43 GB）为有损量化。其模型卡报告达到基础模型任务平均分的 99.2%（作者给出的数字，Strata 未重新测量）。Strata 尚未在此版本上运行其工具调用、编程与长上下文测试集。本应用仅支持文本。默认上下文为每个请求 16,384 tokens，默认 8 路并发请求槽位（`--parallel 1..16`）。单个请求（`--parallel 1`）可用 32,768 tokens。在 Olares One 上，引擎对单个请求和 16 路并发使用 DFlash 2，2 至 15 路并发时不加载草稿模型（默认的 8 路不使用）。
+
+    **Olares One 上的实测数据**
+
+    RTX 5090 Laptop（24 GB），生成 128 个新 token，每用户 16K 上下文，模拟 23 GiB 限制；同一台机器上引擎 0.1.71 对比 0.1.70。使用 DFlash 2 的单个请求：文章 / 对话 / JSON / 代码 / 计数 / 工具调用分别为 132.0 / 166.1 / 236.5 / 141.9 / 302.5 / 223.7 tok/s（平均 200.4；0.1.70 为 200.2，token 一致）。预填充 4K 由 1,088 变为 2,395 tok/s；32K 由 972 变为 1,959 tok/s，解码由 95.8 变为 97.7。并行用户的端到端：8 用户 180，16 用户 158（0.1.70 为 170）。两个档位全部专家都留在显卡上。本应用提供 `--parallel 1..16`。8 路时，GPU 显存达到 18 GiB 起全部专家即可留在显卡上（32K 上下文的单个请求为 13 GiB，用引擎 0.2.23 测得）；本应用请求 23 GiB。
 
     **首次使用前**
 

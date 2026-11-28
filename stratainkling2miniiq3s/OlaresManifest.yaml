@@ -7,7 +7,7 @@ metadata:
   description: "Thinking Machines Inkling-2-Mini in the 3.5-bit GSQ-RCO IQ3_S build for coding and tool use, powered locally by Strata"
   appid: stratainkling2miniiq3s
   title: Inkling-2-Mini IQ3_S (Strata)
-  version: 0.0.1
+  version: 0.0.2
   categories:
   - AI
   - models
@@ -45,11 +45,9 @@ spec:
   onlyAdmin: true
   versionName: Inkling-2-Mini GSQ-RCO IQ3_S
   upgradeDescription: |
-    Initial release of Thinking Machines Inkling-2-Mini in the GSQ-RCO IQ3_S build on Strata v0.2.23 (`strata-inkling`) and Model Console (`llm-init` v1.7.26).
+    Updates the Inkling engine to 0.1.71 (image tag `0.2.23-inkling0.1.71-cuda13`, Strata 0.2.23): IQ3_S prefill kernels, replies that start sooner when many users are waiting and automatic K/V placement. Adds the numbers measured with this file on the Olares One (RTX 5090 Laptop, 24 GB) and the lowest GPU memory request measured. No change to the model files or the settings.
 
-    - Runs the 3.5-bit `GSQ-RCO IQ3_S` GGUF (`11.43 GB`) from ISTA-DASLab, pinned to one Hugging Face commit and checked by size.
-    - Drafts with DFlash 2 (`Inkling-2-Mini-DFlash2-mix.safetensors`, `0.55 GB`), downloaded next to the model. The engine decides per card and per number of parallel requests whether to use it; `--draft off` in ENGINE_ARGS turns it off.
-    - Supports OpenAI-compatible tool calling and continuous batching (`--parallel 1..16`, default `8`). First startup downloads `12.0 GB`.
+    [Strata 0.2.23 release notes](https://github.com/Niko1221/Strata/releases/tag/v0.2.23)
   fullDescription: |
     Thinking Machines Inkling-2-Mini is a 26.4B-parameter looped Mixture-of-Experts model (3.4B active per pass / 5.4B looped-active across 48 virtual visits) engineered for agentic software engineering, tool use, and fast direct responses. This app runs the GSQ-RCO IQ3_S GGUF of ISTA-DASLab locally using Strata's dedicated `strata-inkling` C++/CUDA engine.
 
@@ -65,7 +63,11 @@ spec:
 
     **This edition**
 
-    This edition (`GSQ-RCO IQ3_S`, file `Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf`, 11.43 GB) is a lossy quantization. Its model card reports 99.2% of the base model's task average (the authors' figure, not re-measured by Strata). Strata has not run its tool-call, coding or long-context test suites on this build. This app is text-only. Default context is 16,384 tokens per request with 8 concurrent request slots (`--parallel 1..16`).
+    This edition (`GSQ-RCO IQ3_S`, file `Inkling-2-Mini-GSQ-RCO-IQ3_S.gguf`, 11.43 GB) is a lossy quantization. Its model card reports 99.2% of the base model's task average (the authors' figure, not re-measured by Strata). Strata has not run its tool-call, coding or long-context test suites on this build. This app is text-only. Default context is 16,384 tokens per request with 8 concurrent request slots (`--parallel 1..16`). One request (`--parallel 1`) runs 32,768 tokens. On the Olares One the engine uses DFlash 2 for one request and at 16 parallel requests, and loads no drafter for 2 to 15 (the default 8 slots run without it).
+
+    **Measured on the Olares One**
+
+    RTX 5090 Laptop (24 GB), 128 new tokens, 16K context per user, 23 GiB limit emulated; engine 0.1.71 against 0.1.70 on the same box. One request with DFlash 2: 132.0 / 166.1 / 236.5 / 141.9 / 302.5 / 223.7 tok/s for prose / chat / JSON / code / counting / tool calls (mean 200.4; 200.2 with 0.1.70, tokens identical). Prefill 4K 1,088 to 2,395 tok/s; 32K 972 to 1,959 tok/s, decode 95.8 to 97.7. End to end over parallel users: 8 users 180, 16 users 158 (170 with 0.1.70). All experts stay on the card at both levels. The app offers `--parallel 1..16`. All experts stay on the card from 18 GiB of GPU memory at 8 slots (13 GiB for one request at 32K context), measured with the 0.2.23 engine; this app requests 23 GiB.
 
     **Before first use**
 
@@ -105,8 +107,9 @@ spec:
     # Disk is derived from the file sizes (12,003,045,894 B = 11.2 GiB for the four downloaded files): 16Gi required, 24Gi limit.
     requiredDisk: 16Gi
     limitedDisk: 24Gi
-    # Not measured for this file on the Olares One. The card plan is the SQ-20 app measurement: the whole card, 23Gi = 23,552 MiB (prefill chunk 1,024; 22Gi gives chunk 512, prefill about 15% lower). This file
-    # is smaller (11.4 GB), so the plan has more room than needed; the same number is in STRATA_REQUIRED_GPU_MEMORY below. RAM 8Gi / 24Gi is the SQ-20 app value (engine RSS under 3 GB there).
+    # GPU request 23Gi = the whole card (23,552 MiB; prefill chunk 1,024), the plan measured with the SQ-20 file. Measured with this file under the HAMi shim, 8 slots at 16K context:
+    # 18,432 MiB (18Gi) is the lowest request that keeps all experts on the card at full speed (decode 117 tok/s); 16,384 MiB decodes 87; 14,336 MiB and below goes hybrid (498 or more experts in host RAM,
+    # decode 45-55). One request at 32K context needs at least 13Gi. The request stays 23Gi until the owner decides. RAM 8Gi / 24Gi: engine RSS about 5 GB at 256K single stream.
     requiredMemory: 8Gi
     limitedMemory: 24Gi
     requiredGPUMemory: 23Gi
@@ -157,8 +160,8 @@ envs:
   type: string
   editable: true
   applyOnChange: true
-  # Not measured for this file on the Olares One. Same default and slot limit as the SQ-20 app, whose Olares One measurement is 8 slots at 16K context 226 tok/s and 16 slots 234 tok/s; beyond 16 slots the default memory plan
-  # moves experts to host RAM. The engine loads no DFlash 2 drafter for 2 to 15 slots on this card (23.4 GiB reported, under its 24 GiB class); one slot and 16 slots draft.
+  # OLARES-0223, Olares One, this file: 8 slots at 16K context 180 tok/s end to end, 16 slots 170; 64 slots 156 but its runner and K/V take 10.2 GiB of VRAM, so 1..16 is the limit offered. The engine
+  # loads no DFlash 2 drafter for 2 to 15 slots on this card (23.4 GiB reported, under its 24 GiB class; 8 slots 180 tok/s, the same as --draft off); one slot (C1 mean 200 against 123 with --draft off) and 16 slots draft.
   default: --context 16384 --parallel 8
   description: Strata setup.py / strata-inkling options. Model/source/host/port/GPU/vision are managed by the chart. Supports --context per request slot (16384 default), --parallel 1..16, --kv-dtype auto|fp16|fp8, and --draft off|dflash2 (--draft on loads DFlash 2 past the engine's memory check). Saving engine_args in Model Console relaunches without re-downloading weights.
 - envName: LOG_LEVEL
